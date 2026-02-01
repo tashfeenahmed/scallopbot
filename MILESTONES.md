@@ -8,7 +8,7 @@
 |-----------|------|-------|--------|
 | 1 | **MVP** | End-to-end working bot | ✅ Complete |
 | 2 | **Smart Routing** | Cost efficiency | ✅ Complete |
-| 3 | **Full Features** | Feature parity + extras | Pending |
+| 3 | **Full Features** | Feature parity + extras | ✅ Complete |
 | 4 | **Production Ready** | Polish & reliability | Pending |
 
 ---
@@ -42,28 +42,16 @@ Cost efficiency through intelligent model selection and context management.
 
 ---
 
-## Milestone 3: Full Features
+## Milestone 3: Full Features ✅
 
 Feature parity with alternatives plus LeanBot-specific enhancements.
 
-### 3.1 Additional Channels
-- Discord with slash commands and mentions
-- CLI REPL with syntax highlighting
+- [x] **3.1 Additional Channels**: Discord with slash commands and mentions, CLI REPL with syntax highlighting
+- [x] **3.2 Skill System**: SKILL.md parser with OpenClaw compatibility, ClawHub integration, lazy loading
+- [x] **3.3 Cron Scheduler**: Unified system with built-in actions (ping, status, backup), channel-specific notifications
+- [x] **3.4 Gardener Memory**: Hot collector, background gardener (fact extraction, summarization), hybrid search (BM25 + semantic)
 
-### 3.2 Skill System
-- SKILL.md parser with OpenClaw compatibility
-- ClawHub integration for skill search/install
-- Lazy loading (load on-demand, not startup)
-
-### 3.3 Cron Scheduler
-- Unified system (replaces separate heartbeats)
-- Built-in actions: ping, status, backup
-- Channel-specific notifications
-
-### 3.4 Gardener Memory
-- Hot collector (append during conversation)
-- Background gardener (fact extraction, summarization)
-- Hybrid search (vector + BM25)
+**Tests**: 363 passing | **Status**: Shipped
 
 ---
 

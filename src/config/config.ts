@@ -44,8 +44,15 @@ const telegramChannelSchema = z.object({
   botToken: z.string().default(''),
 });
 
+const discordChannelSchema = z.object({
+  enabled: z.boolean().default(false),
+  botToken: z.string().default(''),
+  applicationId: z.string().default(''),
+});
+
 const channelsSchema = z.object({
   telegram: telegramChannelSchema,
+  discord: discordChannelSchema.default({ enabled: false, botToken: '', applicationId: '' }),
 });
 
 // Agent configuration schema
@@ -112,6 +119,8 @@ export function loadConfig(): Config {
   const groqApiKey = process.env.GROQ_API_KEY;
   const openrouterApiKey = process.env.OPENROUTER_API_KEY;
   const telegramBotToken = process.env.TELEGRAM_BOT_TOKEN;
+  const discordBotToken = process.env.DISCORD_BOT_TOKEN;
+  const discordAppId = process.env.DISCORD_APPLICATION_ID;
   const workspace = process.env.AGENT_WORKSPACE || process.cwd();
   const maxIterations = process.env.AGENT_MAX_ITERATIONS
     ? parseInt(process.env.AGENT_MAX_ITERATIONS, 10)
@@ -145,6 +154,11 @@ export function loadConfig(): Config {
       telegram: {
         enabled: !!telegramBotToken,
         botToken: telegramBotToken || '',
+      },
+      discord: {
+        enabled: !!discordBotToken,
+        botToken: discordBotToken || '',
+        applicationId: discordAppId || '',
       },
     },
     agent: {
