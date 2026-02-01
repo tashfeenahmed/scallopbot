@@ -9,7 +9,7 @@
 | 1 | **MVP** | End-to-end working bot | ✅ Complete |
 | 2 | **Smart Routing** | Cost efficiency | ✅ Complete |
 | 3 | **Full Features** | Feature parity + extras | ✅ Complete |
-| 4 | **Production Ready** | Polish & reliability | Pending |
+| 4 | **Production Ready** | Polish & reliability | ✅ Complete |
 
 ---
 
@@ -55,24 +55,13 @@ Feature parity with alternatives plus LeanBot-specific enhancements.
 
 ---
 
-## Milestone 4: Production Ready
+## Milestone 4: Production Ready ✅
 
 Polish, reliability, and deployment features.
 
-### 4.1 Caching
-- Semantic response cache with TTL
-- Tool output deduplication
+- [x] **4.1 Caching**: Semantic response cache with TTL, tool output deduplication, write-through invalidation
+- [x] **4.2 Session Branching**: Sub-conversations for investigation, summarize & merge/discard
+- [x] **4.3 Dashboard & Deployment**: Cost dashboard CLI, systemd integration, crash recovery with resume/restart/abort
+- [x] **4.4 Reliability**: Provider fallback chain with health tracking, budget guard with warnings, task queue, proactive notifications
 
-### 4.2 Session Branching
-- Sub-conversations for investigation
-- Summarize & merge or discard
-
-### 4.3 Dashboard & Deployment
-- Cost dashboard CLI
-- Systemd integration with `leanbot daemon install`
-- Crash recovery with resume/restart/abort options
-
-### 4.4 Reliability
-- Provider fallback chain
-- Budget exhaustion handling with task queuing
-- Proactive notifications (errors, budget, completions)
+**Tests**: 487 passing | **Status**: Shipped
