@@ -38,6 +38,158 @@ LeanBot is a next-generation personal AI assistant architecture designed from th
 
 ---
 
+## Design Decisions
+
+### Single User
+LeanBot is a **personal** assistant for one user. No multi-tenancy, no shared sessions, no team features. Your VPS, your agent, your data.
+
+### Channel Handling
+Same as OpenClaw: channels run **simultaneously**, routing per-chat. Messages from Telegram and Discord are handled in parallel - no priority queue, no blocking.
+
+### Full Access, No Confirmation Gates
+LeanBot has **unrestricted access** to your VPS. No "are you sure?" prompts, no approval workflows, no restricted commands. It executes what you ask, immediately.
+
+Why? Confirmation gates kill the "autonomous agent" value prop. If you wanted to approve everything, you'd just do it yourself.
+
+### Degraded Mode (When Budget/API Exhausted)
+When API keys hit rate limits or budget runs out:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     DEGRADATION LADDER                          │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  1. Primary model rate-limited                                  │
+│     → Fall back to next provider in chain                       │
+│                                                                 │
+│  2. All cloud providers exhausted                               │
+│     → Fall back to local model (Ollama) if configured           │
+│                                                                 │
+│  3. Daily budget hit                                            │
+│     → Notify user, queue non-urgent tasks                       │
+│     → Continue urgent tasks with cheapest available model       │
+│                                                                 │
+│  4. Hard budget limit hit                                       │
+│     → Notify user, pause all tasks                              │
+│     → Resume on budget reset or manual override                 │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Response Style
+**Configurable by user during onboarding.** Options:
+
+| Style | Description |
+|-------|-------------|
+| `terse` | Minimal output. Just results, no explanation. |
+| `balanced` | Brief context + results. Default. |
+| `verbose` | Full explanation of what was done and why. |
+
+```bash
+leanbot config set response.style balanced
+```
+
+### Memory Retention
+Same as OpenClaw: **indefinite**. `MEMORY.md` persists forever unless manually cleared.
+
+- Daily logs: `memory/YYYY-MM-DD.md` (kept indefinitely)
+- Long-term: `MEMORY.md` (never auto-deleted)
+- Sensitive data: User responsibility to manage
+
+```bash
+# Manual cleanup if needed
+leanbot memory clear --before 2025-01-01
+leanbot memory forget "password for X"
+```
+
+### Proactive Notifications
+LeanBot messages you proactively for:
+
+| Event | Notification |
+|-------|--------------|
+| Cron job completed | Yes (unless `silent: true`) |
+| Cron job failed | Always |
+| Task completed | Yes |
+| Error occurred | Always |
+| Budget warning (75%) | Yes |
+| Budget exhausted | Always |
+
+Default channel: the one you used most recently. Override with:
+```yaml
+notifications:
+  default_channel: telegram
+  urgent_channel: telegram  # For errors, budget alerts
+```
+
+### Recovery from Failure
+**Ask user on restart.** If LeanBot crashes mid-task:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  LeanBot was interrupted during a task.                         │
+│                                                                 │
+│  Task: "Deploy new version to production"                       │
+│  Progress: 3/5 steps completed                                  │
+│  Last action: "docker build completed"                          │
+│                                                                 │
+│  What would you like to do?                                     │
+│  [1] Resume from where I left off                               │
+│  [2] Start over                                                 │
+│  [3] Abort and show me what was done                            │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Bundled Skills
+
+LeanBot ships with OpenClaw-compatible core tools plus the top community skills.
+
+### Core Tools (Always Available)
+
+| Tool | Description |
+|------|-------------|
+| `read` | Read files |
+| `write` | Write files |
+| `edit` | Edit files |
+| `bash` | Execute shell commands |
+| `browser` | Playwright-based browser automation |
+| `memory_search` | Search long-term memory |
+| `memory_get` | Retrieve specific memories |
+
+### Bundled Skills (Top Categories from ClawHub)
+
+Based on ClawHub's most popular categories (700+ community skills):
+
+| Category | Bundled Skills |
+|----------|----------------|
+| **Search & Research** | `brave-search`, `tavily`, `perplexity` |
+| **DevOps & Cloud** | `vercel`, `cloudflare`, `kubernetes`, `docker` |
+| **Productivity** | `linear`, `todoist`, `notion`, `obsidian` |
+| **Communication** | `discord`, `slack`, `telegram-tools` |
+| **Coding** | `github`, `gitlab`, `coding-agent` |
+| **AI & LLMs** | `openai-docs`, `anthropic-docs` |
+| **Media** | `spotify`, `youtube-tools` |
+| **Smart Home** | `home-assistant` |
+
+### Install More from ClawHub
+
+```bash
+# Search
+leanbot skill search "kubernetes"
+
+# Install
+leanbot skill install clawhub:kubernetes
+leanbot skill install clawhub:home-assistant
+leanbot skill install github:user/custom-skill
+
+# List installed
+leanbot skill list
+```
+
+---
+
 ## Architecture
 
 ```
