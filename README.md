@@ -275,6 +275,168 @@ LeanBot:
 └── Skill unloaded after use if context pressure high
 ```
 
+### 8. Full ClawHub/OpenClaw Skill Compatibility
+
+LeanBot is **100% compatible** with the OpenClaw/ClawHub skill ecosystem. Use any of the 100+ existing skills without modification.
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    SKILL COMPATIBILITY LAYER                    │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐         │
+│  │  ClawHub    │    │  OpenClaw   │    │  LeanBot    │         │
+│  │  Registry   │ ←→ │  SKILL.md   │ ←→ │  Native     │         │
+│  │  (Remote)   │    │  Format     │    │  Skills     │         │
+│  └─────────────┘    └─────────────┘    └─────────────┘         │
+│                            ↓                                    │
+│                 ┌─────────────────────┐                        │
+│                 │  Unified Skill API  │                        │
+│                 └─────────────────────┘                        │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### Supported SKILL.md Format
+
+LeanBot parses the standard OpenClaw skill format:
+
+```yaml
+# skills/my-skill/SKILL.md
+---
+name: my-skill
+description: What this skill does
+homepage: https://example.com
+user-invocable: true
+disable-model-invocation: false
+metadata: {"openclaw":{"emoji":"🔧","requires":{"bins":["jq"],"env":["API_KEY"]},"os":["darwin","linux"]}}
+---
+
+## Instructions for the agent
+
+When the user asks to [do something], use this skill to...
+
+## Tools
+
+- `my_tool`: Does X with arguments Y
+```
+
+#### Skill Sources (Precedence Order)
+
+```
+1. Workspace skills     ~/.leanbot/workspace/skills/    (highest)
+2. User skills          ~/.leanbot/skills/
+3. ClawHub installed    ~/.leanbot/clawhub/
+4. Bundled skills       (built into binary)             (lowest)
+```
+
+#### ClawHub Integration
+
+```bash
+# Search ClawHub registry
+leanbot skill search "browser automation"
+
+# Install from ClawHub
+leanbot skill install clawhub:browser-pilot
+leanbot skill install clawhub:gmail-assistant
+leanbot skill install clawhub:calendar-sync
+
+# Install from GitHub
+leanbot skill install github:user/repo
+
+# List installed skills
+leanbot skill list
+
+# Update all skills
+leanbot skill update
+```
+
+#### Gating & Requirements
+
+LeanBot respects OpenClaw's gating system:
+
+```yaml
+metadata:
+  openclaw:
+    requires:
+      bins: ["ffmpeg", "jq"]      # Required CLI tools
+      anyBins: ["chrome", "chromium"]  # At least one required
+      env: ["OPENAI_API_KEY"]     # Required env vars
+      config: ["browser.enabled"] # Required config keys
+    os: ["darwin", "linux"]       # Platform restrictions
+    install:                      # Auto-install instructions
+      - type: brew
+        package: ffmpeg
+      - type: npm
+        package: playwright
+```
+
+#### LeanBot Skill Enhancements
+
+While maintaining compatibility, LeanBot adds:
+
+| Feature | OpenClaw | LeanBot |
+|---------|----------|---------|
+| **Lazy loading** | Load all at startup | Load on-demand |
+| **Cost hints** | None | `complexity: simple/moderate/complex` |
+| **Token budget** | None | `max_tokens: 2000` per invocation |
+| **Caching** | None | `cacheable: true` for deterministic skills |
+| **Tier override** | None | `preferred_tier: moderate` forces routing |
+
+Extended SKILL.md frontmatter (optional, backwards-compatible):
+
+```yaml
+---
+name: my-lean-skill
+description: A token-efficient skill
+# Standard OpenClaw fields...
+
+# LeanBot extensions (ignored by OpenClaw)
+leanbot:
+  complexity: simple              # Routing hint
+  max_tokens: 1500               # Budget per invocation
+  cacheable: true                # Cache identical invocations
+  preferred_tier: simple         # Force cheap model
+  lazy_deps: ["playwright"]      # Load these only when skill runs
+---
+```
+
+#### Native LeanBot Skills
+
+For maximum efficiency, write skills in LeanBot's native format:
+
+```typescript
+// skills/my-skill/index.ts
+import { defineSkill } from '@leanbot/sdk';
+
+export default defineSkill({
+  name: 'my-skill',
+  description: 'Does something efficiently',
+  complexity: 'simple',
+  cacheable: true,
+
+  tools: [
+    {
+      name: 'my_tool',
+      description: 'Does X',
+      parameters: {
+        input: { type: 'string', description: 'The input' }
+      },
+      execute: async ({ input }) => {
+        // Implementation
+        return { result: `Processed: ${input}` };
+      }
+    }
+  ],
+
+  // Optional: Instructions injected into prompt
+  instructions: `
+    When the user asks to do X, use my_tool with their input.
+    Keep responses brief.
+  `
+});
+```
+
 ---
 
 ## Configuration
@@ -398,6 +560,11 @@ leanbot/
 │   ├── skills/
 │   │   ├── loader.ts             # Lazy skill loader
 │   │   ├── registry.ts           # Skill index
+│   │   ├── clawhub.ts            # ClawHub registry client
+│   │   ├── compat/               # OpenClaw compatibility layer
+│   │   │   ├── parser.ts         # SKILL.md parser
+│   │   │   ├── gating.ts         # Requirements checker
+│   │   │   └── adapter.ts        # OpenClaw → LeanBot adapter
 │   │   └── builtin/              # Built-in skills
 │   │       ├── browser.ts
 │   │       ├── calendar.ts
@@ -442,6 +609,8 @@ leanbot/
 | **Session Model** | Linear | Tree (branching) |
 | **Skill Loading** | All at startup | Lazy on-demand |
 | **Budget Controls** | External (API dashboard) | Built-in with hard stops |
+| **Skill Ecosystem** | ClawHub only | ClawHub + native + enhanced |
+| **Skill Cost Hints** | None | Built-in complexity routing |
 | **Estimated Daily Cost** | $30-200 | $3-15 (same usage) |
 
 ---
@@ -467,7 +636,11 @@ leanbot/
 - [ ] REST/WebSocket API
 - [ ] Telegram adapter
 - [ ] Skill lazy-loader
-- [ ] Skill marketplace integration
+- [ ] OpenClaw SKILL.md parser & compatibility layer
+- [ ] ClawHub registry client
+- [ ] `leanbot skill install/search/update` commands
+- [ ] Native LeanBot skill SDK
+- [ ] Skill cost hints & routing integration
 
 ### Phase 4: Advanced Features
 - [ ] Session branching
