@@ -1,3 +1,18 @@
+// Channel types and interfaces
+export type {
+  Channel,
+  SendableChannel,
+  VoiceChannel,
+  BaseChannelConfig,
+  IncomingMessage,
+  OutgoingMessage,
+  Attachment,
+  ChannelStatus,
+  ChannelFactory,
+  ChannelRegistryEntry,
+} from './types.js';
+
+// Telegram
 export {
   TelegramChannel,
   formatMarkdownToHtml,
@@ -6,6 +21,7 @@ export {
   type TelegramChannelOptions,
 } from './telegram.js';
 
+// CLI
 export {
   CLIChannel,
   parseCommand,
@@ -17,6 +33,7 @@ export {
   type HandleResult,
 } from './cli.js';
 
+// Discord
 export {
   DiscordChannel,
   formatMarkdownForDiscord,
@@ -27,3 +44,15 @@ export {
   type ParsedSlashCommand,
   type SlashCommandDef,
 } from './discord.js';
+
+// WhatsApp
+export { WhatsAppChannel, type WhatsAppChannelOptions } from './whatsapp.js';
+
+// Slack
+export { SlackChannel, type SlackChannelOptions } from './slack.js';
+
+// Signal
+export { SignalChannel, type SignalChannelOptions } from './signal.js';
+
+// Matrix
+export { MatrixChannel, type MatrixChannelOptions } from './matrix.js';

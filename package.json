@@ -42,5 +42,11 @@
     "openai": "^6.17.0",
     "pino": "^10.3.0",
     "zod": "^4.3.6"
+  },
+  "optionalDependencies": {
+    "@whiskeysockets/baileys": "^6.7.17",
+    "@hapi/boom": "^10.0.1",
+    "@slack/bolt": "^4.3.1",
+    "matrix-js-sdk": "^36.2.0"
   }
 }
