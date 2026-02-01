@@ -1,16 +1,19 @@
-import { Bot, Context } from 'grammy';
+import { Bot, Context, InputFile } from 'grammy';
 import type { Logger } from 'pino';
 import type { Agent } from '../agent/agent.js';
 import type { SessionManager } from '../agent/session.js';
+import { VoiceManager } from '../voice/index.js';
 
 const MAX_MESSAGE_LENGTH = 4096;
 const TYPING_INTERVAL = 5000; // 5 seconds
+const MAX_VOICE_RESPONSE_LENGTH = 500; // Characters before truncating voice response
 
 export interface TelegramChannelOptions {
   botToken: string;
   agent: Agent;
   sessionManager: SessionManager;
   logger: Logger;
+  enableVoiceReply?: boolean; // Reply with voice when receiving voice messages
 }
 
 export function getStartMessage(): string {
@@ -99,14 +102,34 @@ export class TelegramChannel {
   private logger: Logger;
   public userSessions: Map<string, string> = new Map();
   private isRunning = false;
+  private voiceManager: VoiceManager | null = null;
+  private voiceAvailable = false;
+  private enableVoiceReply: boolean;
 
   constructor(options: TelegramChannelOptions) {
     this.bot = new Bot(options.botToken);
     this.agent = options.agent;
     this.sessionManager = options.sessionManager;
     this.logger = options.logger.child({ channel: 'telegram' });
+    this.enableVoiceReply = options.enableVoiceReply ?? false;
 
     this.setupHandlers();
+    this.initVoice();
+  }
+
+  private async initVoice(): Promise<void> {
+    try {
+      this.voiceManager = VoiceManager.fromEnv(this.logger);
+      const status = await this.voiceManager.isAvailable();
+      this.voiceAvailable = status.stt;
+
+      if (this.voiceAvailable) {
+        this.logger.info('Voice support enabled for Telegram');
+      }
+    } catch (error) {
+      this.logger.debug({ error: (error as Error).message }, 'Voice init failed');
+      this.voiceAvailable = false;
+    }
   }
 
   private setupHandlers(): void {
@@ -129,10 +152,112 @@ export class TelegramChannel {
       await this.handleMessage(ctx);
     });
 
+    // Handle voice messages
+    this.bot.on('message:voice', async (ctx) => {
+      await this.handleVoiceMessage(ctx);
+    });
+
+    // Handle audio messages (voice notes sent as audio files)
+    this.bot.on('message:audio', async (ctx) => {
+      await this.handleVoiceMessage(ctx);
+    });
+
     // Error handler
     this.bot.catch((err) => {
       this.logger.error({ error: err.message }, 'Bot error');
     });
+  }
+
+  /**
+   * Handle incoming voice messages
+   */
+  private async handleVoiceMessage(ctx: Context): Promise<void> {
+    const userId = ctx.from?.id.toString();
+    if (!userId) return;
+
+    if (!this.voiceAvailable || !this.voiceManager) {
+      await ctx.reply('Voice messages are not supported. Please send a text message.');
+      return;
+    }
+
+    this.logger.info({ userId }, 'Received voice message');
+
+    // Start typing/recording indicator
+    const typingInterval = this.startTypingIndicator(ctx);
+
+    try {
+      // Get file info
+      const voice = ctx.message?.voice || ctx.message?.audio;
+      if (!voice) {
+        throw new Error('No voice data in message');
+      }
+
+      // Download voice file
+      const file = await ctx.api.getFile(voice.file_id);
+      const fileUrl = `https://api.telegram.org/file/bot${this.bot.token}/${file.file_path}`;
+
+      // Fetch the audio data
+      const response = await fetch(fileUrl);
+      if (!response.ok) {
+        throw new Error(`Failed to download voice file: ${response.status}`);
+      }
+
+      const audioBuffer = Buffer.from(await response.arrayBuffer());
+      this.logger.debug({ size: audioBuffer.length }, 'Downloaded voice file');
+
+      // Transcribe
+      const transcription = await this.voiceManager.transcribe(audioBuffer);
+      this.logger.info({ text: transcription.text.substring(0, 50) }, 'Transcribed voice');
+
+      if (!transcription.text.trim()) {
+        clearInterval(typingInterval);
+        await ctx.reply('Could not understand the audio. Please try again.');
+        return;
+      }
+
+      // Show what was understood
+      await ctx.reply(`🎤 "${transcription.text}"`);
+
+      // Get or create session
+      const sessionId = await this.getOrCreateSession(userId);
+
+      // Process through agent
+      const result = await this.agent.processMessage(sessionId, transcription.text);
+
+      clearInterval(typingInterval);
+
+      // Format and send text response
+      const formattedResponse = formatMarkdownToHtml(result.response);
+      const chunks = splitMessage(formattedResponse);
+
+      for (const chunk of chunks) {
+        try {
+          await ctx.reply(chunk, { parse_mode: 'HTML' });
+        } catch {
+          await ctx.reply(chunk.replace(/<[^>]*>/g, ''));
+        }
+      }
+
+      // Optionally reply with voice
+      if (this.enableVoiceReply && result.response.length <= MAX_VOICE_RESPONSE_LENGTH) {
+        try {
+          const voiceResult = await this.voiceManager.synthesize(result.response);
+          await ctx.replyWithVoice(new InputFile(voiceResult.audio, 'response.ogg'));
+        } catch (error) {
+          this.logger.debug({ error: (error as Error).message }, 'Failed to send voice reply');
+        }
+      }
+
+      this.logger.info(
+        { userId, responseLength: result.response.length, tokens: result.tokenUsage },
+        'Processed voice message'
+      );
+    } catch (error) {
+      clearInterval(typingInterval);
+      const err = error as Error;
+      this.logger.error({ userId, error: err.message }, 'Failed to process voice message');
+      await ctx.reply('Sorry, I had trouble processing your voice message. Please try again or send a text message.');
+    }
   }
 
   private async handleMessage(ctx: Context): Promise<void> {

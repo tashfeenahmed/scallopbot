@@ -1,12 +1,14 @@
 /**
  * CLI REPL Channel
  * Interactive command-line interface for LeanBot
+ * Supports text and voice modes
  */
 
 import * as readline from 'readline';
 import type { Logger } from 'pino';
 import type { Agent } from '../agent/agent.js';
 import type { SessionManager } from '../agent/session.js';
+import { VoiceManager } from '../voice/index.js';
 
 export interface CLIChannelOptions {
   agent: Agent;
@@ -15,6 +17,7 @@ export interface CLIChannelOptions {
   enableColors?: boolean;
   showTokenUsage?: boolean;
   prompt?: string;
+  voiceMode?: boolean;
 }
 
 export interface CommandResult {
@@ -62,7 +65,14 @@ export function formatOutput(text: string, enableColors: boolean): string {
 /**
  * Get help message with available commands
  */
-export function getHelpMessage(): string {
+export function getHelpMessage(voiceAvailable: boolean = false): string {
+  const voiceCommands = voiceAvailable
+    ? `
+  /voice    - Toggle voice mode (speak to chat)
+  /listen   - Record and transcribe (one-time)
+  /speak    - Speak the last response again`
+    : '';
+
   return `
 LeanBot CLI Commands:
 
@@ -71,9 +81,10 @@ LeanBot CLI Commands:
   /exit     - Exit the CLI
   /quit     - Exit the CLI (alias)
   /status   - Show current session status
-  /model    - Show or change the current model
+  /model    - Show or change the current model${voiceCommands}
 
 Just type your message and press Enter to chat with the bot.
+${voiceAvailable ? 'Voice mode available! Type /voice to enable.' : ''}
 `;
 }
 
@@ -100,6 +111,12 @@ export class CLIChannel {
   private rl: readline.Interface | null = null;
   private isRunning = false;
 
+  // Voice support
+  private voiceManager: VoiceManager | null = null;
+  private voiceModeEnabled = false;
+  private voiceAvailable = false;
+  private lastResponse: string = '';
+
   constructor(options: CLIChannelOptions) {
     this.agent = options.agent;
     this.sessionManager = options.sessionManager;
@@ -107,6 +124,32 @@ export class CLIChannel {
     this.enableColors = options.enableColors ?? true;
     this.showTokenUsage = options.showTokenUsage ?? false;
     this.prompt = options.prompt ?? '> ';
+    this.voiceModeEnabled = options.voiceMode ?? false;
+  }
+
+  /**
+   * Initialize voice capabilities
+   */
+  private async initVoice(): Promise<void> {
+    try {
+      this.voiceManager = VoiceManager.fromEnv(this.logger);
+      const status = await this.voiceManager.isAvailable();
+
+      this.voiceAvailable = status.stt && status.tts;
+
+      if (this.voiceAvailable) {
+        const providers = await this.voiceManager.getStatus();
+        this.logger.info(
+          { stt: providers.stt.provider, tts: providers.tts.provider },
+          'Voice initialized'
+        );
+      } else {
+        this.logger.debug({ status }, 'Voice not available');
+      }
+    } catch (error) {
+      this.logger.debug({ error: (error as Error).message }, 'Voice init failed');
+      this.voiceAvailable = false;
+    }
   }
 
   /**
@@ -136,7 +179,7 @@ export class CLIChannel {
   private async handleCommand(command: string, args: string): Promise<HandleResult> {
     switch (command) {
       case 'help':
-        this.print(getHelpMessage());
+        this.print(getHelpMessage(this.voiceAvailable));
         return {};
 
       case 'exit':
@@ -157,10 +200,97 @@ export class CLIChannel {
         this.print(`Current model: (configured in environment)\n`);
         return {};
 
+      case 'voice':
+        return this.handleVoiceToggle();
+
+      case 'listen':
+        return this.handleVoiceListen();
+
+      case 'speak':
+        return this.handleVoiceSpeak();
+
       default:
         this.print(`Unknown command: /${command}. Type /help for available commands.\n`);
         return {};
     }
+  }
+
+  /**
+   * Toggle voice mode
+   */
+  private handleVoiceToggle(): HandleResult {
+    if (!this.voiceAvailable) {
+      this.print('Voice mode not available. Check if audio tools are installed.\n');
+      return {};
+    }
+
+    this.voiceModeEnabled = !this.voiceModeEnabled;
+    this.print(
+      this.voiceModeEnabled
+        ? 'Voice mode ENABLED. Press Enter to start recording, Enter again to stop.\n'
+        : 'Voice mode DISABLED. Back to text input.\n'
+    );
+    return {};
+  }
+
+  /**
+   * Record and transcribe once
+   */
+  private async handleVoiceListen(): Promise<HandleResult> {
+    if (!this.voiceAvailable || !this.voiceManager) {
+      this.print('Voice not available.\n');
+      return {};
+    }
+
+    try {
+      this.print('Recording... Press Enter to stop.\n');
+      await this.voiceManager.startRecording();
+
+      // Wait for Enter key
+      await new Promise<void>((resolve) => {
+        this.rl?.once('line', () => resolve());
+      });
+
+      const audio = await this.voiceManager.stopRecording();
+      this.print('Transcribing...\n');
+
+      const result = await this.voiceManager.transcribe(audio);
+      this.print(`You said: "${result.text}"\n`);
+
+      if (result.text.trim()) {
+        // Process as message
+        return this.processMessage(result.text);
+      }
+
+      return {};
+    } catch (error) {
+      this.print(`Voice error: ${(error as Error).message}\n`);
+      return {};
+    }
+  }
+
+  /**
+   * Speak the last response
+   */
+  private async handleVoiceSpeak(): Promise<HandleResult> {
+    if (!this.voiceAvailable || !this.voiceManager) {
+      this.print('Voice not available.\n');
+      return {};
+    }
+
+    if (!this.lastResponse) {
+      this.print('No response to speak.\n');
+      return {};
+    }
+
+    try {
+      this.print('Speaking...\n');
+      await this.voiceManager.speak(this.lastResponse);
+    } catch (error) {
+      this.print(`Speech error: ${(error as Error).message}\n`);
+    }
+
+    return {};
   }
 
   /**
@@ -186,6 +316,9 @@ export class CLIChannel {
       // Clear thinking indicator
       this.print('            \r');
 
+      // Save for /speak command
+      this.lastResponse = result.response;
+
       // Format and display response
       const formatted = formatOutput(result.response, this.enableColors);
       this.print('\n' + formatted + '\n\n');
@@ -201,6 +334,15 @@ export class CLIChannel {
         { tokens: result.tokenUsage, iterations: result.iterationsUsed },
         'Message processed'
       );
+
+      // Speak response if voice mode enabled
+      if (this.voiceModeEnabled && this.voiceManager) {
+        try {
+          await this.voiceManager.speak(result.response);
+        } catch (error) {
+          this.logger.debug({ error: (error as Error).message }, 'Failed to speak response');
+        }
+      }
 
       return {};
     } catch (error) {
@@ -280,6 +422,9 @@ export class CLIChannel {
     this.isRunning = true;
     this.logger.info('Starting CLI REPL...');
 
+    // Initialize voice capabilities
+    await this.initVoice();
+
     // Create readline interface
     this.rl = readline.createInterface({
       input: process.stdin,
@@ -288,6 +433,12 @@ export class CLIChannel {
 
     // Show welcome message
     this.print(getWelcomeMessage());
+
+    if (this.voiceAvailable) {
+      const status = await this.voiceManager!.getStatus();
+      this.print(`Voice available: STT=${status.stt.provider}, TTS=${status.tts.provider}\n`);
+      this.print('Type /voice to enable voice mode.\n\n');
+    }
 
     // Start the REPL loop
     await this.replLoop();
@@ -307,11 +458,26 @@ export class CLIChannel {
 
     while (this.isRunning) {
       try {
-        const input = await question(this.prompt);
-        const result = await this.handleInput(input);
+        // Voice mode: record on empty Enter, transcribe and process
+        if (this.voiceModeEnabled && this.voiceManager) {
+          const prompt = '[Voice] Press Enter to record, or type message: ';
+          const input = await question(prompt);
 
-        if (result.shouldExit) {
-          break;
+          if (input.trim() === '') {
+            // Start voice recording
+            await this.handleVoiceListen();
+          } else {
+            const result = await this.handleInput(input);
+            if (result.shouldExit) break;
+          }
+        } else {
+          // Text mode
+          const input = await question(this.prompt);
+          const result = await this.handleInput(input);
+
+          if (result.shouldExit) {
+            break;
+          }
         }
       } catch (error) {
         // Handle Ctrl+C or other interrupts
