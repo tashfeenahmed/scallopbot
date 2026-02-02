@@ -316,11 +316,27 @@ export class BackgroundGardener {
   private interval: number;
   private timer: NodeJS.Timeout | null = null;
   private running = false;
+  private embedder: TFIDFEmbedder;
+
+  /** Patterns indicating contradictory information */
+  private static readonly CONTRADICTION_PATTERNS = [
+    // Preference changes
+    { category: 'preference', patterns: ['prefer', 'like', 'want', 'use', 'favor'] },
+    // Name/identity
+    { category: 'identity', patterns: ['name is', 'called', 'known as', 'goes by'] },
+    // Location
+    { category: 'location', patterns: ['live in', 'based in', 'located in', 'from'] },
+    // Work/job
+    { category: 'work', patterns: ['work at', 'work for', 'employed at', 'job is', 'works as'] },
+    // Tool/technology choices
+    { category: 'technology', patterns: ['uses', 'codes in', 'programs in', 'develops with'] },
+  ];
 
   constructor(options: BackgroundGardenerOptions) {
     this.store = options.store;
     this.logger = options.logger.child({ component: 'gardener' });
     this.interval = options.interval ?? 60000; // Default 1 minute
+    this.embedder = new TFIDFEmbedder();
   }
 
   start(): void {
@@ -372,8 +388,10 @@ export class BackgroundGardener {
       this.store.update(memory.id, { type: 'context' });
     }
 
-    // Deduplicate periodically
+    // Run maintenance tasks
     this.deduplicate();
+    this.linkRelatedFacts();
+    this.pruneOutdatedFacts();
   }
 
   deduplicate(): void {
@@ -406,6 +424,262 @@ export class BackgroundGardener {
     if (toDelete.length > 0) {
       this.logger.debug({ removed: toDelete.length }, 'Deduplicated memories');
     }
+  }
+
+  /**
+   * Link semantically related facts bidirectionally
+   */
+  linkRelatedFacts(): void {
+    const facts = this.store.searchByType('fact');
+
+    // Skip if too few facts
+    if (facts.length < 2) return;
+
+    // Build embeddings for all facts
+    const embeddings = new Map<string, number[]>();
+    for (const fact of facts) {
+      embeddings.set(fact.id, this.embedder.embedSync(fact.content));
+    }
+
+    // Find related pairs
+    const relatedPairs: Array<[string, string, number]> = [];
+    const processedPairs = new Set<string>();
+
+    for (let i = 0; i < facts.length; i++) {
+      for (let j = i + 1; j < facts.length; j++) {
+        const factA = facts[i];
+        const factB = facts[j];
+        const pairKey = [factA.id, factB.id].sort().join('|');
+
+        if (processedPairs.has(pairKey)) continue;
+        processedPairs.add(pairKey);
+
+        const embeddingA = embeddings.get(factA.id)!;
+        const embeddingB = embeddings.get(factB.id)!;
+        const similarity = cosineSimilarity(embeddingA, embeddingB);
+
+        // Link if similarity is high enough (but not a duplicate)
+        if (similarity > 0.3 && similarity < 0.95) {
+          relatedPairs.push([factA.id, factB.id, similarity]);
+        }
+      }
+    }
+
+    // Apply bidirectional links
+    let linksAdded = 0;
+    for (const [idA, idB] of relatedPairs) {
+      const factA = this.store.get(idA);
+      const factB = this.store.get(idB);
+
+      if (!factA || !factB) continue;
+
+      // Get existing related IDs
+      const relatedA = (factA.metadata?.relatedIds as string[]) || [];
+      const relatedB = (factB.metadata?.relatedIds as string[]) || [];
+
+      // Add bidirectional links if not already present
+      if (!relatedA.includes(idB)) {
+        this.store.update(idA, {
+          metadata: { ...factA.metadata, relatedIds: [...relatedA, idB] },
+        });
+        linksAdded++;
+      }
+
+      if (!relatedB.includes(idA)) {
+        this.store.update(idB, {
+          metadata: { ...factB.metadata, relatedIds: [...relatedB, idA] },
+        });
+        linksAdded++;
+      }
+    }
+
+    if (linksAdded > 0) {
+      this.logger.debug({ linksAdded }, 'Linked related facts');
+    }
+  }
+
+  /**
+   * Detect and prune outdated/contradicted facts
+   */
+  pruneOutdatedFacts(): void {
+    const facts = this.store.searchByType('fact');
+
+    // Group facts by category
+    const categorized = new Map<string, MemoryEntry[]>();
+
+    for (const fact of facts) {
+      const category = this.categorizeFactContent(fact.content);
+      if (category) {
+        const existing = categorized.get(category) || [];
+        existing.push(fact);
+        categorized.set(category, existing);
+      }
+    }
+
+    // Within each category, find contradictions (newer supersedes older)
+    const toMarkSuperseded: string[] = [];
+
+    for (const [category, categoryFacts] of categorized) {
+      // Sort by timestamp descending (newest first)
+      categoryFacts.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
+
+      // Check for contradictions within the category
+      for (let i = 0; i < categoryFacts.length; i++) {
+        const newerFact = categoryFacts[i];
+
+        // Skip if already superseded
+        if (newerFact.metadata?.superseded) continue;
+
+        for (let j = i + 1; j < categoryFacts.length; j++) {
+          const olderFact = categoryFacts[j];
+
+          // Skip if already superseded
+          if (olderFact.metadata?.superseded) continue;
+
+          // Check if same subject but different value (contradiction)
+          if (this.detectContradiction(newerFact.content, olderFact.content, category)) {
+            toMarkSuperseded.push(olderFact.id);
+
+            // Link newer fact to superseded one
+            this.store.update(newerFact.id, {
+              metadata: {
+                ...newerFact.metadata,
+                supersedes: olderFact.id,
+              },
+            });
+          }
+        }
+      }
+    }
+
+    // Mark superseded facts
+    for (const id of toMarkSuperseded) {
+      const fact = this.store.get(id);
+      if (fact) {
+        this.store.update(id, {
+          metadata: {
+            ...fact.metadata,
+            superseded: true,
+            supersededAt: new Date().toISOString(),
+          },
+        });
+      }
+    }
+
+    // Delete facts that have been superseded for more than 7 days
+    const oneWeekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    const toDelete: string[] = [];
+
+    for (const fact of facts) {
+      if (fact.metadata?.superseded && fact.metadata?.supersededAt) {
+        const supersededAt = new Date(fact.metadata.supersededAt as string);
+        if (supersededAt < oneWeekAgo) {
+          toDelete.push(fact.id);
+        }
+      }
+    }
+
+    for (const id of toDelete) {
+      this.store.delete(id);
+    }
+
+    if (toMarkSuperseded.length > 0 || toDelete.length > 0) {
+      this.logger.debug(
+        { superseded: toMarkSuperseded.length, deleted: toDelete.length },
+        'Pruned outdated facts'
+      );
+    }
+  }
+
+  /**
+   * Categorize a fact by its content type
+   */
+  private categorizeFactContent(content: string): string | null {
+    const lower = content.toLowerCase();
+
+    for (const { category, patterns } of BackgroundGardener.CONTRADICTION_PATTERNS) {
+      for (const pattern of patterns) {
+        if (lower.includes(pattern)) {
+          // Extract subject for more precise categorization
+          const subject = this.extractSubject(lower, pattern);
+          return subject ? `${category}:${subject}` : category;
+        }
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Extract subject from a fact statement
+   */
+  private extractSubject(content: string, pattern: string): string | null {
+    // Find words before the pattern (likely the subject)
+    const patternIndex = content.indexOf(pattern);
+    if (patternIndex <= 0) return null;
+
+    const before = content.slice(0, patternIndex).trim();
+    const words = before.split(/\s+/).filter((w) => w.length > 2);
+
+    // Return last meaningful word as subject
+    const meaningfulWords = words.filter((w) => !['the', 'user', 'they', 'i'].includes(w));
+    return meaningfulWords.length > 0 ? meaningfulWords[meaningfulWords.length - 1] : null;
+  }
+
+  /**
+   * Detect if two facts contradict each other
+   */
+  private detectContradiction(newer: string, older: string, category: string): boolean {
+    const newerLower = newer.toLowerCase();
+    const olderLower = older.toLowerCase();
+
+    // Extract values after the pattern
+    for (const { patterns } of BackgroundGardener.CONTRADICTION_PATTERNS) {
+      for (const pattern of patterns) {
+        if (newerLower.includes(pattern) && olderLower.includes(pattern)) {
+          const newerValue = newerLower.split(pattern)[1]?.trim() || '';
+          const olderValue = olderLower.split(pattern)[1]?.trim() || '';
+
+          // If values are different, it's a contradiction
+          if (newerValue && olderValue && newerValue !== olderValue) {
+            // Check they're not just elaborating (substring)
+            if (!newerValue.includes(olderValue) && !olderValue.includes(newerValue)) {
+              return true;
+            }
+          }
+        }
+      }
+    }
+
+    return false;
+  }
+
+  /**
+   * Get related facts for a given fact ID
+   */
+  getRelatedFacts(factId: string): MemoryEntry[] {
+    const fact = this.store.get(factId);
+    if (!fact) return [];
+
+    const relatedIds = (fact.metadata?.relatedIds as string[]) || [];
+    return relatedIds
+      .map((id) => this.store.get(id))
+      .filter((f): f is MemoryEntry => f !== undefined);
+  }
+
+  /**
+   * Check if a fact has been superseded
+   */
+  isSuperseded(factId: string): boolean {
+    const fact = this.store.get(factId);
+    return !!fact?.metadata?.superseded;
+  }
+
+  /**
+   * Get active (non-superseded) facts only
+   */
+  getActiveFacts(): MemoryEntry[] {
+    return this.store.searchByType('fact').filter((f) => !f.metadata?.superseded);
   }
 
   private isSimilar(a: string, b: string): boolean {
@@ -481,22 +755,93 @@ export interface SearchOptions {
   type?: MemoryType;
   recencyBoost?: boolean;
   sessionId?: string;
+  /** Minimum score threshold (default: 0.01). Results below this are filtered out. */
+  minScore?: number;
 }
 
 export interface HybridSearchOptions {
   store: MemoryStore;
+  /** Embedding provider for semantic search */
+  embedder?: EmbeddingProvider;
+  /** Weight for BM25 score (default: 0.5) */
+  bm25Weight?: number;
+  /** Weight for semantic score (default: 0.5) */
+  semanticWeight?: number;
 }
+
+// Import embedding types
+import type { EmbeddingProvider } from './embeddings.js';
+import { TFIDFEmbedder, cosineSimilarity, EmbeddingCache } from './embeddings.js';
 
 /**
  * Hybrid Search - combines BM25 and vector similarity
+ *
+ * Uses real vector embeddings for semantic search with configurable weights.
  */
 export class HybridSearch {
   private store: MemoryStore;
+  private embedder: EmbeddingProvider;
+  private embeddingCache: EmbeddingCache;
+  private bm25Weight: number;
+  private semanticWeight: number;
+  private initialized = false;
 
   constructor(options: HybridSearchOptions) {
     this.store = options.store;
+    this.embedder = options.embedder || new TFIDFEmbedder();
+    this.embeddingCache = new EmbeddingCache();
+    this.bm25Weight = options.bm25Weight ?? 0.5;
+    this.semanticWeight = options.semanticWeight ?? 0.5;
   }
 
+  /**
+   * Initialize embeddings for existing memories
+   */
+  async initialize(): Promise<void> {
+    if (this.initialized) return;
+
+    const memories = this.store.getAll();
+
+    // Add documents to TF-IDF for IDF calculation
+    if (this.embedder instanceof TFIDFEmbedder) {
+      this.embedder.addDocuments(memories.map((m) => m.content));
+    }
+
+    // Pre-compute embeddings for existing memories
+    for (const memory of memories) {
+      if (!this.embeddingCache.has(memory.id)) {
+        const embedding = await this.embedder.embed(memory.content);
+        this.embeddingCache.set(memory.id, embedding);
+
+        // Also store in memory entry
+        this.store.update(memory.id, { embedding });
+      }
+    }
+
+    this.initialized = true;
+  }
+
+  /**
+   * Add embedding for a new memory
+   */
+  async addMemoryEmbedding(memory: MemoryEntry): Promise<void> {
+    if (!this.embeddingCache.has(memory.id)) {
+      // Update TF-IDF corpus
+      if (this.embedder instanceof TFIDFEmbedder) {
+        this.embedder.addDocument(memory.content);
+      }
+
+      const embedding = await this.embedder.embed(memory.content);
+      this.embeddingCache.set(memory.id, embedding);
+
+      // Store in memory entry
+      this.store.update(memory.id, { embedding });
+    }
+  }
+
+  /**
+   * Search with hybrid BM25 + vector similarity
+   */
   search(query: string, options: SearchOptions = {}): SearchResult[] {
     const limit = options.limit ?? 10;
     const allMemories = this.store.getAll();
@@ -531,8 +876,8 @@ export class HybridSearch {
       const bm25Score = calculateBM25Score(query, memory.content, bm25Options);
       const semanticScore = this.calculateSemanticScore(query, memory);
 
-      // Combine scores (60% BM25, 40% semantic)
-      let combinedScore = bm25Score * 0.6 + semanticScore * 0.4;
+      // Combine scores with configurable weights
+      let combinedScore = bm25Score * this.bm25Weight + semanticScore * this.semanticWeight;
 
       // Apply recency boost if enabled
       if (options.recencyBoost) {
@@ -542,7 +887,9 @@ export class HybridSearch {
         combinedScore *= 1 + recencyMultiplier * 0.5;
       }
 
-      if (combinedScore > 0) {
+      // Filter by minimum score threshold
+      const minScore = options.minScore ?? 0.01;
+      if (combinedScore >= minScore) {
         results.push({
           entry: memory,
           score: combinedScore,
@@ -557,31 +904,136 @@ export class HybridSearch {
     return results.slice(0, limit);
   }
 
+  /**
+   * Async search with real-time embedding computation
+   */
+  async searchAsync(query: string, options: SearchOptions = {}): Promise<SearchResult[]> {
+    const limit = options.limit ?? 10;
+    const allMemories = this.store.getAll();
+
+    // Filter by type and session if specified
+    let candidates = allMemories;
+    if (options.type) {
+      candidates = candidates.filter((m) => m.type === options.type);
+    }
+    if (options.sessionId) {
+      candidates = candidates.filter((m) => m.sessionId === options.sessionId);
+    }
+
+    if (candidates.length === 0) {
+      return [];
+    }
+
+    // Calculate average document length
+    const avgDocLength =
+      candidates.reduce((sum, m) => sum + m.content.split(/\s+/).length, 0) /
+      candidates.length;
+
+    const bm25Options: BM25Options = {
+      avgDocLength,
+      docCount: candidates.length,
+    };
+
+    // Get query embedding
+    const queryEmbedding = await this.embedder.embed(query);
+
+    // Score each candidate
+    const results: SearchResult[] = [];
+
+    for (const memory of candidates) {
+      const bm25Score = calculateBM25Score(query, memory.content, bm25Options);
+
+      // Get cached embedding or compute new one
+      let memoryEmbedding = memory.embedding || this.embeddingCache.get(memory.id);
+      if (!memoryEmbedding) {
+        memoryEmbedding = await this.embedder.embed(memory.content);
+        this.embeddingCache.set(memory.id, memoryEmbedding);
+      }
+
+      // Calculate semantic similarity using cosine similarity
+      const semanticScore = cosineSimilarity(queryEmbedding, memoryEmbedding);
+
+      // Combine scores with configurable weights
+      let combinedScore = bm25Score * this.bm25Weight + semanticScore * this.semanticWeight;
+
+      // Apply recency boost if enabled
+      if (options.recencyBoost) {
+        const ageMs = Date.now() - memory.timestamp.getTime();
+        const ageDays = ageMs / (1000 * 60 * 60 * 24);
+        const recencyMultiplier = Math.exp(-ageDays / 7); // Decay over ~1 week
+        combinedScore *= 1 + recencyMultiplier * 0.5;
+      }
+
+      // Filter by minimum score threshold
+      const minScore = options.minScore ?? 0.01;
+      if (combinedScore >= minScore) {
+        results.push({
+          entry: memory,
+          score: combinedScore,
+          matchType: bm25Score > semanticScore ? 'keyword' : 'semantic',
+        });
+      }
+    }
+
+    // Sort by score descending
+    results.sort((a, b) => b.score - a.score);
+
+    return results.slice(0, limit);
+  }
+
+  /**
+   * Calculate semantic score using vector similarity
+   */
   private calculateSemanticScore(query: string, memory: MemoryEntry): number {
-    // Simple semantic similarity using word overlap and related terms
+    // For TF-IDF embedder, we can compute embeddings synchronously
+    if (this.embedder instanceof TFIDFEmbedder) {
+      // Get query embedding
+      const queryEmbedding = this.embedder.embedSync(query);
+
+      // Get or compute memory embedding
+      let memoryEmbedding = memory.embedding || this.embeddingCache.get(memory.id);
+      if (!memoryEmbedding) {
+        memoryEmbedding = this.embedder.embedSync(memory.content);
+        this.embeddingCache.set(memory.id, memoryEmbedding);
+      }
+
+      return cosineSimilarity(queryEmbedding, memoryEmbedding);
+    }
+
+    // Check for cached embedding (for non-TF-IDF embedders)
+    const memoryEmbedding = memory.embedding || this.embeddingCache.get(memory.id);
+
+    if (memoryEmbedding) {
+      // Use synchronous embedding for query if available
+      const queryEmbedding = this.embedSync(query);
+      if (queryEmbedding) {
+        return cosineSimilarity(queryEmbedding, memoryEmbedding);
+      }
+    }
+
+    // Fallback to simple word overlap if no embeddings available
+    return this.calculateFallbackScore(query, memory);
+  }
+
+  /**
+   * Synchronous embed for TF-IDF (it's actually sync under the hood)
+   */
+  private embedSync(text: string): number[] | null {
+    if (this.embedder instanceof TFIDFEmbedder) {
+      return this.embedder.embedSync(text);
+    }
+    return null;
+  }
+
+  /**
+   * Fallback score calculation using word overlap
+   */
+  private calculateFallbackScore(query: string, memory: MemoryEntry): number {
     const queryTerms = new Set(query.toLowerCase().split(/\s+/));
     const memTerms = new Set(memory.content.toLowerCase().split(/\s+/));
 
     // Direct overlap
     const overlap = [...queryTerms].filter((t) => memTerms.has(t)).length;
-
-    // Related terms mapping (simple semantic expansion)
-    const relatedTerms: Record<string, string[]> = {
-      javascript: ['js', 'node', 'typescript', 'react', 'frontend', 'backend'],
-      'server-side': ['backend', 'node', 'api', 'server'],
-      programming: ['coding', 'development', 'software', 'code'],
-      web: ['website', 'frontend', 'html', 'css'],
-    };
-
-    let relatedScore = 0;
-    for (const queryTerm of queryTerms) {
-      const related = relatedTerms[queryTerm] || [];
-      for (const rel of related) {
-        if (memTerms.has(rel)) {
-          relatedScore += 0.5;
-        }
-      }
-    }
 
     // Tag matching
     let tagScore = 0;
@@ -593,9 +1045,27 @@ export class HybridSearch {
       }
     }
 
-    const totalScore = overlap + relatedScore + tagScore;
-    const maxPossible = queryTerms.size + 2; // Normalize
+    const totalScore = overlap + tagScore;
+    const maxPossible = queryTerms.size + 2;
 
     return totalScore / maxPossible;
+  }
+
+  /**
+   * Get embedding provider info
+   */
+  getEmbedderInfo(): { name: string; dimension: number; available: boolean } {
+    return {
+      name: this.embedder.name,
+      dimension: this.embedder.dimension,
+      available: this.embedder.isAvailable(),
+    };
+  }
+
+  /**
+   * Clear embedding cache
+   */
+  clearCache(): void {
+    this.embeddingCache.clear();
   }
 }

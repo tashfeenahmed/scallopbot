@@ -597,8 +597,10 @@ export class DegradationLadder {
         return {
           success: true,
           response: {
-            text: this.offlineMessage,
-            tokenUsage: { inputTokens: 0, outputTokens: 0 },
+            content: [{ type: 'text' as const, text: this.offlineMessage }],
+            stopReason: 'end_turn',
+            usage: { inputTokens: 0, outputTokens: 0 },
+            model: 'offline',
           },
           tier: 'offline',
           attempts,

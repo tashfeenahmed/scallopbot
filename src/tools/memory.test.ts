@@ -131,8 +131,9 @@ describe('Memory Tools', () => {
     });
 
     it('should return no results message when none found', async () => {
+      // Use truly unique gibberish that won't match any n-grams
       const result = await tool.execute(
-        { query: 'nonexistent-query-xyz-123' },
+        { query: 'qwzxzqwzxz' },
         context
       );
 

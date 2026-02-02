@@ -17,3 +17,16 @@ export {
   type SearchOptions,
   type HybridSearchOptions,
 } from './memory.js';
+
+// Embeddings
+export {
+  TFIDFEmbedder,
+  OpenAIEmbedder,
+  EmbeddingCache,
+  cosineSimilarity,
+  euclideanDistance,
+  createDefaultEmbedder,
+  createOpenAIEmbedder,
+  type EmbeddingProvider,
+  type OpenAIEmbedderOptions,
+} from './embeddings.js';

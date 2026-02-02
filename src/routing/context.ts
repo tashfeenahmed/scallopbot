@@ -6,6 +6,164 @@
 import type { Message, ContentBlock } from '../providers/types.js';
 import { createHash } from 'crypto';
 
+/**
+ * Tool Output Deduplicator
+ * Detects and deduplicates identical tool outputs to reduce context size
+ */
+export interface DeduplicatorOptions {
+  /** Whether deduplication is enabled (default: true) */
+  enabled?: boolean;
+  /** Minimum output size in bytes to consider for deduplication (default: 100) */
+  minSizeBytes?: number;
+}
+
+interface DeduplicatedOutput {
+  hash: string;
+  toolName: string;
+  inputHash: string;
+  output: string;
+  firstSeenAt: number;
+  occurrences: number;
+}
+
+export class ToolOutputDeduplicator {
+  private enabled: boolean;
+  private minSizeBytes: number;
+  private outputs: Map<string, DeduplicatedOutput> = new Map();
+  private callHistory: Map<string, string> = new Map(); // inputHash -> outputHash
+
+  constructor(options: DeduplicatorOptions = {}) {
+    this.enabled = options.enabled ?? true;
+    this.minSizeBytes = options.minSizeBytes ?? 100;
+  }
+
+  /**
+   * Hash tool call input for lookup
+   */
+  private hashToolCall(toolName: string, input: Record<string, unknown>): string {
+    const data = JSON.stringify({ tool: toolName, input });
+    return createHash('sha256').update(data).digest('hex').slice(0, 16);
+  }
+
+  /**
+   * Hash output content
+   */
+  private hashOutput(content: string): string {
+    return createHash('sha256').update(content).digest('hex').slice(0, 16);
+  }
+
+  /**
+   * Check if a tool output should be deduplicated
+   * Returns the deduplicated output if applicable, or null if not
+   */
+  shouldDeduplicate(
+    toolName: string,
+    input: Record<string, unknown>,
+    output: string
+  ): { deduplicated: boolean; reference?: string; originalHash?: string } {
+    if (!this.enabled) {
+      return { deduplicated: false };
+    }
+
+    const outputBytes = Buffer.byteLength(output, 'utf-8');
+    if (outputBytes < this.minSizeBytes) {
+      return { deduplicated: false };
+    }
+
+    const inputHash = this.hashToolCall(toolName, input);
+    const outputHash = this.hashOutput(output);
+
+    // Check if we've seen this exact output before
+    const existing = this.outputs.get(outputHash);
+    if (existing) {
+      existing.occurrences++;
+      return {
+        deduplicated: true,
+        reference: `[Identical to previous ${existing.toolName} output. Hash: ${outputHash}]`,
+        originalHash: outputHash,
+      };
+    }
+
+    // Check if we've seen this exact call before (same tool + input)
+    const previousOutputHash = this.callHistory.get(inputHash);
+    if (previousOutputHash) {
+      const previousOutput = this.outputs.get(previousOutputHash);
+      if (previousOutput) {
+        previousOutput.occurrences++;
+        return {
+          deduplicated: true,
+          reference: `[Same as previous ${previousOutput.toolName} call. Hash: ${previousOutputHash}]`,
+          originalHash: previousOutputHash,
+        };
+      }
+    }
+
+    // Store this output for future deduplication
+    this.outputs.set(outputHash, {
+      hash: outputHash,
+      toolName,
+      inputHash,
+      output,
+      firstSeenAt: Date.now(),
+      occurrences: 1,
+    });
+    this.callHistory.set(inputHash, outputHash);
+
+    return { deduplicated: false };
+  }
+
+  /**
+   * Get original output by hash
+   */
+  getOutputByHash(hash: string): string | undefined {
+    return this.outputs.get(hash)?.output;
+  }
+
+  /**
+   * Get deduplication stats
+   */
+  getStats(): { totalOutputs: number; totalDeduplicated: number; bytesSaved: number } {
+    let totalDeduplicated = 0;
+    let bytesSaved = 0;
+
+    for (const output of this.outputs.values()) {
+      const duplicates = output.occurrences - 1;
+      if (duplicates > 0) {
+        totalDeduplicated += duplicates;
+        bytesSaved += duplicates * Buffer.byteLength(output.output, 'utf-8');
+      }
+    }
+
+    return {
+      totalOutputs: this.outputs.size,
+      totalDeduplicated,
+      bytesSaved,
+    };
+  }
+
+  /**
+   * Clear all stored outputs
+   */
+  clear(): void {
+    this.outputs.clear();
+    this.callHistory.clear();
+  }
+
+  /**
+   * Check if deduplication is enabled
+   */
+  isEnabled(): boolean {
+    return this.enabled;
+  }
+
+  /**
+   * Enable or disable deduplication
+   */
+  setEnabled(enabled: boolean): void {
+    this.enabled = enabled;
+  }
+}
+
 export interface CompressedContext {
   summary: string;
   messageCount: number;
@@ -26,6 +184,8 @@ export interface ContextManagerOptions {
   maxContextTokens?: number;
   compressionThreshold?: number;
   maxToolOutputBytes?: number;
+  /** Enable tool output deduplication (default: true) */
+  dedupeIdentical?: boolean;
 }
 
 interface TruncatedOutput {
@@ -40,12 +200,23 @@ export class ContextManager {
   private compressionThreshold: number;
   private maxToolOutputBytes: number;
   private truncatedOutputs: Map<string, TruncatedOutput> = new Map();
+  private deduplicator: ToolOutputDeduplicator;
 
   constructor(options: ContextManagerOptions) {
     this.hotWindowSize = options.hotWindowSize ?? 5;
     this.maxContextTokens = options.maxContextTokens ?? 128000;
     this.compressionThreshold = options.compressionThreshold ?? 0.7;
     this.maxToolOutputBytes = options.maxToolOutputBytes ?? 30000;
+    this.deduplicator = new ToolOutputDeduplicator({
+      enabled: options.dedupeIdentical ?? true,
+    });
+  }
+
+  /**
+   * Get the deduplicator instance for external use
+   */
+  getDeduplicator(): ToolOutputDeduplicator {
+    return this.deduplicator;
   }
 
   getHotWindowSize(): number {
@@ -93,6 +264,18 @@ export class ContextManager {
   }
 
   private truncateToolOutputs(messages: Message[]): Message[] {
+    // Build map of tool_use_id -> tool info for deduplication
+    const toolUseMap = new Map<string, { name: string; input: Record<string, unknown> }>();
+    for (const msg of messages) {
+      if (typeof msg.content !== 'string') {
+        for (const block of msg.content) {
+          if (block.type === 'tool_use') {
+            toolUseMap.set(block.id, { name: block.name, input: block.input });
+          }
+        }
+      }
+    }
+
     return messages.map((msg) => {
       if (typeof msg.content === 'string') {
         return msg;
@@ -109,6 +292,23 @@ export class ContextManager {
           content: string;
           is_error?: boolean;
         };
+
+        // Check for deduplication first
+        const toolInfo = toolUseMap.get(toolResult.tool_use_id);
+        if (toolInfo && this.deduplicator.isEnabled()) {
+          const dedupeResult = this.deduplicator.shouldDeduplicate(
+            toolInfo.name,
+            toolInfo.input,
+            toolResult.content
+          );
+
+          if (dedupeResult.deduplicated && dedupeResult.reference) {
+            return {
+              ...toolResult,
+              content: dedupeResult.reference,
+            };
+          }
+        }
 
         const contentBytes = Buffer.byteLength(toolResult.content, 'utf-8');
 

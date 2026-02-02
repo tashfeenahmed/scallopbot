@@ -644,7 +644,8 @@ describe('DegradationLadder', () => {
       expect(result.success).toBe(true);
       expect(result.tier).toBe('offline');
       expect(result.degraded).toBe(true);
-      expect(result.response?.text).toContain('offline mode');
+      const textContent = result.response?.content.find((c) => c.type === 'text');
+      expect(textContent?.type === 'text' && textContent.text).toContain('offline mode');
     });
 
     it('should use custom offline message', async () => {
@@ -663,7 +664,8 @@ describe('DegradationLadder', () => {
 
       const result = await ladder.execute(request);
 
-      expect(result.response?.text).toBe('Custom offline message');
+      const textContent = result.response?.content.find((c) => c.type === 'text');
+      expect(textContent?.type === 'text' && textContent.text).toBe('Custom offline message');
     });
 
     it('should skip unavailable providers', async () => {

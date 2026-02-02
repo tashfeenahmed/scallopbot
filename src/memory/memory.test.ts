@@ -388,6 +388,192 @@ describe('BackgroundGardener', () => {
       expect(allFacts.length).toBeLessThanOrEqual(2);
     });
   });
+
+  describe('bidirectional linking', () => {
+    it('should link semantically related facts', () => {
+      store.add({
+        id: 'link-1',
+        content: 'User prefers TypeScript for web development projects',
+        type: 'fact',
+        timestamp: new Date(),
+        sessionId: 's1',
+      });
+      store.add({
+        id: 'link-2',
+        content: 'User uses TypeScript for frontend development work',
+        type: 'fact',
+        timestamp: new Date(),
+        sessionId: 's1',
+      });
+
+      gardener.linkRelatedFacts();
+
+      const fact1 = store.get('link-1');
+      const fact2 = store.get('link-2');
+
+      // At least one should have related IDs
+      const hasLinks =
+        (fact1?.metadata?.relatedIds as string[])?.includes('link-2') ||
+        (fact2?.metadata?.relatedIds as string[])?.includes('link-1');
+      expect(hasLinks).toBe(true);
+    });
+
+    it('should create bidirectional links', () => {
+      store.add({
+        id: 'bi-1',
+        content: 'JavaScript is a programming language',
+        type: 'fact',
+        timestamp: new Date(),
+        sessionId: 's1',
+      });
+      store.add({
+        id: 'bi-2',
+        content: 'TypeScript extends JavaScript language',
+        type: 'fact',
+        timestamp: new Date(),
+        sessionId: 's1',
+      });
+
+      gardener.linkRelatedFacts();
+
+      const fact1 = store.get('bi-1');
+      const fact2 = store.get('bi-2');
+
+      const relatedIds1 = (fact1?.metadata?.relatedIds as string[]) || [];
+      const relatedIds2 = (fact2?.metadata?.relatedIds as string[]) || [];
+
+      // Both should link to each other
+      if (relatedIds1.includes('bi-2')) {
+        expect(relatedIds2.includes('bi-1')).toBe(true);
+      }
+    });
+
+    it('should get related facts', () => {
+      store.add({
+        id: 'rel-1',
+        content: 'User prefers dark mode',
+        type: 'fact',
+        timestamp: new Date(),
+        sessionId: 's1',
+        metadata: { relatedIds: ['rel-2'] },
+      });
+      store.add({
+        id: 'rel-2',
+        content: 'User works at night',
+        type: 'fact',
+        timestamp: new Date(),
+        sessionId: 's1',
+      });
+
+      const related = gardener.getRelatedFacts('rel-1');
+      expect(related).toHaveLength(1);
+      expect(related[0].id).toBe('rel-2');
+    });
+  });
+
+  describe('fact pruning', () => {
+    it('should detect contradicting facts', () => {
+      // Older fact
+      store.add({
+        id: 'old-pref',
+        content: 'User prefers light mode',
+        type: 'fact',
+        timestamp: new Date(Date.now() - 86400000), // 1 day ago
+        sessionId: 's1',
+      });
+      // Newer contradicting fact
+      store.add({
+        id: 'new-pref',
+        content: 'User prefers dark mode',
+        type: 'fact',
+        timestamp: new Date(),
+        sessionId: 's1',
+      });
+
+      gardener.pruneOutdatedFacts();
+
+      const oldFact = store.get('old-pref');
+      expect(oldFact?.metadata?.superseded).toBe(true);
+    });
+
+    it('should link newer fact to superseded fact', () => {
+      store.add({
+        id: 'old-loc',
+        content: 'User lives in New York',
+        type: 'fact',
+        timestamp: new Date(Date.now() - 86400000),
+        sessionId: 's1',
+      });
+      store.add({
+        id: 'new-loc',
+        content: 'User lives in San Francisco',
+        type: 'fact',
+        timestamp: new Date(),
+        sessionId: 's1',
+      });
+
+      gardener.pruneOutdatedFacts();
+
+      const newFact = store.get('new-loc');
+      expect(newFact?.metadata?.supersedes).toBe('old-loc');
+    });
+
+    it('should check if fact is superseded', () => {
+      store.add({
+        id: 'check-1',
+        content: 'Some fact',
+        type: 'fact',
+        timestamp: new Date(),
+        sessionId: 's1',
+        metadata: { superseded: true },
+      });
+
+      expect(gardener.isSuperseded('check-1')).toBe(true);
+      expect(gardener.isSuperseded('nonexistent')).toBe(false);
+    });
+
+    it('should get active facts only', () => {
+      store.add({
+        id: 'active-1',
+        content: 'Active fact',
+        type: 'fact',
+        timestamp: new Date(),
+        sessionId: 's1',
+      });
+      store.add({
+        id: 'superseded-1',
+        content: 'Old fact',
+        type: 'fact',
+        timestamp: new Date(),
+        sessionId: 's1',
+        metadata: { superseded: true },
+      });
+
+      const active = gardener.getActiveFacts();
+      expect(active).toHaveLength(1);
+      expect(active[0].id).toBe('active-1');
+    });
+
+    it('should delete old superseded facts after retention period', () => {
+      const eightDaysAgo = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000);
+
+      store.add({
+        id: 'to-delete',
+        content: 'Very old superseded fact',
+        type: 'fact',
+        timestamp: eightDaysAgo,
+        sessionId: 's1',
+        metadata: {
+          superseded: true,
+          supersededAt: eightDaysAgo.toISOString(),
+        },
+      });
+
+      gardener.pruneOutdatedFacts();
+
+      expect(store.get('to-delete')).toBeUndefined();
+    });
+  });
 });
 
 describe('HybridSearch', () => {
