@@ -157,11 +157,15 @@ export class MoonshotProvider implements LLMProvider {
             });
 
           if (msg.role === 'assistant') {
-            messages.push({
+            // Note: For Moonshot/Kimi, when assistant has tool_calls but no text,
+            // we should omit content entirely rather than sending null,
+            // to avoid triggering "thinking is enabled" validation errors.
+            const assistantMsg: OpenAI.ChatCompletionAssistantMessageParam = {
               role: 'assistant',
-              content: textContent || null,
+              ...(textContent ? { content: textContent } : {}),
               ...(toolCalls.length > 0 && { tool_calls: toolCalls }),
-            });
+            };
+            messages.push(assistantMsg);
           } else {
             messages.push({
               role: 'user',
