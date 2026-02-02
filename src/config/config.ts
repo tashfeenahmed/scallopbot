@@ -46,7 +46,7 @@ const providersSchema = z.object({
   groq: groqProviderSchema.default({ apiKey: '', model: 'llama-3.3-70b-versatile' }),
   ollama: ollamaProviderSchema.default({ baseUrl: 'http://localhost:11434', model: 'llama3.2' }),
   openrouter: openrouterProviderSchema.default({ apiKey: '', model: 'anthropic/claude-3.5-sonnet' }),
-  moonshot: moonshotProviderSchema.default({ apiKey: '', model: 'kimi-k2.5' }),
+  moonshot: moonshotProviderSchema.default({ apiKey: '', model: 'moonshot-v1-128k' }),
   xai: xaiProviderSchema.default({ apiKey: '', model: 'grok-4' }),
 });
 
@@ -195,7 +195,7 @@ export function loadConfig(): Config {
       },
       moonshot: {
         apiKey: process.env.MOONSHOT_API_KEY || '',
-        model: process.env.MOONSHOT_MODEL || 'kimi-k2.5',
+        model: process.env.MOONSHOT_MODEL || 'moonshot-v1-128k',
       },
       xai: {
         apiKey: process.env.XAI_API_KEY || '',
