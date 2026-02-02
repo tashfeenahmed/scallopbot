@@ -6,7 +6,7 @@ dotenv.config();
 
 // Provider configuration schemas
 const anthropicProviderSchema = z.object({
-  apiKey: z.string().min(1, 'Anthropic API key is required'),
+  apiKey: z.string().default(''),
   model: z.string().default('claude-sonnet-4-20250514'),
 });
 
@@ -262,6 +262,20 @@ export function loadConfig(): Config {
       .map((err) => `${err.path.map(String).join('.')}: ${err.message}`)
       .join('\n');
     throw new Error(`Configuration validation failed:\n${errorMessages}`);
+  }
+
+  // Validate that at least one LLM provider has an API key
+  const providers = result.data.providers;
+  const hasProvider =
+    providers.anthropic.apiKey ||
+    providers.openai.apiKey ||
+    providers.groq.apiKey ||
+    providers.openrouter.apiKey ||
+    providers.moonshot.apiKey ||
+    providers.xai.apiKey;
+
+  if (!hasProvider) {
+    throw new Error('At least one LLM provider API key is required (ANTHROPIC_API_KEY, OPENAI_API_KEY, GROQ_API_KEY, MOONSHOT_API_KEY, XAI_API_KEY, or OPENROUTER_API_KEY)');
   }
 
   return result.data;
