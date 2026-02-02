@@ -35,3 +35,8 @@ sessions/
 
 # Personal todos
 TODOS.md
+
+# Data files (persist across deploys)
+memories.jsonl
+bot-config.json
+data/
