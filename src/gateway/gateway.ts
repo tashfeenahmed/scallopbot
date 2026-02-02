@@ -22,6 +22,7 @@ import { CostTracker } from '../routing/cost.js';
 import { MemoryStore, HotCollector, BackgroundGardener, HybridSearch } from '../memory/index.js';
 import { ContextManager } from '../routing/context.js';
 import { MediaProcessor } from '../media/index.js';
+import { VoiceManager } from '../voice/index.js';
 
 export interface GatewayOptions {
   config: Config;
@@ -44,6 +45,7 @@ export class Gateway {
   private hybridSearch: HybridSearch | null = null;
   private contextManager: ContextManager | null = null;
   private mediaProcessor: MediaProcessor | null = null;
+  private voiceManager: VoiceManager | null = null;
   private agent: Agent | null = null;
   private telegramChannel: TelegramChannel | null = null;
 
@@ -121,11 +123,20 @@ export class Gateway {
       'Skills loaded'
     );
 
-    // Initialize tool registry with skills and memory
+    // Initialize voice manager (for voice reply tool)
+    this.voiceManager = VoiceManager.fromEnv(this.logger);
+    const voiceStatus = await this.voiceManager.isAvailable();
+    this.logger.debug(
+      { stt: voiceStatus.stt, tts: voiceStatus.tts },
+      'Voice manager initialized'
+    );
+
+    // Initialize tool registry with skills, memory, and voice
     this.toolRegistry = await createDefaultToolRegistry({
       skillRegistry: this.skillRegistry,
       memoryStore: this.memoryStore,
       hybridSearch: this.hybridSearch,
+      voiceManager: voiceStatus.tts ? this.voiceManager : undefined, // Only add voice tool if TTS available
     });
     this.logger.debug({ tools: this.toolRegistry.getAllTools().map((t) => t.name) }, 'Tools registered');
 
@@ -277,6 +288,7 @@ export class Gateway {
         workspacePath: this.config.agent.workspace,
         allowedUsers: this.config.channels.telegram.allowedUsers,
         enableVoiceReply: this.config.channels.telegram.enableVoiceReply,
+        voiceManager: this.voiceManager || undefined, // Share voice manager
       });
       await this.telegramChannel.start();
     }

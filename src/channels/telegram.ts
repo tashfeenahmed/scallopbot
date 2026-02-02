@@ -3,6 +3,7 @@ import type { Logger } from 'pino';
 import type { Agent } from '../agent/agent.js';
 import type { SessionManager } from '../agent/session.js';
 import { VoiceManager } from '../voice/index.js';
+import { getPendingVoiceAttachments, cleanupVoiceAttachments } from '../tools/voice.js';
 import {
   BotConfigManager,
   DEFAULT_PERSONALITIES,
@@ -23,6 +24,7 @@ export interface TelegramChannelOptions {
   workspacePath: string;
   allowedUsers?: string[]; // Empty = allow all
   enableVoiceReply?: boolean;
+  voiceManager?: VoiceManager; // Optional shared voice manager
 }
 
 export function formatMarkdownToHtml(text: string): string {
@@ -110,6 +112,7 @@ export class TelegramChannel {
     this.configManager = new BotConfigManager(options.workspacePath);
     this.allowedUsers = new Set(options.allowedUsers || []);
     this.enableVoiceReply = options.enableVoiceReply ?? false;
+    this.voiceManager = options.voiceManager || null;
 
     this.setupHandlers();
     this.initVoice();
@@ -117,7 +120,10 @@ export class TelegramChannel {
 
   private async initVoice(): Promise<void> {
     try {
-      this.voiceManager = VoiceManager.fromEnv(this.logger);
+      // Use provided voice manager or create new one
+      if (!this.voiceManager) {
+        this.voiceManager = VoiceManager.fromEnv(this.logger);
+      }
       const status = await this.voiceManager.isAvailable();
       this.voiceAvailable = status.stt;
 
@@ -624,6 +630,9 @@ export class TelegramChannel {
         }
       }
 
+      // Check for pending voice attachments from voice_reply tool
+      await this.sendPendingVoiceAttachments(ctx, sessionId);
+
       this.logger.info(
         { userId, responseLength: result.response.length, tokens: result.tokenUsage },
         'Sent response'
@@ -641,6 +650,35 @@ export class TelegramChannel {
     return setInterval(() => {
       ctx.replyWithChatAction('typing').catch(() => {});
     }, TYPING_INTERVAL);
+  }
+
+  /**
+   * Send any pending voice attachments created by the voice_reply tool
+   */
+  private async sendPendingVoiceAttachments(ctx: Context, sessionId: string): Promise<void> {
+    const attachments = getPendingVoiceAttachments(sessionId);
+    if (attachments.length === 0) {
+      return;
+    }
+
+    this.logger.info({ count: attachments.length }, 'Sending pending voice attachments');
+
+    try {
+      const { readFile } = await import('fs/promises');
+
+      for (const filePath of attachments) {
+        try {
+          const audioBuffer = await readFile(filePath);
+          await ctx.replyWithVoice(new InputFile(audioBuffer, 'voice.ogg'));
+          this.logger.debug({ file: filePath }, 'Sent voice attachment');
+        } catch (error) {
+          this.logger.error({ file: filePath, error: (error as Error).message }, 'Failed to send voice attachment');
+        }
+      }
+    } finally {
+      // Clean up temp files
+      await cleanupVoiceAttachments(attachments);
+    }
   }
 
   async getOrCreateSession(userId: string): Promise<string> {

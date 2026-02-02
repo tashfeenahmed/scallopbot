@@ -2,6 +2,7 @@ import type { Tool, ToolRegistry } from './types.js';
 import type { ToolDefinition } from '../providers/types.js';
 import type { MemoryStore, HybridSearch } from '../memory/index.js';
 import type { SkillRegistry } from '../skills/registry.js';
+import type { VoiceManager } from '../voice/index.js';
 
 export class ToolRegistryImpl implements ToolRegistry {
   private tools: Map<string, Tool> = new Map();
@@ -49,6 +50,10 @@ export interface ToolRegistryOptions {
   skillRegistry?: SkillRegistry;
   /** Whether to include skill tool (default: true if skillRegistry provided) */
   includeSkillTool?: boolean;
+  /** Voice manager for voice reply tool */
+  voiceManager?: VoiceManager;
+  /** Whether to include voice tool (default: true if voiceManager provided) */
+  includeVoiceTool?: boolean;
 }
 
 /**
@@ -89,6 +94,13 @@ export async function createDefaultToolRegistry(
     const { SkillTool, initializeSkillTool } = await import('./skill.js');
     initializeSkillTool(options.skillRegistry);
     registry.registerTool(new SkillTool());
+  }
+
+  // Add voice tool if voice manager is provided
+  const includeVoice = options.includeVoiceTool ?? !!options.voiceManager;
+  if (includeVoice && options.voiceManager) {
+    const { VoiceReplyTool } = await import('./voice.js');
+    registry.registerTool(new VoiceReplyTool({ voiceManager: options.voiceManager }));
   }
 
   return registry;

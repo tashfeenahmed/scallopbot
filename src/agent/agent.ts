@@ -52,6 +52,7 @@ Available tools:
 - edit: Make targeted edits to existing files
 - browser: Navigate websites, scrape content, fill forms
 - memory_search: Search past conversations ONLY (not the web!)
+- voice_reply: Send a voice message to the user (use when they ask for audio/voice note)
 
 FOR WEB SEARCHES (sports, news, weather, current events):
 1. Use browser to navigate to Google, ESPN, BBC, etc.
