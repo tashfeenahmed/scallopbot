@@ -20,14 +20,16 @@ import type {
   TypeOptions,
   WaitOptions,
 } from './types.js';
+import { safeImport } from '../../utils/dynamic-import.js';
 
 // Dynamic import for optional dependency
 let playwright: any;
 
 async function loadPlaywright(): Promise<boolean> {
   try {
-    playwright = await (eval('import("playwright")') as Promise<any>);
-    return true;
+    // Use safe import utility with whitelist validation
+    playwright = await safeImport('playwright');
+    return playwright !== null;
   } catch {
     return false;
   }

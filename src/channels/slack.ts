@@ -18,6 +18,7 @@ import type { Logger } from 'pino';
 import type { Agent } from '../agent/agent.js';
 import type { SessionManager } from '../agent/session.js';
 import type { Channel, ChannelStatus } from './types.js';
+import { safeImport } from '../utils/dynamic-import.js';
 
 // Dynamic import for optional dependency
 let App: any;
@@ -25,8 +26,9 @@ let LogLevel: any;
 
 async function loadSlackDeps(): Promise<boolean> {
   try {
-    // Use eval to prevent TypeScript from trying to resolve the module
-    const bolt = await (eval('import("@slack/bolt")') as Promise<any>);
+    // Use safe import utility with whitelist validation
+    const bolt = await safeImport('@slack/bolt');
+    if (!bolt) return false;
     App = bolt.App;
     LogLevel = bolt.LogLevel;
     return true;

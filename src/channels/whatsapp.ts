@@ -17,6 +17,7 @@ import type { Agent } from '../agent/agent.js';
 import type { SessionManager } from '../agent/session.js';
 import type { Channel, ChannelStatus, VoiceChannel } from './types.js';
 import { VoiceManager } from '../voice/index.js';
+import { safeImport } from '../utils/dynamic-import.js';
 
 // Dynamic import types for optional dependency
 let makeWASocket: any;
@@ -27,8 +28,9 @@ let downloadMediaMessage: any;
 // Try to load optional dependencies
 async function loadBaileysDeps(): Promise<boolean> {
   try {
-    // Use eval to prevent TypeScript from trying to resolve the module
-    const baileys = await (eval('import("@whiskeysockets/baileys")') as Promise<any>);
+    // Use safe import utility with whitelist validation
+    const baileys = await safeImport('@whiskeysockets/baileys');
+    if (!baileys) return false;
     makeWASocket = baileys.default;
     DisconnectReason = baileys.DisconnectReason;
     useMultiFileAuthState = baileys.useMultiFileAuthState;

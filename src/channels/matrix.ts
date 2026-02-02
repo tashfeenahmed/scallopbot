@@ -20,6 +20,7 @@ import type { Logger } from 'pino';
 import type { Agent } from '../agent/agent.js';
 import type { SessionManager } from '../agent/session.js';
 import type { Channel, ChannelStatus } from './types.js';
+import { safeImport } from '../utils/dynamic-import.js';
 
 // Dynamic import for optional dependency
 let sdk: any;
@@ -29,8 +30,9 @@ let RoomMemberEvent: any;
 
 async function loadMatrixDeps(): Promise<boolean> {
   try {
-    // Use eval to prevent TypeScript from trying to resolve the module
-    sdk = await (eval('import("matrix-js-sdk")') as Promise<any>);
+    // Use safe import utility with whitelist validation
+    sdk = await safeImport('matrix-js-sdk');
+    if (!sdk) return false;
     ClientEvent = sdk.ClientEvent;
     RoomEvent = sdk.RoomEvent;
     RoomMemberEvent = sdk.RoomMemberEvent;

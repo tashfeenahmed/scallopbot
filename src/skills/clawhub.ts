@@ -21,6 +21,64 @@ const execAsync = promisify(exec);
 const DEFAULT_LOCAL_SKILLS_DIR = path.join(homedir(), '.leanbot', 'skills');
 
 /**
+ * Escape a string for safe use in shell commands
+ * Uses single quotes and escapes any embedded single quotes
+ */
+function escapeShellArg(arg: string): string {
+  // Validate the argument doesn't contain null bytes
+  if (arg.includes('\0')) {
+    throw new Error('Invalid argument: contains null byte');
+  }
+  // Use single quotes and escape any embedded single quotes
+  // 'foo'\''bar' -> foo'bar
+  return `'${arg.replace(/'/g, "'\\''")}'`;
+}
+
+/**
+ * Validate that a string is safe for use as a package/formula name
+ * Only allows alphanumeric, hyphens, underscores, slashes (for scoped packages), @ and .
+ */
+function validatePackageName(name: string): boolean {
+  // Package names should match a safe pattern
+  // npm: @scope/package, regular-package
+  // brew: formula-name
+  // go: github.com/user/repo@version
+  const safePattern = /^[@a-zA-Z0-9_.\-/]+$/;
+  return safePattern.test(name) && !name.includes('..') && name.length < 256;
+}
+
+/**
+ * Validate URL for safe use
+ */
+function validateUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return ['http:', 'https:'].includes(parsed.protocol);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Validate and sanitize skill name to prevent path traversal
+ * Returns sanitized name or throws if invalid
+ */
+function sanitizeSkillName(name: string): string {
+  // Check for path traversal attempts
+  if (name.includes('..') || name.includes('/') || name.includes('\\')) {
+    throw new Error(`Invalid skill name: path traversal detected in "${name}"`);
+  }
+  // Only allow safe characters in skill names
+  if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
+    throw new Error(`Invalid skill name: "${name}" contains invalid characters`);
+  }
+  if (name.length > 128) {
+    throw new Error(`Invalid skill name: "${name}" exceeds maximum length`);
+  }
+  return name;
+}
+
+/**
  * Skill installer options
  */
 export interface SkillInstallerOptions {
@@ -89,26 +147,50 @@ export class SkillInstaller {
 
   /**
    * Build install command for an installer spec
+   * Uses proper escaping to prevent command injection
    */
   buildInstallCommand(installer: SkillInstallerSpec): string {
     switch (installer.kind) {
-      case 'brew':
-        return `brew install ${installer.formula}`;
+      case 'brew': {
+        if (!installer.formula || !validatePackageName(installer.formula)) {
+          throw new Error(`Invalid brew formula name: ${installer.formula}`);
+        }
+        return `brew install ${escapeShellArg(installer.formula)}`;
+      }
 
-      case 'npm':
-        return `${this.nodeManager} install -g ${installer.package}`;
+      case 'npm': {
+        if (!installer.package || !validatePackageName(installer.package)) {
+          throw new Error(`Invalid npm package name: ${installer.package}`);
+        }
+        return `${this.nodeManager} install -g ${escapeShellArg(installer.package)}`;
+      }
 
-      case 'go':
-        return `go install ${installer.package}`;
+      case 'go': {
+        if (!installer.package || !validatePackageName(installer.package)) {
+          throw new Error(`Invalid go package name: ${installer.package}`);
+        }
+        return `go install ${escapeShellArg(installer.package)}`;
+      }
 
-      case 'uv':
-        return `uv tool install ${installer.package}`;
+      case 'uv': {
+        if (!installer.package || !validatePackageName(installer.package)) {
+          throw new Error(`Invalid uv package name: ${installer.package}`);
+        }
+        return `uv tool install ${escapeShellArg(installer.package)}`;
+      }
 
       case 'download': {
+        if (!installer.url || !validateUrl(installer.url)) {
+          throw new Error(`Invalid download URL: ${installer.url}`);
+        }
         const binName = installer.bins?.[0] || 'binary';
+        // Validate binary name - only alphanumeric, hyphens, underscores
+        if (!/^[a-zA-Z0-9_-]+$/.test(binName)) {
+          throw new Error(`Invalid binary name: ${binName}`);
+        }
         const installDir = '$HOME/.local/bin';
-        // Download, make executable, and move to bin
-        return `curl -fsSL "${installer.url}" -o /tmp/${binName} && chmod +x /tmp/${binName} && mkdir -p ${installDir} && mv /tmp/${binName} ${installDir}/${binName}`;
+        // Use escaped URL and validated binary name
+        return `curl -fsSL ${escapeShellArg(installer.url)} -o /tmp/${binName} && chmod +x /tmp/${binName} && mkdir -p ${installDir} && mv /tmp/${binName} ${installDir}/${binName}`;
       }
 
       default:
@@ -120,8 +202,15 @@ export class SkillInstaller {
    * Check if a binary is available
    */
   hasBinary(name: string): boolean {
+    // Validate binary name to prevent command injection
+    if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
+      this.logger?.warn({ name }, 'Invalid binary name, rejecting');
+      return false;
+    }
     try {
-      const cmd = process.platform === 'win32' ? `where ${name}` : `which ${name}`;
+      const cmd = process.platform === 'win32'
+        ? `where ${escapeShellArg(name)}`
+        : `which ${escapeShellArg(name)}`;
       execSync(cmd, { stdio: 'ignore' });
       return true;
     } catch {
@@ -317,6 +406,16 @@ export class SkillPackageManager {
    * Install a skill by name
    */
   async install(name: string): Promise<InstallResult> {
+    // Validate name early to prevent path traversal
+    try {
+      sanitizeSkillName(name);
+    } catch (err) {
+      return {
+        success: false,
+        error: (err as Error).message,
+      };
+    }
+
     this.logger?.info({ name }, 'Installing skill');
 
     try {
@@ -349,6 +448,14 @@ export class SkillPackageManager {
    */
   async installFromUrl(name: string, url: string): Promise<InstallResult> {
     try {
+      // Validate URL
+      if (!validateUrl(url)) {
+        return {
+          success: false,
+          error: `Invalid URL: ${url}`,
+        };
+      }
+
       // Fetch skill content
       const response = await fetch(url);
       if (!response.ok) {
@@ -374,8 +481,16 @@ export class SkillPackageManager {
         };
       }
 
-      // Use name from frontmatter or provided name
-      const skillName = parsed.frontmatter.name || name;
+      // Use name from frontmatter or provided name, sanitize to prevent path traversal
+      let skillName: string;
+      try {
+        skillName = sanitizeSkillName(parsed.frontmatter.name || name);
+      } catch (err) {
+        return {
+          success: false,
+          error: (err as Error).message,
+        };
+      }
 
       // Create skill directory
       const skillDir = path.join(this.skillsDir, skillName);
@@ -440,6 +555,14 @@ export class SkillPackageManager {
     expectedChecksum: string
   ): Promise<InstallResult> {
     try {
+      // Validate URL
+      if (!validateUrl(url)) {
+        return {
+          success: false,
+          error: `Invalid URL: ${url}`,
+        };
+      }
+
       // Fetch skill content
       const response = await fetch(url);
       if (!response.ok) {
@@ -471,8 +594,16 @@ export class SkillPackageManager {
         };
       }
 
-      // Use name from frontmatter or provided name
-      const skillName = parsed.frontmatter.name || name;
+      // Use name from frontmatter or provided name, sanitize to prevent path traversal
+      let skillName: string;
+      try {
+        skillName = sanitizeSkillName(parsed.frontmatter.name || name);
+      } catch (err) {
+        return {
+          success: false,
+          error: (err as Error).message,
+        };
+      }
 
       // Create skill directory
       const skillDir = path.join(this.skillsDir, skillName);
@@ -533,7 +664,9 @@ export class SkillPackageManager {
    */
   async getInstalledVersion(name: string): Promise<string | null> {
     try {
-      const versionPath = path.join(this.skillsDir, name, '.version.json');
+      // Sanitize name to prevent path traversal
+      const safeName = sanitizeSkillName(name);
+      const versionPath = path.join(this.skillsDir, safeName, '.version.json');
       const content = await fs.readFile(versionPath, 'utf-8');
       const meta: VersionMetadata = JSON.parse(content);
       return meta.version;
@@ -547,11 +680,13 @@ export class SkillPackageManager {
    */
   async hasUpdate(name: string): Promise<{ available: boolean; currentVersion?: string; latestVersion?: string } | null> {
     try {
+      // Validate name - getInstalledVersion already sanitizes
       const currentVersion = await this.getInstalledVersion(name);
       if (!currentVersion) {
         return null;
       }
 
+      // getPackage uses the name for API lookup, not filesystem
       const pkg = await this.getPackage(name);
       if (!pkg) {
         return null;
@@ -571,8 +706,14 @@ export class SkillPackageManager {
    * Check if installed version is compatible with minimum requirement
    */
   async isVersionCompatible(name: string, minVersion: string): Promise<boolean> {
+    // getInstalledVersion already sanitizes the name
     const currentVersion = await this.getInstalledVersion(name);
     if (!currentVersion) {
+      return false;
+    }
+
+    // Validate version format
+    if (!/^\d+\.\d+\.\d+$/.test(minVersion)) {
       return false;
     }
 
@@ -595,7 +736,18 @@ export class SkillPackageManager {
    */
   async uninstall(name: string): Promise<{ success: boolean; error?: string }> {
     try {
-      const skillDir = path.join(this.skillsDir, name);
+      // Sanitize name to prevent path traversal
+      let safeName: string;
+      try {
+        safeName = sanitizeSkillName(name);
+      } catch (err) {
+        return {
+          success: false,
+          error: (err as Error).message,
+        };
+      }
+
+      const skillDir = path.join(this.skillsDir, safeName);
 
       // Check if skill exists
       try {
@@ -603,14 +755,14 @@ export class SkillPackageManager {
       } catch {
         return {
           success: false,
-          error: `Skill not found: ${name}`,
+          error: `Skill not found: ${safeName}`,
         };
       }
 
       // Remove skill directory
       await fs.rm(skillDir, { recursive: true, force: true });
 
-      this.logger?.info({ name }, 'Skill uninstalled');
+      this.logger?.info({ name: safeName }, 'Skill uninstalled');
 
       return { success: true };
     } catch (error) {

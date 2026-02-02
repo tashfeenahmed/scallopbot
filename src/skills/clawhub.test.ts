@@ -51,7 +51,7 @@ describe('SkillInstaller', () => {
   });
 
   describe('buildInstallCommand', () => {
-    it('should build brew install command', () => {
+    it('should build brew install command with shell escaping', () => {
       const installer = new SkillInstaller();
       const cmd = installer.buildInstallCommand({
         id: 'brew',
@@ -59,10 +59,11 @@ describe('SkillInstaller', () => {
         formula: 'ripgrep',
       });
 
-      expect(cmd).toBe('brew install ripgrep');
+      // Commands now use shell escaping for security
+      expect(cmd).toBe("brew install 'ripgrep'");
     });
 
-    it('should build npm install command', () => {
+    it('should build npm install command with shell escaping', () => {
       const installer = new SkillInstaller();
       const cmd = installer.buildInstallCommand({
         id: 'npm',
@@ -70,10 +71,11 @@ describe('SkillInstaller', () => {
         package: 'typescript',
       });
 
-      expect(cmd).toContain('npm install -g typescript');
+      // Commands now use shell escaping for security
+      expect(cmd).toContain("npm install -g 'typescript'");
     });
 
-    it('should build go install command', () => {
+    it('should build go install command with shell escaping', () => {
       const installer = new SkillInstaller();
       const cmd = installer.buildInstallCommand({
         id: 'go',
@@ -81,10 +83,11 @@ describe('SkillInstaller', () => {
         package: 'github.com/example/tool@latest',
       });
 
-      expect(cmd).toBe('go install github.com/example/tool@latest');
+      // Commands now use shell escaping for security
+      expect(cmd).toBe("go install 'github.com/example/tool@latest'");
     });
 
-    it('should build download command with curl', () => {
+    it('should build download command with curl and escaping', () => {
       const installer = new SkillInstaller();
       const cmd = installer.buildInstallCommand({
         id: 'download',
@@ -94,12 +97,35 @@ describe('SkillInstaller', () => {
       });
 
       expect(cmd).toContain('curl');
-      expect(cmd).toContain('https://example.com/binary');
+      expect(cmd).toContain("'https://example.com/binary'");
+    });
+
+    it('should reject invalid package names', () => {
+      const installer = new SkillInstaller();
+      expect(() =>
+        installer.buildInstallCommand({
+          id: 'npm',
+          kind: 'npm',
+          package: 'package; rm -rf /',
+        })
+      ).toThrow('Invalid npm package name');
+    });
+
+    it('should reject invalid URLs', () => {
+      const installer = new SkillInstaller();
+      expect(() =>
+        installer.buildInstallCommand({
+          id: 'download',
+          kind: 'download',
+          url: 'javascript:alert(1)',
+          bins: ['binary'],
+        })
+      ).toThrow('Invalid download URL');
     });
   });
 
   describe('executeInstall (mocked)', () => {
-    it('should return command that would be executed', async () => {
+    it('should return command that would be executed with escaping', async () => {
       const installer = new SkillInstaller({ dryRun: true });
       const result = await installer.executeInstall({
         id: 'brew',
@@ -108,7 +134,8 @@ describe('SkillInstaller', () => {
       });
 
       expect(result.success).toBe(true);
-      expect(result.command).toBe('brew install jq');
+      // Commands now use shell escaping for security
+      expect(result.command).toBe("brew install 'jq'");
     });
   });
 });

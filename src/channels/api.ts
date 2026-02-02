@@ -17,11 +17,15 @@
 
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
+import { timingSafeEqual } from 'crypto';
 import type { Logger } from 'pino';
 import type { Agent } from '../agent/agent.js';
 import type { SessionManager } from '../agent/session.js';
 import type { Channel } from './types.js';
 import { nanoid } from 'nanoid';
+
+/** Maximum request body size (1MB) */
+const MAX_BODY_SIZE = 1024 * 1024;
 
 /**
  * API Channel configuration
@@ -33,6 +37,10 @@ export interface ApiChannelConfig {
   host?: string;
   /** API key for authentication (optional) */
   apiKey?: string;
+  /** Allowed CORS origins (default: none - same origin only) */
+  allowedOrigins?: string[];
+  /** Maximum request body size in bytes (default: 1MB) */
+  maxBodySize?: number;
   /** Agent instance */
   agent: Agent;
   /** Session manager */
@@ -79,7 +87,10 @@ interface WsResponse {
 export class ApiChannel implements Channel {
   name = 'api';
 
-  private config: Required<Omit<ApiChannelConfig, 'apiKey'>> & { apiKey?: string };
+  private config: Required<Omit<ApiChannelConfig, 'apiKey' | 'allowedOrigins'>> & {
+    apiKey?: string;
+    allowedOrigins: string[];
+  };
   private server: Server | null = null;
   private wss: WebSocketServer | null = null;
   private logger: Logger;
@@ -91,6 +102,8 @@ export class ApiChannel implements Channel {
       port: config.port,
       host: config.host || '127.0.0.1',
       apiKey: config.apiKey,
+      allowedOrigins: config.allowedOrigins || [],
+      maxBodySize: config.maxBodySize || MAX_BODY_SIZE,
       agent: config.agent,
       sessionManager: config.sessionManager,
       logger: config.logger,
@@ -212,8 +225,13 @@ export class ApiChannel implements Channel {
     const path = url.pathname;
     const method = req.method?.toUpperCase();
 
-    // CORS headers
-    res.setHeader('Access-Control-Allow-Origin', '*');
+    // CORS headers - only allow configured origins
+    const origin = req.headers.origin;
+    if (origin && this.isOriginAllowed(origin)) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Access-Control-Allow-Credentials', 'true');
+    }
+    // If no origin header or not allowed, don't set CORS headers (browser will block cross-origin)
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-API-Key');
 
@@ -257,13 +275,78 @@ export class ApiChannel implements Channel {
   }
 
   /**
-   * Authenticate request
+   * Check if origin is allowed for CORS
+   */
+  private isOriginAllowed(origin: string): boolean {
+    // If no origins configured, reject all cross-origin requests
+    if (this.config.allowedOrigins.length === 0) {
+      return false;
+    }
+    // Check if origin matches any allowed pattern
+    return this.config.allowedOrigins.some((allowed) => {
+      if (allowed === '*') {
+        // Explicitly allowing all origins (user must opt-in)
+        return true;
+      }
+      // Exact match
+      return origin === allowed;
+    });
+  }
+
+  /**
+   * Authenticate request using constant-time comparison
    */
   private authenticateRequest(req: IncomingMessage): boolean {
     const apiKey =
       req.headers['x-api-key'] ||
       req.headers.authorization?.replace(/^Bearer\s+/i, '');
-    return apiKey === this.config.apiKey;
+
+    if (!apiKey || !this.config.apiKey) {
+      return false;
+    }
+
+    // Use constant-time comparison to prevent timing attacks
+    try {
+      const apiKeyBuffer = Buffer.from(String(apiKey), 'utf-8');
+      const expectedBuffer = Buffer.from(this.config.apiKey, 'utf-8');
+
+      // If lengths differ, we still need to compare to prevent timing leaks
+      // Create a buffer of the expected length for comparison
+      if (apiKeyBuffer.length !== expectedBuffer.length) {
+        // Compare against expected to maintain constant time, but always return false
+        timingSafeEqual(expectedBuffer, expectedBuffer);
+        return false;
+      }
+
+      return timingSafeEqual(apiKeyBuffer, expectedBuffer);
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Authenticate WebSocket connection using constant-time comparison
+   */
+  private authenticateWebSocket(apiKey: string | string[] | undefined): boolean {
+    if (!apiKey || !this.config.apiKey) {
+      return false;
+    }
+
+    const keyToCheck = Array.isArray(apiKey) ? apiKey[0] : apiKey;
+
+    try {
+      const apiKeyBuffer = Buffer.from(String(keyToCheck), 'utf-8');
+      const expectedBuffer = Buffer.from(this.config.apiKey, 'utf-8');
+
+      if (apiKeyBuffer.length !== expectedBuffer.length) {
+        timingSafeEqual(expectedBuffer, expectedBuffer);
+        return false;
+      }
+
+      return timingSafeEqual(apiKeyBuffer, expectedBuffer);
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -387,11 +470,12 @@ export class ApiChannel implements Channel {
     const clientId = nanoid(8);
     this.logger.debug({ clientId }, 'WebSocket client connected');
 
-    // Check authentication
+    // Check authentication using constant-time comparison
     if (this.config.apiKey) {
       const url = new URL(req.url || '/', `http://${req.headers.host}`);
       const apiKey = url.searchParams.get('apiKey') || req.headers['x-api-key'];
-      if (apiKey !== this.config.apiKey) {
+
+      if (!this.authenticateWebSocket(apiKey)) {
         ws.close(4001, 'Unauthorized');
         return;
       }
@@ -468,12 +552,21 @@ export class ApiChannel implements Channel {
   }
 
   /**
-   * Parse request body as JSON
+   * Parse request body as JSON with size limit
    */
   private parseBody<T>(req: IncomingMessage): Promise<T> {
     return new Promise((resolve, reject) => {
       let body = '';
-      req.on('data', (chunk) => {
+      let size = 0;
+      const maxSize = this.config.maxBodySize;
+
+      req.on('data', (chunk: Buffer | string) => {
+        size += chunk.length;
+        if (size > maxSize) {
+          req.destroy();
+          reject(new Error(`Request body too large (max ${maxSize} bytes)`));
+          return;
+        }
         body += chunk;
       });
       req.on('end', () => {
