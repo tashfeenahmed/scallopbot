@@ -682,6 +682,15 @@ export class TelegramChannel {
     this.logger.info('Starting Telegram bot...');
     this.isRunning = true;
 
+    // Register bot commands with Telegram (makes them show in menu)
+    await this.bot.api.setMyCommands([
+      { command: 'start', description: 'Start the bot / Show welcome message' },
+      { command: 'help', description: 'Show available commands' },
+      { command: 'settings', description: 'View your current settings' },
+      { command: 'setup', description: 'Reconfigure bot (name, personality, model)' },
+      { command: 'reset', description: 'Clear conversation history' },
+    ]);
+
     await this.bot.start({
       onStart: (botInfo) => {
         this.logger.info(
