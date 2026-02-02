@@ -45,6 +45,13 @@ export interface KokoroConfig {
   speed?: number;
 }
 
+// Default Python path - checks for scallopbot venv first
+function getDefaultPythonPath(): string {
+  const homeDir = process.env.HOME || process.env.USERPROFILE || '';
+  const venvPython = `${homeDir}/.scallopbot/venv/bin/python3`;
+  return process.env.VOICE_PYTHON_PATH || venvPython;
+}
+
 interface SynthesisInfo {
   success: boolean;
   sample_rate?: number;
@@ -68,7 +75,7 @@ export class KokoroTTS implements TTSProvider {
   constructor(config: KokoroConfig = {}) {
     this.voice = config.voice || 'af_heart';
     this.lang = config.lang || 'a';
-    this.pythonPath = config.pythonPath || 'python3';
+    this.pythonPath = config.pythonPath || getDefaultPythonPath();
     this.defaultSpeed = config.speed || 1.0;
     this.scriptPath = join(__dirname, '..', '..', 'scripts', 'kokoro_tts.py');
   }

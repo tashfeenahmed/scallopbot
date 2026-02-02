@@ -27,6 +27,13 @@ export interface FasterWhisperConfig {
   beamSize?: number;
 }
 
+// Default Python path - checks for scallopbot venv first
+function getDefaultPythonPath(): string {
+  const homeDir = process.env.HOME || process.env.USERPROFILE || '';
+  const venvPython = `${homeDir}/.scallopbot/venv/bin/python3`;
+  return process.env.VOICE_PYTHON_PATH || venvPython;
+}
+
 interface TranscriptionResult {
   success: boolean;
   text?: string;
@@ -51,7 +58,7 @@ export class FasterWhisperSTT implements STTProvider {
     this.model = config.model || 'small';
     this.device = config.device || 'cpu';
     this.computeType = config.computeType || 'int8';
-    this.pythonPath = config.pythonPath || 'python3';
+    this.pythonPath = config.pythonPath || getDefaultPythonPath();
     this.beamSize = config.beamSize || 5;
     this.scriptPath = join(__dirname, '..', '..', 'scripts', 'faster_whisper_stt.py');
   }
