@@ -389,9 +389,6 @@ export class Gateway {
       this.logger.info({ reminderId: reminder.id }, 'Executing actionable reminder through agent');
 
       try {
-        // Send a "working on it" message first
-        await this.telegramChannel.sendMessage(reminder.userId, `**Reminder triggered!** Working on: ${reminder.message}`);
-
         // Process through agent using the existing session
         const result = await this.agent.processMessage(
           reminder.sessionId,
