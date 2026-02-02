@@ -15,6 +15,7 @@ const ALLOWED_MODULES = new Set([
   '@whiskeysockets/baileys',
   '@slack/bolt',
   'playwright',
+  'pdf-parse',
 ]);
 
 /**

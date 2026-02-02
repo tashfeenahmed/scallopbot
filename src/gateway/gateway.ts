@@ -11,6 +11,7 @@ import { Router } from '../routing/router.js';
 import { CostTracker } from '../routing/cost.js';
 import { MemoryStore, HotCollector, BackgroundGardener, HybridSearch } from '../memory/index.js';
 import { ContextManager } from '../routing/context.js';
+import { MediaProcessor } from '../media/index.js';
 
 export interface GatewayOptions {
   config: Config;
@@ -32,6 +33,7 @@ export class Gateway {
   private backgroundGardener: BackgroundGardener | null = null;
   private hybridSearch: HybridSearch | null = null;
   private contextManager: ContextManager | null = null;
+  private mediaProcessor: MediaProcessor | null = null;
   private agent: Agent | null = null;
   private telegramChannel: TelegramChannel | null = null;
 
@@ -93,6 +95,14 @@ export class Gateway {
     });
     this.logger.debug('Context manager initialized');
 
+    // Initialize media processor for link/image/PDF understanding
+    this.mediaProcessor = new MediaProcessor({}, this.logger);
+    const mediaStatus = await this.mediaProcessor.getStatus();
+    this.logger.debug(
+      { pdfParsing: mediaStatus.pdfParsing, imageProcessing: mediaStatus.imageProcessing },
+      'Media processor initialized'
+    );
+
     // Initialize skill registry
     this.skillRegistry = createSkillRegistry(this.config.agent.workspace, this.logger);
     await this.skillRegistry.initialize();
@@ -129,6 +139,7 @@ export class Gateway {
       costTracker: this.costTracker,
       hotCollector: this.hotCollector,
       contextManager: this.contextManager,
+      mediaProcessor: this.mediaProcessor,
       workspace: this.config.agent.workspace,
       logger: this.logger,
       maxIterations: this.config.agent.maxIterations,
@@ -247,6 +258,13 @@ export class Gateway {
       throw new Error('Gateway not initialized');
     }
     return this.skillRegistry;
+  }
+
+  getMediaProcessor(): MediaProcessor {
+    if (!this.mediaProcessor) {
+      throw new Error('Gateway not initialized');
+    }
+    return this.mediaProcessor;
   }
 
   isGatewayRunning(): boolean {

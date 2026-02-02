@@ -15,6 +15,8 @@ import type { Router } from '../routing/router.js';
 import type { CostTracker } from '../routing/cost.js';
 import type { HotCollector } from '../memory/memory.js';
 import type { ContextManager } from '../routing/context.js';
+import type { MediaProcessor } from '../media/index.js';
+import type { Attachment } from '../channels/types.js';
 import { analyzeComplexity } from '../routing/complexity.js';
 
 export interface AgentOptions {
@@ -26,6 +28,7 @@ export interface AgentOptions {
   costTracker?: CostTracker;
   hotCollector?: HotCollector;
   contextManager?: ContextManager;
+  mediaProcessor?: MediaProcessor;
   workspace: string;
   logger: Logger;
   maxIterations: number;
@@ -56,6 +59,7 @@ export class Agent {
   private costTracker: CostTracker | null;
   private hotCollector: HotCollector | null;
   private contextManager: ContextManager | null;
+  private mediaProcessor: MediaProcessor | null;
   private workspace: string;
   private logger: Logger;
   private maxIterations: number;
@@ -70,13 +74,21 @@ export class Agent {
     this.costTracker = options.costTracker || null;
     this.hotCollector = options.hotCollector || null;
     this.contextManager = options.contextManager || null;
+    this.mediaProcessor = options.mediaProcessor || null;
     this.workspace = options.workspace;
     this.logger = options.logger;
     this.maxIterations = options.maxIterations;
     this.baseSystemPrompt = options.systemPrompt || DEFAULT_SYSTEM_PROMPT;
   }
 
-  async processMessage(sessionId: string, userMessage: string): Promise<AgentResult> {
+  /**
+   * Process a message with optional attachments
+   */
+  async processMessage(
+    sessionId: string,
+    userMessage: string,
+    attachments?: Attachment[]
+  ): Promise<AgentResult> {
     const session = await this.sessionManager.getSession(sessionId);
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
@@ -92,6 +104,34 @@ export class Agent {
           tokenUsage: { inputTokens: 0, outputTokens: 0 },
           iterationsUsed: 0,
         };
+      }
+    }
+
+    // Process media (URLs in text and attachments) if media processor available
+    let processedContent: ContentBlock[] | string = userMessage;
+    if (this.mediaProcessor) {
+      try {
+        const { content, processedMedia, errors } = await this.mediaProcessor.processMessage(
+          userMessage,
+          attachments || []
+        );
+
+        // If we processed any media, use content blocks
+        if (processedMedia.length > 0) {
+          processedContent = content;
+          this.logger.debug(
+            { mediaCount: processedMedia.length, types: processedMedia.map((m) => m.type) },
+            'Media processed'
+          );
+        }
+
+        // Log any media processing errors
+        for (const error of errors) {
+          this.logger.warn({ error }, 'Media processing error');
+        }
+      } catch (error) {
+        this.logger.error({ error: (error as Error).message }, 'Media processing failed');
+        // Continue with text-only message
       }
     }
 
@@ -112,10 +152,10 @@ export class Agent {
       }
     }
 
-    // Add user message to session
+    // Add user message to session (store original text, content blocks used for LLM only)
     await this.sessionManager.addMessage(sessionId, {
       role: 'user',
-      content: userMessage,
+      content: typeof processedContent === 'string' ? processedContent : processedContent,
     });
 
     // Collect user message in memory
