@@ -77,7 +77,9 @@ export class KokoroTTS implements TTSProvider {
     this.lang = config.lang || 'a';
     this.pythonPath = config.pythonPath || getDefaultPythonPath();
     this.defaultSpeed = config.speed || 1.0;
-    this.scriptPath = join(__dirname, '..', '..', 'scripts', 'kokoro_tts.py');
+    // Script is in src folder (not copied to dist by TypeScript)
+    // __dirname in dist is dist/voice/tts/local, so go up to project root then into src
+    this.scriptPath = join(__dirname, '..', '..', '..', '..', 'src', 'voice', 'scripts', 'kokoro_tts.py');
   }
 
   async isAvailable(): Promise<boolean> {

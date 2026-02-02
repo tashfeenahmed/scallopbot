@@ -60,7 +60,9 @@ export class FasterWhisperSTT implements STTProvider {
     this.computeType = config.computeType || 'int8';
     this.pythonPath = config.pythonPath || getDefaultPythonPath();
     this.beamSize = config.beamSize || 5;
-    this.scriptPath = join(__dirname, '..', '..', 'scripts', 'faster_whisper_stt.py');
+    // Script is in src folder (not copied to dist by TypeScript)
+    // __dirname in dist is dist/voice/stt/local, so go up to project root then into src
+    this.scriptPath = join(__dirname, '..', '..', '..', '..', 'src', 'voice', 'scripts', 'faster_whisper_stt.py');
   }
 
   async isAvailable(): Promise<boolean> {
