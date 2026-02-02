@@ -9,6 +9,11 @@ import json
 import argparse
 import tempfile
 import os
+import logging
+
+# Suppress all logging from kokoro-onnx and other libraries
+logging.disable(logging.CRITICAL)
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # Suppress TensorFlow logs if any
 
 def main():
     parser = argparse.ArgumentParser(description='Synthesize speech using Kokoro TTS')

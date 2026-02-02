@@ -154,19 +154,36 @@ export class KokoroTTS implements TTSProvider {
               // Read the output file
               const { readFile } = await import('fs/promises');
               const audio = await readFile(tempFile);
-              const info: SynthesisInfo = stderr ? JSON.parse(stderr) : { success: true };
+              // Try to parse JSON from stderr, but don't fail if it's not valid JSON
+              let info: SynthesisInfo = { success: true };
+              if (stderr) {
+                // Find JSON in stderr (may have debug output before it)
+                const jsonMatch = stderr.match(/\{[\s\S]*\}/);
+                if (jsonMatch) {
+                  try {
+                    info = JSON.parse(jsonMatch[0]);
+                  } catch {
+                    // Ignore JSON parse errors, use default
+                  }
+                }
+              }
               resolve({ audio, info });
             } catch (e) {
               reject(new Error(`Failed to read output: ${e}`));
             }
           } else {
             // Try to parse error from stderr
-            try {
-              const errorInfo = JSON.parse(stderr);
-              reject(new Error(errorInfo.error || 'Synthesis failed'));
-            } catch {
-              reject(new Error(`Kokoro failed: ${stderr}`));
+            const jsonMatch = stderr.match(/\{[\s\S]*\}/);
+            if (jsonMatch) {
+              try {
+                const errorInfo = JSON.parse(jsonMatch[0]);
+                reject(new Error(errorInfo.error || 'Synthesis failed'));
+                return;
+              } catch {
+                // Fall through to generic error
+              }
             }
+            reject(new Error(`Kokoro failed: ${stderr}`));
           }
         });
       });
