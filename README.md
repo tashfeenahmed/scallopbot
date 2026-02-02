@@ -1,18 +1,264 @@
 # ScallopBot
 
-A personal AI assistant that runs on your VPS, accessible via Telegram, with full system access and persistent sessions.
+A production-ready AI assistant that runs on your VPS with full system access, multi-provider support, persistent memory, and extensible skills.
 
-## Features
+## Architecture Overview
 
-- **Telegram Integration**: Chat with your bot from anywhere
-- **Interactive Onboarding**: Set up bot name, personality, and model on first use
-- **Multi-Provider Support**: Claude, GPT-4o, Kimi K2.5, Grok, Llama via Groq
-- **Admin Whitelist**: Restrict bot access to specific Telegram user IDs
-- **Full VPS Access**: Read/write files, execute commands, no sandbox restrictions
-- **Session Persistence**: Conversations survive restarts (JSONL storage)
-- **Core Tools**: Read, Write, Edit, Bash - everything you need
-- **Token Tracking**: Monitor usage per session
-- **Graceful Shutdown**: Proper SIGTERM/SIGINT handling
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              SCALLOPBOT                                      │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  ┌──────────────┐     ┌──────────────┐     ┌──────────────┐                │
+│  │   Telegram   │     │   Discord    │     │     CLI      │                │
+│  │   Channel    │     │   Channel    │     │   Channel    │                │
+│  └──────┬───────┘     └──────┬───────┘     └──────┬───────┘                │
+│         │                    │                    │                         │
+│         └────────────────────┼────────────────────┘                         │
+│                              ▼                                              │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │                           GATEWAY                                      │ │
+│  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌──────────────┐  │ │
+│  │  │   Session   │  │    Tool     │  │   Skill     │  │    Voice     │  │ │
+│  │  │   Manager   │  │  Registry   │  │  Registry   │  │   Manager    │  │ │
+│  │  └─────────────┘  └─────────────┘  └─────────────┘  └──────────────┘  │ │
+│  └───────────────────────────────────────────────────────────────────────┘ │
+│                              │                                              │
+│                              ▼                                              │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │                            AGENT                                       │ │
+│  │                                                                        │ │
+│  │   ┌─────────┐    ┌─────────────┐    ┌─────────────┐    ┌──────────┐   │ │
+│  │   │ Context │───▶│   Router    │───▶│  Provider   │───▶│ Recovery │   │ │
+│  │   │ Manager │    │ (Fallback)  │    │  (LLM API)  │    │  Engine  │   │ │
+│  │   └─────────┘    └─────────────┘    └─────────────┘    └──────────┘   │ │
+│  │                                                                        │ │
+│  └───────────────────────────────────────────────────────────────────────┘ │
+│                              │                                              │
+│         ┌────────────────────┼────────────────────┐                         │
+│         ▼                    ▼                    ▼                         │
+│  ┌─────────────┐      ┌─────────────┐      ┌─────────────┐                 │
+│  │    TOOLS    │      │   MEMORY    │      │   SKILLS    │                 │
+│  │             │      │             │      │             │                 │
+│  │ read, write │      │  Semantic   │      │ git, npm,   │                 │
+│  │ edit, bash  │      │  Search +   │      │ docker, ... │                 │
+│  │ browser     │      │  Facts +    │      │             │                 │
+│  │ web_search  │      │  Context    │      │ (OpenClaw   │                 │
+│  │ voice_reply │      │             │      │  compatible)│                 │
+│  └─────────────┘      └─────────────┘      └─────────────┘                 │
+│                                                                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  PROVIDERS                                                                   │
+│  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐   │
+│  │ Claude  │ │  GPT-4  │ │ Kimi K2 │ │  Grok   │ │  Llama  │ │ Ollama  │   │
+│  │(Anthropic)│ │(OpenAI) │ │(Moonshot)│ │  (xAI)  │ │ (Groq)  │ │ (Local) │   │
+│  └─────────┘ └─────────┘ └─────────┘ └─────────┘ └─────────┘ └─────────┘   │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+## Agent Loop
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│                         AGENT EXECUTION LOOP                              │
+└──────────────────────────────────────────────────────────────────────────┘
+
+     User Message
+          │
+          ▼
+    ┌───────────┐
+    │  Session  │◀────────────────────────────────────────┐
+    │   Load    │                                         │
+    └─────┬─────┘                                         │
+          │                                               │
+          ▼                                               │
+    ┌───────────┐     ┌───────────┐                      │
+    │  Memory   │────▶│  Context  │                      │
+    │  Recall   │     │  Build    │                      │
+    └───────────┘     └─────┬─────┘                      │
+                            │                             │
+                            ▼                             │
+                      ┌───────────┐                       │
+                      │    LLM    │◀──────────────┐      │
+                      │   Call    │               │      │
+                      └─────┬─────┘               │      │
+                            │                     │      │
+              ┌─────────────┴─────────────┐      │      │
+              ▼                           ▼      │      │
+        ┌───────────┐               ┌───────────┐│      │
+        │   Text    │               │   Tool    ││      │
+        │ Response  │               │   Calls   │┘      │
+        └─────┬─────┘               └─────┬─────┘       │
+              │                           │              │
+              │                           ▼              │
+              │                     ┌───────────┐        │
+              │                     │  Execute  │        │
+              │                     │   Tools   │────────┘
+              │                     └───────────┘
+              │                    (loop until done
+              │                     or max iterations)
+              ▼
+    ┌───────────────┐
+    │ Save Session  │
+    │ + Memories    │
+    └───────┬───────┘
+            │
+            ▼
+      Final Response
+```
+
+## Memory System
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                      MEMORY ARCHITECTURE                         │
+└─────────────────────────────────────────────────────────────────┘
+
+  Conversation                    Storage                 Retrieval
+       │                             │                        │
+       ▼                             ▼                        ▼
+┌─────────────┐              ┌─────────────┐          ┌─────────────┐
+│   Message   │              │  memories   │          │   Hybrid    │
+│   Arrives   │              │   .jsonl    │          │   Search    │
+└──────┬──────┘              └─────────────┘          └──────┬──────┘
+       │                            ▲                        │
+       ▼                            │                        ▼
+┌─────────────┐              ┌──────┴──────┐          ┌─────────────┐
+│    Fact     │─────────────▶│   Memory    │◀─────────│  Semantic   │
+│ Extraction  │              │    Store    │          │  + Keyword  │
+│   (Auto)    │              └─────────────┘          │   Scoring   │
+└─────────────┘                     ▲                 └─────────────┘
+                                    │
+                             ┌──────┴──────┐
+                             │   Memory    │
+                             │  Gardener   │
+                             │ (Dedupe +   │
+                             │  Cleanup)   │
+                             └─────────────┘
+
+Memory Types:
+  • context  - Conversation history
+  • fact     - Extracted user facts (name, preferences)
+  • task     - Ongoing tasks and goals
+```
+
+## Error Recovery
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                      ERROR RECOVERY FLOW                         │
+└─────────────────────────────────────────────────────────────────┘
+
+  LLM Request
+       │
+       ▼
+┌─────────────┐
+│   Primary   │──── Success ───▶ Response
+│  Provider   │
+└──────┬──────┘
+       │
+     Error
+       │
+       ▼
+┌─────────────┐
+│  Classify   │
+│   Error     │
+└──────┬──────┘
+       │
+       ├── Context Overflow ──▶ Emergency Compress ──▶ Retry
+       │                        (keep last 3 msgs)
+       │
+       ├── Auth Error (401) ──▶ Rotate API Key ──▶ Retry
+       │
+       └── Provider Error ───▶ Router Fallback
+                                      │
+                               ┌──────┴──────┐
+                               │   Fallback  │
+                               │  Provider   │──▶ Response
+                               │  Selection  │
+                               └─────────────┘
+```
+
+## Tool Registry
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                       TOOL CATEGORIES                            │
+└─────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐
+  │     CODING      │  │     SYSTEM      │  │    BROWSER      │
+  │                 │  │                 │  │                 │
+  │  • read         │  │  • bash         │  │  • browser      │
+  │  • write        │  │                 │  │                 │
+  │  • edit         │  │                 │  │                 │
+  └─────────────────┘  └─────────────────┘  └─────────────────┘
+
+  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐
+  │     SEARCH      │  │     MEMORY      │  │     COMMS       │
+  │                 │  │                 │  │                 │
+  │  • web_search   │  │  • memory_search│  │  • voice_reply  │
+  │                 │  │  • memory_get   │  │                 │
+  └─────────────────┘  └─────────────────┘  └─────────────────┘
+
+  ┌─────────────────┐
+  │      META       │
+  │                 │
+  │  • Skill        │  ◀── Invokes registered skills
+  │                 │
+  └─────────────────┘
+
+
+Policy Filtering:
+  ┌──────────────────────────────────────────────────────────┐
+  │  mode: "allowlist" | "denylist"                          │
+  │  tools: ["read", "write"]      # specific tools          │
+  │  categories: ["coding"]        # entire categories       │
+  └──────────────────────────────────────────────────────────┘
+```
+
+## Skills System (OpenClaw Compatible)
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                       SKILLS SYSTEM                              │
+└─────────────────────────────────────────────────────────────────┘
+
+  src/skills/bundled/
+       │
+       ├── git/
+       │    └── SKILL.md     # Git operations
+       │
+       ├── npm/
+       │    └── SKILL.md     # Package management
+       │
+       └── docker/
+            └── SKILL.md     # Container management
+
+
+  SKILL.md Format:
+  ┌────────────────────────────────────────────────┐
+  │  ---                                           │
+  │  name: git                                     │
+  │  description: Git version control              │
+  │  user-invocable: true                          │
+  │  metadata:                                     │
+  │    openclaw:                                   │
+  │      emoji: "🔀"                               │
+  │      requires:                                 │
+  │        bins: [git]   # Gating requirement     │
+  │  ---                                           │
+  │                                                │
+  │  # Git Skill                                   │
+  │  [Skill instructions for the LLM...]          │
+  └────────────────────────────────────────────────┘
+
+
+  Skill Loading Priority:
+    1. User skills     (~/.scallopbot/skills/)
+    2. Project skills  (./.scallopbot/skills/)
+    3. Bundled skills  (built-in)
+```
 
 ## Quick Start
 
@@ -30,29 +276,34 @@ npm install
 cp .env.example .env
 ```
 
-Edit `.env` with your credentials:
+Edit `.env`:
 
 ```bash
-# Required
-ANTHROPIC_API_KEY=sk-ant-your-key-here
+# At least one LLM provider required
+ANTHROPIC_API_KEY=sk-ant-...
+OPENAI_API_KEY=sk-...
+MOONSHOT_API_KEY=...
+XAI_API_KEY=...
+GROQ_API_KEY=...
 
-# Optional - enables Telegram bot
-TELEGRAM_BOT_TOKEN=your-telegram-bot-token
+# Telegram bot
+TELEGRAM_BOT_TOKEN=...
+TELEGRAM_ALLOWED_USERS=123456789  # comma-separated user IDs
 
-# Optional - defaults to current directory
-AGENT_WORKSPACE=/path/to/workspace
+# Optional
+BRAVE_SEARCH_API_KEY=...          # enables web_search tool
+AGENT_MAX_ITERATIONS=100          # max tool calls per message
 ```
 
 ### 3. Build and Run
 
 ```bash
-# Build
 npm run build
 
-# Start the gateway (with Telegram)
+# Start with Telegram
 node dist/cli.js start
 
-# Or interactive CLI chat (no Telegram needed)
+# Or CLI chat only
 node dist/cli.js chat
 ```
 
@@ -60,114 +311,86 @@ node dist/cli.js chat
 
 | Command | Description |
 |---------|-------------|
-| `scallopbot start` | Start gateway server with Telegram |
-| `scallopbot chat` | Interactive CLI chat session |
-| `scallopbot config` | Show current configuration |
-| `scallopbot version` | Show version |
-
-### Start Options
-
-```bash
-# Verbose logging
-scallopbot start --verbose
-
-# Resume existing chat session
-scallopbot chat --session <session-id>
-```
+| `start` | Start gateway with all channels |
+| `chat` | Interactive CLI session |
+| `config` | Show configuration |
+| `version` | Show version |
 
 ## Telegram Commands
 
 | Command | Description |
 |---------|-------------|
-| `/start` | Welcome message (triggers onboarding for new users) |
-| `/help` | Show all available commands |
-| `/settings` | View your bot configuration |
-| `/setup` | Reconfigure bot (name, personality, model) |
-| `/reset` | Clear conversation history |
-
-### First-Time Setup
-
-When you first message the bot, it will guide you through setup:
-1. **Name**: Choose what to call your bot (Jarvis, Friday, etc.)
-2. **Personality**: Professional, Friendly, Technical, Creative, or Custom
-3. **Model**: Claude Sonnet (default), Claude Opus, Kimi K2.5, Grok, GPT-4o, Llama
+| `/start` | Welcome + onboarding |
+| `/help` | Show commands |
+| `/settings` | View configuration |
+| `/setup` | Reconfigure bot |
+| `/reset` | Clear conversation |
+| `/git` | Git skill |
+| `/npm` | NPM skill |
+| `/docker` | Docker skill |
 
 ## Project Structure
 
 ```
 src/
-├── config/      # Zod schema, env loading
-├── providers/   # Anthropic LLM integration
-├── tools/       # Read, Write, Edit, Bash
-├── agent/       # Runtime loop, session management
-├── channels/    # Telegram bot
-├── gateway/     # Server orchestration
-└── cli.ts       # CLI entry point
+├── agent/          # Agent loop, session, recovery
+├── channels/       # Telegram, Discord, CLI
+├── config/         # Zod schemas, env loading
+├── gateway/        # Server orchestration
+├── memory/         # Semantic search, fact extraction
+├── providers/      # Claude, GPT-4, Kimi, Grok, Llama, Ollama
+├── reliability/    # Circuit breaker, degradation
+├── routing/        # Provider selection, fallback
+├── skills/         # OpenClaw-compatible skill system
+├── tools/          # Read, Write, Edit, Bash, Browser, Search
+├── voice/          # Speech-to-text, text-to-speech
+└── cli.ts          # CLI entry point
 ```
+
+## Environment Variables
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `ANTHROPIC_API_KEY` | * | - | Anthropic API key |
+| `OPENAI_API_KEY` | * | - | OpenAI API key |
+| `MOONSHOT_API_KEY` | * | - | Moonshot/Kimi API key |
+| `XAI_API_KEY` | * | - | xAI/Grok API key |
+| `GROQ_API_KEY` | * | - | Groq API key |
+| `TELEGRAM_BOT_TOKEN` | No | - | Telegram bot token |
+| `TELEGRAM_ALLOWED_USERS` | No | - | Allowed user IDs |
+| `BRAVE_SEARCH_API_KEY` | No | - | Enables web search |
+| `AGENT_WORKSPACE` | No | `cwd()` | Working directory |
+| `AGENT_MAX_ITERATIONS` | No | `100` | Max tool calls |
+
+*At least one LLM provider API key required.
 
 ## Development
 
 ```bash
-# Run tests
-npm test
-
-# Watch mode
-npm run test:watch
-
-# Type check
-npm run typecheck
-
-# Development with hot reload
-npm run dev start
+npm test              # Run tests
+npm run dev start     # Dev mode with hot reload
+npm run typecheck     # Type check
 ```
 
-## Configuration
+## Deployment
 
-### Environment Variables
+```bash
+# Build
+npm run build
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `ANTHROPIC_API_KEY` | Yes* | - | Anthropic API key |
-| `OPENAI_API_KEY` | No | - | OpenAI API key |
-| `GROQ_API_KEY` | No | - | Groq API key (for Llama) |
-| `MOONSHOT_API_KEY` | No | - | Moonshot API key (for Kimi) |
-| `XAI_API_KEY` | No | - | xAI API key (for Grok) |
-| `TELEGRAM_BOT_TOKEN` | No | - | Telegram bot token |
-| `TELEGRAM_ALLOWED_USERS` | No | - | Comma-separated user IDs (empty = allow all) |
-| `TELEGRAM_VOICE_REPLY` | No | `false` | Reply with voice to voice messages |
-| `AGENT_WORKSPACE` | No | `cwd()` | Working directory for agent |
-| `AGENT_MAX_ITERATIONS` | No | `20` | Max tool calls per message |
-| `LOG_LEVEL` | No | `info` | Logging level |
+# Deploy to server
+rsync -avz --exclude node_modules --exclude .env ./ user@server:/opt/scallopbot/
 
-*At least one LLM provider API key is required.
+# On server
+cd /opt/scallopbot
+npm install --production
+npm run build
 
-### SOUL.md (Optional)
-
-Create a `SOUL.md` in your workspace to customize agent behavior:
-
-```markdown
-# Agent Behavior
-
-- Be concise
-- Prefer code over explanations
-- Always confirm destructive operations
+# Systemd service
+sudo systemctl enable scallopbot
+sudo systemctl start scallopbot
 ```
-
-## How It Works
-
-1. **Message received** (Telegram or CLI)
-2. **Session loaded** from JSONL file
-3. **Agent loop**: LLM → Tool execution → Response
-4. **Session saved** with new messages
-5. **Response sent** back to user
-
-The agent can chain up to 20 tool calls per message before responding.
 
 ## License
 
 MIT
-
-## Links
-
-- [Milestones](./MILESTONES.md) - Development roadmap
-- [Specification](./SPEC.md) - Full architecture details
