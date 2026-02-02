@@ -357,6 +357,12 @@ export function extractFacts(text: string): string[] {
     /(?:i prefer|i like|i love|i enjoy|i hate|i dislike)\s+([^.,!?]+)/gi,
   ];
 
+  // Relationship patterns (my friend, my flatmate, my colleague, etc.)
+  const relationshipPatterns = [
+    /(?:my\s+)(friend|flatmate|roommate|colleague|coworker|brother|sister|mom|dad|mother|father|wife|husband|partner|boss|manager|teammate)(?:\s+is|\s+named|\s*,?\s*)([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)/gi,
+    /([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s+(?:is|,)\s+my\s+(friend|flatmate|roommate|colleague|coworker|brother|sister|mom|dad|mother|father|wife|husband|partner|boss|manager|teammate)/gi,
+  ];
+
   // Extract names
   for (const pattern of namePatterns) {
     const matches = text.matchAll(pattern);
@@ -386,6 +392,23 @@ export function extractFacts(text: string): string[] {
     const matches = text.matchAll(pattern);
     for (const match of matches) {
       facts.push(`Preference: ${match[0].trim()}`);
+    }
+  }
+
+  // Extract relationships (my friend X, my flatmate Y, etc.)
+  for (const pattern of relationshipPatterns) {
+    const matches = text.matchAll(pattern);
+    for (const match of matches) {
+      // Pattern 1: "my friend/flatmate is X" -> match[1]=relationship, match[2]=name
+      // Pattern 2: "X is my friend/flatmate" -> match[1]=name, match[2]=relationship
+      if (match[1] && match[2]) {
+        const isFirstPattern = match[1].toLowerCase().match(/friend|flatmate|roommate|colleague|coworker|brother|sister|mom|dad|mother|father|wife|husband|partner|boss|manager|teammate/);
+        if (isFirstPattern) {
+          facts.push(`Relationship: ${match[1]} is ${match[2]}`);
+        } else {
+          facts.push(`Relationship: ${match[2]} is ${match[1]}`);
+        }
+      }
     }
   }
 
@@ -495,19 +518,26 @@ export class BackgroundGardener {
     const rawMemories = this.store.searchByType('raw');
 
     for (const memory of rawMemories) {
-      // Extract facts
-      const facts = extractFacts(memory.content);
+      // Only extract facts from USER messages, not tool results or assistant responses
+      // Tool results contain web search data about random people, not about the user
+      const source = memory.metadata?.source;
+      const isUserMessage = source === 'user';
 
-      for (const fact of facts) {
-        this.store.add({
-          content: fact,
-          type: 'fact',
-          timestamp: new Date(),
-          sessionId: memory.sessionId,
-          metadata: {
-            sourceId: memory.id,
-          },
-        });
+      if (isUserMessage) {
+        // Extract facts only from what the user says
+        const facts = extractFacts(memory.content);
+
+        for (const fact of facts) {
+          this.store.add({
+            content: fact,
+            type: 'fact',
+            timestamp: new Date(),
+            sessionId: memory.sessionId,
+            metadata: {
+              sourceId: memory.id,
+            },
+          });
+        }
       }
 
       // Update original memory type to prevent reprocessing
