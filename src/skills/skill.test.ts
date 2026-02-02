@@ -110,7 +110,7 @@ Get weather information.
 ## Metadata
 
 - version: 1.0.0
-- author: LeanBot Team
+- author: ScallopBot Team
 - license: MIT
 
 ## Triggers
@@ -127,7 +127,7 @@ Get current weather.
 
     expect(skill.metadata).toBeDefined();
     expect(skill.metadata?.version).toBe('1.0.0');
-    expect(skill.metadata?.author).toBe('LeanBot Team');
+    expect(skill.metadata?.author).toBe('ScallopBot Team');
   });
 
   it('should handle empty content', () => {

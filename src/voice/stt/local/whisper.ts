@@ -39,7 +39,7 @@ export class WhisperSTT implements STTProvider {
 
   constructor(config: WhisperConfig = {}) {
     const homeDir = process.env.HOME || process.env.USERPROFILE || '';
-    const defaultModelDir = join(homeDir, '.leanbot', 'models');
+    const defaultModelDir = join(homeDir, '.scallopbot', 'models');
 
     this.modelPath = config.modelPath || join(defaultModelDir, WHISPER_MODELS[config.model || 'base']);
     this.whisperPath = config.whisperPath || 'whisper-cpp';
@@ -142,7 +142,7 @@ export async function downloadWhisperModel(
   targetDir?: string
 ): Promise<string> {
   const homeDir = process.env.HOME || process.env.USERPROFILE || '';
-  const modelDir = targetDir || join(homeDir, '.leanbot', 'models');
+  const modelDir = targetDir || join(homeDir, '.scallopbot', 'models');
   const modelFile = join(modelDir, WHISPER_MODELS[model]);
 
   try {

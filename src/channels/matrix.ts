@@ -240,7 +240,7 @@ export class MatrixChannel implements Channel {
     if (!botUserId) return false;
 
     // Check for direct mention like @bot:matrix.org or display name
-    return text.includes(botUserId) || text.toLowerCase().includes('leanbot');
+    return text.includes(botUserId) || text.toLowerCase().includes('scallopbot');
   }
 
   private removeMention(text: string): string {
@@ -249,7 +249,7 @@ export class MatrixChannel implements Channel {
 
     return text
       .replace(new RegExp(botUserId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), '')
-      .replace(/leanbot/gi, '')
+      .replace(/scallopbot/gi, '')
       .replace(/^\s*[:,]?\s*/, '')
       .trim();
   }
@@ -284,7 +284,7 @@ export class MatrixChannel implements Channel {
   }
 
   private getHelpMessage(): string {
-    return `**LeanBot on Matrix**
+    return `**ScallopBot on Matrix**
 
 I'm your personal AI assistant. In DMs, just send me a message. In group chats, mention me!
 

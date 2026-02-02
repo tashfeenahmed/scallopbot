@@ -27,7 +27,7 @@ describe('BotConfigManager', () => {
       await manager.load();
 
       const config = manager.getUserConfig('user123');
-      expect(config.botName).toBe('LeanBot');
+      expect(config.botName).toBe('ScallopBot');
       expect(config.onboardingComplete).toBe(false);
     });
 
@@ -65,7 +65,7 @@ describe('BotConfigManager', () => {
 
       const config = manager.getUserConfig('newuser');
 
-      expect(config.botName).toBe('LeanBot');
+      expect(config.botName).toBe('ScallopBot');
       expect(config.personalityId).toBe('friendly');
       expect(config.modelId).toBe('kimi-k2.5');
       expect(config.onboardingComplete).toBe(false);
@@ -231,7 +231,7 @@ describe('BotConfigManager', () => {
       await manager.resetUserConfig('user123');
 
       const config = manager.getUserConfig('user123');
-      expect(config.botName).toBe('LeanBot');
+      expect(config.botName).toBe('ScallopBot');
       expect(config.personalityId).toBe('friendly');
       expect(config.onboardingComplete).toBe(false);
     });

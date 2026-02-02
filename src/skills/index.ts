@@ -3,7 +3,7 @@
  *
  * Provides two skill systems:
  *
- * 1. Original LeanBot format (skill.ts):
+ * 1. Original ScallopBot format (skill.ts):
  *    - Uses markdown H1/H2/H3 sections
  *    - Sections: Triggers, Actions, Metadata
  *    - Good for simple skills
@@ -14,7 +14,7 @@
  *    - Full OpenClaw skill compatibility
  */
 
-// Original LeanBot skill system
+// Original ScallopBot skill system
 export {
   parseSkillMd,
   SkillRegistry as LegacySkillRegistry,

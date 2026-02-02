@@ -1,14 +1,14 @@
-# LeanBot
+# ScallopBot
 
 **The token-efficient AI agent that doesn't burn your wallet.**
 
-LeanBot is a next-generation personal AI assistant architecture designed from the ground up for **minimal token consumption**, **intelligent cost management**, and **superior context handling**. Built as a response to the token-burning inefficiencies of existing solutions.
+ScallopBot is a next-generation personal AI assistant architecture designed from the ground up for **minimal token consumption**, **intelligent cost management**, and **superior context handling**. Built as a response to the token-burning inefficiencies of existing solutions.
 
 ---
 
-## Why LeanBot?
+## Why ScallopBot?
 
-| Problem with Current Solutions | LeanBot's Answer |
+| Problem with Current Solutions | ScallopBot's Answer |
 |-------------------------------|------------------|
 | $30-200/day token costs | Smart routing cuts costs 70-85% |
 | Full history sent every request | Sliding window + semantic compression |
@@ -41,13 +41,13 @@ LeanBot is a next-generation personal AI assistant architecture designed from th
 ## Design Decisions
 
 ### Single User
-LeanBot is a **personal** assistant for one user. No multi-tenancy, no shared sessions, no team features. Your VPS, your agent, your data.
+ScallopBot is a **personal** assistant for one user. No multi-tenancy, no shared sessions, no team features. Your VPS, your agent, your data.
 
 ### Channel Handling
 Same as OpenClaw: channels run **simultaneously**, routing per-chat. Messages from Telegram and Discord are handled in parallel - no priority queue, no blocking.
 
 ### Full Access, No Confirmation Gates
-LeanBot has **unrestricted access** to your VPS. No "are you sure?" prompts, no approval workflows, no restricted commands. It executes what you ask, immediately.
+ScallopBot has **unrestricted access** to your VPS. No "are you sure?" prompts, no approval workflows, no restricted commands. It executes what you ask, immediately.
 
 Why? Confirmation gates kill the "autonomous agent" value prop. If you wanted to approve everything, you'd just do it yourself.
 
@@ -86,7 +86,7 @@ When API keys hit rate limits or budget runs out:
 | `verbose` | Full explanation of what was done and why. |
 
 ```bash
-leanbot config set response.style balanced
+scallopbot config set response.style balanced
 ```
 
 ### Memory Retention
@@ -98,12 +98,12 @@ Same as OpenClaw: **indefinite**. `MEMORY.md` persists forever unless manually c
 
 ```bash
 # Manual cleanup if needed
-leanbot memory clear --before 2025-01-01
-leanbot memory forget "password for X"
+scallopbot memory clear --before 2025-01-01
+scallopbot memory forget "password for X"
 ```
 
 ### Proactive Notifications
-LeanBot messages you proactively for:
+ScallopBot messages you proactively for:
 
 | Event | Notification |
 |-------|--------------|
@@ -122,11 +122,11 @@ notifications:
 ```
 
 ### Recovery from Failure
-**Ask user on restart.** If LeanBot crashes mid-task:
+**Ask user on restart.** If ScallopBot crashes mid-task:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│  LeanBot was interrupted during a task.                         │
+│  ScallopBot was interrupted during a task.                         │
 │                                                                 │
 │  Task: "Deploy new version to production"                       │
 │  Progress: 3/5 steps completed                                  │
@@ -144,7 +144,7 @@ notifications:
 
 ## Bundled Skills
 
-LeanBot ships with OpenClaw-compatible core tools plus the top community skills.
+ScallopBot ships with OpenClaw-compatible core tools plus the top community skills.
 
 ### Core Tools (Always Available)
 
@@ -177,15 +177,15 @@ Based on ClawHub's most popular categories (700+ community skills):
 
 ```bash
 # Search
-leanbot skill search "kubernetes"
+scallopbot skill search "kubernetes"
 
 # Install
-leanbot skill install clawhub:kubernetes
-leanbot skill install clawhub:home-assistant
-leanbot skill install github:user/custom-skill
+scallopbot skill install clawhub:kubernetes
+scallopbot skill install clawhub:home-assistant
+scallopbot skill install github:user/custom-skill
 
 # List installed
-leanbot skill list
+scallopbot skill list
 ```
 
 ---
@@ -194,7 +194,7 @@ leanbot skill list
 
 ```
 ┌────────────────────────────────────────────────────────────────────────────┐
-│                              LEANBOT CORE                                   │
+│                              SCALLOPBOT CORE                                   │
 ├────────────────────────────────────────────────────────────────────────────┤
 │                                                                            │
 │  ┌──────────────────────────────────────────────────────────────────────┐  │
@@ -235,7 +235,7 @@ leanbot skill list
 
 ### 1. Tiered Model Routing (70-85% Cost Reduction)
 
-LeanBot analyzes every request and routes to the cheapest capable model:
+ScallopBot analyzes every request and routes to the cheapest capable model:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -277,7 +277,7 @@ OpenClaw Approach (Expensive):
 ├── Message 50 (600 tokens)
 └── Total: 45,000 tokens PER REQUEST ❌
 
-LeanBot Approach (Efficient):
+ScallopBot Approach (Efficient):
 ├── System prompt (500 tokens)
 ├── Compressed summary of old context (200 tokens)
 ├── Last 5 relevant messages (2000 tokens)
@@ -332,7 +332,7 @@ Two-phase memory processing inspired by how humans consolidate memories:
 
 ### 4. Aggressive Tool Output Management
 
-Tool outputs are the #1 cause of token bloat. LeanBot handles this:
+Tool outputs are the #1 cause of token bloat. ScallopBot handles this:
 
 ```yaml
 tool_output_policy:
@@ -356,7 +356,7 @@ Tool: bash("cat package.json")
 Output: [8,500 tokens of JSON, stays in context forever]
 ```
 
-**After (LeanBot):**
+**After (ScallopBot):**
 ```
 Tool: bash("cat package.json")
 Output: [500 token summary + hash reference]
@@ -367,7 +367,7 @@ Full output: [retrievable via `recall(hash)` if needed]
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│  LEANBOT COST DASHBOARD                          Session #47    │
+│  SCALLOPBOT COST DASHBOARD                          Session #47    │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │  Current Session:                                               │
@@ -421,7 +421,7 @@ Skills are NOT loaded into context until needed:
 ```
 OpenClaw: Load all 50 skill schemas at startup → 15,000 tokens wasted
 
-LeanBot:
+ScallopBot:
 ├── Core tools always loaded (Read, Write, Edit, Bash) → 400 tokens
 ├── Skill index loaded (name + 1-line description) → 200 tokens
 ├── Full skill loaded ON DEMAND when referenced → variable
@@ -430,7 +430,7 @@ LeanBot:
 
 ### 8. Full ClawHub/OpenClaw Skill Compatibility
 
-LeanBot is **100% compatible** with the OpenClaw/ClawHub skill ecosystem. Use any of the 100+ existing skills without modification.
+ScallopBot is **100% compatible** with the OpenClaw/ClawHub skill ecosystem. Use any of the 100+ existing skills without modification.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -438,7 +438,7 @@ LeanBot is **100% compatible** with the OpenClaw/ClawHub skill ecosystem. Use an
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐         │
-│  │  ClawHub    │    │  OpenClaw   │    │  LeanBot    │         │
+│  │  ClawHub    │    │  OpenClaw   │    │  ScallopBot    │         │
 │  │  Registry   │ ←→ │  SKILL.md   │ ←→ │  Native     │         │
 │  │  (Remote)   │    │  Format     │    │  Skills     │         │
 │  └─────────────┘    └─────────────┘    └─────────────┘         │
@@ -452,7 +452,7 @@ LeanBot is **100% compatible** with the OpenClaw/ClawHub skill ecosystem. Use an
 
 #### Supported SKILL.md Format
 
-LeanBot parses the standard OpenClaw skill format:
+ScallopBot parses the standard OpenClaw skill format:
 
 ```yaml
 # skills/my-skill/SKILL.md
@@ -477,9 +477,9 @@ When the user asks to [do something], use this skill to...
 #### Skill Sources (Precedence Order)
 
 ```
-1. Workspace skills     ~/.leanbot/workspace/skills/    (highest)
-2. User skills          ~/.leanbot/skills/
-3. ClawHub installed    ~/.leanbot/clawhub/
+1. Workspace skills     ~/.scallopbot/workspace/skills/    (highest)
+2. User skills          ~/.scallopbot/skills/
+3. ClawHub installed    ~/.scallopbot/clawhub/
 4. Bundled skills       (built into binary)             (lowest)
 ```
 
@@ -487,26 +487,26 @@ When the user asks to [do something], use this skill to...
 
 ```bash
 # Search ClawHub registry
-leanbot skill search "browser automation"
+scallopbot skill search "browser automation"
 
 # Install from ClawHub
-leanbot skill install clawhub:browser-pilot
-leanbot skill install clawhub:gmail-assistant
-leanbot skill install clawhub:calendar-sync
+scallopbot skill install clawhub:browser-pilot
+scallopbot skill install clawhub:gmail-assistant
+scallopbot skill install clawhub:calendar-sync
 
 # Install from GitHub
-leanbot skill install github:user/repo
+scallopbot skill install github:user/repo
 
 # List installed skills
-leanbot skill list
+scallopbot skill list
 
 # Update all skills
-leanbot skill update
+scallopbot skill update
 ```
 
 #### Gating & Requirements
 
-LeanBot respects OpenClaw's gating system:
+ScallopBot respects OpenClaw's gating system:
 
 ```yaml
 metadata:
@@ -524,11 +524,11 @@ metadata:
         package: playwright
 ```
 
-#### LeanBot Skill Enhancements
+#### ScallopBot Skill Enhancements
 
-While maintaining compatibility, LeanBot adds:
+While maintaining compatibility, ScallopBot adds:
 
-| Feature | OpenClaw | LeanBot |
+| Feature | OpenClaw | ScallopBot |
 |---------|----------|---------|
 | **Lazy loading** | Load all at startup | Load on-demand |
 | **Cost hints** | None | `complexity: simple/moderate/complex` |
@@ -544,8 +544,8 @@ name: my-lean-skill
 description: A token-efficient skill
 # Standard OpenClaw fields...
 
-# LeanBot extensions (ignored by OpenClaw)
-leanbot:
+# ScallopBot extensions (ignored by OpenClaw)
+scallopbot:
   complexity: simple              # Routing hint
   max_tokens: 1500               # Budget per invocation
   cacheable: true                # Cache identical invocations
@@ -554,13 +554,13 @@ leanbot:
 ---
 ```
 
-#### Native LeanBot Skills
+#### Native ScallopBot Skills
 
-For maximum efficiency, write skills in LeanBot's native format:
+For maximum efficiency, write skills in ScallopBot's native format:
 
 ```typescript
 // skills/my-skill/index.ts
-import { defineSkill } from '@leanbot/sdk';
+import { defineSkill } from '@scallopbot/sdk';
 
 export default defineSkill({
   name: 'my-skill',
@@ -592,7 +592,7 @@ export default defineSkill({
 
 ### 9. Unified Cron (No Separate Heartbeats)
 
-OpenClaw has both **cron jobs** AND **heartbeats**. LeanBot simplifies: **cron does everything**.
+OpenClaw has both **cron jobs** AND **heartbeats**. ScallopBot simplifies: **cron does everything**.
 
 ```
 OpenClaw:
@@ -600,7 +600,7 @@ OpenClaw:
 ├── Heartbeat system (keep-alive, cache warming)  ← redundant
 └── Two concepts to configure and debug
 
-LeanBot:
+ScallopBot:
 └── Cron system (does both)  ← one concept
 ```
 
@@ -636,7 +636,7 @@ cron:
 
 #### Why No Heartbeats?
 
-| Use Case | OpenClaw | LeanBot |
+| Use Case | OpenClaw | ScallopBot |
 |----------|----------|---------|
 | Cache warming | Heartbeat config | `cron: keepalive` |
 | Health checks | Heartbeat config | `cron: ping` |
@@ -652,7 +652,7 @@ cron:
 ### SOUL.md (Identity)
 
 ```markdown
-# soul.md - LeanBot Identity
+# soul.md - ScallopBot Identity
 
 ## Core Values
 - Efficiency over verbosity
@@ -676,7 +676,7 @@ cron:
 ### config.yaml
 
 ```yaml
-leanbot:
+scallopbot:
   # Model Routing
   routing:
     strategy: "complexity-based"
@@ -744,7 +744,7 @@ leanbot:
 ## Project Structure
 
 ```
-leanbot/
+scallopbot/
 ├── src/
 │   ├── core/
 │   │   ├── agent.ts              # Main agent loop
@@ -784,7 +784,7 @@ leanbot/
 │   │   ├── compat/               # OpenClaw compatibility layer
 │   │   │   ├── parser.ts         # SKILL.md parser
 │   │   │   ├── gating.ts         # Requirements checker
-│   │   │   └── adapter.ts        # OpenClaw → LeanBot adapter
+│   │   │   └── adapter.ts        # OpenClaw → ScallopBot adapter
 │   │   └── builtin/              # Built-in skills
 │   │       ├── browser.ts
 │   │       ├── calendar.ts
@@ -821,9 +821,9 @@ leanbot/
 
 ---
 
-## LeanBot vs OpenClaw Comparison
+## ScallopBot vs OpenClaw Comparison
 
-| Feature | OpenClaw | LeanBot |
+| Feature | OpenClaw | ScallopBot |
 |---------|----------|---------|
 | **Token Efficiency** | Poor (full history every request) | Excellent (sliding window + compression) |
 | **Cost Visibility** | After the fact | Real-time dashboard |
@@ -865,8 +865,8 @@ leanbot/
 - [ ] Skill lazy-loader
 - [ ] OpenClaw SKILL.md parser & compatibility layer
 - [ ] ClawHub registry client
-- [ ] `leanbot skill install/search/update` commands
-- [ ] Native LeanBot skill SDK
+- [ ] `scallopbot skill install/search/update` commands
+- [ ] Native ScallopBot skill SDK
 - [ ] Skill cost hints & routing integration
 
 ### Phase 4: Advanced Features
@@ -879,7 +879,7 @@ leanbot/
 
 ## Deployment Model: Full Machine Access
 
-LeanBot is designed to run on a **VPS as a full user-level agent** - not sandboxed, not containerized. It has the same access you would have if you SSH'd into the machine.
+ScallopBot is designed to run on a **VPS as a full user-level agent** - not sandboxed, not containerized. It has the same access you would have if you SSH'd into the machine.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -887,7 +887,7 @@ LeanBot is designed to run on a **VPS as a full user-level agent** - not sandbox
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │   ┌─────────────────────────────────────────────────────────┐   │
-│   │                     LEANBOT                              │   │
+│   │                     SCALLOPBOT                              │   │
 │   │                 (runs as user)                           │   │
 │   └─────────────────────────────────────────────────────────┘   │
 │                            │                                    │
@@ -906,7 +906,7 @@ LeanBot is designed to run on a **VPS as a full user-level agent** - not sandbox
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### What LeanBot Can Do
+### What ScallopBot Can Do
 
 | Capability | Access Level |
 |------------|--------------|
@@ -922,7 +922,7 @@ LeanBot is designed to run on a **VPS as a full user-level agent** - not sandbox
 
 ### Why Full Access?
 
-LeanBot is your **digital employee**, not a sandboxed chatbot. It needs to:
+ScallopBot is your **digital employee**, not a sandboxed chatbot. It needs to:
 - Deploy your code
 - Manage your servers
 - Run your scripts
@@ -941,56 +941,56 @@ LeanBot is your **digital employee**, not a sandboxed chatbot. It needs to:
 # SSH into your VPS
 ssh user@your-vps.com
 
-# Install LeanBot
-curl -fsSL https://leanbot.dev/install.sh | sh
+# Install ScallopBot
+curl -fsSL https://scallopbot.dev/install.sh | sh
 
 # Initialize
-leanbot init
+scallopbot init
 
 # Configure API keys
-leanbot config set anthropic.key sk-ant-xxx
-leanbot config set openai.key sk-xxx
+scallopbot config set anthropic.key sk-ant-xxx
+scallopbot config set openai.key sk-xxx
 
 # Set daily budget
-leanbot config set budget.daily 5.00
+scallopbot config set budget.daily 5.00
 
 # Configure channels (how you'll talk to it)
-leanbot channel add telegram --token YOUR_BOT_TOKEN
-leanbot channel add discord --token YOUR_BOT_TOKEN
+scallopbot channel add telegram --token YOUR_BOT_TOKEN
+scallopbot channel add discord --token YOUR_BOT_TOKEN
 
 # Run as daemon (always-on)
-leanbot daemon start
+scallopbot daemon start
 
 # Or run with systemd (auto-restart on reboot)
-leanbot daemon install
-sudo systemctl enable leanbot
-sudo systemctl start leanbot
+scallopbot daemon install
+sudo systemctl enable scallopbot
+sudo systemctl start scallopbot
 ```
 
 ### Check Status
 
 ```bash
 # View daemon status
-leanbot daemon status
+scallopbot daemon status
 
 # View logs
-leanbot logs
+scallopbot logs
 
 # View cost dashboard
-leanbot budget
+scallopbot budget
 
 # Interactive CLI (for testing)
-leanbot chat
+scallopbot chat
 ```
 
 ### Local Development
 
 ```bash
 # Run locally for development/testing
-leanbot start
+scallopbot start
 
 # Or CLI mode
-leanbot chat
+scallopbot chat
 ```
 
 ---
@@ -999,7 +999,7 @@ leanbot chat
 
 > "Perfection is achieved, not when there is nothing more to add, but when there is nothing left to take away." - Antoine de Saint-Exupery
 
-LeanBot applies lean principles to AI agents:
+ScallopBot applies lean principles to AI agents:
 - **Eliminate waste**: Don't send tokens you don't need
 - **Just-in-time**: Load skills and context only when needed
 - **Continuous improvement**: Gardener constantly optimizes memory

@@ -12,7 +12,7 @@ const DEFAULT_CONFIG = {
   maxContentLength: 50000,
   timeout: 30000,
   userAgent:
-    'Mozilla/5.0 (compatible; LeanBot/1.0; +https://github.com/leanbot)',
+    'Mozilla/5.0 (compatible; ScallopBot/1.0; +https://github.com/scallopbot)',
 };
 
 /**

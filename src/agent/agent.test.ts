@@ -24,7 +24,7 @@ describe('Agent', () => {
   let sessionsDir: string;
 
   beforeEach(async () => {
-    testDir = await fs.mkdtemp(path.join(os.tmpdir(), 'leanbot-agent-test-'));
+    testDir = await fs.mkdtemp(path.join(os.tmpdir(), 'scallopbot-agent-test-'));
     sessionsDir = path.join(testDir, 'sessions');
     await fs.mkdir(sessionsDir, { recursive: true });
   });

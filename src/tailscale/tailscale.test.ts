@@ -309,12 +309,12 @@ describe('createTailscaleFromEnv', () => {
   });
 
   it('should use TAILSCALE_HOSTNAME from environment', async () => {
-    process.env.TAILSCALE_HOSTNAME = 'leanbot';
+    process.env.TAILSCALE_HOSTNAME = 'scallopbot';
 
     const { createTailscaleFromEnv } = await import('./tailscale.js');
     const tailscale = createTailscaleFromEnv();
 
-    expect((tailscale as any).config.hostname).toBe('leanbot');
+    expect((tailscale as any).config.hostname).toBe('scallopbot');
   });
 });
 

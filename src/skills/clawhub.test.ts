@@ -145,7 +145,7 @@ describe('SkillPackageManager', () => {
   let manager: SkillPackageManager;
 
   beforeEach(async () => {
-    testDir = await fs.mkdtemp(path.join(os.tmpdir(), 'leanbot-clawhub-test-'));
+    testDir = await fs.mkdtemp(path.join(os.tmpdir(), 'scallopbot-clawhub-test-'));
     manager = new SkillPackageManager({
       skillsDir: path.join(testDir, 'skills'),
     });

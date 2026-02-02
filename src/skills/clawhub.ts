@@ -18,7 +18,7 @@ import { promisify } from 'util';
 import type { SkillInstaller as SkillInstallerSpec } from './types.js';
 
 const execAsync = promisify(exec);
-const DEFAULT_LOCAL_SKILLS_DIR = path.join(homedir(), '.leanbot', 'skills');
+const DEFAULT_LOCAL_SKILLS_DIR = path.join(homedir(), '.scallopbot', 'skills');
 
 /**
  * Escape a string for safe use in shell commands

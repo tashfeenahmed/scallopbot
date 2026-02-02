@@ -73,8 +73,8 @@ export class OpenRouterProvider implements LLMProvider {
     this.apiKey = options.apiKey;
     this.model = options.model || DEFAULT_MODEL;
     this.maxRetries = options.maxRetries || DEFAULT_MAX_RETRIES;
-    this.siteUrl = options.siteUrl || 'https://leanbot.local';
-    this.siteName = options.siteName || 'LeanBot';
+    this.siteUrl = options.siteUrl || 'https://scallopbot.local';
+    this.siteName = options.siteName || 'ScallopBot';
   }
 
   isAvailable(): boolean {

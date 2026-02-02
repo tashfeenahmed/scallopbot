@@ -1,5 +1,5 @@
 {
-  "name": "leanbot",
+  "name": "scallopbot",
   "version": "0.1.0",
   "description": "An economical and smart bot architecture",
   "main": "dist/index.js",

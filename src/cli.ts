@@ -14,14 +14,14 @@ const VERSION = '0.1.0';
 const program = new Command();
 
 program
-  .name('leanbot')
+  .name('scallopbot')
   .description('Personal AI assistant accessible via Telegram')
   .version(VERSION);
 
 // Start command - runs the gateway server
 program
   .command('start')
-  .description('Start the LeanBot gateway server')
+  .description('Start the ScallopBot gateway server')
   .option('-v, --verbose', 'Enable verbose logging')
   .action(async (options) => {
     try {
@@ -34,7 +34,7 @@ program
 
       const logger = createLogger(config.logging);
 
-      logger.info({ version: VERSION }, 'Starting LeanBot...');
+      logger.info({ version: VERSION }, 'Starting ScallopBot...');
 
       const gateway = new Gateway({ config, logger });
       setupGracefulShutdown(gateway, logger);
@@ -42,9 +42,9 @@ program
       await gateway.initialize();
       await gateway.start();
 
-      logger.info('LeanBot is running. Press Ctrl+C to stop.');
+      logger.info('ScallopBot is running. Press Ctrl+C to stop.');
     } catch (error) {
-      console.error('Failed to start LeanBot:', (error as Error).message);
+      console.error('Failed to start ScallopBot:', (error as Error).message);
       process.exit(1);
     }
   });
@@ -82,7 +82,7 @@ program
         console.log(`Created new session: ${sessionId}`);
       }
 
-      console.log('LeanBot Chat - Type your messages below. Use Ctrl+C to exit.\n');
+      console.log('ScallopBot Chat - Type your messages below. Use Ctrl+C to exit.\n');
 
       const rl = readline.createInterface({
         input: process.stdin,
@@ -154,7 +154,7 @@ program
       if (options.json) {
         console.log(JSON.stringify(safeConfig, null, 2));
       } else {
-        console.log('LeanBot Configuration:');
+        console.log('ScallopBot Configuration:');
         console.log('');
         console.log('Providers:');
         console.log(
@@ -184,7 +184,7 @@ program
   .command('version')
   .description('Show version information')
   .action(() => {
-    console.log(`LeanBot v${VERSION}`);
+    console.log(`ScallopBot v${VERSION}`);
   });
 
 // Skill command group

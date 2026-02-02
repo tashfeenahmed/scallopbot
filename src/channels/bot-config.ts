@@ -123,7 +123,7 @@ export interface BotConfigStore {
 }
 
 const DEFAULT_CONFIG: UserBotConfig = {
-  botName: 'LeanBot',
+  botName: 'ScallopBot',
   personalityId: 'friendly',
   modelId: 'kimi-k2.5',
   onboardingComplete: false,

@@ -1,5 +1,5 @@
 /**
- * Tests for LeanBot Skill SDK
+ * Tests for ScallopBot Skill SDK
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';

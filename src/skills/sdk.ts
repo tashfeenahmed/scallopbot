@@ -1,12 +1,12 @@
 /**
- * LeanBot Skill SDK
+ * ScallopBot Skill SDK
  *
  * Native programmatic skill definition API.
  * Provides a fluent builder interface for creating skills without YAML/Markdown.
  *
  * Example:
  * ```typescript
- * import { defineSkill } from 'leanbot';
+ * import { defineSkill } from 'scallopbot';
  *
  * const mySkill = defineSkill('my-skill', 'Does something useful')
  *   .userInvocable()

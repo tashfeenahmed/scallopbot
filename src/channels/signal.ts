@@ -291,7 +291,7 @@ export class SignalChannel implements Channel, VoiceChannel {
   }
 
   private getHelpMessage(): string {
-    return `*LeanBot on Signal*
+    return `*ScallopBot on Signal*
 
 I'm your personal AI assistant. Just send me a message!
 

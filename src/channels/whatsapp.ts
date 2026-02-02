@@ -129,7 +129,7 @@ export class WhatsAppChannel implements Channel, VoiceChannel {
       auth: state,
       printQRInTerminal: true, // Show QR code in terminal for first-time auth
       logger: this.logger as any,
-      browser: ['LeanBot', 'Chrome', '120.0.0'],
+      browser: ['ScallopBot', 'Chrome', '120.0.0'],
     });
 
     // Handle connection updates
@@ -280,7 +280,7 @@ export class WhatsAppChannel implements Channel, VoiceChannel {
   }
 
   private getHelpMessage(): string {
-    return `*LeanBot on WhatsApp*
+    return `*ScallopBot on WhatsApp*
 
 I'm your personal AI assistant. Just send me a message!
 

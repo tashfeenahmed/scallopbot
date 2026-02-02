@@ -179,7 +179,7 @@ describe('TelegramChannel', () => {
       const message = getStartMessage();
 
       expect(message).toContain('Welcome');
-      expect(message).toContain('LeanBot');
+      expect(message).toContain('ScallopBot');
     });
 
     it('should handle /reset command by clearing session', async () => {

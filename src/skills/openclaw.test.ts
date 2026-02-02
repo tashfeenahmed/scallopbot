@@ -216,7 +216,7 @@ describe('OpenClaw Skill Loader', () => {
   let loader: SkillLoader;
 
   beforeEach(async () => {
-    testDir = await fs.mkdtemp(path.join(os.tmpdir(), 'leanbot-skill-test-'));
+    testDir = await fs.mkdtemp(path.join(os.tmpdir(), 'scallopbot-skill-test-'));
     loader = new SkillLoader({ workspaceDir: testDir });
   });
 
@@ -227,7 +227,7 @@ describe('OpenClaw Skill Loader', () => {
   describe('loadFromDirectory', () => {
     it('should load skills from directory', async () => {
       // Create skill directory
-      const skillDir = path.join(testDir, '.leanbot', 'skills', 'test-skill');
+      const skillDir = path.join(testDir, '.scallopbot', 'skills', 'test-skill');
       await fs.mkdir(skillDir, { recursive: true });
       await fs.writeFile(
         path.join(skillDir, 'SKILL.md'),
@@ -241,7 +241,7 @@ Test content.
       );
 
       const skills = await loader.loadFromDirectory(
-        path.join(testDir, '.leanbot', 'skills'),
+        path.join(testDir, '.scallopbot', 'skills'),
         'workspace'
       );
 
@@ -276,7 +276,7 @@ Test content.
 
   describe('checkGates', () => {
     it('should pass gates when no requirements', async () => {
-      const skillDir = path.join(testDir, '.leanbot', 'skills', 'no-gates');
+      const skillDir = path.join(testDir, '.scallopbot', 'skills', 'no-gates');
       await fs.mkdir(skillDir, { recursive: true });
       await fs.writeFile(
         path.join(skillDir, 'SKILL.md'),
@@ -297,7 +297,7 @@ Content.
     });
 
     it('should fail gates for missing binary', async () => {
-      const skillDir = path.join(testDir, '.leanbot', 'skills', 'needs-binary');
+      const skillDir = path.join(testDir, '.scallopbot', 'skills', 'needs-binary');
       await fs.mkdir(skillDir, { recursive: true });
       await fs.writeFile(
         path.join(skillDir, 'SKILL.md'),
@@ -323,7 +323,7 @@ Content.
     });
 
     it('should fail gates for missing env var', async () => {
-      const skillDir = path.join(testDir, '.leanbot', 'skills', 'needs-env');
+      const skillDir = path.join(testDir, '.scallopbot', 'skills', 'needs-env');
       await fs.mkdir(skillDir, { recursive: true });
       await fs.writeFile(
         path.join(skillDir, 'SKILL.md'),
@@ -349,7 +349,7 @@ Content.
     });
 
     it('should pass anyBins gate if at least one exists', async () => {
-      const skillDir = path.join(testDir, '.leanbot', 'skills', 'any-bins');
+      const skillDir = path.join(testDir, '.scallopbot', 'skills', 'any-bins');
       await fs.mkdir(skillDir, { recursive: true });
       await fs.writeFile(
         path.join(skillDir, 'SKILL.md'),
@@ -380,7 +380,7 @@ Content.
   describe('loadAll', () => {
     it('should load skills from multiple sources', async () => {
       // Create workspace skill
-      const workspaceSkillDir = path.join(testDir, '.leanbot', 'skills', 'workspace-skill');
+      const workspaceSkillDir = path.join(testDir, '.scallopbot', 'skills', 'workspace-skill');
       await fs.mkdir(workspaceSkillDir, { recursive: true });
       await fs.writeFile(
         path.join(workspaceSkillDir, 'SKILL.md'),
@@ -401,7 +401,7 @@ Content.
 
     it('should respect priority (workspace > local)', async () => {
       // Create skill with same name in both workspace and local
-      const workspaceSkillDir = path.join(testDir, '.leanbot', 'skills', 'priority-skill');
+      const workspaceSkillDir = path.join(testDir, '.scallopbot', 'skills', 'priority-skill');
       await fs.mkdir(workspaceSkillDir, { recursive: true });
       await fs.writeFile(
         path.join(workspaceSkillDir, 'SKILL.md'),
@@ -451,10 +451,10 @@ describe('OpenClaw Skill Registry', () => {
   let registry: SkillRegistry;
 
   beforeEach(async () => {
-    testDir = await fs.mkdtemp(path.join(os.tmpdir(), 'leanbot-registry-test-'));
+    testDir = await fs.mkdtemp(path.join(os.tmpdir(), 'scallopbot-registry-test-'));
 
     // Create some test skills
-    const skill1Dir = path.join(testDir, '.leanbot', 'skills', 'available-skill');
+    const skill1Dir = path.join(testDir, '.scallopbot', 'skills', 'available-skill');
     await fs.mkdir(skill1Dir, { recursive: true });
     await fs.writeFile(
       path.join(skill1Dir, 'SKILL.md'),
@@ -470,7 +470,7 @@ Available skill content.
 `
     );
 
-    const skill2Dir = path.join(testDir, '.leanbot', 'skills', 'command-skill');
+    const skill2Dir = path.join(testDir, '.scallopbot', 'skills', 'command-skill');
     await fs.mkdir(skill2Dir, { recursive: true });
     await fs.writeFile(
       path.join(skill2Dir, 'SKILL.md'),
@@ -486,7 +486,7 @@ Command skill content.
 `
     );
 
-    const skill3Dir = path.join(testDir, '.leanbot', 'skills', 'hidden-skill');
+    const skill3Dir = path.join(testDir, '.scallopbot', 'skills', 'hidden-skill');
     await fs.mkdir(skill3Dir, { recursive: true });
     await fs.writeFile(
       path.join(skill3Dir, 'SKILL.md'),
@@ -602,7 +602,7 @@ Hidden skill content.
   describe('reload', () => {
     it('should reload skills from disk', async () => {
       // Add a new skill
-      const newSkillDir = path.join(testDir, '.leanbot', 'skills', 'new-skill');
+      const newSkillDir = path.join(testDir, '.scallopbot', 'skills', 'new-skill');
       await fs.mkdir(newSkillDir, { recursive: true });
       await fs.writeFile(
         path.join(newSkillDir, 'SKILL.md'),
@@ -642,7 +642,7 @@ describe('Skills Hot Reload', () => {
   let loader: SkillLoader;
 
   beforeEach(async () => {
-    testDir = await fs.mkdtemp(path.join(os.tmpdir(), 'leanbot-hotreload-test-'));
+    testDir = await fs.mkdtemp(path.join(os.tmpdir(), 'scallopbot-hotreload-test-'));
   });
 
   afterEach(async () => {
@@ -739,7 +739,7 @@ describe('XDG Path Support', () => {
   let originalXdgConfig: string | undefined;
 
   beforeEach(async () => {
-    testDir = await fs.mkdtemp(path.join(os.tmpdir(), 'leanbot-xdg-test-'));
+    testDir = await fs.mkdtemp(path.join(os.tmpdir(), 'scallopbot-xdg-test-'));
     originalXdgConfig = process.env.XDG_CONFIG_HOME;
   });
 

@@ -713,7 +713,7 @@ export class TelegramChannel {
 
 // Export for backwards compatibility and testing
 export function getStartMessage(): string {
-  return `Welcome to LeanBot!
+  return `Welcome to ScallopBot!
 
 I'm your personal AI assistant. I can help you with:
 - Reading and writing files

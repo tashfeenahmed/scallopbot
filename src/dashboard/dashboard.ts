@@ -101,7 +101,7 @@ export class CostDashboard {
 
     const lines: string[] = [
       '╔══════════════════════════════════════╗',
-      '║         LeanBot Cost Dashboard       ║',
+      '║         ScallopBot Cost Dashboard       ║',
       '╠══════════════════════════════════════╣',
       '║ Daily Spend                          ║',
       `║   ${formatCurrency(summary.daily.spent).padEnd(12)} / ${formatCurrency(summary.daily.budget).padEnd(12)} (${summary.daily.percentage}%)`.padEnd(40) + '║',

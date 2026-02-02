@@ -19,7 +19,7 @@ describe('ReadTool', () => {
   let ctx: ToolContext;
 
   beforeEach(async () => {
-    testDir = await fs.mkdtemp(path.join(os.tmpdir(), 'leanbot-test-'));
+    testDir = await fs.mkdtemp(path.join(os.tmpdir(), 'scallopbot-test-'));
     ctx = createTestContext(testDir);
   });
 
@@ -117,7 +117,7 @@ describe('WriteTool', () => {
   let ctx: ToolContext;
 
   beforeEach(async () => {
-    testDir = await fs.mkdtemp(path.join(os.tmpdir(), 'leanbot-test-'));
+    testDir = await fs.mkdtemp(path.join(os.tmpdir(), 'scallopbot-test-'));
     ctx = createTestContext(testDir);
   });
 
@@ -196,7 +196,7 @@ describe('EditTool', () => {
   let ctx: ToolContext;
 
   beforeEach(async () => {
-    testDir = await fs.mkdtemp(path.join(os.tmpdir(), 'leanbot-test-'));
+    testDir = await fs.mkdtemp(path.join(os.tmpdir(), 'scallopbot-test-'));
     ctx = createTestContext(testDir);
   });
 
@@ -300,7 +300,7 @@ describe('BashTool', () => {
   let ctx: ToolContext;
 
   beforeEach(async () => {
-    testDir = await fs.mkdtemp(path.join(os.tmpdir(), 'leanbot-test-'));
+    testDir = await fs.mkdtemp(path.join(os.tmpdir(), 'scallopbot-test-'));
     ctx = createTestContext(testDir);
   });
 

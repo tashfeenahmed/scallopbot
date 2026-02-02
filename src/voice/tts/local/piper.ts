@@ -26,7 +26,7 @@ export class PiperTTS implements TTSProvider {
 
   constructor(config: PiperConfig = {}) {
     const homeDir = process.env.HOME || process.env.USERPROFILE || '';
-    const defaultModelDir = join(homeDir, '.leanbot', 'models', 'piper');
+    const defaultModelDir = join(homeDir, '.scallopbot', 'models', 'piper');
 
     this.piperPath = config.piperPath || 'piper';
     this.modelPath = config.modelPath || join(defaultModelDir, 'en_US-lessac-medium.onnx');
@@ -115,7 +115,7 @@ export async function downloadPiperModel(
   targetDir?: string
 ): Promise<string> {
   const homeDir = process.env.HOME || process.env.USERPROFILE || '';
-  const modelDir = targetDir || join(homeDir, '.leanbot', 'models', 'piper');
+  const modelDir = targetDir || join(homeDir, '.scallopbot', 'models', 'piper');
   const modelFile = join(modelDir, `${voice}.onnx`);
   const configFile = join(modelDir, `${voice}.onnx.json`);
 

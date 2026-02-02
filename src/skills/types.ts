@@ -101,7 +101,7 @@ export interface Skill {
 export interface SkillLoaderConfig {
   /** Workspace skills directory */
   workspaceDir?: string;
-  /** Local skills directory (default: ~/.leanbot/skills) */
+  /** Local skills directory (default: ~/.scallopbot/skills) */
   localDir?: string;
   /** Extra directories to load skills from */
   extraDirs?: string[];

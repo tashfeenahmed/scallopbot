@@ -134,22 +134,22 @@ describe('SystemdConfig', () => {
   describe('generate', () => {
     it('should generate systemd unit file', () => {
       const config = SystemdConfig.generate({
-        name: 'leanbot',
-        description: 'LeanBot AI Assistant',
-        execPath: '/usr/local/bin/leanbot',
-        workingDir: '/var/lib/leanbot',
-        user: 'leanbot',
+        name: 'scallopbot',
+        description: 'ScallopBot AI Assistant',
+        execPath: '/usr/local/bin/scallopbot',
+        workingDir: '/var/lib/scallopbot',
+        user: 'scallopbot',
       });
 
       expect(config).toContain('[Unit]');
       expect(config).toContain('[Service]');
       expect(config).toContain('[Install]');
-      expect(config).toContain('leanbot');
+      expect(config).toContain('scallopbot');
     });
 
     it('should include restart policy', () => {
       const config = SystemdConfig.generate({
-        name: 'leanbot',
+        name: 'scallopbot',
         description: 'Test',
         execPath: '/bin/test',
         workingDir: '/tmp',
@@ -161,7 +161,7 @@ describe('SystemdConfig', () => {
 
     it('should include environment variables', () => {
       const config = SystemdConfig.generate({
-        name: 'leanbot',
+        name: 'scallopbot',
         description: 'Test',
         execPath: '/bin/test',
         workingDir: '/tmp',
@@ -196,7 +196,7 @@ describe('DaemonManager', () => {
 
     manager = new DaemonManager({
       logger: mockLogger,
-      serviceName: 'leanbot',
+      serviceName: 'scallopbot',
       exec: mockExec,
     });
   });
@@ -206,9 +206,9 @@ describe('DaemonManager', () => {
       mockExec.mockResolvedValue({ stdout: '', stderr: '' });
 
       const result = await manager.install({
-        execPath: '/usr/local/bin/leanbot',
-        workingDir: '/var/lib/leanbot',
-        user: 'leanbot',
+        execPath: '/usr/local/bin/scallopbot',
+        workingDir: '/var/lib/scallopbot',
+        user: 'scallopbot',
       });
 
       expect(result.success).toBe(true);
@@ -219,9 +219,9 @@ describe('DaemonManager', () => {
       mockExec.mockRejectedValue(new Error('Permission denied'));
 
       const result = await manager.install({
-        execPath: '/usr/local/bin/leanbot',
-        workingDir: '/var/lib/leanbot',
-        user: 'leanbot',
+        execPath: '/usr/local/bin/scallopbot',
+        workingDir: '/var/lib/scallopbot',
+        user: 'scallopbot',
       });
 
       expect(result.success).toBe(false);
@@ -321,7 +321,7 @@ describe('CrashRecovery', () => {
 
     recovery = new CrashRecovery({
       logger: mockLogger,
-      stateDir: '/var/lib/leanbot',
+      stateDir: '/var/lib/scallopbot',
       fs: mockFs as any,
     });
   });

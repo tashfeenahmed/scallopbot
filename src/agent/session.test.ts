@@ -8,7 +8,7 @@ describe('SessionManager', () => {
   let testDir: string;
 
   beforeEach(async () => {
-    testDir = await fs.mkdtemp(path.join(os.tmpdir(), 'leanbot-session-test-'));
+    testDir = await fs.mkdtemp(path.join(os.tmpdir(), 'scallopbot-session-test-'));
   });
 
   afterEach(async () => {

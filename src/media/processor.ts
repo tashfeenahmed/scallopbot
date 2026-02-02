@@ -25,7 +25,7 @@ const DEFAULT_CONFIG: MediaProcessorConfig = {
   maxLinkContentLength: 50000,
   maxImageSize: 20 * 1024 * 1024,
   maxPDFSize: 50 * 1024 * 1024,
-  userAgent: 'Mozilla/5.0 (compatible; LeanBot/1.0)',
+  userAgent: 'Mozilla/5.0 (compatible; ScallopBot/1.0)',
   timeout: 30000,
   extractPDFImages: false,
 };

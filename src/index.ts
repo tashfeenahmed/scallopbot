@@ -1,4 +1,4 @@
-// LeanBot - Personal AI Assistant
+// ScallopBot - Personal AI Assistant
 // Main entry point for library usage
 
 export * from './config/index.js';

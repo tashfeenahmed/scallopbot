@@ -1,6 +1,6 @@
 /**
  * CLI REPL Channel
- * Interactive command-line interface for LeanBot
+ * Interactive command-line interface for ScallopBot
  * Supports text and voice modes
  */
 
@@ -74,7 +74,7 @@ export function getHelpMessage(voiceAvailable: boolean = false): string {
     : '';
 
   return `
-LeanBot CLI Commands:
+ScallopBot CLI Commands:
 
   /help     - Show this help message
   /reset    - Clear conversation history and start fresh
@@ -93,7 +93,7 @@ ${voiceAvailable ? 'Voice mode available! Type /voice to enable.' : ''}
  */
 export function getWelcomeMessage(): string {
   return `
-Welcome to LeanBot CLI!
+Welcome to ScallopBot CLI!
 
 Type /help for available commands, or just start chatting.
 Press Ctrl+C or type /exit to quit.

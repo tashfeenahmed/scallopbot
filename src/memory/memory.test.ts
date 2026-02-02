@@ -66,7 +66,7 @@ describe('MemoryStore', () => {
       });
       store.add({
         id: 'mem-3',
-        content: 'User works on a React project called LeanBot',
+        content: 'User works on a React project called ScallopBot',
         type: 'fact',
         timestamp: new Date(),
         sessionId: 'session-1',

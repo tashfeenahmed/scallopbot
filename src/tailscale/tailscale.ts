@@ -1,7 +1,7 @@
 /**
  * Tailscale Integration
  *
- * Provides secure remote access to LeanBot using Tailscale.
+ * Provides secure remote access to ScallopBot using Tailscale.
  *
  * Modes:
  * - serve: Expose gateway to your tailnet only (private)

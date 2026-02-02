@@ -74,7 +74,7 @@ describe('Gateway', () => {
   let testDir: string;
 
   beforeEach(async () => {
-    testDir = await fs.mkdtemp(path.join(os.tmpdir(), 'leanbot-gateway-test-'));
+    testDir = await fs.mkdtemp(path.join(os.tmpdir(), 'scallopbot-gateway-test-'));
     vi.clearAllMocks();
   });
 

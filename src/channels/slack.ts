@@ -137,7 +137,7 @@ export class SlackChannel implements Channel {
                 type: 'section',
                 text: {
                   type: 'mrkdwn',
-                  text: '*Welcome to LeanBot!* :robot_face:\n\nI\'m your AI assistant. You can chat with me directly or mention me in any channel.',
+                  text: '*Welcome to ScallopBot!* :robot_face:\n\nI\'m your AI assistant. You can chat with me directly or mention me in any channel.',
                 },
               },
               {
@@ -154,7 +154,7 @@ export class SlackChannel implements Channel {
                 type: 'section',
                 text: {
                   type: 'mrkdwn',
-                  text: '*How to use:*\n1. Send me a direct message\n2. Or mention me in any channel: `@LeanBot your question`',
+                  text: '*How to use:*\n1. Send me a direct message\n2. Or mention me in any channel: `@ScallopBot your question`',
                 },
               },
             ],
@@ -166,7 +166,7 @@ export class SlackChannel implements Channel {
     });
 
     // Handle slash commands
-    this.app.command('/leanbot', async ({ command, ack, respond }: { command: any; ack: any; respond: any }) => {
+    this.app.command('/scallopbot', async ({ command, ack, respond }: { command: any; ack: any; respond: any }) => {
       await ack();
 
       const args = command.text.trim().split(' ');
@@ -192,7 +192,7 @@ export class SlackChannel implements Channel {
                 type: 'section',
                 text: {
                   type: 'mrkdwn',
-                  text: '*LeanBot Help*\n\n`/leanbot help` - Show this message\n`/leanbot reset` - Clear conversation history\n`/leanbot status` - Check bot status\n\nOr just send me a message!',
+                  text: '*ScallopBot Help*\n\n`/scallopbot help` - Show this message\n`/scallopbot reset` - Clear conversation history\n`/scallopbot status` - Check bot status\n\nOr just send me a message!',
                 },
               },
             ],
@@ -210,7 +210,7 @@ export class SlackChannel implements Channel {
     switch (command.toLowerCase()) {
       case 'help':
         await say(
-          '*LeanBot Help*\n\n• `/help` - Show this message\n• `/reset` - Clear conversation history\n• `/status` - Check bot status\n\nOr just send me a message!'
+          '*ScallopBot Help*\n\n• `/help` - Show this message\n• `/reset` - Clear conversation history\n• `/status` - Check bot status\n\nOr just send me a message!'
         );
         break;
 

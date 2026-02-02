@@ -2,8 +2,8 @@
  * Skill Loader
  *
  * Loads skills from multiple directories with priority:
- * 1. Workspace skills (.leanbot/skills/)
- * 2. Local skills (~/.leanbot/skills/)
+ * 1. Workspace skills (.scallopbot/skills/)
+ * 2. Local skills (~/.scallopbot/skills/)
  * 3. Bundled skills (built-in)
  *
  * Skills are gated based on:
@@ -35,8 +35,8 @@ export interface SkillLoaderEvents {
 /**
  * Default skill directories
  */
-const DEFAULT_LOCAL_DIR = join(homedir(), '.leanbot', 'skills');
-const WORKSPACE_SKILL_DIR = '.leanbot/skills';
+const DEFAULT_LOCAL_DIR = join(homedir(), '.scallopbot', 'skills');
+const WORKSPACE_SKILL_DIR = '.scallopbot/skills';
 const BUNDLED_SKILL_DIR = join(dirname(import.meta.url.replace('file://', '')), '..', '..', 'skills');
 
 /**

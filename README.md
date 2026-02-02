@@ -1,4 +1,4 @@
-# LeanBot
+# ScallopBot
 
 A personal AI assistant that runs on your VPS, accessible via Telegram, with full system access and persistent sessions.
 
@@ -19,8 +19,8 @@ A personal AI assistant that runs on your VPS, accessible via Telegram, with ful
 ### 1. Clone and Install
 
 ```bash
-git clone https://github.com/tashfeenahmed/leanbot.git
-cd leanbot
+git clone https://github.com/tashfeenahmed/scallopbot.git
+cd scallopbot
 npm install
 ```
 
@@ -60,19 +60,19 @@ node dist/cli.js chat
 
 | Command | Description |
 |---------|-------------|
-| `leanbot start` | Start gateway server with Telegram |
-| `leanbot chat` | Interactive CLI chat session |
-| `leanbot config` | Show current configuration |
-| `leanbot version` | Show version |
+| `scallopbot start` | Start gateway server with Telegram |
+| `scallopbot chat` | Interactive CLI chat session |
+| `scallopbot config` | Show current configuration |
+| `scallopbot version` | Show version |
 
 ### Start Options
 
 ```bash
 # Verbose logging
-leanbot start --verbose
+scallopbot start --verbose
 
 # Resume existing chat session
-leanbot chat --session <session-id>
+scallopbot chat --session <session-id>
 ```
 
 ## Telegram Commands

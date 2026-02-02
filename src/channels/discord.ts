@@ -119,7 +119,7 @@ export function buildSlashCommands(): SlashCommandDef[] {
   return [
     {
       name: 'ask',
-      description: 'Ask LeanBot a question',
+      description: 'Ask ScallopBot a question',
       options: [
         {
           name: 'message',
@@ -148,7 +148,7 @@ export function buildSlashCommands(): SlashCommandDef[] {
  * Get help message
  */
 function getHelpMessage(): string {
-  return `**LeanBot Help**
+  return `**ScallopBot Help**
 
 **Slash Commands:**
 \`/ask <message>\` - Ask me a question
