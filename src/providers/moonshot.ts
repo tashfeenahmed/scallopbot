@@ -40,7 +40,7 @@ export const MOONSHOT_MODELS = {
   'kimi': 'kimi-k2.5',
 } as const;
 
-const DEFAULT_MODEL = 'moonshot-v1-128k';
+const DEFAULT_MODEL = 'kimi-k2.5';
 const DEFAULT_BASE_URL = 'https://api.moonshot.ai/v1';
 const DEFAULT_MAX_TOKENS = 4096;
 const DEFAULT_MAX_RETRIES = 3;
@@ -85,13 +85,18 @@ export class MoonshotProvider implements LLMProvider {
   async complete(request: CompletionRequest): Promise<CompletionResponse> {
     const messages = this.formatMessages(request);
 
-    const params: OpenAI.ChatCompletionCreateParams = {
+    // Disable thinking mode for kimi-k2.5 to avoid reasoning_content issues with tool calls
+    const isKimiK2 = this.model.includes('kimi-k2');
+
+    const params: OpenAI.ChatCompletionCreateParams & { thinking?: { type: string } } = {
       model: this.model,
       messages,
       max_tokens: request.maxTokens || DEFAULT_MAX_TOKENS,
-      ...(request.temperature !== undefined && { temperature: request.temperature }),
+      temperature: request.temperature ?? (isKimiK2 ? 0.6 : undefined), // Use 0.6 for instant mode
       ...(request.stopSequences && { stop: request.stopSequences }),
       ...(request.tools && { tools: this.formatTools(request.tools) }),
+      // Disable thinking mode for Kimi K2.5 to prevent reasoning_content errors
+      ...(isKimiK2 && { thinking: { type: 'disabled' } }),
     };
 
     // Debug logging - log the full request

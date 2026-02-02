@@ -32,7 +32,7 @@ const openrouterProviderSchema = z.object({
 
 const moonshotProviderSchema = z.object({
   apiKey: z.string().default(''),
-  model: z.string().default('moonshot-v1-128k'),
+  model: z.string().default('kimi-k2.5'),
 });
 
 const xaiProviderSchema = z.object({
@@ -46,7 +46,7 @@ const providersSchema = z.object({
   groq: groqProviderSchema.default({ apiKey: '', model: 'llama-3.3-70b-versatile' }),
   ollama: ollamaProviderSchema.default({ baseUrl: 'http://localhost:11434', model: 'llama3.2' }),
   openrouter: openrouterProviderSchema.default({ apiKey: '', model: 'anthropic/claude-3.5-sonnet' }),
-  moonshot: moonshotProviderSchema.default({ apiKey: '', model: 'moonshot-v1-128k' }),
+  moonshot: moonshotProviderSchema.default({ apiKey: '', model: 'kimi-k2.5' }),
   xai: xaiProviderSchema.default({ apiKey: '', model: 'grok-4' }),
 });
 
@@ -74,7 +74,7 @@ const channelsSchema = z.object({
 // Agent configuration schema
 const agentSchema = z.object({
   workspace: z.string().min(1, 'Workspace path is required'),
-  maxIterations: z.number().int().positive().default(20),
+  maxIterations: z.number().int().positive().default(100),
 });
 
 // Logging configuration schema
@@ -168,7 +168,7 @@ export function loadConfig(): Config {
   const workspace = process.env.AGENT_WORKSPACE || process.cwd();
   const maxIterations = process.env.AGENT_MAX_ITERATIONS
     ? parseInt(process.env.AGENT_MAX_ITERATIONS, 10)
-    : 20;
+    : 100;
   const logLevel = process.env.LOG_LEVEL || 'info';
 
   const rawConfig = {
@@ -195,7 +195,7 @@ export function loadConfig(): Config {
       },
       moonshot: {
         apiKey: process.env.MOONSHOT_API_KEY || '',
-        model: process.env.MOONSHOT_MODEL || 'moonshot-v1-128k',
+        model: process.env.MOONSHOT_MODEL || 'kimi-k2.5',
       },
       xai: {
         apiKey: process.env.XAI_API_KEY || '',

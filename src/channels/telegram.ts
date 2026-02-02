@@ -560,7 +560,23 @@ export class TelegramChannel {
 
       // Process transcribed text as regular message (don't echo transcription back)
       const sessionId = await this.getOrCreateSession(userId);
-      const result = await this.agent.processMessage(sessionId, transcription.text);
+
+      // Progress callback to send intermediate updates to user
+      const onProgress = async (update: { type: string; message: string }) => {
+        if (update.type === 'thinking' && update.message) {
+          const formatted = formatMarkdownToHtml(update.message);
+          const chunks = splitMessage(formatted);
+          for (const chunk of chunks) {
+            try {
+              await ctx.reply(chunk, { parse_mode: 'HTML' });
+            } catch {
+              await ctx.reply(chunk.replace(/<[^>]*>/g, ''));
+            }
+          }
+        }
+      };
+
+      const result = await this.agent.processMessage(sessionId, transcription.text, undefined, onProgress);
 
       clearInterval(typingInterval);
 
@@ -614,7 +630,24 @@ export class TelegramChannel {
 
     try {
       const sessionId = await this.getOrCreateSession(userId);
-      const result = await this.agent.processMessage(sessionId, messageText);
+
+      // Progress callback to send intermediate updates to user
+      const onProgress = async (update: { type: string; message: string }) => {
+        if (update.type === 'thinking' && update.message) {
+          // Send the assistant's thinking/planning text
+          const formatted = formatMarkdownToHtml(update.message);
+          const chunks = splitMessage(formatted);
+          for (const chunk of chunks) {
+            try {
+              await ctx.reply(chunk, { parse_mode: 'HTML' });
+            } catch {
+              await ctx.reply(chunk.replace(/<[^>]*>/g, ''));
+            }
+          }
+        }
+      };
+
+      const result = await this.agent.processMessage(sessionId, messageText, undefined, onProgress);
 
       clearInterval(typingInterval);
 

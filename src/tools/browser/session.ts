@@ -52,7 +52,7 @@ export class BrowserSession {
   private constructor(config: BrowserSessionConfig = {}) {
     this.config = {
       headless: true,
-      viewport: { width: 1280, height: 720 },
+      viewport: { width: 1920, height: 1080 }, // More realistic viewport
       timeout: 30000,
       ...config,
     };
@@ -99,21 +99,85 @@ export class BrowserSession {
       );
     }
 
-    this.logger?.info('Launching browser...');
+    this.logger?.info('Launching browser with stealth mode...');
 
+    // Stealth browser launch options to avoid detection
     this.browser = await playwright.chromium.launch({
       headless: this.config.headless,
+      args: [
+        '--disable-blink-features=AutomationControlled',
+        '--disable-features=IsolateOrigins,site-per-process',
+        '--disable-site-isolation-trials',
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-accelerated-2d-canvas',
+        '--no-first-run',
+        '--no-zygote',
+        '--disable-gpu',
+      ],
     });
+
+    // Realistic user agents (rotated based on session)
+    const userAgents = [
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15',
+    ];
+    const randomUserAgent = this.config.userAgent || userAgents[Math.floor(Math.random() * userAgents.length)];
+
+    // Check for local proxy (residential proxy via gost)
+    const proxyServer = process.env.BROWSER_PROXY || 'http://127.0.0.1:8888';
+    const useProxy = process.env.BROWSER_USE_PROXY !== 'false';
 
     this.context = await this.browser.newContext({
       viewport: this.config.viewport,
-      userAgent: this.config.userAgent,
+      userAgent: randomUserAgent,
+      // Use residential proxy if available
+      ...(useProxy && { proxy: { server: proxyServer } }),
+      // Stealth settings
+      locale: 'en-US',
+      timezoneId: 'America/New_York',
+      geolocation: { latitude: 40.7128, longitude: -74.0060 }, // NYC
+      permissions: ['geolocation'],
+      colorScheme: 'light',
+      // Bypass CSP to allow scripts
+      bypassCSP: true,
+      // Ignore HTTPS errors (some proxies may have cert issues)
+      ignoreHTTPSErrors: true,
     });
 
     this.page = await this.context.newPage();
     this.page.setDefaultTimeout(this.config.timeout || 30000);
 
-    this.logger?.info('Browser launched successfully');
+    // Additional stealth: Remove webdriver flag and automation indicators
+    await this.page.addInitScript(`
+      // Remove webdriver property
+      Object.defineProperty(navigator, 'webdriver', {
+        get: () => undefined,
+      });
+      // Mock plugins
+      Object.defineProperty(navigator, 'plugins', {
+        get: () => [1, 2, 3, 4, 5],
+      });
+      // Mock languages
+      Object.defineProperty(navigator, 'languages', {
+        get: () => ['en-US', 'en'],
+      });
+      // Mock chrome object
+      window.chrome = {
+        runtime: {},
+      };
+      // Mock permissions
+      const originalQuery = window.navigator.permissions.query;
+      window.navigator.permissions.query = (parameters) =>
+        parameters.name === 'notifications'
+          ? Promise.resolve({ state: 'denied' })
+          : originalQuery(parameters);
+    `);
+
+    this.logger?.info({ proxy: useProxy ? proxyServer : 'none', userAgent: randomUserAgent.substring(0, 50) }, 'Browser launched with stealth mode');
   }
 
   /**

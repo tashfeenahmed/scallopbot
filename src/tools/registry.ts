@@ -103,5 +103,12 @@ export async function createDefaultToolRegistry(
     registry.registerTool(new VoiceReplyTool({ voiceManager: options.voiceManager }));
   }
 
+  // Add Brave Search tool if API key is available
+  const { initializeBraveSearch } = await import('./search.js');
+  const braveSearch = initializeBraveSearch();
+  if (braveSearch) {
+    registry.registerTool(braveSearch);
+  }
+
   return registry;
 }

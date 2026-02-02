@@ -42,22 +42,42 @@ export interface AgentResult {
   iterationsUsed: number;
 }
 
+/**
+ * Progress callback for streaming updates during agent execution
+ */
+export type ProgressCallback = (update: ProgressUpdate) => Promise<void>;
+
+export interface ProgressUpdate {
+  type: 'thinking' | 'tool_start' | 'tool_complete' | 'status';
+  message: string;
+  toolName?: string;
+  iteration?: number;
+}
+
 const DEFAULT_SYSTEM_PROMPT = `You are an autonomous AI agent with direct access to the user's system through tools. You MUST use your tools to accomplish tasks - do not just describe what you would do, actually do it.
 
 CRITICAL: You have REAL tools that execute REAL commands. USE THEM. Never say "I cannot" - you CAN through your tools.
 
 Available tools:
+- web_search: Search the web for information (FASTEST and most reliable for web searches!)
 - bash: Execute shell commands, curl for web requests/APIs
 - read: Read file contents
-- write: Create or overwrite files
+- write: Create or overwrite files (for user projects only, NOT for remembering things!)
 - edit: Make targeted edits to existing files
-- browser: Navigate websites, scrape content, fill forms
+- browser: Navigate websites, scrape content, fill forms (use for interacting with pages, not searching)
 - memory_search: Search past conversations ONLY (not the web!)
 - voice_reply: Send a voice message to the user (use when they ask for audio/voice note)
 
-FOR WEB SEARCHES (sports, news, weather, current events):
-1. Use browser to navigate to Google, ESPN, BBC, etc.
-2. OR use bash with curl to fetch from public APIs or websites
+AUTOMATIC MEMORY - IMPORTANT:
+- Your conversations are AUTOMATICALLY remembered. You don't need to do anything special.
+- Facts about the user (name, preferences, etc.) are automatically extracted and shown in "MEMORIES FROM THE PAST" section above.
+- DO NOT create files to remember things. DO NOT use write/edit tools to store user information.
+- When the user says "remember X" or asks if you remember something, just acknowledge it - the memory system handles storage automatically.
+- Use memory_search to find past conversations if needed.
+
+FOR WEB SEARCHES (sports, news, weather, current events, people, companies):
+1. ALWAYS use web_search FIRST - it's fast, reliable, and avoids CAPTCHAs
+2. If you need more details from a specific page, then use browser to visit that URL
 3. memory_search is ONLY for past conversation history - NOT web search!
 
 PERSISTENCE RULES - THIS IS CRITICAL:
@@ -77,14 +97,27 @@ EXECUTION RULES:
 4. Be concise but thorough
 5. Keep trying until you succeed or have exhausted all reasonable approaches
 
-COMMUNICATION - Keep the user informed:
-1. When you encounter an issue, BRIEFLY tell the user what went wrong and what you're trying next
-2. Examples:
-   - "That API needs authentication. Trying ESPN website instead..."
-   - "Browser timed out. Switching to curl..."
-   - "First site didn't have the data. Checking BBC Sports..."
-3. Don't be verbose - just a short status update before trying the next approach
-4. This helps the user understand what's happening and that you're still working on it
+PROGRESS UPDATES - CRITICAL:
+You MUST always output a brief message BEFORE each tool call to keep the user informed. Never call tools silently.
+- ALWAYS write a short status message before every tool use
+- For multi-step tasks, update the user at each step
+- Be concise - one short sentence is enough
+- This text is sent to the user immediately, so they know you're working
+
+Examples of good progress messages before tool calls:
+- "Searching the web for that..."
+- "Found some results. Let me get more details from LinkedIn..."
+- "Checking GitHub for your profile..."
+- "That didn't work, trying a different approach..."
+- "Got the search results. Here's what I found:"
+
+BAD (don't do this): Calling tools without any text output first.
+GOOD: Always write something brief, then call the tool.
+
+FORMATTING RULES:
+- Do NOT use markdown headings (# or ##) in your replies
+- Use **bold**, *italic*, and simple formatting instead
+- Keep responses clean and conversational, not document-like
 
 You are running on the user's server. Act autonomously and persistently to help them.`;
 
@@ -123,11 +156,13 @@ export class Agent {
 
   /**
    * Process a message with optional attachments
+   * @param onProgress - Optional callback for streaming progress updates
    */
   async processMessage(
     sessionId: string,
     userMessage: string,
-    attachments?: Attachment[]
+    attachments?: Attachment[],
+    onProgress?: ProgressCallback
   ): Promise<AgentResult> {
     const session = await this.sessionManager.getSession(sessionId);
     if (!session) {
@@ -298,6 +333,23 @@ export class Agent {
         break;
       }
 
+      // Send assistant's thinking/planning text to user before executing tools
+      if (textContent && onProgress) {
+        // Clean the text content - remove any JSON tool call patterns that some models output
+        const cleanedText = this.cleanProgressMessage(textContent);
+        if (cleanedText) {
+          try {
+            await onProgress({
+              type: 'thinking',
+              message: cleanedText,
+              iteration: iterations,
+            });
+          } catch (e) {
+            this.logger.warn({ error: (e as Error).message }, 'Progress callback failed');
+          }
+        }
+      }
+
       // Add assistant message with tool use
       await this.sessionManager.addMessage(sessionId, {
         role: 'assistant',
@@ -459,9 +511,9 @@ export class Agent {
         minScore: 0.05,
       });
 
-      // Filter to conversation messages
+      // Filter to conversation messages (raw before gardener processes, context after)
       const recentConversations = conversationMemories
-        .filter((r) => r.entry.type === 'raw' && r.entry.tags?.includes('conversation'))
+        .filter((r) => (r.entry.type === 'raw' || r.entry.type === 'context') && r.entry.tags?.includes('conversation'))
         .slice(0, MAX_CONVERSATION_MESSAGES);
 
       if (recentConversations.length > 0) {
@@ -502,7 +554,80 @@ export class Agent {
   }
 
   private extractToolUses(content: ContentBlock[]): ToolUseContent[] {
-    return content.filter((block): block is ToolUseContent => block.type === 'tool_use');
+    // First try to get proper tool_use blocks
+    const toolUses = content.filter((block): block is ToolUseContent => block.type === 'tool_use');
+    if (toolUses.length > 0) {
+      return toolUses;
+    }
+
+    // Fallback: Some models (like moonshot-v1-128k) output tool calls as JSON in text
+    // Try to parse tool calls from text content
+    const textBlocks = content.filter((block): block is { type: 'text'; text: string } => block.type === 'text');
+    for (const block of textBlocks) {
+      const parsed = this.parseToolCallFromText(block.text);
+      if (parsed) {
+        return [parsed];
+      }
+    }
+
+    return [];
+  }
+
+  /**
+   * Try to parse a tool call from text content (fallback for models that don't use proper tool_calls)
+   */
+  private parseToolCallFromText(text: string): ToolUseContent | null {
+    try {
+      // Look for JSON with function/arguments pattern
+      const functionMatch = text.match(/\{\s*"function"\s*:\s*"([^"]+)"\s*,\s*"arguments"\s*:\s*(\{[^}]+\})\s*\}/);
+      if (functionMatch) {
+        const name = functionMatch[1];
+        const input = JSON.parse(functionMatch[2]);
+        return {
+          type: 'tool_use',
+          id: `fallback-${Date.now()}`,
+          name,
+          input,
+        };
+      }
+
+      // Look for JSON with name/input pattern
+      const nameMatch = text.match(/\{\s*"name"\s*:\s*"([^"]+)"\s*,\s*"input"\s*:\s*(\{[^}]+\})\s*\}/);
+      if (nameMatch) {
+        const name = nameMatch[1];
+        const input = JSON.parse(nameMatch[2]);
+        return {
+          type: 'tool_use',
+          id: `fallback-${Date.now()}`,
+          name,
+          input,
+        };
+      }
+    } catch {
+      // Parsing failed, return null
+    }
+    return null;
+  }
+
+  /**
+   * Clean progress message by removing JSON tool call patterns
+   * Some models output tool calls as JSON text instead of proper tool_calls
+   */
+  private cleanProgressMessage(text: string): string {
+    // Remove JSON blocks that look like tool calls
+    let cleaned = text
+      // Remove JSON objects with function/arguments keys
+      .replace(/\{[\s\S]*?"function"[\s\S]*?"arguments"[\s\S]*?\}/g, '')
+      // Remove JSON objects with name/input keys
+      .replace(/\{[\s\S]*?"name"[\s\S]*?"input"[\s\S]*?\}/g, '')
+      // Remove standalone JSON objects
+      .replace(/```json[\s\S]*?```/g, '')
+      .replace(/```[\s\S]*?\{[\s\S]*?\}[\s\S]*?```/g, '')
+      // Clean up extra whitespace
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+
+    return cleaned;
   }
 
   private async executeTools(
