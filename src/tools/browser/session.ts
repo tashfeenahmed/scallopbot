@@ -520,23 +520,25 @@ export class BrowserSession {
    * Resolve target to selector
    */
   private resolveTarget(target: number | string): string {
-    if (typeof target === 'number') {
-      const selector = this.elementRefs.get(target);
+    // Handle numeric refs (either as number or numeric string like "5")
+    const numTarget = typeof target === 'number' ? target : parseInt(target, 10);
+    if (!isNaN(numTarget) && String(numTarget) === String(target).trim()) {
+      const selector = this.elementRefs.get(numTarget);
       if (!selector) {
         throw new Error(
-          `Element ref ${target} not found. Run snapshot() first to get element refs.`
+          `Element ref ${numTarget} not found. Run snapshot() first to get element refs.`
         );
       }
       return selector;
     }
 
     // If starts with text=, use text selector
-    if (target.startsWith('text=')) {
+    if (typeof target === 'string' && target.startsWith('text=')) {
       return target;
     }
 
     // Otherwise treat as CSS selector
-    return target;
+    return String(target);
   }
 
   /**

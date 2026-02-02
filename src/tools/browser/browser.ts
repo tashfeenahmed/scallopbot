@@ -87,9 +87,9 @@ OPERATIONS:
           description: 'URL to navigate to (for navigate operation)',
         },
         target: {
-          type: ['string', 'number'],
+          type: 'string',
           description:
-            'Element to interact with: ref number from snapshot, "text=..." for text match, or CSS selector',
+            'Element to interact with: ref number from snapshot (as string), "text=..." for text match, or CSS selector',
         },
         text: {
           type: 'string',
