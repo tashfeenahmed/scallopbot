@@ -212,10 +212,20 @@ export class Agent {
         maxTokens: 4096,
       };
 
-      this.logger.debug({ iteration: iterations, messageCount: messages.length }, 'Agent iteration');
+      this.logger.info({ iteration: iterations, messageCount: messages.length, provider: activeProvider.name }, 'Agent iteration starting');
 
       // Call LLM
-      const response = await activeProvider.complete(request);
+      let response;
+      try {
+        response = await activeProvider.complete(request);
+      } catch (error) {
+        this.logger.error({
+          iteration: iterations,
+          error: (error as Error).message,
+          provider: activeProvider.name
+        }, 'LLM call failed');
+        throw error;
+      }
       lastModel = response.model;
 
       // Track token usage
@@ -225,6 +235,15 @@ export class Agent {
       // Process response content
       const textContent = this.extractTextContent(response.content);
       const toolUses = this.extractToolUses(response.content);
+
+      this.logger.info({
+        iteration: iterations,
+        stopReason: response.stopReason,
+        hasText: !!textContent,
+        textLength: textContent?.length || 0,
+        toolUseCount: toolUses.length,
+        toolNames: toolUses.map(t => t.name),
+      }, 'LLM response received');
 
       // If no tool use, we're done
       if (response.stopReason === 'end_turn' || toolUses.length === 0) {
@@ -246,13 +265,23 @@ export class Agent {
       });
 
       // Execute tools and gather results
+      this.logger.info({ toolCount: toolUses.length, tools: toolUses.map(t => t.name) }, 'Executing tools');
       const toolResults = await this.executeTools(toolUses, sessionId);
+      this.logger.info({
+        resultCount: toolResults.length,
+        results: toolResults.map(r => ({
+          type: r.type,
+          isError: 'is_error' in r ? r.is_error : false,
+          contentLength: 'content' in r ? String(r.content).length : 0,
+        }))
+      }, 'Tool execution complete');
 
       // Add tool results as user message
       await this.sessionManager.addMessage(sessionId, {
         role: 'user',
         content: toolResults,
       });
+      this.logger.info({ iteration: iterations }, 'Tool results added to session, continuing loop');
 
       // If this is the last iteration, add a warning
       if (iterations >= this.maxIterations) {

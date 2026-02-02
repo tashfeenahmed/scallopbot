@@ -93,11 +93,40 @@ export class MoonshotProvider implements LLMProvider {
       ...(request.tools && { tools: this.formatTools(request.tools) }),
     };
 
-    const response = await this.executeWithRetry(() =>
-      this.client.chat.completions.create(params)
-    );
+    // Debug logging - log the full request
+    console.log('[MOONSHOT DEBUG] Request params:', JSON.stringify({
+      model: params.model,
+      messageCount: messages.length,
+      hasTools: !!request.tools,
+      toolCount: request.tools?.length || 0,
+    }));
+    console.log('[MOONSHOT DEBUG] Messages:', JSON.stringify(messages, null, 2));
 
-    return this.formatResponse(response);
+    try {
+      const response = await this.executeWithRetry(() =>
+        this.client.chat.completions.create(params)
+      );
+
+      // Debug logging - log the response
+      console.log('[MOONSHOT DEBUG] Response:', JSON.stringify({
+        model: response.model,
+        finishReason: response.choices[0]?.finish_reason,
+        hasToolCalls: !!response.choices[0]?.message?.tool_calls,
+        toolCallCount: response.choices[0]?.message?.tool_calls?.length || 0,
+        contentLength: response.choices[0]?.message?.content?.length || 0,
+        usage: response.usage,
+      }));
+
+      return this.formatResponse(response);
+    } catch (error) {
+      // Debug logging - log any errors
+      console.error('[MOONSHOT DEBUG] Error:', {
+        message: (error as Error).message,
+        name: (error as Error).name,
+        stack: (error as Error).stack?.split('\n').slice(0, 3).join('\n'),
+      });
+      throw error;
+    }
   }
 
   private formatMessages(
