@@ -32,7 +32,7 @@ const openrouterProviderSchema = z.object({
 
 const moonshotProviderSchema = z.object({
   apiKey: z.string().default(''),
-  model: z.string().default('kimi-k2.5'),
+  model: z.string().default('moonshot-v1-128k'),
 });
 
 const xaiProviderSchema = z.object({

@@ -51,10 +51,10 @@ export interface ModelOption {
 
 export const AVAILABLE_MODELS: ModelOption[] = [
   {
-    id: 'kimi-k2.5',
-    name: 'Kimi K2.5',
+    id: 'moonshot-v1-128k',
+    name: 'Moonshot V1 128K',
     provider: 'moonshot',
-    description: 'Multimodal agentic model (Recommended)',
+    description: '128K context, tool-capable (Recommended)',
   },
   {
     id: 'claude-sonnet-4-5-20250929',
@@ -125,7 +125,7 @@ export interface BotConfigStore {
 const DEFAULT_CONFIG: UserBotConfig = {
   botName: 'ScallopBot',
   personalityId: 'friendly',
-  modelId: 'kimi-k2.5',
+  modelId: 'moonshot-v1-128k',
   onboardingComplete: false,
   onboardingStep: 'welcome',
   updatedAt: new Date().toISOString(),

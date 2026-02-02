@@ -67,7 +67,7 @@ describe('BotConfigManager', () => {
 
       expect(config.botName).toBe('ScallopBot');
       expect(config.personalityId).toBe('friendly');
-      expect(config.modelId).toBe('kimi-k2.5');
+      expect(config.modelId).toBe('moonshot-v1-128k');
       expect(config.onboardingComplete).toBe(false);
       expect(config.onboardingStep).toBe('welcome');
     });
@@ -303,8 +303,8 @@ describe('AVAILABLE_MODELS', () => {
     }
   });
 
-  it('should include Kimi K2.5 as the first (recommended) model', () => {
-    expect(AVAILABLE_MODELS[0].name).toContain('Kimi');
-    expect(AVAILABLE_MODELS[0].id).toBe('kimi-k2.5');
+  it('should include Moonshot V1 128K as the first (recommended) model', () => {
+    expect(AVAILABLE_MODELS[0].name).toContain('Moonshot');
+    expect(AVAILABLE_MODELS[0].id).toBe('moonshot-v1-128k');
   });
 });
