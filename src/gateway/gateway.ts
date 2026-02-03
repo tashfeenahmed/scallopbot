@@ -113,9 +113,13 @@ export class Gateway {
       interval: 60000, // 1 minute
     });
 
-    // Initialize LLM-based fact extractor (uses the default provider)
+    // Initialize LLM-based fact extractor
+    // Use a chat-capable provider (not Ollama which may only have embedding models)
     // This runs asynchronously and doesn't block the main conversation
-    const factExtractionProvider = this.providerRegistry.getDefaultProvider();
+    const availableProviders = this.providerRegistry.getAvailableProviders();
+    const factExtractionProvider = availableProviders.find(p => p.name !== 'ollama')
+      || this.providerRegistry.getDefaultProvider();
+
     if (factExtractionProvider && this.memoryStore && this.hybridSearch) {
       this.factExtractor = new LLMFactExtractor({
         provider: factExtractionProvider,
@@ -126,7 +130,7 @@ export class Gateway {
         deduplicationThreshold: 0.85,
         enableFactUpdates: true,
       });
-      this.logger.debug('LLM fact extractor initialized');
+      this.logger.debug({ provider: factExtractionProvider.name }, 'LLM fact extractor initialized');
     }
 
     this.logger.debug('Memory system initialized');
