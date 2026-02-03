@@ -11,7 +11,27 @@ import {
 } from './fact-extractor.js';
 import { MemoryStore, HybridSearch } from './memory.js';
 import type { LLMProvider } from '../providers/types.js';
+import type { EmbeddingProvider } from './embeddings.js';
 import type { Logger } from 'pino';
+
+// Mock embedder that returns simple word-based vectors for testing
+// Designed so facts about the same topic (e.g., "office") have high similarity
+const createMockEmbedder = (): EmbeddingProvider => ({
+  embed: vi.fn().mockImplementation((text: string) => {
+    const lower = text.toLowerCase();
+    // Create a vector that emphasizes topic similarity
+    // Facts about "office" should be highly similar regardless of location
+    return Promise.resolve([
+      lower.includes('office') ? 0.9 : 0,        // office topic (high weight)
+      lower.includes('lives') || lower.includes('home') ? 0.9 : 0, // home topic
+      lower.includes('works') || lower.includes('work') ? 0.9 : 0, // work topic
+      lower.includes('dublin') ? 0.1 : 0,        // location detail (low weight)
+      lower.includes('wicklow') ? 0.1 : 0,       // location detail (low weight)
+      lower.includes('microsoft') ? 0.1 : 0,     // company detail (low weight)
+      0.1, // Small constant to avoid zero vectors
+    ]);
+  }),
+});
 
 // Mock logger
 const createMockLogger = (): Logger =>
@@ -247,6 +267,91 @@ describe('LLMFactExtractor', () => {
 
       // Should update with more specific info
       expect(result.factsUpdated).toBeGreaterThanOrEqual(0);
+    });
+
+    it('should enrich/correct existing fact in same category with new info', async () => {
+      // Add an INCORRECT location fact (Wicklow instead of Dublin)
+      memoryStore.add({
+        content: 'Office is in Wicklow',
+        type: 'fact',
+        sessionId: 'user-123',
+        timestamp: new Date(Date.now() - 86400000), // 1 day old
+        metadata: { subject: 'user', category: 'location' },
+        tags: ['location', 'about-user'],
+      });
+
+      // User now provides CORRECT location info
+      const mockProvider = createMockProvider(JSON.stringify({
+        facts: [
+          { content: 'Office is One Microsoft Court in Dublin', subject: 'user', category: 'location' },
+        ],
+      }));
+
+      const extractor = new LLMFactExtractor({
+        provider: mockProvider,
+        memoryStore,
+        hybridSearch,
+        logger,
+        embedder: createMockEmbedder(), // Need embedder for fact enrichment
+      });
+
+      const result = await extractor.extractFacts(
+        'My office is One Microsoft Court in Dublin',
+        'user-123'
+      );
+
+      // Should update the existing location fact (enrichment)
+      expect(result.factsUpdated).toBe(1);
+      expect(result.factsStored).toBe(0);
+
+      // Verify the old fact was updated, not a new one created
+      const allFacts = memoryStore.getAll().filter(m => m.type === 'fact');
+      const locationFacts = allFacts.filter(f =>
+        f.metadata?.category === 'location' && f.metadata?.subject === 'user'
+      );
+
+      expect(locationFacts.length).toBe(1);
+      expect(locationFacts[0].content).toContain('Dublin');
+      expect(locationFacts[0].content).not.toContain('Wicklow');
+    });
+
+    it('should create new fact if category differs from existing facts', async () => {
+      // Add a work fact
+      memoryStore.add({
+        content: 'Works at Microsoft',
+        type: 'fact',
+        sessionId: 'user-123',
+        timestamp: new Date(),
+        metadata: { subject: 'user', category: 'work' },
+        tags: ['work', 'about-user'],
+      });
+
+      // User provides a LOCATION fact (different category)
+      const mockProvider = createMockProvider(JSON.stringify({
+        facts: [
+          { content: 'Lives in Dublin', subject: 'user', category: 'location' },
+        ],
+      }));
+
+      const extractor = new LLMFactExtractor({
+        provider: mockProvider,
+        memoryStore,
+        hybridSearch,
+        logger,
+      });
+
+      const result = await extractor.extractFacts(
+        'I live in Dublin',
+        'user-123'
+      );
+
+      // Should store as new fact (different category)
+      expect(result.factsStored).toBe(1);
+      expect(result.factsUpdated).toBe(0);
+
+      // Verify both facts exist
+      const allFacts = memoryStore.getAll().filter(m => m.type === 'fact');
+      expect(allFacts.length).toBe(2);
     });
   });
 

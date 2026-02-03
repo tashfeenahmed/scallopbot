@@ -213,14 +213,47 @@ export class LLMFactExtractor {
   }
 
   /**
-   * Process a fact: check for duplicates and store/update
+   * Find existing facts by category and subject for enrichment
+   */
+  private findFactsByCategoryAndSubject(
+    category: FactCategory,
+    subject: string
+  ): MemoryEntry[] {
+    const allFacts = this.memoryStore.getAll().filter(m => m.type === 'fact');
+
+    return allFacts.filter(fact => {
+      const factCategory = fact.metadata?.category as string | undefined;
+      const factSubject = fact.metadata?.subject as string | undefined;
+
+      return (
+        factCategory?.toLowerCase() === category.toLowerCase() &&
+        factSubject?.toLowerCase() === subject.toLowerCase()
+      );
+    });
+  }
+
+  /**
+   * Process a fact: check for duplicates, enrich existing facts, or store new
+   *
+   * Fact Enrichment Logic:
+   * 1. If exact/near duplicate found (>0.85 similarity), skip unless more detailed
+   * 2. If related fact in same category+subject found (>0.5 similarity), UPDATE it
+   *    This handles corrections like "office in Wicklow" → "office in Dublin"
+   * 3. If no related fact, store as new
    */
   private async processAndStoreFact(
     fact: ExtractedFactWithEmbedding,
     userId: string
   ): Promise<'stored' | 'updated' | 'duplicate' | 'error'> {
     try {
-      // Search for similar existing facts
+      // Get embedding for new fact early (needed for both dedup and enrichment)
+      let newEmbedding: number[] | undefined;
+      if (this.embedder) {
+        newEmbedding = await this.embedder.embed(fact.content);
+        fact.embedding = newEmbedding;
+      }
+
+      // Search for similar existing facts by content
       const existingFacts = this.hybridSearch.search(fact.content, {
         type: 'fact',
         subject: fact.subject,
@@ -233,16 +266,12 @@ export class LLMFactExtractor {
       let mostSimilarFact: MemoryEntry | null = null;
       let highestSimilarity = 0;
 
-      if (this.embedder && existingFacts.length > 0) {
-        // Get embedding for new fact
-        const newEmbedding = await this.embedder.embed(fact.content);
-        fact.embedding = newEmbedding;
-
+      if (newEmbedding && existingFacts.length > 0) {
         for (const result of existingFacts) {
           // Get or compute embedding for existing fact
           let existingEmbedding = result.entry.embedding;
           if (!existingEmbedding) {
-            existingEmbedding = await this.embedder.embed(result.entry.content);
+            existingEmbedding = await this.embedder!.embed(result.entry.content);
           }
 
           const similarity = cosineSimilarity(newEmbedding, existingEmbedding);
@@ -269,13 +298,14 @@ export class LLMFactExtractor {
         }
       }
 
-      // If duplicate but new fact is more detailed, update
+      // If exact duplicate but new fact is more detailed, update
       if (isDuplicate && this.enableFactUpdates && mostSimilarFact) {
         if (fact.content.length > mostSimilarFact.content.length * 1.2) {
           // New fact is significantly more detailed - update
           this.memoryStore.update(mostSimilarFact.id, {
             content: fact.content,
             timestamp: new Date(),
+            embedding: fact.embedding,
           });
           this.logger.debug(
             { old: mostSimilarFact.content, new: fact.content },
@@ -292,6 +322,54 @@ export class LLMFactExtractor {
           'Skipping duplicate fact'
         );
         return 'duplicate';
+      }
+
+      // FACT ENRICHMENT: Search for related facts by category+subject
+      // This catches corrections like "office in Wicklow" → "office in Dublin"
+      if (this.enableFactUpdates) {
+        const categoryFacts = this.findFactsByCategoryAndSubject(fact.category, fact.subject);
+
+        if (categoryFacts.length > 0 && newEmbedding) {
+          // Find the most semantically related fact in the same category
+          let mostRelatedFact: MemoryEntry | null = null;
+          let highestRelation = 0;
+          const ENRICHMENT_THRESHOLD = 0.5; // Lower threshold for same-category enrichment
+
+          for (const existingFact of categoryFacts) {
+            let existingEmbedding = existingFact.embedding;
+            if (!existingEmbedding && this.embedder) {
+              existingEmbedding = await this.embedder.embed(existingFact.content);
+            }
+
+            if (existingEmbedding) {
+              const similarity = cosineSimilarity(newEmbedding, existingEmbedding);
+
+              if (similarity > highestRelation && similarity >= ENRICHMENT_THRESHOLD) {
+                highestRelation = similarity;
+                mostRelatedFact = existingFact;
+              }
+            }
+          }
+
+          // If we found a related fact, UPDATE it with the new info (newer takes precedence)
+          if (mostRelatedFact) {
+            this.memoryStore.update(mostRelatedFact.id, {
+              content: fact.content,
+              timestamp: new Date(),
+              embedding: fact.embedding,
+            });
+            this.logger.info(
+              {
+                old: mostRelatedFact.content,
+                new: fact.content,
+                category: fact.category,
+                similarity: highestRelation.toFixed(2)
+              },
+              'Enriched existing fact with updated info'
+            );
+            return 'updated';
+          }
+        }
       }
 
       // Store new fact
