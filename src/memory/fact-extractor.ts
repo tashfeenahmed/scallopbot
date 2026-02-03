@@ -313,8 +313,11 @@ export class LLMFactExtractor {
         }
       } else if (existingFacts.length > 0) {
         // Fallback: use BM25 score for deduplication
+        // BM25 scores are not normalized (0-1), so use a higher threshold
+        const bm25Threshold = 2.0; // Much higher than embedding threshold
         for (const result of existingFacts) {
-          if (result.score > this.deduplicationThreshold) {
+          this.logger.debug({ fact: fact.content, existing: result.entry.content, score: result.score }, 'BM25 comparison');
+          if (result.score > bm25Threshold) {
             isDuplicate = true;
             if (result.score > highestSimilarity) {
               highestSimilarity = result.score;
@@ -343,8 +346,8 @@ export class LLMFactExtractor {
       }
 
       if (isDuplicate) {
-        this.logger.debug(
-          { fact: fact.content, similarity: highestSimilarity },
+        this.logger.info(
+          { fact: fact.content, similarity: highestSimilarity.toFixed(3), mostSimilar: mostSimilarFact?.content },
           'Skipping duplicate fact'
         );
         return 'duplicate';

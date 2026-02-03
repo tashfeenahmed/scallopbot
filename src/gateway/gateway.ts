@@ -172,7 +172,7 @@ export class Gateway {
         hybridSearch: this.hybridSearch,
         logger: this.logger,
         embedder,
-        deduplicationThreshold: 0.85,
+        deduplicationThreshold: 0.95, // Higher threshold - only skip true duplicates
         enableFactUpdates: true,
         scallopStore: this.scallopMemoryStore ?? undefined,
       });
