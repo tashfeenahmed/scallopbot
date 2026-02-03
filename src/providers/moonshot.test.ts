@@ -161,4 +161,127 @@ describe('MoonshotProvider', () => {
       expect(provider.characteristics.isLocal).toBe(false);
     });
   });
+
+  describe('thinking mode', () => {
+    it('should disable thinking mode by default (instant mode)', async () => {
+      const { default: OpenAI } = await import('openai');
+      const mockCreate = vi.fn().mockResolvedValue({
+        choices: [{ message: { content: 'Response' }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 10, completion_tokens: 5 },
+        model: 'kimi-k2.5',
+      });
+
+      const mockInstance = new OpenAI({ apiKey: 'test' });
+      (mockInstance.chat.completions.create as unknown) = mockCreate;
+      (provider as unknown as { client: typeof mockInstance }).client = mockInstance;
+
+      await provider.complete({
+        messages: [{ role: 'user', content: 'Hello' }],
+        enableThinking: false,
+      });
+
+      // Verify thinking is disabled and temperature is 0.6 (instant mode)
+      expect(mockCreate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          thinking: { type: 'disabled' },
+          temperature: 0.6,
+        })
+      );
+    });
+
+    it('should enable thinking mode when enableThinking is true', async () => {
+      const { default: OpenAI } = await import('openai');
+      const mockCreate = vi.fn().mockResolvedValue({
+        choices: [{ message: { content: 'Thoughtful response' }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 10, completion_tokens: 5 },
+        model: 'kimi-k2.5',
+      });
+
+      const mockInstance = new OpenAI({ apiKey: 'test' });
+      (mockInstance.chat.completions.create as unknown) = mockCreate;
+      (provider as unknown as { client: typeof mockInstance }).client = mockInstance;
+
+      await provider.complete({
+        messages: [{ role: 'user', content: 'Hello' }],
+        enableThinking: true,
+      });
+
+      // Verify thinking is NOT disabled (enabled) and temperature is 1.0 (thinking mode)
+      expect(mockCreate).toHaveBeenCalledWith(
+        expect.not.objectContaining({
+          thinking: expect.anything(),
+        })
+      );
+      expect(mockCreate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          temperature: 1.0,
+        })
+      );
+    });
+
+    it('should only return content field, not reasoning_content', async () => {
+      const { default: OpenAI } = await import('openai');
+      const mockCreate = vi.fn().mockResolvedValue({
+        choices: [
+          {
+            message: {
+              // Thinking mode returns both reasoning_content and content
+              reasoning_content: 'Let me think about this step by step...',
+              content: 'The answer is 42.',
+            },
+            finish_reason: 'stop',
+          },
+        ],
+        usage: { prompt_tokens: 10, completion_tokens: 50 },
+        model: 'kimi-k2.5',
+      });
+
+      const mockInstance = new OpenAI({ apiKey: 'test' });
+      (mockInstance.chat.completions.create as unknown) = mockCreate;
+      (provider as unknown as { client: typeof mockInstance }).client = mockInstance;
+
+      const response = await provider.complete({
+        messages: [{ role: 'user', content: 'What is the meaning of life?' }],
+        enableThinking: true,
+      });
+
+      // Should only return the content, NOT the reasoning_content
+      expect(response.content).toHaveLength(1);
+      expect(response.content[0]).toEqual({ type: 'text', text: 'The answer is 42.' });
+      // Verify reasoning_content is NOT in the response
+      expect(response.content[0]).not.toEqual(
+        expect.objectContaining({ text: expect.stringContaining('step by step') })
+      );
+    });
+
+    it('should not enable thinking for non-Kimi models', async () => {
+      const nonKimiProvider = new MoonshotProvider({
+        apiKey: 'test-key',
+        model: 'moonshot-v1-128k', // Legacy model, not Kimi K2
+      });
+
+      const { default: OpenAI } = await import('openai');
+      const mockCreate = vi.fn().mockResolvedValue({
+        choices: [{ message: { content: 'Response' }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 10, completion_tokens: 5 },
+        model: 'moonshot-v1-128k',
+      });
+
+      const mockInstance = new OpenAI({ apiKey: 'test' });
+      (mockInstance.chat.completions.create as unknown) = mockCreate;
+      (nonKimiProvider as unknown as { client: typeof mockInstance }).client = mockInstance;
+
+      await nonKimiProvider.complete({
+        messages: [{ role: 'user', content: 'Hello' }],
+        enableThinking: true, // Request thinking, but model doesn't support it
+      });
+
+      // For non-Kimi models, no thinking param should be sent at all
+      expect(mockCreate).toHaveBeenCalledWith(
+        expect.not.objectContaining({
+          thinking: expect.anything(),
+        })
+      );
+    });
+  });
 });

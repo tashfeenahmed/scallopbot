@@ -111,18 +111,20 @@ export class MoonshotProvider implements LLMProvider {
   async complete(request: CompletionRequest): Promise<CompletionResponse> {
     const messages = this.formatMessages(request);
 
-    // Disable thinking mode for kimi-k2.5 to avoid reasoning_content issues with tool calls
     const isKimiK2 = this.model.includes('kimi-k2');
+    // Enable thinking mode if explicitly requested AND model supports it
+    const enableThinking = request.enableThinking === true && isKimiK2;
 
     const params: OpenAI.ChatCompletionCreateParams & { thinking?: { type: string } } = {
       model: this.model,
       messages,
       max_tokens: request.maxTokens || DEFAULT_MAX_TOKENS,
-      temperature: request.temperature ?? (isKimiK2 ? 0.6 : undefined), // Use 0.6 for instant mode
+      // Temperature: 1.0 for thinking mode, 0.6 for instant mode
+      temperature: request.temperature ?? (isKimiK2 ? (enableThinking ? 1.0 : 0.6) : undefined),
       ...(request.stopSequences && { stop: request.stopSequences }),
       ...(request.tools && { tools: this.formatTools(request.tools) }),
-      // Disable thinking mode for Kimi K2.5 to prevent reasoning_content errors
-      ...(isKimiK2 && { thinking: { type: 'disabled' } }),
+      // Only disable thinking if NOT enabling it (for Kimi K2 models)
+      ...(isKimiK2 && !enableThinking && { thinking: { type: 'disabled' } }),
     };
 
     // Debug logging - log the full request
@@ -263,9 +265,10 @@ export class MoonshotProvider implements LLMProvider {
     const choice = response.choices[0];
     const content: ContentBlock[] = [];
 
-    // Add text content - Kimi K2.5 may use reasoning_content instead of content
+    // Add text content - ONLY use 'content' field, NOT reasoning_content
+    // reasoning_content contains internal thinking which should not be shown to users
     const message = choice.message as OpenAI.ChatCompletionMessage & { reasoning_content?: string };
-    const textContent = message.content || message.reasoning_content;
+    const textContent = message.content;
     if (textContent) {
       content.push({ type: 'text', text: textContent });
     }

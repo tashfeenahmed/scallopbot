@@ -37,6 +37,8 @@ export interface AgentOptions {
   logger: Logger;
   maxIterations: number;
   systemPrompt?: string;
+  /** Enable extended thinking for supported providers (e.g., Kimi K2.5) */
+  enableThinking?: boolean;
 }
 
 export interface AgentResult {
@@ -168,6 +170,8 @@ export class Agent {
   private baseSystemPrompt: string;
   /** Stores recent assistant response for contextual fact extraction */
   private lastAssistantResponse: string = '';
+  /** Enable extended thinking for supported providers */
+  private enableThinking: boolean;
 
   constructor(options: AgentOptions) {
     this.provider = options.provider;
@@ -185,6 +189,7 @@ export class Agent {
     this.logger = options.logger;
     this.maxIterations = options.maxIterations;
     this.baseSystemPrompt = options.systemPrompt || DEFAULT_SYSTEM_PROMPT;
+    this.enableThinking = options.enableThinking ?? false;
   }
 
   /**
@@ -334,6 +339,7 @@ export class Agent {
         system: systemPrompt,
         tools: tools.length > 0 ? tools : undefined,
         maxTokens: 4096,
+        enableThinking: this.enableThinking,
       };
 
       this.logger.info({ iteration: iterations, messageCount: messages.length, provider: activeProvider.name }, 'Agent iteration starting');

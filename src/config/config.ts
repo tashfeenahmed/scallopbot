@@ -33,6 +33,8 @@ const openrouterProviderSchema = z.object({
 const moonshotProviderSchema = z.object({
   apiKey: z.string().default(''),
   model: z.string().default('kimi-k2.5'),
+  /** Enable extended thinking mode for Kimi K2.5 (uses more tokens, better reasoning) */
+  enableThinking: z.boolean().default(false),
 });
 
 const xaiProviderSchema = z.object({
@@ -46,7 +48,7 @@ const providersSchema = z.object({
   groq: groqProviderSchema.default({ apiKey: '', model: 'llama-3.3-70b-versatile' }),
   ollama: ollamaProviderSchema.default({ baseUrl: 'http://localhost:11434', model: 'llama3.2' }),
   openrouter: openrouterProviderSchema.default({ apiKey: '', model: 'anthropic/claude-3.5-sonnet' }),
-  moonshot: moonshotProviderSchema.default({ apiKey: '', model: 'kimi-k2.5' }),
+  moonshot: moonshotProviderSchema.default({ apiKey: '', model: 'kimi-k2.5', enableThinking: false }),
   xai: xaiProviderSchema.default({ apiKey: '', model: 'grok-4' }),
 });
 
@@ -196,6 +198,7 @@ export function loadConfig(): Config {
       moonshot: {
         apiKey: process.env.MOONSHOT_API_KEY || '',
         model: process.env.MOONSHOT_MODEL || 'kimi-k2.5',
+        enableThinking: process.env.KIMI_THINKING_ENABLED === 'true',
       },
       xai: {
         apiKey: process.env.XAI_API_KEY || '',

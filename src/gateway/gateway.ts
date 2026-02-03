@@ -209,6 +209,7 @@ export class Gateway {
       workspace: this.config.agent.workspace,
       logger: this.logger,
       maxIterations: this.config.agent.maxIterations,
+      enableThinking: this.config.providers.moonshot.enableThinking,
     });
     this.logger.debug('Agent initialized');
 

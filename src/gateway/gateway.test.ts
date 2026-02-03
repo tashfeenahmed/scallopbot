@@ -19,7 +19,7 @@ const createMockConfig = (testDir: string, overrides: Record<string, unknown> = 
     groq: { apiKey: '', model: 'llama-3.3-70b-versatile' },
     ollama: { baseUrl: 'http://localhost:11434', model: 'llama3' },
     openrouter: { apiKey: '', model: 'anthropic/claude-3-sonnet' },
-    moonshot: { apiKey: '', model: 'kimi-k2-0905' },
+    moonshot: { apiKey: '', model: 'kimi-k2-0905', enableThinking: false },
     xai: { apiKey: '', model: 'grok-4' },
     ...((overrides.providers as Record<string, unknown>) || {}),
   },

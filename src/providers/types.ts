@@ -60,6 +60,8 @@ export interface CompletionRequest {
   maxTokens?: number;
   temperature?: number;
   stopSequences?: string[];
+  /** Enable extended thinking for supported models (e.g., Kimi K2.5) */
+  enableThinking?: boolean;
 }
 
 // Token usage tracking
