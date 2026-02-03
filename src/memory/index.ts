@@ -35,3 +35,13 @@ export {
   type OpenAIEmbedderOptions,
   type OllamaEmbedderOptions,
 } from './embeddings.js';
+
+// LLM-based fact extraction
+export {
+  LLMFactExtractor,
+  extractFactsWithLLM,
+  type ExtractedFactWithEmbedding,
+  type FactExtractionResult,
+  type FactCategory,
+  type LLMFactExtractorOptions,
+} from './fact-extractor.js';

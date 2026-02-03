@@ -19,7 +19,7 @@ import { TelegramChannel } from '../channels/telegram.js';
 import { createSkillRegistry, type SkillRegistry } from '../skills/registry.js';
 import { Router } from '../routing/router.js';
 import { CostTracker } from '../routing/cost.js';
-import { MemoryStore, HotCollector, BackgroundGardener, HybridSearch, OllamaEmbedder, type EmbeddingProvider } from '../memory/index.js';
+import { MemoryStore, HotCollector, BackgroundGardener, HybridSearch, OllamaEmbedder, LLMFactExtractor, type EmbeddingProvider } from '../memory/index.js';
 import { ContextManager } from '../routing/context.js';
 import { MediaProcessor } from '../media/index.js';
 import { VoiceManager } from '../voice/index.js';
@@ -43,6 +43,7 @@ export class Gateway {
   private hotCollector: HotCollector | null = null;
   private backgroundGardener: BackgroundGardener | null = null;
   private hybridSearch: HybridSearch | null = null;
+  private factExtractor: LLMFactExtractor | null = null;
   private contextManager: ContextManager | null = null;
   private mediaProcessor: MediaProcessor | null = null;
   private voiceManager: VoiceManager | null = null;
@@ -111,6 +112,23 @@ export class Gateway {
       logger: this.logger,
       interval: 60000, // 1 minute
     });
+
+    // Initialize LLM-based fact extractor (uses the default provider)
+    // This runs asynchronously and doesn't block the main conversation
+    const factExtractionProvider = this.providerRegistry.getDefaultProvider();
+    if (factExtractionProvider && this.memoryStore && this.hybridSearch) {
+      this.factExtractor = new LLMFactExtractor({
+        provider: factExtractionProvider,
+        memoryStore: this.memoryStore,
+        hybridSearch: this.hybridSearch,
+        logger: this.logger,
+        embedder,
+        deduplicationThreshold: 0.85,
+        enableFactUpdates: true,
+      });
+      this.logger.debug('LLM fact extractor initialized');
+    }
+
     this.logger.debug('Memory system initialized');
 
     // Initialize context manager
@@ -181,6 +199,7 @@ export class Gateway {
       costTracker: this.costTracker,
       hotCollector: this.hotCollector,
       hybridSearch: this.hybridSearch || undefined,
+      factExtractor: this.factExtractor || undefined,
       contextManager: this.contextManager,
       mediaProcessor: this.mediaProcessor,
       workspace: this.config.agent.workspace,
