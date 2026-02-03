@@ -80,9 +80,14 @@ Rules:
 
 Examples:
 - "I work at Microsoft" → { "content": "Works at Microsoft", "subject": "user", "category": "work" }
-- "My flatmate Hamza works at Google" → { "content": "Works at Google", "subject": "Hamza", "category": "work" }
+- "My flatmate Hamza works at Google" → TWO facts:
+  { "content": "Flatmate is Hamza", "subject": "user", "category": "relationship" }
+  { "content": "Works at Google", "subject": "Hamza", "category": "work" }
+- "I live in Wicklow" → { "content": "Lives in Wicklow", "subject": "user", "category": "location" }
 - "Yes that's my office" (context: One Microsoft Court) → { "content": "Office is One Microsoft Court", "subject": "user", "category": "location" }
 - "I prefer dark mode" → { "content": "Prefers dark mode", "subject": "user", "category": "preference" }
+
+IMPORTANT: Extract ALL facts from a message. If someone mentions a relationship AND another fact, extract BOTH.
 
 Respond with JSON only:
 {
