@@ -19,7 +19,7 @@ import { TelegramChannel } from '../channels/telegram.js';
 import { createSkillRegistry, type SkillRegistry } from '../skills/registry.js';
 import { Router } from '../routing/router.js';
 import { CostTracker } from '../routing/cost.js';
-import { MemoryStore, HotCollector, BackgroundGardener, HybridSearch } from '../memory/index.js';
+import { MemoryStore, HotCollector, BackgroundGardener, HybridSearch, OllamaEmbedder, type EmbeddingProvider } from '../memory/index.js';
 import { ContextManager } from '../routing/context.js';
 import { MediaProcessor } from '../media/index.js';
 import { VoiceManager } from '../voice/index.js';
@@ -90,7 +90,22 @@ export class Gateway {
       this.logger.debug({ filePath: memoryFilePath, count: this.memoryStore.size() }, 'Memories loaded from disk');
     }
     this.hotCollector = new HotCollector({ store: this.memoryStore });
-    this.hybridSearch = new HybridSearch({ store: this.memoryStore });
+
+    // Use OllamaEmbedder for semantic search if Ollama is configured
+    let embedder: EmbeddingProvider | undefined;
+    const ollamaConfig = this.config.providers.ollama;
+    if (ollamaConfig.baseUrl) {
+      embedder = new OllamaEmbedder({
+        baseUrl: ollamaConfig.baseUrl,
+        model: 'nomic-embed-text',  // Use nomic-embed-text for embeddings
+      });
+      this.logger.debug({ model: 'nomic-embed-text', baseUrl: ollamaConfig.baseUrl }, 'Using Ollama for semantic embeddings');
+    }
+
+    this.hybridSearch = new HybridSearch({
+      store: this.memoryStore,
+      embedder,  // Uses TFIDFEmbedder as fallback if undefined
+    });
     this.backgroundGardener = new BackgroundGardener({
       store: this.memoryStore,
       logger: this.logger,
