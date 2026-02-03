@@ -16,12 +16,12 @@ import type { Logger } from 'pino';
 
 // Mock embedder that returns simple word-based vectors for testing
 // Designed so facts about the same topic (e.g., "office") have high similarity
-const createMockEmbedder = (): EmbeddingProvider => ({
-  embed: vi.fn().mockImplementation((text: string) => {
+const createMockEmbedder = (): EmbeddingProvider => {
+  const embedFn = (text: string): number[] => {
     const lower = text.toLowerCase();
     // Create a vector that emphasizes topic similarity
     // Facts about "office" should be highly similar regardless of location
-    return Promise.resolve([
+    return [
       lower.includes('office') ? 0.9 : 0,        // office topic (high weight)
       lower.includes('lives') || lower.includes('home') ? 0.9 : 0, // home topic
       lower.includes('works') || lower.includes('work') ? 0.9 : 0, // work topic
@@ -29,9 +29,17 @@ const createMockEmbedder = (): EmbeddingProvider => ({
       lower.includes('wicklow') ? 0.1 : 0,       // location detail (low weight)
       lower.includes('microsoft') ? 0.1 : 0,     // company detail (low weight)
       0.1, // Small constant to avoid zero vectors
-    ]);
-  }),
-});
+    ];
+  };
+
+  return {
+    name: 'mock-embedder',
+    dimension: 7,
+    embed: vi.fn().mockImplementation((text: string) => Promise.resolve(embedFn(text))),
+    embedBatch: vi.fn().mockImplementation((texts: string[]) => Promise.resolve(texts.map(embedFn))),
+    isAvailable: vi.fn().mockReturnValue(true),
+  };
+};
 
 // Mock logger
 const createMockLogger = (): Logger =>
