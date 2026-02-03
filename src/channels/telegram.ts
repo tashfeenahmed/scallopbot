@@ -619,18 +619,9 @@ export class TelegramChannel {
         }
       }
 
-      if (this.enableVoiceReply && result.response.length <= MAX_VOICE_RESPONSE_LENGTH) {
-        try {
-          const voiceResult = await this.voiceManager.synthesize(result.response);
-          const formatExtMap: Record<string, string> = {
-            opus: 'ogg', ogg: 'ogg', mp3: 'mp3', wav: 'wav', aac: 'aac', pcm: 'wav', aiff: 'aiff',
-          };
-          const ext = formatExtMap[voiceResult.format.toLowerCase()] || voiceResult.format;
-          await ctx.replyWithVoice(new InputFile(voiceResult.audio, `response.${ext}`));
-        } catch (error) {
-          this.logger.debug({ error: (error as Error).message }, 'Failed to send voice reply');
-        }
-      }
+      // Voice replies are now contextual - the agent can use the voice_reply tool
+      // when it determines a voice response is appropriate, rather than automatically
+      // replying with voice just because the user sent a voice message.
     } catch (error) {
       clearInterval(typingInterval);
       this.logger.error({ userId, error: (error as Error).message }, 'Failed to process voice message');
