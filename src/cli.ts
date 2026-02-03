@@ -8,6 +8,7 @@ import { Gateway, setupGracefulShutdown } from './gateway/index.js';
 import { createLogger } from './utils/logger.js';
 import { SkillPackageManager, SkillInstaller } from './skills/clawhub.js';
 import { SkillLoader } from './skills/loader.js';
+import { migrateJsonlToSqlite, verifyMigration, rollbackMigration } from './memory/migrate.js';
 
 const VERSION = '0.1.0';
 
@@ -434,6 +435,137 @@ skillCommand
       console.log('');
     } catch (error) {
       console.error('Info failed:', (error as Error).message);
+      process.exit(1);
+    }
+  });
+
+// Migrate command group for ScallopMemory
+const migrateCommand = program
+  .command('migrate')
+  .description('Memory migration tools (JSONL -> SQLite)');
+
+// migrate run
+migrateCommand
+  .command('run')
+  .description('Migrate memories from JSONL to SQLite (ScallopMemory)')
+  .option('-s, --source <path>', 'Source JSONL file path', 'memories.jsonl')
+  .option('-d, --dest <path>', 'Destination SQLite database path', 'memories.db')
+  .option('--no-backup', 'Skip creating backup of source file')
+  .option('-u, --user <id>', 'Default user ID for memories without one', 'default')
+  .action(async (options: { source: string; dest: string; backup: boolean; user: string }) => {
+    try {
+      resetConfig();
+      const config = loadConfig();
+      const workspace = config.agent.workspace;
+
+      // Resolve paths relative to workspace
+      const jsonlPath = options.source.startsWith('/')
+        ? options.source
+        : `${workspace}/${options.source}`;
+      const dbPath = options.dest.startsWith('/')
+        ? options.dest
+        : `${workspace}/${options.dest}`;
+
+      console.log('ScallopMemory Migration: JSONL -> SQLite');
+      console.log('========================================');
+      console.log(`Source: ${jsonlPath}`);
+      console.log(`Target: ${dbPath}`);
+      console.log(`Backup: ${options.backup ? 'Yes' : 'No'}`);
+      console.log('');
+
+      const result = await migrateJsonlToSqlite({
+        jsonlPath,
+        dbPath,
+        createBackup: options.backup,
+        defaultUserId: options.user,
+      });
+
+      if (result.success) {
+        console.log('✓ Migration successful!');
+        console.log(`  Imported: ${result.memoriesImported}`);
+        console.log(`  Skipped: ${result.memoriesSkipped}`);
+        if (result.backupPath) {
+          console.log(`  Backup: ${result.backupPath}`);
+        }
+        console.log('');
+        console.log('To enable ScallopMemory, set:');
+        console.log('  USE_SCALLOP_MEMORY=true');
+        console.log(`  MEMORY_DB_PATH=${options.dest}`);
+      } else {
+        console.error('✗ Migration failed!');
+        for (const error of result.errors) {
+          console.error(`  - ${error}`);
+        }
+        process.exit(1);
+      }
+    } catch (error) {
+      console.error('Migration error:', (error as Error).message);
+      process.exit(1);
+    }
+  });
+
+// migrate verify
+migrateCommand
+  .command('verify')
+  .description('Verify migration by comparing entry counts')
+  .option('-s, --source <path>', 'Source JSONL file path', 'memories.jsonl')
+  .option('-d, --dest <path>', 'Destination SQLite database path', 'memories.db')
+  .action(async (options: { source: string; dest: string }) => {
+    try {
+      resetConfig();
+      const config = loadConfig();
+      const workspace = config.agent.workspace;
+
+      const jsonlPath = options.source.startsWith('/')
+        ? options.source
+        : `${workspace}/${options.source}`;
+      const dbPath = options.dest.startsWith('/')
+        ? options.dest
+        : `${workspace}/${options.dest}`;
+
+      console.log('Verifying migration...');
+      const result = await verifyMigration(jsonlPath, dbPath);
+
+      console.log(`  JSONL entries: ${result.jsonlCount}`);
+      console.log(`  SQLite entries: ${result.dbCount}`);
+      console.log(`  Match: ${result.match ? '✓ Yes' : '✗ No'}`);
+
+      if (!result.match) {
+        process.exit(1);
+      }
+    } catch (error) {
+      console.error('Verify error:', (error as Error).message);
+      process.exit(1);
+    }
+  });
+
+// migrate rollback
+migrateCommand
+  .command('rollback')
+  .description('Remove SQLite database (use backup JSONL to restore)')
+  .option('-d, --dest <path>', 'SQLite database path to remove', 'memories.db')
+  .option('--force', 'Skip confirmation prompt')
+  .action(async (options: { dest: string; force: boolean }) => {
+    try {
+      resetConfig();
+      const config = loadConfig();
+      const workspace = config.agent.workspace;
+
+      const dbPath = options.dest.startsWith('/')
+        ? options.dest
+        : `${workspace}/${options.dest}`;
+
+      if (!options.force) {
+        console.log(`WARNING: This will delete ${dbPath}`);
+        console.log('Use --force to skip this confirmation');
+        process.exit(1);
+      }
+
+      console.log(`Removing SQLite database: ${dbPath}`);
+      await rollbackMigration(dbPath);
+      console.log('✓ Rollback complete');
+    } catch (error) {
+      console.error('Rollback error:', (error as Error).message);
       process.exit(1);
     }
   });

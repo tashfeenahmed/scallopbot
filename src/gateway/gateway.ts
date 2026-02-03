@@ -19,7 +19,16 @@ import { TelegramChannel } from '../channels/telegram.js';
 import { createSkillRegistry, type SkillRegistry } from '../skills/registry.js';
 import { Router } from '../routing/router.js';
 import { CostTracker } from '../routing/cost.js';
-import { MemoryStore, HotCollector, BackgroundGardener, HybridSearch, OllamaEmbedder, LLMFactExtractor, type EmbeddingProvider } from '../memory/index.js';
+import {
+  MemoryStore,
+  HotCollector,
+  BackgroundGardener,
+  HybridSearch,
+  OllamaEmbedder,
+  LLMFactExtractor,
+  ScallopMemoryStore,
+  type EmbeddingProvider,
+} from '../memory/index.js';
 import { ContextManager } from '../routing/context.js';
 import { MediaProcessor } from '../media/index.js';
 import { VoiceManager } from '../voice/index.js';
@@ -40,6 +49,7 @@ export class Gateway {
   private router: Router | null = null;
   private costTracker: CostTracker | null = null;
   private memoryStore: MemoryStore | null = null;
+  private scallopMemoryStore: ScallopMemoryStore | null = null;
   private hotCollector: HotCollector | null = null;
   private backgroundGardener: BackgroundGardener | null = null;
   private hybridSearch: HybridSearch | null = null;
@@ -81,17 +91,6 @@ export class Gateway {
     });
     this.logger.debug('Cost tracker initialized');
 
-    // Initialize memory system with persistence
-    const memoryFilePath = this.config.memory.persist
-      ? path.join(this.config.agent.workspace, this.config.memory.filePath)
-      : undefined;
-    this.memoryStore = new MemoryStore({ filePath: memoryFilePath });
-    if (memoryFilePath) {
-      await this.memoryStore.load();
-      this.logger.debug({ filePath: memoryFilePath, count: this.memoryStore.size() }, 'Memories loaded from disk');
-    }
-    this.hotCollector = new HotCollector({ store: this.memoryStore });
-
     // Use OllamaEmbedder for semantic search if Ollama is configured
     let embedder: EmbeddingProvider | undefined;
     const ollamaConfig = this.config.providers.ollama;
@@ -103,15 +102,61 @@ export class Gateway {
       this.logger.debug({ model: 'nomic-embed-text', baseUrl: ollamaConfig.baseUrl }, 'Using Ollama for semantic embeddings');
     }
 
-    this.hybridSearch = new HybridSearch({
-      store: this.memoryStore,
-      embedder,  // Uses TFIDFEmbedder as fallback if undefined
-    });
-    this.backgroundGardener = new BackgroundGardener({
-      store: this.memoryStore,
-      logger: this.logger,
-      interval: 60000, // 1 minute
-    });
+    // Initialize memory system - use ScallopMemory if configured, otherwise legacy JSONL
+    if (this.config.memory.useScallopMemory) {
+      // ScallopMemory: SQLite-based with relationships, decay, profiles
+      const dbPath = path.join(this.config.agent.workspace, this.config.memory.dbPath);
+      this.scallopMemoryStore = new ScallopMemoryStore({
+        dbPath,
+        logger: this.logger,
+        embedder,
+      });
+      this.logger.info({ dbPath, count: this.scallopMemoryStore.getCount() }, 'ScallopMemory initialized');
+
+      // Legacy system still needed for HotCollector compatibility
+      const memoryFilePath = this.config.memory.persist
+        ? path.join(this.config.agent.workspace, this.config.memory.filePath)
+        : undefined;
+      this.memoryStore = new MemoryStore({ filePath: memoryFilePath });
+      if (memoryFilePath) {
+        await this.memoryStore.load();
+      }
+      this.hotCollector = new HotCollector({ store: this.memoryStore });
+
+      this.hybridSearch = new HybridSearch({
+        store: this.memoryStore,
+        embedder,
+      });
+
+      // Background gardener now also processes ScallopMemory decay
+      this.backgroundGardener = new BackgroundGardener({
+        store: this.memoryStore,
+        logger: this.logger,
+        interval: 60000, // 1 minute
+        scallopStore: this.scallopMemoryStore,
+      });
+    } else {
+      // Legacy JSONL-based memory system
+      const memoryFilePath = this.config.memory.persist
+        ? path.join(this.config.agent.workspace, this.config.memory.filePath)
+        : undefined;
+      this.memoryStore = new MemoryStore({ filePath: memoryFilePath });
+      if (memoryFilePath) {
+        await this.memoryStore.load();
+        this.logger.debug({ filePath: memoryFilePath, count: this.memoryStore.size() }, 'Memories loaded from disk');
+      }
+      this.hotCollector = new HotCollector({ store: this.memoryStore });
+
+      this.hybridSearch = new HybridSearch({
+        store: this.memoryStore,
+        embedder,
+      });
+      this.backgroundGardener = new BackgroundGardener({
+        store: this.memoryStore,
+        logger: this.logger,
+        interval: 60000, // 1 minute
+      });
+    }
 
     // Initialize LLM-based fact extractor
     // Use a chat-capable provider (not Ollama which may only have embedding models)
@@ -129,6 +174,7 @@ export class Gateway {
         embedder,
         deduplicationThreshold: 0.85,
         enableFactUpdates: true,
+        scallopStore: this.scallopMemoryStore ?? undefined,
       });
       this.logger.debug({ provider: factExtractionProvider.name }, 'LLM fact extractor initialized');
     }
@@ -359,6 +405,12 @@ export class Gateway {
     if (this.telegramChannel) {
       await this.telegramChannel.stop();
       this.telegramChannel = null;
+    }
+
+    // Close ScallopMemoryStore (SQLite database)
+    if (this.scallopMemoryStore) {
+      this.scallopMemoryStore.close();
+      this.scallopMemoryStore = null;
     }
 
     this.isRunning = false;
