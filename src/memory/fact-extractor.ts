@@ -399,12 +399,22 @@ export class LLMFactExtractor {
       }
 
       // Store new fact - use ScallopMemory if available
+      // For third-party facts, include the subject name in the content for searchability
+      // e.g., "Works at Google" with subject "Hamza" becomes "Hamza works at Google"
+      let searchableContent = fact.content;
+      if (fact.subject !== 'user') {
+        // Prepend subject name if not already present in content
+        if (!fact.content.toLowerCase().includes(fact.subject.toLowerCase())) {
+          searchableContent = `${fact.subject} ${fact.content.toLowerCase()}`;
+        }
+      }
+
       if (this.scallopStore) {
         // Map fact category to ScallopMemory category
         const scallopCategory = this.mapToScallopCategory(fact.category);
         await this.scallopStore.add({
           userId,
-          content: fact.content,
+          content: searchableContent,
           category: scallopCategory,
           importance: 5,
           confidence: 0.8,
@@ -414,11 +424,11 @@ export class LLMFactExtractor {
             extractedBy: 'llm',
           },
         });
-        this.logger.debug({ fact: fact.content, subject: fact.subject, store: 'scallop' }, 'Stored new fact in ScallopMemory');
+        this.logger.debug({ fact: searchableContent, subject: fact.subject, store: 'scallop' }, 'Stored new fact in ScallopMemory');
       } else {
         // Legacy storage
         this.memoryStore.add({
-          content: fact.content,
+          content: searchableContent,
           type: 'fact',
           sessionId: userId,  // Use userId as sessionId for facts
           timestamp: new Date(),
@@ -431,7 +441,7 @@ export class LLMFactExtractor {
           tags: [fact.category, fact.subject === 'user' ? 'about-user' : `about-${fact.subject}`],
           embedding: fact.embedding,
         });
-        this.logger.debug({ fact: fact.content, subject: fact.subject }, 'Stored new fact');
+        this.logger.debug({ fact: searchableContent, subject: fact.subject }, 'Stored new fact');
       }
       return 'stored';
     } catch (error) {
