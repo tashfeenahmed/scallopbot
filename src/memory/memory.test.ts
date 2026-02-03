@@ -8,6 +8,7 @@ import {
   extractFacts,
   summarizeMemories,
   calculateBM25Score,
+  type ExtractedFact,
 } from './memory.js';
 import type { Logger } from 'pino';
 
@@ -279,7 +280,7 @@ describe('BackgroundGardener', () => {
       );
 
       expect(facts.length).toBeGreaterThan(0);
-      expect(facts.some((f) => f.toLowerCase().includes('john'))).toBe(true);
+      expect(facts.some((f) => f.content.toLowerCase().includes('john'))).toBe(true);
     });
 
     it('should handle empty input', () => {
@@ -289,7 +290,7 @@ describe('BackgroundGardener', () => {
 
     it('should extract preferences', () => {
       const facts = extractFacts('I prefer using VS Code over other editors');
-      expect(facts.some((f) => f.toLowerCase().includes('prefer'))).toBe(true);
+      expect(facts.some((f) => f.content.toLowerCase().includes('prefer'))).toBe(true);
     });
   });
 
@@ -716,22 +717,90 @@ describe('HybridSearch', () => {
       expect(nodeResult).toBeDefined();
     });
   });
+
+  describe('subject filtering', () => {
+    beforeEach(() => {
+      // Add facts about user
+      store.add({
+        id: 'user-work',
+        content: 'Occupation: Microsoft',
+        type: 'fact',
+        timestamp: new Date(),
+        sessionId: 's1',
+        metadata: { subject: 'user' },
+      });
+      store.add({
+        id: 'user-location',
+        content: 'Location: Dublin',
+        type: 'fact',
+        timestamp: new Date(),
+        sessionId: 's1',
+        metadata: { subject: 'user' },
+      });
+      // Add facts about third party
+      store.add({
+        id: 'hamza-work',
+        content: 'Occupation: Henry Schein',
+        type: 'fact',
+        timestamp: new Date(),
+        sessionId: 's1',
+        metadata: { subject: 'Hamza' },
+      });
+    });
+
+    it('should filter by subject when specified', () => {
+      const results = search.search('Microsoft', { subject: 'user' });
+
+      // Should only return user facts matching the query
+      expect(results.length).toBe(1);
+      expect(results[0].entry.id).toBe('user-work');
+    });
+
+    it('should filter by third party subject', () => {
+      const results = search.search('Henry Schein', { subject: 'Hamza' });
+
+      expect(results.length).toBe(1);
+      expect(results[0].entry.id).toBe('hamza-work');
+    });
+
+    it('should boost user facts by default', () => {
+      const results = search.search('Occupation work job');
+
+      // User fact should rank higher due to boost
+      const userFactIndex = results.findIndex((r) => r.entry.id === 'user-work');
+      const hamzaFactIndex = results.findIndex((r) => r.entry.id === 'hamza-work');
+
+      // Both should be found
+      expect(userFactIndex).not.toBe(-1);
+      expect(hamzaFactIndex).not.toBe(-1);
+
+      // User fact should rank higher (lower index)
+      expect(userFactIndex).toBeLessThan(hamzaFactIndex);
+    });
+
+    it('should be case insensitive for subject matching', () => {
+      const results = search.search('Henry Schein Occupation', { subject: 'hamza' }); // lowercase
+
+      expect(results.length).toBe(1);
+      expect(results[0].entry.metadata?.subject).toBe('Hamza');
+    });
+  });
 });
 
 describe('extractFacts', () => {
   it('should extract name mentions', () => {
     const facts = extractFacts('My name is Sarah');
-    expect(facts.some((f) => f.includes('Sarah'))).toBe(true);
+    expect(facts.some((f) => f.content.includes('Sarah'))).toBe(true);
   });
 
   it('should extract location mentions', () => {
     const facts = extractFacts('I live in San Francisco');
-    expect(facts.some((f) => f.toLowerCase().includes('san francisco'))).toBe(true);
+    expect(facts.some((f) => f.content.toLowerCase().includes('san francisco'))).toBe(true);
   });
 
   it('should extract job mentions', () => {
     const facts = extractFacts('I work as a data scientist');
-    expect(facts.some((f) => f.toLowerCase().includes('data scientist'))).toBe(true);
+    expect(facts.some((f) => f.content.toLowerCase().includes('data scientist'))).toBe(true);
   });
 
   it('should extract preferences', () => {
@@ -743,5 +812,77 @@ describe('extractFacts', () => {
     // Using patterns that extractFacts can recognize
     const facts = extractFacts('My name is Bob and I live in Seattle. I work as a developer.');
     expect(facts.length).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe('extractFacts with subject attribution', () => {
+  it('should attribute facts about the user to "user"', () => {
+    const facts = extractFacts('I work at Microsoft');
+    const workFact = facts.find((f) => f.content.toLowerCase().includes('microsoft'));
+    expect(workFact).toBeDefined();
+    expect(workFact?.subject).toBe('user');
+  });
+
+  it('should attribute user name to "user"', () => {
+    const facts = extractFacts('My name is Tashfeen');
+    const nameFact = facts.find((f) => f.content.includes('Tashfeen'));
+    expect(nameFact).toBeDefined();
+    expect(nameFact?.subject).toBe('user');
+  });
+
+  it('should attribute user location to "user"', () => {
+    const facts = extractFacts('I live in Dublin');
+    const locationFact = facts.find((f) => f.content.toLowerCase().includes('dublin'));
+    expect(locationFact).toBeDefined();
+    expect(locationFact?.subject).toBe('user');
+  });
+
+  it('should attribute flatmate facts to the flatmate name', () => {
+    const facts = extractFacts('My flatmate Hamza works at Henry Schein');
+    const workFact = facts.find((f) => f.content.toLowerCase().includes('henry schein'));
+    expect(workFact).toBeDefined();
+    expect(workFact?.subject.toLowerCase()).toBe('hamza');
+  });
+
+  it('should attribute friend facts to the friend name', () => {
+    const facts = extractFacts('My friend John lives in London');
+    const locationFact = facts.find((f) => f.content.toLowerCase().includes('london'));
+    expect(locationFact).toBeDefined();
+    expect(locationFact?.subject.toLowerCase()).toBe('john');
+  });
+
+  it('should handle "X is my flatmate" pattern', () => {
+    const facts = extractFacts('Hamza is my flatmate and he works at Google');
+    const relationFact = facts.find((f) => f.content.toLowerCase().includes('flatmate'));
+    expect(relationFact).toBeDefined();
+    expect(relationFact?.subject.toLowerCase()).toBe('hamza');
+  });
+
+  it('should handle complex sentence with both user and third party facts', () => {
+    const facts = extractFacts('I work at Microsoft and my colleague Sarah works at Amazon');
+
+    const userWorkFact = facts.find((f) =>
+      f.content.toLowerCase().includes('microsoft') && f.subject === 'user'
+    );
+    const sarahWorkFact = facts.find((f) =>
+      f.content.toLowerCase().includes('amazon') && f.subject.toLowerCase() === 'sarah'
+    );
+
+    expect(userWorkFact).toBeDefined();
+    expect(sarahWorkFact).toBeDefined();
+  });
+
+  it('should handle "my brother/sister" patterns', () => {
+    const facts = extractFacts('My brother Ahmed is a doctor');
+    const fact = facts.find((f) => f.content.toLowerCase().includes('doctor'));
+    expect(fact).toBeDefined();
+    expect(fact?.subject.toLowerCase()).toBe('ahmed');
+  });
+
+  it('should return ExtractedFact objects with content and subject', () => {
+    const facts = extractFacts('I prefer dark mode');
+    expect(facts.length).toBeGreaterThan(0);
+    expect(facts[0]).toHaveProperty('content');
+    expect(facts[0]).toHaveProperty('subject');
   });
 });

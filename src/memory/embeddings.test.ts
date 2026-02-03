@@ -6,11 +6,13 @@ import { describe, it, expect } from 'vitest';
 import {
   TFIDFEmbedder,
   OpenAIEmbedder,
+  OllamaEmbedder,
   EmbeddingCache,
   cosineSimilarity,
   euclideanDistance,
   createDefaultEmbedder,
   createOpenAIEmbedder,
+  createOllamaEmbedder,
 } from './embeddings.js';
 
 describe('TFIDFEmbedder', () => {
@@ -324,5 +326,58 @@ describe('createOpenAIEmbedder', () => {
   it('should create OpenAIEmbedder with custom model', () => {
     const embedder = createOpenAIEmbedder('test-key', 'text-embedding-3-large');
     expect(embedder.dimension).toBe(3072);
+  });
+});
+
+describe('OllamaEmbedder', () => {
+  describe('constructor', () => {
+    it('should create embedder with default settings', () => {
+      const embedder = new OllamaEmbedder();
+      expect(embedder.name).toBe('ollama');
+      expect(embedder.dimension).toBe(768); // embeddinggemma default
+    });
+
+    it('should use custom model', () => {
+      const embedder = new OllamaEmbedder({ model: 'nomic-embed-text' });
+      expect(embedder.dimension).toBe(768);
+    });
+
+    it('should adjust dimension for mxbai model', () => {
+      const embedder = new OllamaEmbedder({ model: 'mxbai-embed-large' });
+      expect(embedder.dimension).toBe(1024);
+    });
+
+    it('should adjust dimension for all-minilm model', () => {
+      const embedder = new OllamaEmbedder({ model: 'all-minilm' });
+      expect(embedder.dimension).toBe(384);
+    });
+
+    it('should use custom base URL', () => {
+      const embedder = new OllamaEmbedder({ baseUrl: 'http://remote:11434' });
+      expect(embedder.name).toBe('ollama');
+    });
+  });
+
+  describe('isAvailable', () => {
+    it('should return true', () => {
+      const embedder = new OllamaEmbedder();
+      expect(embedder.isAvailable()).toBe(true);
+    });
+  });
+});
+
+describe('createOllamaEmbedder', () => {
+  it('should create OllamaEmbedder with defaults', () => {
+    const embedder = createOllamaEmbedder();
+    expect(embedder.name).toBe('ollama');
+  });
+
+  it('should create OllamaEmbedder with custom options', () => {
+    const embedder = createOllamaEmbedder({
+      baseUrl: 'http://localhost:11435',
+      model: 'nomic-embed-text',
+    });
+    expect(embedder.name).toBe('ollama');
+    expect(embedder.dimension).toBe(768);
   });
 });

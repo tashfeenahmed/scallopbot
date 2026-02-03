@@ -328,92 +328,227 @@ export class HotCollector {
 }
 
 /**
- * Extract facts from text
+ * Extracted fact with subject attribution
  */
-export function extractFacts(text: string): string[] {
+export interface ExtractedFact {
+  /** The fact content */
+  content: string;
+  /** Who the fact is about: "user" or a person's name */
+  subject: string;
+}
+
+/**
+ * Relationship types we track
+ */
+const RELATIONSHIP_TYPES = [
+  'friend', 'flatmate', 'roommate', 'colleague', 'coworker',
+  'brother', 'sister', 'mom', 'dad', 'mother', 'father',
+  'wife', 'husband', 'partner', 'boss', 'manager', 'teammate',
+];
+
+const RELATIONSHIP_REGEX = new RegExp(RELATIONSHIP_TYPES.join('|'), 'i');
+
+/**
+ * Extract the current subject context from text
+ * Looks for patterns like "my flatmate X" and tracks X as the subject
+ */
+function findThirdPartySubject(text: string): Map<number, string> {
+  const subjectRanges = new Map<number, string>();
+
+  // Pattern: "my <relationship> <Name>" - marks the following clauses as about Name
+  // Use [Mm]y to match both "my" and "My"
+  const myRelPattern = /[Mm]y\s+(friend|flatmate|roommate|colleague|coworker|brother|sister|mom|dad|mother|father|wife|husband|partner|boss|manager|teammate)\s+([A-Z][a-z]+)/g;
+
+  // Pattern: "<Name> is my <relationship>" - marks preceding/following as about Name
+  const isMyPattern = /([A-Z][a-z]+)\s+is\s+[Mm]y\s+(friend|flatmate|roommate|colleague|coworker|brother|sister|mom|dad|mother|father|wife|husband|partner|boss|manager|teammate)/g;
+
+  let match;
+
+  // Find "my flatmate Hamza" patterns
+  while ((match = myRelPattern.exec(text)) !== null) {
+    const name = match[2];
+    const startPos = match.index;
+    // This subject applies from here to end of sentence or next subject
+    subjectRanges.set(startPos, name);
+  }
+
+  // Find "Hamza is my flatmate" patterns
+  while ((match = isMyPattern.exec(text)) !== null) {
+    const name = match[1];
+    const startPos = match.index;
+    subjectRanges.set(startPos, name);
+  }
+
+  return subjectRanges;
+}
+
+/**
+ * Determine subject for a fact at a given position
+ */
+function getSubjectAtPosition(position: number, subjectRanges: Map<number, string>): string {
+  let currentSubject = 'user';
+  let lastPos = -1;
+
+  for (const [pos, subject] of subjectRanges) {
+    if (pos <= position && pos > lastPos) {
+      currentSubject = subject;
+      lastPos = pos;
+    }
+  }
+
+  return currentSubject;
+}
+
+/**
+ * Extract facts from text with subject attribution
+ */
+export function extractFacts(text: string): ExtractedFact[] {
   if (!text.trim()) return [];
 
-  const facts: string[] = [];
+  const facts: ExtractedFact[] = [];
+  const subjectRanges = findThirdPartySubject(text);
 
-  // Name patterns
+  // Name patterns (user's own name) - case insensitive for "i'm", "I'm" etc
   const namePatterns = [
     /(?:my name is|i'm|i am|call me)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/gi,
-    /(?:i'm|i am)\s+([A-Z][a-z]+)/gi,
   ];
 
-  // Location patterns
+  // Location patterns - case insensitive for "i live", "I live" etc
   const locationPatterns = [
     /(?:i live in|i'm from|i am from|i'm in|located in|based in)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)/gi,
   ];
 
-  // Job patterns
-  const jobPatterns = [
+  // Job patterns - user (case insensitive for "i work")
+  const userJobPatterns = [
     /(?:i work as|i am a|i'm a|work as a|my job is)\s+([a-z]+(?:\s+[a-z]+)*)/gi,
-    /(?:work at|working at|employed at|employed by)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)/gi,
+    /(?:i work at|i'm working at|i am employed at)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)/gi,
   ];
+
+  // Job patterns - third party (comes after relationship mention) - NO 'i' flag to preserve case matching
+  // Pattern for company names (capitalized): "works at Google"
+  const thirdPartyJobPattern = /(?:works at|working at|employed at|employed by)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)/g;
+  // Pattern for job titles (lowercase): "is a doctor", "is an engineer"
+  const thirdPartyJobTitlePattern = /(?:is a|is an)\s+([a-z]+(?:\s+[a-z]+)*)/g;
+
+  // Location patterns - third party - NO 'i' flag
+  const thirdPartyLocationPattern = /(?:lives in|is from|is based in|is in)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)/g;
 
   // Preference patterns
   const preferencePatterns = [
     /(?:i prefer|i like|i love|i enjoy|i hate|i dislike)\s+([^.,!?]+)/gi,
   ];
 
-  // Relationship patterns (my friend, my flatmate, my colleague, etc.)
-  const relationshipPatterns = [
-    /(?:my\s+)(friend|flatmate|roommate|colleague|coworker|brother|sister|mom|dad|mother|father|wife|husband|partner|boss|manager|teammate)(?:\s+is|\s+named|\s*,?\s*)([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)/gi,
-    /([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s+(?:is|,)\s+my\s+(friend|flatmate|roommate|colleague|coworker|brother|sister|mom|dad|mother|father|wife|husband|partner|boss|manager|teammate)/gi,
-  ];
-
-  // Extract names
+  // Extract user's name
   for (const pattern of namePatterns) {
-    const matches = text.matchAll(pattern);
-    for (const match of matches) {
-      facts.push(`Name: ${match[1]}`);
+    let match;
+    while ((match = pattern.exec(text)) !== null) {
+      facts.push({
+        content: `Name: ${match[1]}`,
+        subject: 'user',
+      });
     }
   }
 
-  // Extract locations
+  // Extract user's location
   for (const pattern of locationPatterns) {
-    const matches = text.matchAll(pattern);
-    for (const match of matches) {
-      facts.push(`Location: ${match[1]}`);
+    let match;
+    while ((match = pattern.exec(text)) !== null) {
+      facts.push({
+        content: `Location: ${match[1]}`,
+        subject: 'user',
+      });
     }
   }
 
-  // Extract jobs
-  for (const pattern of jobPatterns) {
-    const matches = text.matchAll(pattern);
-    for (const match of matches) {
-      facts.push(`Occupation: ${match[1]}`);
+  // Extract user's job
+  for (const pattern of userJobPatterns) {
+    let match;
+    while ((match = pattern.exec(text)) !== null) {
+      facts.push({
+        content: `Occupation: ${match[1]}`,
+        subject: 'user',
+      });
     }
   }
 
-  // Extract preferences
+  // Extract preferences (always user)
   for (const pattern of preferencePatterns) {
-    const matches = text.matchAll(pattern);
-    for (const match of matches) {
-      facts.push(`Preference: ${match[0].trim()}`);
+    let match;
+    while ((match = pattern.exec(text)) !== null) {
+      facts.push({
+        content: `Preference: ${match[0].trim()}`,
+        subject: 'user',
+      });
     }
   }
 
-  // Extract relationships (my friend X, my flatmate Y, etc.)
-  for (const pattern of relationshipPatterns) {
-    const matches = text.matchAll(pattern);
-    for (const match of matches) {
-      // Pattern 1: "my friend/flatmate is X" -> match[1]=relationship, match[2]=name
-      // Pattern 2: "X is my friend/flatmate" -> match[1]=name, match[2]=relationship
-      if (match[1] && match[2]) {
-        const isFirstPattern = match[1].toLowerCase().match(/friend|flatmate|roommate|colleague|coworker|brother|sister|mom|dad|mother|father|wife|husband|partner|boss|manager|teammate/);
-        if (isFirstPattern) {
-          facts.push(`Relationship: ${match[1]} is ${match[2]}`);
-        } else {
-          facts.push(`Relationship: ${match[2]} is ${match[1]}`);
-        }
-      }
+  // Extract third party jobs (e.g., "my flatmate Hamza works at Henry Schein")
+  let match;
+  while ((match = thirdPartyJobPattern.exec(text)) !== null) {
+    const subject = getSubjectAtPosition(match.index, subjectRanges);
+    // Only add if this is about a third party (not the user)
+    if (subject !== 'user') {
+      facts.push({
+        content: `Occupation: ${match[1]}`,
+        subject: subject,
+      });
     }
   }
 
-  // Deduplicate
-  return [...new Set(facts)];
+  // Extract third party job titles (e.g., "my brother Ahmed is a doctor")
+  while ((match = thirdPartyJobTitlePattern.exec(text)) !== null) {
+    const subject = getSubjectAtPosition(match.index, subjectRanges);
+    // Only add if this is about a third party (not the user)
+    if (subject !== 'user') {
+      facts.push({
+        content: `Occupation: ${match[1]}`,
+        subject: subject,
+      });
+    }
+  }
+
+  // Extract third party locations (e.g., "my friend John lives in London")
+  while ((match = thirdPartyLocationPattern.exec(text)) !== null) {
+    const subject = getSubjectAtPosition(match.index, subjectRanges);
+    if (subject !== 'user') {
+      facts.push({
+        content: `Location: ${match[1]}`,
+        subject: subject,
+      });
+    }
+  }
+
+  // Extract relationships (my friend X, my flatmate Y, etc.) - NO 'i' flag to preserve case matching for names
+  // Use [Mm]y to match both "my" and "My"
+  const relationshipPattern1 = /[Mm]y\s+(friend|flatmate|roommate|colleague|coworker|brother|sister|mom|dad|mother|father|wife|husband|partner|boss|manager|teammate)\s+(?:is\s+|named\s+)?([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)/g;
+  const relationshipPattern2 = /([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s+is\s+[Mm]y\s+(friend|flatmate|roommate|colleague|coworker|brother|sister|mom|dad|mother|father|wife|husband|partner|boss|manager|teammate)/g;
+
+  while ((match = relationshipPattern1.exec(text)) !== null) {
+    const relationship = match[1];
+    const name = match[2];
+    facts.push({
+      content: `Relationship: ${relationship} is ${name}`,
+      subject: name,
+    });
+  }
+
+  while ((match = relationshipPattern2.exec(text)) !== null) {
+    const name = match[1];
+    const relationship = match[2];
+    facts.push({
+      content: `Relationship: ${relationship} is ${name}`,
+      subject: name,
+    });
+  }
+
+  // Deduplicate by content+subject
+  const seen = new Set<string>();
+  return facts.filter((f) => {
+    const key = `${f.subject}:${f.content}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 /**
@@ -529,12 +664,13 @@ export class BackgroundGardener {
 
         for (const fact of facts) {
           this.store.add({
-            content: fact,
+            content: fact.content,
             type: 'fact',
             timestamp: new Date(),
             sessionId: memory.sessionId,
             metadata: {
               sourceId: memory.id,
+              subject: fact.subject, // Track WHO the fact is about
             },
           });
         }
@@ -913,6 +1049,10 @@ export interface SearchOptions {
   sessionId?: string;
   /** Minimum score threshold (default: 0.01). Results below this are filtered out. */
   minScore?: number;
+  /** Filter to only include facts about a specific subject (e.g., "user", "Hamza") */
+  subject?: string;
+  /** Boost score for facts about the user (default: 1.5) */
+  userSubjectBoost?: number;
 }
 
 export interface HybridSearchOptions {
@@ -1010,6 +1150,13 @@ export class HybridSearch {
     if (options.sessionId) {
       candidates = candidates.filter((m) => m.sessionId === options.sessionId);
     }
+    // Filter by subject if specified
+    if (options.subject) {
+      candidates = candidates.filter((m) => {
+        const subject = m.metadata?.subject as string | undefined;
+        return subject?.toLowerCase() === options.subject?.toLowerCase();
+      });
+    }
 
     if (candidates.length === 0) {
       return [];
@@ -1027,6 +1174,7 @@ export class HybridSearch {
 
     // Score each candidate
     const results: SearchResult[] = [];
+    const userSubjectBoost = options.userSubjectBoost ?? 1.5;
 
     for (const memory of candidates) {
       const bm25Score = calculateBM25Score(query, memory.content, bm25Options);
@@ -1041,6 +1189,12 @@ export class HybridSearch {
         const ageDays = ageMs / (1000 * 60 * 60 * 24);
         const recencyMultiplier = Math.exp(-ageDays / 7); // Decay over ~1 week
         combinedScore *= 1 + recencyMultiplier * 0.5;
+      }
+
+      // Apply user subject boost - facts about the user are more likely to be relevant
+      const subject = memory.metadata?.subject as string | undefined;
+      if (subject?.toLowerCase() === 'user') {
+        combinedScore *= userSubjectBoost;
       }
 
       // Filter by minimum score threshold
@@ -1075,6 +1229,13 @@ export class HybridSearch {
     if (options.sessionId) {
       candidates = candidates.filter((m) => m.sessionId === options.sessionId);
     }
+    // Filter by subject if specified
+    if (options.subject) {
+      candidates = candidates.filter((m) => {
+        const subject = m.metadata?.subject as string | undefined;
+        return subject?.toLowerCase() === options.subject?.toLowerCase();
+      });
+    }
 
     if (candidates.length === 0) {
       return [];
@@ -1095,6 +1256,7 @@ export class HybridSearch {
 
     // Score each candidate
     const results: SearchResult[] = [];
+    const userSubjectBoost = options.userSubjectBoost ?? 1.5;
 
     for (const memory of candidates) {
       const bm25Score = calculateBM25Score(query, memory.content, bm25Options);
@@ -1118,6 +1280,12 @@ export class HybridSearch {
         const ageDays = ageMs / (1000 * 60 * 60 * 24);
         const recencyMultiplier = Math.exp(-ageDays / 7); // Decay over ~1 week
         combinedScore *= 1 + recencyMultiplier * 0.5;
+      }
+
+      // Apply user subject boost - facts about the user are more likely to be relevant
+      const subject = memory.metadata?.subject as string | undefined;
+      if (subject?.toLowerCase() === 'user') {
+        combinedScore *= userSubjectBoost;
       }
 
       // Filter by minimum score threshold
