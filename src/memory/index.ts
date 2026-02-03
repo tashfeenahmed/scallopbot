@@ -17,17 +17,21 @@ export {
   type SearchResult,
   type SearchOptions,
   type HybridSearchOptions,
+  type ExtractedFact,
 } from './memory.js';
 
 // Embeddings
 export {
   TFIDFEmbedder,
   OpenAIEmbedder,
+  OllamaEmbedder,
   EmbeddingCache,
   cosineSimilarity,
   euclideanDistance,
   createDefaultEmbedder,
   createOpenAIEmbedder,
+  createOllamaEmbedder,
   type EmbeddingProvider,
   type OpenAIEmbedderOptions,
+  type OllamaEmbedderOptions,
 } from './embeddings.js';

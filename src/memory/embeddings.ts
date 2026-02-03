@@ -391,6 +391,76 @@ export class EmbeddingCache {
 }
 
 /**
+ * Ollama Embeddings Provider
+ * Uses local Ollama instance for embeddings (e.g., EmbeddingGemma, nomic-embed-text)
+ */
+export interface OllamaEmbedderOptions {
+  /** Ollama API base URL (default: http://localhost:11434) */
+  baseUrl?: string;
+  /** Model name (default: embeddinggemma) */
+  model?: string;
+}
+
+export class OllamaEmbedder implements EmbeddingProvider {
+  name = 'ollama';
+  dimension = 768; // EmbeddingGemma default
+
+  private baseUrl: string;
+  private model: string;
+
+  constructor(options: OllamaEmbedderOptions = {}) {
+    this.baseUrl = options.baseUrl || 'http://localhost:11434';
+    this.model = options.model || 'embeddinggemma';
+
+    // Adjust dimension based on model
+    if (this.model.includes('nomic')) {
+      this.dimension = 768;
+    } else if (this.model.includes('mxbai')) {
+      this.dimension = 1024;
+    } else if (this.model.includes('all-minilm')) {
+      this.dimension = 384;
+    }
+  }
+
+  isAvailable(): boolean {
+    // TODO: Could ping Ollama to check availability
+    return true;
+  }
+
+  async embed(text: string): Promise<number[]> {
+    const response = await fetch(`${this.baseUrl}/api/embeddings`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: this.model,
+        prompt: text,
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Ollama embedding failed: ${response.statusText}`);
+    }
+
+    const data = (await response.json()) as {
+      embedding: number[];
+    };
+
+    return data.embedding;
+  }
+
+  async embedBatch(texts: string[]): Promise<number[][]> {
+    // Ollama doesn't have batch endpoint, so we do them sequentially
+    const embeddings: number[][] = [];
+    for (const text of texts) {
+      embeddings.push(await this.embed(text));
+    }
+    return embeddings;
+  }
+}
+
+/**
  * Create default embedding provider (TF-IDF)
  */
 export function createDefaultEmbedder(): EmbeddingProvider {
@@ -402,4 +472,11 @@ export function createDefaultEmbedder(): EmbeddingProvider {
  */
 export function createOpenAIEmbedder(apiKey: string, model?: string): EmbeddingProvider {
   return new OpenAIEmbedder({ apiKey, model });
+}
+
+/**
+ * Create Ollama embedding provider
+ */
+export function createOllamaEmbedder(options?: OllamaEmbedderOptions): EmbeddingProvider {
+  return new OllamaEmbedder(options);
 }
