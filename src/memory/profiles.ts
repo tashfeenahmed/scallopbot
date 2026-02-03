@@ -1,0 +1,412 @@
+/**
+ * User Profile Manager for ScallopMemory
+ *
+ * Manages three types of user profiles:
+ * - Static Profile: Permanent characteristics (name, timezone, preferences)
+ * - Dynamic Profile: Recent context (topics, mood, projects)
+ * - Behavioral Patterns: Inferred from history (communication style, expertise)
+ */
+
+import type {
+  ScallopDatabase,
+  UserProfileEntry,
+  DynamicProfile,
+  BehavioralPatterns,
+  ScallopMemoryEntry,
+} from './db.js';
+
+/**
+ * Full user profile combining all three components
+ */
+export interface FullUserProfile {
+  userId: string;
+  static: Record<string, string>;
+  dynamic: DynamicProfile | null;
+  behavioral: BehavioralPatterns | null;
+}
+
+/**
+ * Profile injection format for LLM context
+ */
+export interface ProfileContext {
+  staticProfile: string;
+  dynamicContext: string;
+  behavioralPatterns: string;
+  relevantMemories: string;
+}
+
+/**
+ * Options for profile update from conversation
+ */
+export interface ProfileUpdateOptions {
+  /** Maximum recent topics to track (default: 10) */
+  maxRecentTopics?: number;
+  /** Maximum active projects to track (default: 5) */
+  maxActiveProjects?: number;
+  /** Days to consider for active projects (default: 7) */
+  activeProjectDays?: number;
+}
+
+/**
+ * User Profile Manager
+ */
+export class ProfileManager {
+  private db: ScallopDatabase;
+  private options: Required<ProfileUpdateOptions>;
+
+  constructor(db: ScallopDatabase, options: ProfileUpdateOptions = {}) {
+    this.db = db;
+    this.options = {
+      maxRecentTopics: options.maxRecentTopics ?? 10,
+      maxActiveProjects: options.maxActiveProjects ?? 5,
+      activeProjectDays: options.activeProjectDays ?? 7,
+    };
+  }
+
+  // ============ Static Profile Operations ============
+
+  /**
+   * Set a static profile value
+   */
+  setStaticValue(userId: string, key: string, value: string, confidence: number = 0.9): void {
+    this.db.setProfileValue(userId, key, value, confidence);
+  }
+
+  /**
+   * Get a static profile value
+   */
+  getStaticValue(userId: string, key: string): string | null {
+    const entry = this.db.getProfileValue(userId, key);
+    return entry?.value ?? null;
+  }
+
+  /**
+   * Get all static profile values
+   */
+  getStaticProfile(userId: string): Record<string, string> {
+    const entries = this.db.getProfile(userId);
+    const profile: Record<string, string> = {};
+    for (const entry of entries) {
+      profile[entry.key] = entry.value;
+    }
+    return profile;
+  }
+
+  /**
+   * Delete a static profile value
+   */
+  deleteStaticValue(userId: string, key: string): boolean {
+    return this.db.deleteProfileValue(userId, key);
+  }
+
+  /**
+   * Update static profile from extracted facts
+   */
+  updateStaticFromFacts(userId: string, facts: ScallopMemoryEntry[]): void {
+    for (const fact of facts) {
+      const content = fact.content.toLowerCase();
+
+      // Extract name
+      if (content.startsWith('name:')) {
+        this.setStaticValue(userId, 'name', fact.content.split(':')[1].trim(), fact.confidence);
+      }
+
+      // Extract location
+      if (content.startsWith('location:') || content.includes('lives in')) {
+        const location = content.replace(/^location:\s*/i, '').replace(/lives in\s*/i, '').trim();
+        this.setStaticValue(userId, 'location', location, fact.confidence);
+      }
+
+      // Extract timezone (if mentioned)
+      const tzMatch = content.match(/timezone[:\s]+([a-z_\/]+)/i);
+      if (tzMatch) {
+        this.setStaticValue(userId, 'timezone', tzMatch[1], fact.confidence);
+      }
+
+      // Extract language preference
+      const langMatch = content.match(/(?:speaks?|language)[:\s]+([a-z]+)/i);
+      if (langMatch) {
+        this.setStaticValue(userId, 'language', langMatch[1], fact.confidence);
+      }
+
+      // Extract occupation
+      if (content.startsWith('occupation:') || content.includes('works as')) {
+        const occupation = content.replace(/^occupation:\s*/i, '').replace(/works as\s*/i, '').trim();
+        this.setStaticValue(userId, 'occupation', occupation, fact.confidence);
+      }
+    }
+  }
+
+  // ============ Dynamic Profile Operations ============
+
+  /**
+   * Get dynamic profile
+   */
+  getDynamicProfile(userId: string): DynamicProfile | null {
+    return this.db.getDynamicProfile(userId);
+  }
+
+  /**
+   * Add a topic to recent topics
+   */
+  addRecentTopic(userId: string, topic: string): void {
+    const profile = this.db.getDynamicProfile(userId);
+    const recentTopics = profile?.recentTopics ?? [];
+
+    // Add to front, remove duplicates
+    const filtered = recentTopics.filter((t) => t.toLowerCase() !== topic.toLowerCase());
+    filtered.unshift(topic);
+
+    // Trim to max
+    const trimmed = filtered.slice(0, this.options.maxRecentTopics);
+
+    this.db.updateDynamicProfile(userId, { recentTopics: trimmed });
+  }
+
+  /**
+   * Set current mood
+   */
+  setCurrentMood(userId: string, mood: string | null): void {
+    this.db.updateDynamicProfile(userId, { currentMood: mood });
+  }
+
+  /**
+   * Add an active project
+   */
+  addActiveProject(userId: string, project: string): void {
+    const profile = this.db.getDynamicProfile(userId);
+    const activeProjects = profile?.activeProjects ?? [];
+
+    // Add if not exists
+    if (!activeProjects.some((p) => p.toLowerCase() === project.toLowerCase())) {
+      activeProjects.unshift(project);
+    }
+
+    // Trim to max
+    const trimmed = activeProjects.slice(0, this.options.maxActiveProjects);
+
+    this.db.updateDynamicProfile(userId, { activeProjects: trimmed });
+  }
+
+  /**
+   * Update dynamic profile from conversation
+   */
+  updateDynamicFromConversation(
+    userId: string,
+    message: string,
+    extractedTopics?: string[],
+    extractedMood?: string
+  ): void {
+    // Add topics
+    if (extractedTopics) {
+      for (const topic of extractedTopics) {
+        this.addRecentTopic(userId, topic);
+      }
+    }
+
+    // Set mood if extracted
+    if (extractedMood) {
+      this.setCurrentMood(userId, extractedMood);
+    }
+
+    // Extract projects from message
+    const projectPatterns = [
+      /working on (?:a |the )?([a-z0-9\s]+?)(?:\.|,|$)/gi,
+      /my (?:project|app|tool|system) (?:is |called )?([a-z0-9\s]+?)(?:\.|,|$)/gi,
+      /building (?:a |the )?([a-z0-9\s]+?)(?:\.|,|$)/gi,
+    ];
+
+    for (const pattern of projectPatterns) {
+      let match;
+      while ((match = pattern.exec(message)) !== null) {
+        this.addActiveProject(userId, match[1].trim());
+      }
+    }
+
+    // Update last interaction time
+    this.db.updateDynamicProfile(userId, {});
+  }
+
+  // ============ Behavioral Patterns Operations ============
+
+  /**
+   * Get behavioral patterns
+   */
+  getBehavioralPatterns(userId: string): BehavioralPatterns | null {
+    return this.db.getBehavioralPatterns(userId);
+  }
+
+  /**
+   * Update behavioral patterns (typically run weekly)
+   */
+  updateBehavioralPatterns(
+    userId: string,
+    patterns: Partial<Omit<BehavioralPatterns, 'userId' | 'updatedAt'>>
+  ): void {
+    this.db.updateBehavioralPatterns(userId, patterns);
+  }
+
+  /**
+   * Infer behavioral patterns from conversation history
+   */
+  inferBehavioralPatterns(userId: string, messages: Array<{ content: string; timestamp: number }>): void {
+    if (messages.length === 0) return;
+
+    // Analyze communication style
+    const avgLength = messages.reduce((sum, m) => sum + m.content.length, 0) / messages.length;
+    let communicationStyle: string;
+    if (avgLength < 50) {
+      communicationStyle = 'concise';
+    } else if (avgLength < 200) {
+      communicationStyle = 'moderate';
+    } else {
+      communicationStyle = 'detailed';
+    }
+
+    // Analyze active hours
+    const hourCounts = new Map<number, number>();
+    for (const msg of messages) {
+      const hour = new Date(msg.timestamp).getHours();
+      hourCounts.set(hour, (hourCounts.get(hour) || 0) + 1);
+    }
+
+    // Get top 3 most active hours
+    const sortedHours = [...hourCounts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3)
+      .map(([hour]) => hour);
+
+    // Analyze expertise areas from technical terms
+    const techTerms = new Map<string, number>();
+    const techPatterns = /\b(javascript|typescript|python|react|vue|angular|node|api|database|sql|docker|kubernetes|aws|azure|gcp|machine learning|ai|ml|nlp)\b/gi;
+
+    for (const msg of messages) {
+      let match;
+      while ((match = techPatterns.exec(msg.content)) !== null) {
+        const term = match[1].toLowerCase();
+        techTerms.set(term, (techTerms.get(term) || 0) + 1);
+      }
+    }
+
+    // Get top expertise areas
+    const expertiseAreas = [...techTerms.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5)
+      .map(([term]) => term);
+
+    // Analyze response preferences
+    const hasCodeBlocks = messages.some((m) => m.content.includes('```'));
+    const hasBulletPoints = messages.some((m) => m.content.includes('- ') || m.content.includes('* '));
+    const responsePreferences = {
+      prefersCodeExamples: hasCodeBlocks,
+      prefersBulletPoints: hasBulletPoints,
+      verbosityLevel: avgLength < 100 ? 2 : avgLength < 300 ? 3 : 4,
+    };
+
+    this.updateBehavioralPatterns(userId, {
+      communicationStyle,
+      expertiseAreas,
+      responsePreferences,
+      activeHours: sortedHours,
+    });
+  }
+
+  // ============ Full Profile Operations ============
+
+  /**
+   * Get full user profile (all three components)
+   */
+  getFullProfile(userId: string): FullUserProfile {
+    return {
+      userId,
+      static: this.getStaticProfile(userId),
+      dynamic: this.getDynamicProfile(userId),
+      behavioral: this.getBehavioralPatterns(userId),
+    };
+  }
+
+  /**
+   * Format profile for LLM context injection
+   */
+  formatProfileContext(
+    userId: string,
+    relevantMemories: ScallopMemoryEntry[] = []
+  ): ProfileContext {
+    const profile = this.getFullProfile(userId);
+
+    // Format static profile
+    let staticProfile = '[SCALLOPMEMORY CONTEXT]\nUser Profile (Static):';
+    if (Object.keys(profile.static).length > 0) {
+      for (const [key, value] of Object.entries(profile.static)) {
+        staticProfile += `\n  - ${key}: ${value}`;
+      }
+    } else {
+      staticProfile += '\n  - (no static profile yet)';
+    }
+
+    // Format dynamic context
+    let dynamicContext = '\nRecent Context (Dynamic):';
+    if (profile.dynamic) {
+      if (profile.dynamic.activeProjects.length > 0) {
+        dynamicContext += `\n  - Working on: ${profile.dynamic.activeProjects.join(', ')}`;
+      }
+      if (profile.dynamic.recentTopics.length > 0) {
+        dynamicContext += `\n  - Recent topics: ${profile.dynamic.recentTopics.slice(0, 5).join(', ')}`;
+      }
+      if (profile.dynamic.currentMood) {
+        dynamicContext += `\n  - Current mood: ${profile.dynamic.currentMood}`;
+      }
+    } else {
+      dynamicContext += '\n  - (no recent context)';
+    }
+
+    // Format behavioral patterns
+    let behavioralPatterns = '\nBehavioral Patterns:';
+    if (profile.behavioral) {
+      if (profile.behavioral.communicationStyle) {
+        behavioralPatterns += `\n  - Style: ${profile.behavioral.communicationStyle}`;
+      }
+      if (profile.behavioral.expertiseAreas.length > 0) {
+        behavioralPatterns += `\n  - Expertise: ${profile.behavioral.expertiseAreas.join(', ')}`;
+      }
+    } else {
+      behavioralPatterns += '\n  - (not yet analyzed)';
+    }
+
+    // Format relevant memories
+    let relevantMemoriesStr = '\nRelevant Memories:';
+    if (relevantMemories.length > 0) {
+      for (const memory of relevantMemories.slice(0, 10)) {
+        const confidence = Math.round(memory.prominence * 100);
+        relevantMemoriesStr += `\n  - [${confidence}%] ${memory.content}`;
+      }
+    } else {
+      relevantMemoriesStr += '\n  - (no relevant memories found)';
+    }
+
+    return {
+      staticProfile,
+      dynamicContext,
+      behavioralPatterns,
+      relevantMemories: relevantMemoriesStr,
+    };
+  }
+
+  /**
+   * Get full formatted context string for LLM injection
+   */
+  getContextString(userId: string, relevantMemories: ScallopMemoryEntry[] = []): string {
+    const context = this.formatProfileContext(userId, relevantMemories);
+    return `${context.staticProfile}${context.dynamicContext}${context.behavioralPatterns}${context.relevantMemories}`;
+  }
+}
+
+/**
+ * Create a ProfileManager instance
+ */
+export function createProfileManager(
+  db: ScallopDatabase,
+  options?: ProfileUpdateOptions
+): ProfileManager {
+  return new ProfileManager(db, options);
+}
