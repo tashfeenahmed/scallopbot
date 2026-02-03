@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/scallop.png" alt="ScallopBot" width="120" height="120">
+</p>
+
 # 🐚 ScallopBot — Cost-Optimized Personal AI
 
 <p align="center">
