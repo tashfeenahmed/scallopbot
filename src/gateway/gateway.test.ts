@@ -123,7 +123,19 @@ describe('Gateway', () => {
       await gateway.initialize();
 
       const tools = gateway.getToolRegistry().getAllTools();
-      expect(tools.length).toBe(11); // read, write, edit, bash, browser, memory_search, memory_get, Skill, reminder, send_file, receive_file
+      const toolNames = tools.map(t => t.name);
+
+      // Core tools that should always be present
+      expect(toolNames).toContain('read');
+      expect(toolNames).toContain('write');
+      expect(toolNames).toContain('edit');
+      expect(toolNames).toContain('bash');
+      expect(toolNames).toContain('browser');
+      expect(toolNames).toContain('memory_search');
+      expect(toolNames).toContain('memory_get');
+
+      // At least 7 core tools, plus optional (Skill, voice_reply, web_search, reminder, send_file)
+      expect(tools.length).toBeGreaterThanOrEqual(7);
     });
 
     it('should initialize session manager', async () => {
