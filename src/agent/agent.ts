@@ -15,6 +15,7 @@ import type { SkillRegistry } from '../skills/registry.js';
 import type { Router } from '../routing/router.js';
 import type { CostTracker } from '../routing/cost.js';
 import type { HotCollector, HybridSearch } from '../memory/memory.js';
+import type { LLMFactExtractor } from '../memory/fact-extractor.js';
 import type { ContextManager } from '../routing/context.js';
 import type { MediaProcessor } from '../media/index.js';
 import type { Attachment } from '../channels/types.js';
@@ -29,6 +30,7 @@ export interface AgentOptions {
   costTracker?: CostTracker;
   hotCollector?: HotCollector;
   hybridSearch?: HybridSearch;
+  factExtractor?: LLMFactExtractor;
   contextManager?: ContextManager;
   mediaProcessor?: MediaProcessor;
   workspace: string;
@@ -157,12 +159,15 @@ export class Agent {
   private costTracker: CostTracker | null;
   private hotCollector: HotCollector | null;
   private hybridSearch: HybridSearch | null;
+  private factExtractor: LLMFactExtractor | null;
   private contextManager: ContextManager | null;
   private mediaProcessor: MediaProcessor | null;
   private workspace: string;
   private logger: Logger;
   private maxIterations: number;
   private baseSystemPrompt: string;
+  /** Stores recent assistant response for contextual fact extraction */
+  private lastAssistantResponse: string = '';
 
   constructor(options: AgentOptions) {
     this.provider = options.provider;
@@ -173,6 +178,7 @@ export class Agent {
     this.costTracker = options.costTracker || null;
     this.hotCollector = options.hotCollector || null;
     this.hybridSearch = options.hybridSearch || null;
+    this.factExtractor = options.factExtractor || null;
     this.contextManager = options.contextManager || null;
     this.mediaProcessor = options.mediaProcessor || null;
     this.workspace = options.workspace;
@@ -267,6 +273,19 @@ export class Agent {
         sessionId,
         source: 'user',
         tags: ['conversation', 'user-message'],
+      });
+    }
+
+    // Queue LLM-based fact extraction (async, non-blocking)
+    // Pass the last assistant response as context for references like "that's my office"
+    if (this.factExtractor) {
+      const userId = session.metadata?.userId || sessionId;
+      this.factExtractor.queueForExtraction(
+        userMessage,
+        userId,
+        this.lastAssistantResponse || undefined
+      ).catch((error) => {
+        this.logger.warn({ error: (error as Error).message }, 'Async fact extraction failed');
       });
     }
 
@@ -457,6 +476,9 @@ export class Agent {
       { sessionId, iterations, inputTokens: totalInputTokens, outputTokens: totalOutputTokens, provider: activeProvider.name },
       'Message processed'
     );
+
+    // Store response for context in next fact extraction (for "that's my office" type references)
+    this.lastAssistantResponse = finalResponse;
 
     return {
       response: finalResponse,
