@@ -502,6 +502,8 @@ export class Agent {
   /**
    * Build memory context for system prompt
    * Includes relevant memories and recent conversations
+   *
+   * FIX A/B/E: Always include user facts, prioritize facts over context
    */
   private buildMemoryContext(userMessage: string, sessionId: string): string {
     if (!this.hybridSearch) return '';
@@ -511,31 +513,61 @@ export class Agent {
     let context = '';
 
     try {
-      // Search for relevant memories based on user message
-      const relevantMemories = this.hybridSearch.search(userMessage, {
-        limit: 10,
+      // FIX B/E: First, always get key user facts (subject="user") regardless of query
+      // These are facts about the user that should always be available
+      const userFacts = this.hybridSearch.search('', {
+        limit: 20,
+        type: 'fact',
+        subject: 'user',  // Only facts about the user, not third parties
         recencyBoost: true,
-        minScore: 0.1,
+        minScore: 0,  // Get all user facts
       });
 
-      // Filter to facts/context type memories (not raw conversation)
-      const factMemories = relevantMemories.filter(
-        (r) => r.entry.type === 'fact' || r.entry.type === 'context'
-      );
+      // FIX A: Search for query-relevant facts, preferring facts type over context
+      const relevantFacts = this.hybridSearch.search(userMessage, {
+        limit: 10,
+        type: 'fact',  // Only facts, not context
+        recencyBoost: true,
+        minScore: 0.1,
+        userSubjectBoost: 2.0,  // Boost user facts higher
+      });
 
-      if (factMemories.length > 0) {
+      // Combine user facts with query-relevant facts, deduplicating by ID
+      const seenIds = new Set<string>();
+      const allFacts: typeof userFacts = [];
+
+      // Add user facts first (always included)
+      for (const fact of userFacts) {
+        if (!seenIds.has(fact.entry.id)) {
+          seenIds.add(fact.entry.id);
+          allFacts.push(fact);
+        }
+      }
+
+      // Add query-relevant facts
+      for (const fact of relevantFacts) {
+        if (!seenIds.has(fact.entry.id)) {
+          seenIds.add(fact.entry.id);
+          allFacts.push(fact);
+        }
+      }
+
+      if (allFacts.length > 0) {
         let memoriesText = '';
         let charCount = 0;
 
-        for (const result of factMemories) {
-          const memoryLine = `- ${result.entry.content}\n`;
+        for (const result of allFacts) {
+          // Include subject info for third-party facts
+          const subject = result.entry.metadata?.subject as string | undefined;
+          const subjectPrefix = subject && subject !== 'user' ? `[About ${subject}] ` : '';
+          const memoryLine = `- ${subjectPrefix}${result.entry.content}\n`;
           if (charCount + memoryLine.length > MAX_MEMORY_CHARS) break;
           memoriesText += memoryLine;
           charCount += memoryLine.length;
         }
 
         if (memoriesText) {
-          context += `\n\n## MEMORIES FROM THE PAST\nThese are facts and context you've learned about the user:\n${memoriesText}`;
+          context += `\n\n## MEMORIES FROM THE PAST\nThese are facts you've learned about the user and people they've mentioned:\n${memoriesText}`;
         }
       }
 
@@ -571,7 +603,7 @@ export class Agent {
 
       if (context) {
         this.logger.debug(
-          { factCount: factMemories.length, conversationCount: recentConversations.length },
+          { userFactCount: userFacts.length, relevantFactCount: relevantFacts.length, totalFacts: allFacts.length },
           'Memory context added to prompt'
         );
       }

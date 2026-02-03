@@ -133,7 +133,7 @@ export class MemorySearchTool implements Tool {
     description:
       'Search memories using hybrid search combining keyword matching (BM25) and semantic similarity. ' +
       'Returns ranked results with relevance scores. Use this to find relevant context, facts, ' +
-      'user preferences, or past conversation details.',
+      'user preferences, or past conversation details. By default, searches facts (what you learned about the user).',
     input_schema: {
       type: 'object',
       properties: {
@@ -143,10 +143,16 @@ export class MemorySearchTool implements Tool {
         },
         type: {
           type: 'string',
-          enum: ['raw', 'fact', 'summary', 'preference', 'context'],
+          enum: ['raw', 'fact', 'summary', 'preference', 'context', 'all'],
           description:
-            'Filter by memory type: raw (unprocessed), fact (extracted facts), ' +
-            'summary (condensed), preference (user preferences), context (processed)',
+            'Filter by memory type: fact (default - extracted facts about the user), ' +
+            'raw (unprocessed), summary (condensed), preference (user preferences), context (processed), ' +
+            'all (search all types)',
+        },
+        subject: {
+          type: 'string',
+          description: 'Filter to facts about a specific person (e.g., "user", "Hamza", "John"). ' +
+            'Use "user" for facts about the user themselves.',
         },
         limit: {
           type: 'number',
@@ -170,10 +176,15 @@ export class MemorySearchTool implements Tool {
     context: ToolContext
   ): Promise<ToolResult> {
     const query = input.query as string;
-    const type = input.type as MemoryType | undefined;
+    const typeInput = input.type as string | undefined;
     const limit = Math.min((input.limit as number) || 10, 50);
     const recencyBoost = input.recencyBoost !== false; // Default true
     const sessionId = input.sessionId as string | undefined;
+    const subject = input.subject as string | undefined;
+
+    // Default to 'fact' type unless 'all' is specified
+    // This ensures we search facts about the user, not raw conversation logs
+    const type: MemoryType | undefined = typeInput === 'all' ? undefined : (typeInput as MemoryType || 'fact');
 
     try {
       const search = this.search || getHybridSearch();
@@ -183,10 +194,12 @@ export class MemorySearchTool implements Tool {
         type,
         recencyBoost,
         sessionId,
+        subject,
+        userSubjectBoost: 1.5,  // Boost facts about the user
       });
 
       context.logger.debug(
-        { query, type, limit, resultsCount: results.length },
+        { query, type, subject, limit, resultsCount: results.length },
         'Memory search completed'
       );
 

@@ -416,12 +416,27 @@ export function extractFacts(text: string): ExtractedFact[] {
   // Location patterns - case insensitive for "i live", "I live" etc
   const locationPatterns = [
     /(?:i live in|i'm from|i am from|i'm in|located in|based in)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)/gi,
+    /(?:my home is in|my house is in|my apartment is in|my flat is in)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)/gi,
+    /(?:my address is)\s+(.+?)(?:\.|$)/gi,
+  ];
+
+  // Office/workplace location patterns
+  const officePatterns = [
+    /(?:my office is (?:at|in|on)|my workplace is (?:at|in)|i work (?:at|from|in))\s+(.+?)(?:\.|,|$)/gi,
+    /(?:our office is (?:at|in)|the office is (?:at|in))\s+(.+?)(?:\.|,|$)/gi,
   ];
 
   // Job patterns - user (case insensitive for "i work")
   const userJobPatterns = [
-    /(?:i work as|i am a|i'm a|work as a|my job is)\s+([a-z]+(?:\s+[a-z]+)*)/gi,
-    /(?:i work at|i'm working at|i am employed at)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)/gi,
+    /(?:i work as|i am a|i'm a|work as a|my job is|my role is|my position is)\s+([a-z]+(?:\s+[a-z]+)*)/gi,
+    /(?:i work at|i'm working at|i am employed at|i work for|i'm at)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)/gi,
+    /(?:my company is|i work for)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)/gi,
+  ];
+
+  // Project/interest patterns
+  const projectPatterns = [
+    /(?:i'm working on|i am working on|i'm building|i am building|my project is)\s+(.+?)(?:\.|,|$)/gi,
+    /(?:i'm learning|i am learning|i'm studying|i am studying)\s+(.+?)(?:\.|,|$)/gi,
   ];
 
   // Job patterns - third party (comes after relationship mention) - NO 'i' flag to preserve case matching
@@ -454,7 +469,29 @@ export function extractFacts(text: string): ExtractedFact[] {
     let match;
     while ((match = pattern.exec(text)) !== null) {
       facts.push({
-        content: `Location: ${match[1]}`,
+        content: `Location: ${match[1].trim()}`,
+        subject: 'user',
+      });
+    }
+  }
+
+  // Extract office/workplace location
+  for (const pattern of officePatterns) {
+    let match;
+    while ((match = pattern.exec(text)) !== null) {
+      facts.push({
+        content: `Office: ${match[1].trim()}`,
+        subject: 'user',
+      });
+    }
+  }
+
+  // Extract projects/interests
+  for (const pattern of projectPatterns) {
+    let match;
+    while ((match = pattern.exec(text)) !== null) {
+      facts.push({
+        content: `Project: ${match[1].trim()}`,
         subject: 'user',
       });
     }
@@ -1137,6 +1174,7 @@ export class HybridSearch {
 
   /**
    * Search with hybrid BM25 + vector similarity
+   * If query is empty, returns all matching memories sorted by recency
    */
   search(query: string, options: SearchOptions = {}): SearchResult[] {
     const limit = options.limit ?? 10;
@@ -1160,6 +1198,20 @@ export class HybridSearch {
 
     if (candidates.length === 0) {
       return [];
+    }
+
+    // Handle empty query: return all candidates sorted by recency
+    // This is useful for getting all user facts without needing a specific search term
+    if (!query.trim()) {
+      const results: SearchResult[] = candidates
+        .sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())
+        .slice(0, limit)
+        .map((memory) => ({
+          entry: memory,
+          score: 1.0,
+          matchType: 'keyword' as const,
+        }));
+      return results;
     }
 
     // Calculate average document length
