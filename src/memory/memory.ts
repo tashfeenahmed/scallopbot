@@ -346,8 +346,6 @@ const RELATIONSHIP_TYPES = [
   'wife', 'husband', 'partner', 'boss', 'manager', 'teammate',
 ];
 
-const RELATIONSHIP_REGEX = new RegExp(RELATIONSHIP_TYPES.join('|'), 'i');
-
 /**
  * Extract the current subject context from text
  * Looks for patterns like "my flatmate X" and tracks X as the subject
@@ -626,7 +624,12 @@ export interface BackgroundGardenerOptions {
   store: MemoryStore;
   logger: Logger;
   interval?: number;
+  /** ScallopMemoryStore for decay processing (optional) */
+  scallopStore?: ScallopMemoryStore;
 }
+
+// Import ScallopMemoryStore type for decay processing
+import type { ScallopMemoryStore } from './scallop-store.js';
 
 /**
  * Background Gardener - processes and organizes memories
@@ -638,6 +641,7 @@ export class BackgroundGardener {
   private timer: NodeJS.Timeout | null = null;
   private running = false;
   private embedder: TFIDFEmbedder;
+  private scallopStore: ScallopMemoryStore | null = null;
 
   /** Patterns indicating contradictory information */
   private static readonly CONTRADICTION_PATTERNS = [
@@ -658,6 +662,7 @@ export class BackgroundGardener {
     this.logger = options.logger.child({ component: 'gardener' });
     this.interval = options.interval ?? 60000; // Default 1 minute
     this.embedder = new TFIDFEmbedder();
+    this.scallopStore = options.scallopStore ?? null;
   }
 
   start(): void {
@@ -685,6 +690,17 @@ export class BackgroundGardener {
 
   processMemories(): void {
     this.logger.debug('Processing memories');
+
+    // Process ScallopMemory decay if enabled
+    if (this.scallopStore) {
+      const decayResult = this.scallopStore.processDecay();
+      if (decayResult.updated > 0 || decayResult.archived > 0) {
+        this.logger.debug(
+          { updated: decayResult.updated, archived: decayResult.archived },
+          'ScallopMemory decay processed'
+        );
+      }
+    }
 
     // Get raw memories that need processing
     const rawMemories = this.store.searchByType('raw');

@@ -56,6 +56,8 @@ const createMockConfig = (testDir: string, overrides: Record<string, unknown> = 
   memory: {
     filePath: 'memories.jsonl',
     persist: false, // Disable persistence in tests
+    useScallopMemory: false,
+    dbPath: 'memories.db',
     ...((overrides.memory as Record<string, unknown>) || {}),
   },
   gateway: {

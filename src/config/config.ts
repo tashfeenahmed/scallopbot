@@ -111,6 +111,10 @@ const memorySchema = z.object({
   filePath: z.string().default('memories.jsonl'),
   /** Enable memory persistence (default: true) */
   persist: z.boolean().default(true),
+  /** Use ScallopMemory system (SQLite-based, default: false) */
+  useScallopMemory: z.boolean().default(false),
+  /** Path to SQLite database for ScallopMemory (relative to workspace) */
+  dbPath: z.string().default('memories.db'),
 });
 
 // Gateway configuration schema
@@ -136,7 +140,7 @@ export const configSchema = z.object({
   routing: routingSchema.default({ providerOrder: ['anthropic', 'openai', 'groq', 'ollama'], enableComplexityAnalysis: true }),
   cost: costSchema.default({ warningThreshold: 0.75 }),
   context: contextSchema.default({ hotWindowSize: 5, maxContextTokens: 128000, compressionThreshold: 0.7, maxToolOutputBytes: 30000 }),
-  memory: memorySchema.default({ filePath: 'memories.jsonl', persist: true }),
+  memory: memorySchema.default({ filePath: 'memories.jsonl', persist: true, useScallopMemory: false, dbPath: 'memories.db' }),
   gateway: gatewaySchema.default({ port: 3000, host: '127.0.0.1' }),
   tailscale: tailscaleSchema.default({ mode: 'off', resetOnExit: true }),
 });
@@ -245,6 +249,12 @@ export function loadConfig(): Config {
       maxContextTokens: process.env.MAX_CONTEXT_TOKENS ? parseInt(process.env.MAX_CONTEXT_TOKENS, 10) : 128000,
       compressionThreshold: process.env.COMPRESSION_THRESHOLD ? parseFloat(process.env.COMPRESSION_THRESHOLD) : 0.7,
       maxToolOutputBytes: process.env.MAX_TOOL_OUTPUT_BYTES ? parseInt(process.env.MAX_TOOL_OUTPUT_BYTES, 10) : 30000,
+    },
+    memory: {
+      filePath: process.env.MEMORY_FILE_PATH || 'memories.jsonl',
+      persist: process.env.MEMORY_PERSIST !== 'false',
+      useScallopMemory: process.env.USE_SCALLOP_MEMORY === 'true',
+      dbPath: process.env.MEMORY_DB_PATH || 'memories.db',
     },
     gateway: {
       port: process.env.GATEWAY_PORT ? parseInt(process.env.GATEWAY_PORT, 10) : 3000,

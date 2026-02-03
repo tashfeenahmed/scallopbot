@@ -10,6 +10,8 @@ import type { Logger } from 'pino';
 import type { LLMProvider } from '../providers/types.js';
 import type { MemoryStore, HybridSearch, MemoryEntry } from './memory.js';
 import { cosineSimilarity, type EmbeddingProvider } from './embeddings.js';
+import type { ScallopMemoryStore } from './scallop-store.js';
+import type { MemoryCategory } from './db.js';
 
 /**
  * Categories for extracted facts
@@ -58,6 +60,8 @@ export interface LLMFactExtractorOptions {
   deduplicationThreshold?: number;
   /** Whether to update existing facts with more specific info */
   enableFactUpdates?: boolean;
+  /** ScallopMemoryStore for enhanced fact storage (optional) */
+  scallopStore?: ScallopMemoryStore;
 }
 
 /**
@@ -101,6 +105,7 @@ export class LLMFactExtractor {
   private deduplicationThreshold: number;
   private enableFactUpdates: boolean;
   private processingQueue: Map<string, Promise<FactExtractionResult>> = new Map();
+  private scallopStore?: ScallopMemoryStore;
 
   constructor(options: LLMFactExtractorOptions) {
     this.provider = options.provider;
@@ -110,6 +115,7 @@ export class LLMFactExtractor {
     this.embedder = options.embedder;
     this.deduplicationThreshold = options.deduplicationThreshold ?? 0.85;
     this.enableFactUpdates = options.enableFactUpdates ?? true;
+    this.scallopStore = options.scallopStore;
   }
 
   /**
@@ -372,27 +378,64 @@ export class LLMFactExtractor {
         }
       }
 
-      // Store new fact
-      this.memoryStore.add({
-        content: fact.content,
-        type: 'fact',
-        sessionId: userId,  // Use userId as sessionId for facts
-        timestamp: new Date(),
-        metadata: {
-          subject: fact.subject,
-          category: fact.category,
+      // Store new fact - use ScallopMemory if available
+      if (this.scallopStore) {
+        // Map fact category to ScallopMemory category
+        const scallopCategory = this.mapToScallopCategory(fact.category);
+        await this.scallopStore.add({
           userId,
-          extractedBy: 'llm',
-        },
-        tags: [fact.category, fact.subject === 'user' ? 'about-user' : `about-${fact.subject}`],
-        embedding: fact.embedding,
-      });
-
-      this.logger.debug({ fact: fact.content, subject: fact.subject }, 'Stored new fact');
+          content: fact.content,
+          category: scallopCategory,
+          importance: 5,
+          confidence: 0.8,
+          metadata: {
+            subject: fact.subject,
+            originalCategory: fact.category,
+            extractedBy: 'llm',
+          },
+        });
+        this.logger.debug({ fact: fact.content, subject: fact.subject, store: 'scallop' }, 'Stored new fact in ScallopMemory');
+      } else {
+        // Legacy storage
+        this.memoryStore.add({
+          content: fact.content,
+          type: 'fact',
+          sessionId: userId,  // Use userId as sessionId for facts
+          timestamp: new Date(),
+          metadata: {
+            subject: fact.subject,
+            category: fact.category,
+            userId,
+            extractedBy: 'llm',
+          },
+          tags: [fact.category, fact.subject === 'user' ? 'about-user' : `about-${fact.subject}`],
+          embedding: fact.embedding,
+        });
+        this.logger.debug({ fact: fact.content, subject: fact.subject }, 'Stored new fact');
+      }
       return 'stored';
     } catch (error) {
       this.logger.error({ error: (error as Error).message, fact: fact.content }, 'Failed to process fact');
       return 'error';
+    }
+  }
+
+  /**
+   * Map fact category to ScallopMemory category
+   */
+  private mapToScallopCategory(category: FactCategory): MemoryCategory {
+    switch (category) {
+      case 'relationship':
+        return 'relationship';
+      case 'preference':
+        return 'preference';
+      case 'personal':
+      case 'work':
+      case 'project':
+      case 'location':
+      case 'general':
+      default:
+        return 'fact';
     }
   }
 
