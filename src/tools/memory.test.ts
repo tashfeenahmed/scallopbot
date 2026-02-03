@@ -96,7 +96,16 @@ describe('Memory Tools', () => {
     });
 
     it('should search memories by query', async () => {
-      const result = await tool.execute({ query: 'dark mode' }, context);
+      // Default searches facts, so search for fact content
+      const result = await tool.execute({ query: 'John Acme' }, context);
+
+      expect(result.success).toBe(true);
+      expect(result.output).toContain('John');
+      expect(result.output).toContain('fact');
+    });
+
+    it('should search all memory types when type=all', async () => {
+      const result = await tool.execute({ query: 'dark mode', type: 'all' }, context);
 
       expect(result.success).toBe(true);
       expect(result.output).toContain('dark mode');
@@ -112,8 +121,9 @@ describe('Memory Tools', () => {
     });
 
     it('should search memories with session filter', async () => {
+      // Need type: 'all' since TypeScript is in a preference, not a fact
       const result = await tool.execute(
-        { query: 'TypeScript', sessionId: 'session-2' },
+        { query: 'TypeScript', sessionId: 'session-2', type: 'all' },
         context
       );
 
