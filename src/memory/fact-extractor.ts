@@ -253,10 +253,19 @@ export class LLMFactExtractor {
   ): Promise<'stored' | 'updated' | 'duplicate' | 'error'> {
     try {
       // Get embedding for new fact early (needed for both dedup and enrichment)
+      // Embedding is optional - if it fails, we still store the fact without it
       let newEmbedding: number[] | undefined;
       if (this.embedder) {
-        newEmbedding = await this.embedder.embed(fact.content);
-        fact.embedding = newEmbedding;
+        try {
+          newEmbedding = await this.embedder.embed(fact.content);
+          fact.embedding = newEmbedding;
+        } catch (embedError) {
+          this.logger.warn(
+            { error: (embedError as Error).message, fact: fact.content },
+            'Embedding failed, storing fact without embedding'
+          );
+          // Continue without embedding - fact will still be stored
+        }
       }
 
       // Search for similar existing facts by content
@@ -276,9 +285,15 @@ export class LLMFactExtractor {
         for (const result of existingFacts) {
           // Get or compute embedding for existing fact
           let existingEmbedding = result.entry.embedding;
-          if (!existingEmbedding) {
-            existingEmbedding = await this.embedder!.embed(result.entry.content);
+          if (!existingEmbedding && this.embedder) {
+            try {
+              existingEmbedding = await this.embedder.embed(result.entry.content);
+            } catch {
+              // Skip semantic comparison if embedding fails
+              continue;
+            }
           }
+          if (!existingEmbedding) continue;
 
           const similarity = cosineSimilarity(newEmbedding, existingEmbedding);
 
@@ -344,7 +359,12 @@ export class LLMFactExtractor {
           for (const existingFact of categoryFacts) {
             let existingEmbedding = existingFact.embedding;
             if (!existingEmbedding && this.embedder) {
-              existingEmbedding = await this.embedder.embed(existingFact.content);
+              try {
+                existingEmbedding = await this.embedder.embed(existingFact.content);
+              } catch {
+                // Skip this fact if embedding fails
+                continue;
+              }
             }
 
             if (existingEmbedding) {
