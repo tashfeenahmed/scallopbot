@@ -7,6 +7,7 @@
 
 import type { Logger } from 'pino';
 import type { Skill, SkillContext, SkillResult, SkillRegistryState } from './types.js';
+import type { ToolDefinition } from '../providers/types.js';
 import { SkillLoader } from './loader.js';
 
 /**
@@ -114,6 +115,25 @@ export class SkillRegistry {
     return this.state.availableSkills.filter(
       (skill) => skill.frontmatter['disable-model-invocation'] !== true
     );
+  }
+
+  /**
+   * Generate ToolDefinition[] from skills for LLM tool_use protocol
+   *
+   * Skills become "tools" from the LLM's perspective.
+   * Skills without inputSchema get an empty schema (no required parameters).
+   */
+  getToolDefinitions(): ToolDefinition[] {
+    const skills = this.getModelSkills();
+    return skills.map((skill) => ({
+      name: skill.name,
+      description: skill.description,
+      input_schema: skill.frontmatter.inputSchema || {
+        type: 'object' as const,
+        properties: {},
+        required: [],
+      },
+    }));
   }
 
   /**
