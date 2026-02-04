@@ -17,7 +17,7 @@ None
 - [ ] **Phase 1: Skill System Foundation** - SKILL.md format, discovery, and loading infrastructure (In progress)
 - [x] **Phase 2: Bash Skill** - Shell command execution as first complete skill (Complete)
 - [x] **Phase 3: Skill Executor** - Infrastructure to run skill scripts with SKILL_ARGS (Complete)
-- [ ] **Phase 4: Web Search Skill** - Brave API integration for web search (In progress)
+- [x] **Phase 4: Web Search Skill** - Brave API integration for web search (Complete)
 - [ ] **Phase 5: Browser Skill** - Web browsing and content extraction
 - [ ] **Phase 6: Telegram & Memory Skills** - Messaging and semantic memory search
 - [ ] **Phase 7: Agent Loop Refactor** - Skills-only execution loop replacing tools
@@ -60,11 +60,10 @@ Plans:
 **Depends on**: Phase 3
 **Research**: Likely (external API integration)
 **Research topics**: Current Brave Search API endpoints, rate limits, response format, API key handling
-**Plans**: TBD
+**Plans**: 1
 
 Plans:
-- [x] 04-01: Create web_search skill structure with SKILL.md and run.ts
-- [ ] 04-02: Implement search execution with result formatting
+- [x] 04-01: Create web_search skill structure with SKILL.md and run.ts (includes search execution)
 
 ### Phase 5: Browser Skill
 **Goal**: Implement browser skill for web page browsing and content extraction
@@ -119,7 +118,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8
 | 1. Skill System Foundation | 1/3 | In progress | - |
 | 2. Bash Skill | 2/2 | Complete | 2026-02-04 |
 | 3. Skill Executor | 1/1 | Complete | 2026-02-04 |
-| 4. Web Search Skill | 1/2 | In progress | - |
+| 4. Web Search Skill | 1/1 | Complete | 2026-02-04 |
 | 5. Browser Skill | 0/2 | Not started | - |
 | 6. Telegram & Memory Skills | 0/2 | Not started | - |
 | 7. Agent Loop Refactor | 0/3 | Not started | - |
