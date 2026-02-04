@@ -110,14 +110,14 @@ Plans:
 Plans:
 - [x] 11-01: Web UI foundation (API channel config, static serving, chat interface)
 
-#### Phase 12: Loop Until Done
+#### Phase 12: Loop Until Done (Complete)
 **Goal**: Agent continues in loops until task complete (stop vs next-task decision each iteration)
 **Depends on**: Phase 11
 **Research**: Unlikely (extending existing agent loop)
-**Plans**: TBD
+**Plans**: 1/1 complete
 
 Plans:
-- [ ] 12-01: TBD
+- [x] 12-01: Implement [DONE] marker completion detection and loop-until-done prompt
 
 #### Phase 13: Unified Triggers
 **Goal**: Telegram, Web UI, and Cron (reminders) as trigger sources
@@ -175,7 +175,7 @@ Phases execute in numeric order: 9 → 10 → 11 → 12 → 13 → 14 → 15 →
 | 9. Code Cleanup | v2.0 | 2/2 | Complete | 2026-02-04 |
 | 10. Test Infrastructure | v2.0 | 1/1 | Complete | 2026-02-04 |
 | 11. Web UI | v2.0 | 1/1 | Complete | 2026-02-04 |
-| 12. Loop Until Done | v2.0 | 0/? | Not started | - |
+| 12. Loop Until Done | v2.0 | 1/1 | Complete | 2026-02-04 |
 | 13. Unified Triggers | v2.0 | 0/? | Not started | - |
 | 14. Proactive Execution | v2.0 | 0/? | Not started | - |
 | 15. Human-like Messaging | v2.0 | 0/? | Not started | - |
