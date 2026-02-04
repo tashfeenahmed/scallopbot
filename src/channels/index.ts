@@ -59,3 +59,6 @@ export { MatrixChannel, type MatrixChannelOptions } from './matrix.js';
 
 // API (REST/WebSocket)
 export { ApiChannel, type ApiChannelConfig } from './api.js';
+
+// Telegram Gateway (singleton for skill access)
+export { TelegramGateway } from './telegram-gateway.js';
