@@ -274,7 +274,7 @@ export class ContextManager {
    */
   private findSafeSplitIndex(messages: Message[], targetHotSize: number): number {
     // Start from the ideal split point
-    let splitIndex = Math.max(0, messages.length - targetHotSize);
+    const splitIndex = Math.max(0, messages.length - targetHotSize);
 
     // Build a list of (index, tool_use_id) for all tool_use blocks
     const toolUseOccurrences: Array<{ index: number; id: string }> = [];

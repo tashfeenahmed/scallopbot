@@ -6,7 +6,6 @@
  */
 
 import * as fs from 'fs/promises';
-import * as path from 'path';
 import type { MemoryEntry, MemoryType } from './memory.js';
 import { ScallopDatabase, type MemoryCategory, type ScallopMemoryType } from './db.js';
 
@@ -100,7 +99,7 @@ export async function migrateJsonlToSqlite(options: MigrationOptions): Promise<M
     dbPath: options.dbPath,
   };
 
-  const { jsonlPath, dbPath, createBackup = true, defaultUserId = 'default', keepOriginal = true } = options;
+  const { jsonlPath, dbPath, createBackup = true, defaultUserId = 'default', keepOriginal: _keepOriginal = true } = options;
 
   try {
     // Check if JSONL file exists
