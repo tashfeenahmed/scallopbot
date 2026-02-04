@@ -11,7 +11,7 @@ None
 ## Milestones
 
 - ✅ **v1.0 Skills-Only Architecture** - Phases 1-7 (shipped 2026-02-04)
-- 🚧 **v2.0 Agent Polish & Enhanced Loop** - Phases 9-17 (in progress)
+- ✅ **v2.0 Agent Polish & Enhanced Loop** - Phases 9-17 (shipped 2026-02-04)
 
 ## Phases
 
@@ -77,9 +77,11 @@ Plans:
 
 </details>
 
-### 🚧 v2.0 Agent Polish & Enhanced Loop (In Progress)
+### ✅ v2.0 Agent Polish & Enhanced Loop (Complete)
 
 **Milestone Goal:** Clean up codebase, add tests, build web UI, and transform the agent into a proactive personal assistant that loops until task completion with human-like messaging.
+
+**Shipped:** 2026-02-04
 
 #### Phase 9: Code Cleanup (Complete)
 **Goal**: Unwire tool system, delete unused code, replace console.log with structured logger
@@ -155,14 +157,14 @@ Plans:
 Plans:
 - [x] 16-01: Consolidate and restructure system prompt
 
-#### Phase 17: Kimi K2.5 Thinking Mode
+#### Phase 17: Kimi K2.5 Thinking Mode (Complete)
 **Goal**: Enable thinking mode with reasoning_content handling and temperature constraints
 **Depends on**: Phase 16
 **Research**: Unlikely (already researched in PROJECT.md)
-**Plans**: TBD
+**Plans**: 1/1 complete
 
 Plans:
-- [ ] 17-01: TBD
+- [x] 17-01: Verify and document thinking mode integration
 
 ## Progress
 
@@ -180,4 +182,4 @@ Phases execute in numeric order: 9 → 10 → 11 → 12 → 13 → 14 → 15 →
 | 14. Proactive Execution | v2.0 | 1/1 | Complete | 2026-02-04 |
 | 15. Human-like Messaging | v2.0 | 1/1 | Complete | 2026-02-04 |
 | 16. System Prompt Refinement | v2.0 | 1/1 | Complete | 2026-02-04 |
-| 17. Kimi K2.5 Thinking Mode | v2.0 | 0/? | Not started | - |
+| 17. Kimi K2.5 Thinking Mode | v2.0 | 1/1 | Complete | 2026-02-04 |
