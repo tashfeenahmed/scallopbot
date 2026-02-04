@@ -944,8 +944,9 @@ export class TelegramChannel {
       }
     }
 
+    // Prefix userId with channel for trigger routing (reminders, etc.)
     const session = await this.sessionManager.createSession({
-      userId,
+      userId: `telegram:${userId}`,
       channelId: 'telegram',
     });
 

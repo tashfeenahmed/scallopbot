@@ -141,7 +141,7 @@ describe('TelegramChannel', () => {
       const sessionId = await channel.getOrCreateSession('user123');
 
       expect(sessionId).toBe('new-session');
-      expect(mockSessionManager.createSession).toHaveBeenCalledWith({ userId: 'user123', channelId: 'telegram' });
+      expect(mockSessionManager.createSession).toHaveBeenCalledWith({ userId: 'telegram:user123', channelId: 'telegram' });
     });
 
     it('should reuse existing session for user', async () => {

@@ -157,7 +157,7 @@ describe('ApiChannel', () => {
 
       expect(sessionId).toBe('new-session-123');
       expect(mockSessionManager.createSession).toHaveBeenCalledWith({
-        userId: 'user123',
+        userId: 'api:user123',
         channelId: 'api',
       });
     });

@@ -968,6 +968,8 @@ export class Agent {
             skillName: toolUse.name,
             args: toolUse.input,
             cwd: this.workspace,
+            userId,
+            sessionId,
           });
 
           const resultContent = result.success

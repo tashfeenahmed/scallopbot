@@ -168,6 +168,10 @@ export interface SkillExecutionRequest {
   args?: Record<string, unknown>;
   /** Working directory for script execution */
   cwd?: string;
+  /** User ID (channel-prefixed, e.g. "api:ws-abc123", "telegram:12345") */
+  userId?: string;
+  /** Session ID for context */
+  sessionId?: string;
 }
 
 /**

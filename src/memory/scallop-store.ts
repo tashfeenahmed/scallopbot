@@ -302,10 +302,14 @@ export class ScallopMemoryStore {
     const results: ScallopSearchResult[] = [];
     const queryLower = query.toLowerCase();
 
-    // Get query embedding if embedder available
+    // Get query embedding if embedder available (non-fatal if it fails)
     let queryEmbedding: number[] | undefined;
     if (this.embedder) {
-      queryEmbedding = await this.embedder.embed(query);
+      try {
+        queryEmbedding = await this.embedder.embed(query);
+      } catch (err) {
+        this.logger.warn({ error: (err as Error).message }, 'Query embedding failed, using keyword-only search');
+      }
     }
 
     // Pre-compute BM25 statistics for proper keyword scoring

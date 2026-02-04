@@ -238,9 +238,9 @@ export class ApiChannel implements Channel, TriggerSource {
       }
     }
 
-    // Create new session
+    // Create new session — prefix userId with channel for trigger routing
     const session = await this.config.sessionManager.createSession({
-      userId,
+      userId: `api:${userId}`,
       channelId: 'api',
     });
 
