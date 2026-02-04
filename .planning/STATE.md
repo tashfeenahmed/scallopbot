@@ -5,23 +5,23 @@
 See: .planning/PROJECT.md (updated 2026-02-04)
 
 **Core value:** Skills-only execution: Every capability the agent has comes from a skill file that advertises itself to the agent.
-**Current focus:** Phase 6 — Telegram & Memory Skills
+**Current focus:** Phase 7 — Agent Loop Refactor
 
 ## Current Position
 
 Phase: 6 of 8 (Telegram & Memory Skills)
-Plan: 1 of 2 in current phase
-Status: In progress
-Last activity: 2026-02-04 — Completed 06-01-PLAN.md
+Plan: 2 of 2 in current phase
+Status: Phase complete
+Last activity: 2026-02-04 — Completed 06-02-PLAN.md
 
-Progress: ███████░░░ 54%
+Progress: ████████░░ 62%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 7
+- Total plans completed: 8
 - Average duration: 3 min
-- Total execution time: 19 min
+- Total execution time: 22 min
 
 **By Phase:**
 
@@ -32,10 +32,10 @@ Progress: ███████░░░ 54%
 | 3 | 1 | 5 min | 5 min |
 | 4 | 1 | 3 min | 3 min |
 | 5 | 1 | 2 min | 2 min |
-| 6 | 1 | 2 min | 2 min |
+| 6 | 2 | 5 min | 3 min |
 
 **Recent Trend:**
-- Last 5 plans: 2min, 5min, 3min, 2min, 2min
+- Last 5 plans: 5min, 3min, 2min, 2min, 3min
 - Trend: Stable (~3 min/plan)
 
 ## Accumulated Context
@@ -61,6 +61,8 @@ Recent decisions affecting current work:
 - Browser skill user-invocable: true (slash command enabled)
 - memory_search defaults to 'fact' type (not raw logs)
 - Lazy singleton for MemoryStore/HybridSearch in skill scripts
+- TelegramGateway singleton matches BrowserSession pattern
+- Gateway wires telegram singleton after channel starts
 
 ### Deferred Issues
 
@@ -76,6 +78,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-02-04T10:30:57Z
-Stopped at: Completed 06-01-PLAN.md, ready for 06-02
+Last session: 2026-02-04T10:37:22Z
+Stopped at: Completed 06-02-PLAN.md, Phase 6 complete
 Resume file: None
