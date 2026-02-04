@@ -48,6 +48,9 @@ interface SkillConfig {
 /** Default timeout for script execution (30 seconds) */
 const DEFAULT_TIMEOUT = 30000;
 
+/** Grace period before SIGKILL after SIGTERM (5 seconds) */
+const SIGKILL_GRACE_PERIOD = 5000;
+
 /**
  * SkillExecutor class for running skill scripts
  *
@@ -196,7 +199,12 @@ export class SkillExecutor {
   }
 
   /**
-   * Spawn script process and capture output
+   * Spawn script process and capture output with timeout handling
+   *
+   * Timeout behavior:
+   * 1. After timeout expires, sends SIGTERM for graceful shutdown
+   * 2. After additional 5 seconds, sends SIGKILL if still running
+   * 3. Returns exitCode 124 (standard timeout exit code)
    */
   private spawnScript(
     command: string,
@@ -207,11 +215,57 @@ export class SkillExecutor {
     return new Promise((resolve) => {
       let stdout = '';
       let stderr = '';
+      let killed = false;
+      let resolved = false;
+      let timeoutId: ReturnType<typeof setTimeout> | null = null;
+      let killTimeoutId: ReturnType<typeof setTimeout> | null = null;
 
       const proc: ChildProcess = spawn(command, args, {
         env: env as NodeJS.ProcessEnv,
         stdio: ['ignore', 'pipe', 'pipe'],
       });
+
+      /**
+       * Clean up timers and event listeners
+       */
+      const cleanup = () => {
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+          timeoutId = null;
+        }
+        if (killTimeoutId) {
+          clearTimeout(killTimeoutId);
+          killTimeoutId = null;
+        }
+        // Remove event listeners to prevent memory leaks
+        proc.stdout?.removeAllListeners('data');
+        proc.stderr?.removeAllListeners('data');
+        proc.removeAllListeners('close');
+        proc.removeAllListeners('error');
+      };
+
+      /**
+       * Resolve the promise with result (only once)
+       */
+      const resolveOnce = (result: SkillResult) => {
+        if (resolved) return;
+        resolved = true;
+        cleanup();
+        resolve(result);
+      };
+
+      // Set up timeout with graceful shutdown
+      timeoutId = setTimeout(() => {
+        killed = true;
+        proc.kill('SIGTERM');
+
+        // Set up SIGKILL after grace period if still running
+        killTimeoutId = setTimeout(() => {
+          if (!proc.killed) {
+            proc.kill('SIGKILL');
+          }
+        }, SIGKILL_GRACE_PERIOD);
+      }, timeout);
 
       // Capture stdout
       proc.stdout?.on('data', (data: Buffer) => {
@@ -225,12 +279,23 @@ export class SkillExecutor {
 
       // Handle process completion
       proc.on('close', (code) => {
+        // If killed by timeout, return timeout result
+        if (killed) {
+          resolveOnce({
+            success: false,
+            output: stdout,
+            error: `Script killed due to timeout (${timeout}ms)`,
+            exitCode: 124, // Standard timeout exit code
+          });
+          return;
+        }
+
         const exitCode = code ?? 0;
 
         // Try to parse stdout as JSON (skill result format)
         try {
           const parsed = JSON.parse(stdout.trim());
-          resolve({
+          resolveOnce({
             success: parsed.success ?? exitCode === 0,
             output: parsed.output ?? stdout,
             error: parsed.error ?? (stderr || undefined),
@@ -238,7 +303,7 @@ export class SkillExecutor {
           });
         } catch {
           // If not valid JSON, return raw output
-          resolve({
+          resolveOnce({
             success: exitCode === 0,
             output: stdout,
             error: stderr || undefined,
@@ -249,7 +314,7 @@ export class SkillExecutor {
 
       // Handle spawn errors
       proc.on('error', (err) => {
-        resolve({
+        resolveOnce({
           success: false,
           output: '',
           error: `Failed to execute script: ${err.message}`,
