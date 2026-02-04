@@ -196,26 +196,36 @@ const skillCommand = program
 // skill search
 skillCommand
   .command('search <query>')
-  .description('Search for skills in the registry')
-  .action(async (query: string) => {
+  .description('Search for skills on ClawHub (clawhub.ai)')
+  .option('-l, --limit <number>', 'Maximum results to show', '10')
+  .action(async (query: string, options: { limit: string }) => {
     try {
       const manager = new SkillPackageManager();
-      const results = await manager.search(query);
+      const limit = parseInt(options.limit, 10) || 10;
 
-      if (results.total === 0) {
+      console.log(`Searching ClawHub for "${query}"...\n`);
+      const results = await manager.searchClawHub(query, limit);
+
+      if (results.length === 0) {
         console.log(`No skills found matching "${query}"`);
+        console.log('\nTry browsing skills at: https://clawhub.ai/skills');
         return;
       }
 
-      console.log(`Found ${results.total} skill(s):\n`);
-      for (const pkg of results.packages) {
-        console.log(`  ${pkg.name} (v${pkg.version})`);
-        console.log(`    ${pkg.description}`);
-        if (pkg.homepage) {
-          console.log(`    ${pkg.homepage}`);
-        }
+      console.log(`Found ${results.length} skill(s):\n`);
+      for (const skill of results) {
+        const stars = skill.stats?.stars ? `★${skill.stats.stars}` : '';
+        const downloads = skill.stats?.downloads ? `↓${skill.stats.downloads}` : '';
+        const badges = [stars, downloads].filter(Boolean).join(' ');
+        const owner = skill.owner?.handle ? `by ${skill.owner.handle}` : '';
+
+        console.log(`  ${skill.slug} ${badges}`);
+        console.log(`    ${skill.displayName} ${owner}`);
+        console.log(`    ${skill.summary || '(no description)'}`);
         console.log('');
       }
+
+      console.log(`Install with: scallopbot skill install <slug>`);
     } catch (error) {
       console.error('Search failed:', (error as Error).message);
       process.exit(1);
@@ -224,27 +234,35 @@ skillCommand
 
 // skill install
 skillCommand
-  .command('install <name>')
-  .description('Install a skill from the registry')
-  .option('--url <url>', 'Install from a specific URL')
+  .command('install <slug>')
+  .description('Install a skill from ClawHub (clawhub.ai)')
+  .option('--url <url>', 'Install from a specific URL instead of ClawHub')
+  .option('-v, --version <version>', 'Install a specific version')
   .option('--deps', 'Also install skill dependencies')
-  .action(async (name: string, options: { url?: string; deps?: boolean }) => {
+  .action(async (slug: string, options: { url?: string; version?: string; deps?: boolean }) => {
     try {
       const manager = new SkillPackageManager();
 
-      console.log(`Installing skill: ${name}...`);
+      console.log(`Installing skill: ${slug}...`);
 
       let result;
       if (options.url) {
-        result = await manager.installFromUrl(name, options.url);
+        // Install from direct URL
+        result = await manager.installFromUrl(slug, options.url);
       } else {
-        result = await manager.install(name);
+        // Install from ClawHub (default)
+        result = await manager.installFromClawHub(slug, options.version);
       }
 
       if (result.success) {
         console.log(`\n✓ Installed ${result.skill?.name} to ${result.path}`);
         if (result.checksum) {
           console.log(`  Checksum: ${result.checksum.slice(0, 16)}...`);
+        }
+        if (result.skill?.hasScripts) {
+          console.log(`  Scripts: Yes (executable skill)`);
+        } else {
+          console.log(`  Scripts: No (documentation skill - provides context to LLM)`);
         }
 
         // Install dependencies if requested
@@ -262,6 +280,8 @@ skillCommand
             }
           }
         }
+
+        console.log('\nRestart ScallopBot to use the new skill.');
       } else {
         console.error(`\n✗ Installation failed: ${result.error}`);
         process.exit(1);
@@ -374,10 +394,114 @@ skillCommand
     }
   });
 
-// skill info
+// skill info (ClawHub)
+skillCommand
+  .command('hub <slug>')
+  .description('Get skill info from ClawHub')
+  .action(async (slug: string) => {
+    try {
+      const manager = new SkillPackageManager();
+
+      console.log(`Fetching info for "${slug}" from ClawHub...\n`);
+
+      const skill = await manager.getClawHubSkill(slug);
+      if (!skill) {
+        console.error(`Skill "${slug}" not found on ClawHub`);
+        process.exit(1);
+      }
+
+      console.log(`Skill: ${skill.displayName}`);
+      console.log(`Slug: ${skill.slug}`);
+      console.log(`Summary: ${skill.summary || '(none)'}`);
+
+      if (skill.owner) {
+        console.log(`Owner: ${skill.owner.displayName} (@${skill.owner.handle})`);
+      }
+
+      if (skill.stats) {
+        console.log(`\nStats:`);
+        console.log(`  Downloads: ${skill.stats.downloads || 0}`);
+        console.log(`  Stars: ${skill.stats.stars || 0}`);
+        if (skill.stats.versions) {
+          console.log(`  Versions: ${skill.stats.versions}`);
+        }
+      }
+
+      if (skill.badges) {
+        const badges = [];
+        if (skill.badges.official) badges.push('Official');
+        if (skill.badges.highlighted) badges.push('Highlighted');
+        if (badges.length > 0) {
+          console.log(`\nBadges: ${badges.join(', ')}`);
+        }
+      }
+
+      // Get versions
+      const versions = await manager.getClawHubVersions(slug);
+      if (versions.length > 0) {
+        console.log(`\nVersions:`);
+        for (const v of versions.slice(0, 5)) {
+          const date = new Date(v.createdAt).toLocaleDateString();
+          console.log(`  ${v.version} (${date})`);
+          if (v.changelog) {
+            console.log(`    ${v.changelog.slice(0, 80)}${v.changelog.length > 80 ? '...' : ''}`);
+          }
+        }
+        if (versions.length > 5) {
+          console.log(`  ... and ${versions.length - 5} more`);
+        }
+      }
+
+      console.log(`\nView on ClawHub: https://clawhub.ai/skills/${slug}`);
+      console.log(`Install: scallopbot skill install ${slug}`);
+    } catch (error) {
+      console.error('Failed to get skill info:', (error as Error).message);
+      process.exit(1);
+    }
+  });
+
+// skill versions (ClawHub)
+skillCommand
+  .command('versions <slug>')
+  .description('List available versions of a skill on ClawHub')
+  .action(async (slug: string) => {
+    try {
+      const manager = new SkillPackageManager();
+
+      console.log(`Fetching versions for "${slug}" from ClawHub...\n`);
+
+      const versions = await manager.getClawHubVersions(slug);
+
+      if (versions.length === 0) {
+        console.log(`No versions found for "${slug}"`);
+        console.log('The skill may not exist or have no published versions.');
+        return;
+      }
+
+      console.log(`Available versions for ${slug}:\n`);
+
+      for (const ver of versions) {
+        // createdAt is in milliseconds
+        const date = new Date(ver.createdAt).toLocaleDateString();
+        console.log(`  v${ver.version} (${date})`);
+        if (ver.changelog) {
+          // Show first line of changelog
+          const firstLine = ver.changelog.split('\n')[0].slice(0, 100);
+          console.log(`    ${firstLine}${ver.changelog.length > 100 ? '...' : ''}`);
+        }
+      }
+
+      console.log(`\nInstall specific version: scallopbot skill install ${slug} -v <version>`);
+    } catch (error) {
+      console.error('Failed to get versions:', (error as Error).message);
+      process.exit(1);
+    }
+  });
+
+// skill info (local)
 skillCommand
   .command('info <name>')
-  .description('Show detailed information about a skill')
+  .description('Show detailed information about an installed skill')
   .action(async (name: string) => {
     try {
       resetConfig();

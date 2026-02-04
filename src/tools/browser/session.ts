@@ -504,7 +504,16 @@ export class BrowserSession {
     await this.ensureBrowser();
 
     if (selector) {
-      return this.page.textContent(selector) || '';
+      try {
+        // Use locator with timeout to avoid hanging on non-existent elements
+        const locator = this.page.locator(selector).first();
+        const text = await locator.textContent({ timeout: 10000 });
+        return text || '';
+      } catch {
+        // Selector not found or timeout - return empty
+        this.logger?.debug({ selector }, 'Extract text: selector not found or timed out');
+        return '';
+      }
     }
 
     return this.page.evaluate(`document.body?.innerText || ''`);
@@ -517,7 +526,16 @@ export class BrowserSession {
     await this.ensureBrowser();
 
     if (selector) {
-      return this.page.innerHTML(selector);
+      try {
+        // Use locator with timeout to avoid hanging on non-existent elements
+        const locator = this.page.locator(selector).first();
+        const html = await locator.innerHTML({ timeout: 10000 });
+        return html || '';
+      } catch {
+        // Selector not found or timeout - return empty
+        this.logger?.debug({ selector }, 'Extract HTML: selector not found or timed out');
+        return '';
+      }
     }
 
     return this.page.content();

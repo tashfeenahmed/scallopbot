@@ -241,6 +241,133 @@ html, body {
   letter-spacing: 0.5px;
 }
 
+.debug-content {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Tool execution styles */
+.debug-tool-start {
+  border-color: #4a90d9;
+}
+
+.debug-tool-start .debug-label {
+  background: #2d5a87;
+  color: #7cb3e8;
+}
+
+.debug-tool-complete {
+  border-color: #48bb78;
+}
+
+.debug-tool-complete .debug-label {
+  background: #276749;
+  color: #68d391;
+}
+
+/* Error styles */
+.debug-tool-error {
+  border-color: #f56565;
+  background-color: rgba(245, 101, 101, 0.1);
+}
+
+.debug-tool-error .debug-label {
+  background: #c53030;
+  color: #fed7d7;
+}
+
+/* Memory styles */
+.debug-memory {
+  border-color: #9f7aea;
+}
+
+.debug-memory .debug-label {
+  background: #553c9a;
+  color: #d6bcfa;
+}
+
+/* Thinking styles */
+.debug-thinking {
+  border-color: #ed8936;
+}
+
+.debug-thinking .debug-label {
+  background: #975a16;
+  color: #fbd38d;
+}
+
+/* Expandable memory items */
+.debug-memory-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.debug-memory-summary {
+  flex: 1;
+  color: #a0aec0;
+}
+
+.debug-expand-btn {
+  background: none;
+  border: none;
+  color: #9f7aea;
+  cursor: pointer;
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  transition: background 0.2s;
+}
+
+.debug-expand-btn:hover {
+  background: rgba(159, 122, 234, 0.2);
+}
+
+.debug-memory-items {
+  margin-top: 8px;
+  border-top: 1px dashed #3d4654;
+  padding-top: 8px;
+}
+
+.debug-memory-items.collapsed {
+  display: none;
+}
+
+.debug-memory-item {
+  display: flex;
+  gap: 8px;
+  padding: 4px 0;
+  border-bottom: 1px dotted #2d3748;
+}
+
+.debug-memory-item:last-child {
+  border-bottom: none;
+}
+
+.debug-memory-type {
+  font-size: 9px;
+  padding: 1px 4px;
+  border-radius: 3px;
+  text-transform: uppercase;
+  flex-shrink: 0;
+}
+
+.debug-memory-item-fact .debug-memory-type {
+  background: #553c9a;
+  color: #d6bcfa;
+}
+
+.debug-memory-item-conversation .debug-memory-type {
+  background: #2c5282;
+  color: #90cdf4;
+}
+
+.debug-memory-content {
+  color: #cbd5e0;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
 /* Markdown content styles */
 .message-content {
   line-height: 1.5;

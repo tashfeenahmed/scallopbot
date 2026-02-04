@@ -58,10 +58,14 @@ export type ProgressCallback = (update: ProgressUpdate) => Promise<void>;
 export type ShouldStopCallback = () => boolean;
 
 export interface ProgressUpdate {
-  type: 'thinking' | 'tool_start' | 'tool_complete' | 'status';
+  type: 'thinking' | 'tool_start' | 'tool_complete' | 'tool_error' | 'memory' | 'status';
   message: string;
   toolName?: string;
   iteration?: number;
+  /** For memory events */
+  count?: number;
+  action?: string;
+  items?: { type: 'fact' | 'conversation'; content: string; subject?: string }[];
 }
 
 const DEFAULT_SYSTEM_PROMPT = `You are a personal AI assistant with direct system access via skills. Get things done - don't describe, DO.
@@ -272,7 +276,18 @@ export class Agent {
     }
 
     // Build system prompt with memory context
-    const systemPrompt = await this.buildSystemPrompt(userMessage, sessionId);
+    const { prompt: systemPrompt, memoryStats, memoryItems } = await this.buildSystemPrompt(userMessage, sessionId);
+
+    // Report memory usage if we found any memories
+    if (onProgress && (memoryStats.factsFound > 0 || memoryStats.conversationsFound > 0)) {
+      await onProgress({
+        type: 'memory',
+        action: 'search',
+        message: `Found ${memoryStats.factsFound} facts, ${memoryStats.conversationsFound} conversations`,
+        count: memoryStats.factsFound + memoryStats.conversationsFound,
+        items: memoryItems,
+      });
+    }
 
     // Get tool definitions from skills (skills are now the primary capability source)
     const tools = this.skillRegistry
@@ -483,7 +498,11 @@ export class Agent {
     };
   }
 
-  private async buildSystemPrompt(userMessage: string, sessionId: string): Promise<string> {
+  private async buildSystemPrompt(userMessage: string, sessionId: string): Promise<{
+    prompt: string;
+    memoryStats: { factsFound: number; conversationsFound: number };
+    memoryItems: { type: 'fact' | 'conversation'; content: string; subject?: string }[];
+  }> {
     let prompt = this.baseSystemPrompt;
 
     // Add workspace context
@@ -507,14 +526,18 @@ export class Agent {
     }
 
     // Add memory context if hybrid search is available
+    let memoryStats = { factsFound: 0, conversationsFound: 0 };
+    let memoryItems: { type: 'fact' | 'conversation'; content: string; subject?: string }[] = [];
     if (this.hybridSearch) {
-      const memoryContext = this.buildMemoryContext(userMessage, sessionId);
+      const { context: memoryContext, stats, items } = this.buildMemoryContext(userMessage, sessionId);
+      memoryStats = stats;
+      memoryItems = items;
       if (memoryContext) {
         prompt += memoryContext;
       }
     }
 
-    return prompt;
+    return { prompt, memoryStats, memoryItems };
   }
 
   /**
@@ -523,12 +546,17 @@ export class Agent {
    *
    * FIX A/B/E: Always include user facts, prioritize facts over context
    */
-  private buildMemoryContext(userMessage: string, sessionId: string): string {
-    if (!this.hybridSearch) return '';
+  private buildMemoryContext(userMessage: string, sessionId: string): {
+    context: string;
+    stats: { factsFound: number; conversationsFound: number };
+    items: { type: 'fact' | 'conversation'; content: string; subject?: string }[];
+  } {
+    if (!this.hybridSearch) return { context: '', stats: { factsFound: 0, conversationsFound: 0 }, items: [] };
 
     const MAX_MEMORY_CHARS = 2000;
     const MAX_CONVERSATION_MESSAGES = 6;
     let context = '';
+    const items: { type: 'fact' | 'conversation'; content: string; subject?: string }[] = [];
 
     try {
       // FIX B/E: First, always get key user facts (subject="user") regardless of query
@@ -582,6 +610,13 @@ export class Agent {
           if (charCount + memoryLine.length > MAX_MEMORY_CHARS) break;
           memoriesText += memoryLine;
           charCount += memoryLine.length;
+
+          // Collect for debug display
+          items.push({
+            type: 'fact',
+            content: result.entry.content,
+            subject: subject !== 'user' ? subject : undefined,
+          });
         }
 
         if (memoriesText) {
@@ -612,6 +647,12 @@ export class Agent {
             ? result.entry.content.substring(0, 200) + '...'
             : result.entry.content;
           conversationText += `${role}: ${content}\n`;
+
+          // Collect for debug display
+          items.push({
+            type: 'conversation',
+            content: `${role}: ${content}`,
+          });
         }
 
         if (conversationText) {
@@ -619,17 +660,20 @@ export class Agent {
         }
       }
 
+      const stats = { factsFound: allFacts.length, conversationsFound: recentConversations.length };
+
       if (context) {
         this.logger.debug(
           { userFactCount: userFacts.length, relevantFactCount: relevantFacts.length, totalFacts: allFacts.length },
           'Memory context added to prompt'
         );
       }
+
+      return { context, stats, items };
     } catch (error) {
       this.logger.warn({ error: (error as Error).message }, 'Failed to build memory context');
+      return { context: '', stats: { factsFound: 0, conversationsFound: 0 }, items: [] };
     }
-
-    return context;
   }
 
   private extractTextContent(content: ContentBlock[]): string {
@@ -866,6 +910,16 @@ export class Agent {
         } catch (error) {
           const err = error as Error;
           this.logger.error({ skillName: toolUse.name, error: err.message }, 'Skill execution failed');
+
+          // Send progress: skill error
+          if (onProgress) {
+            await onProgress({
+              type: 'tool_error',
+              message: err.message,
+              toolName: toolUse.name,
+            });
+          }
+
           results.push({
             type: 'tool_result',
             tool_use_id: toolUse.id,

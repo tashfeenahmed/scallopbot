@@ -104,20 +104,105 @@
 
   /**
    * Add a debug message (skill call, internal work)
+   * @param {string} label - Label for the debug message
+   * @param {string|object} content - Content to display
+   * @param {string} type - Type for styling: 'tool-start', 'tool-complete', 'tool-error', 'memory', 'thinking'
    */
-  function addDebugMessage(label, content) {
+  function addDebugMessage(label, content, type = 'default') {
     const messageEl = document.createElement('div');
-    messageEl.className = 'message debug';
+    messageEl.className = `message debug debug-${type}`;
 
     const labelEl = document.createElement('div');
     labelEl.className = 'debug-label';
     labelEl.textContent = label;
 
     const contentEl = document.createElement('div');
+    contentEl.className = 'debug-content';
     contentEl.textContent = typeof content === 'object' ? JSON.stringify(content, null, 2) : content;
 
     messageEl.appendChild(labelEl);
     messageEl.appendChild(contentEl);
+    messagesContainer.appendChild(messageEl);
+
+    if (debugMode) {
+      scrollToBottom();
+    }
+  }
+
+  /**
+   * Add a memory debug message with expandable items
+   * @param {string} action - Memory action (search, collect)
+   * @param {string} summary - Summary text
+   * @param {Array} items - Memory items to display
+   */
+  function addMemoryDebugMessage(action, summary, items) {
+    const messageEl = document.createElement('div');
+    messageEl.className = 'message debug debug-memory';
+
+    const headerEl = document.createElement('div');
+    headerEl.className = 'debug-memory-header';
+
+    const labelEl = document.createElement('div');
+    labelEl.className = 'debug-label';
+    labelEl.textContent = 'memory:' + action;
+
+    const summaryEl = document.createElement('span');
+    summaryEl.className = 'debug-memory-summary';
+    summaryEl.textContent = summary;
+
+    headerEl.appendChild(labelEl);
+    headerEl.appendChild(summaryEl);
+
+    // Add expand button if there are items
+    if (items && items.length > 0) {
+      const expandBtn = document.createElement('button');
+      expandBtn.className = 'debug-expand-btn';
+      expandBtn.textContent = '▶';
+      expandBtn.title = 'Click to expand';
+
+      const itemsEl = document.createElement('div');
+      itemsEl.className = 'debug-memory-items collapsed';
+
+      for (const item of items) {
+        const itemEl = document.createElement('div');
+        itemEl.className = `debug-memory-item debug-memory-item-${item.type}`;
+
+        const typeTag = document.createElement('span');
+        typeTag.className = 'debug-memory-type';
+        typeTag.textContent = item.type;
+
+        const contentEl = document.createElement('span');
+        contentEl.className = 'debug-memory-content';
+        contentEl.textContent = item.subject ? `[${item.subject}] ${item.content}` : item.content;
+
+        itemEl.appendChild(typeTag);
+        itemEl.appendChild(contentEl);
+        itemsEl.appendChild(itemEl);
+      }
+
+      expandBtn.addEventListener('click', function() {
+        const isCollapsed = itemsEl.classList.contains('collapsed');
+        if (isCollapsed) {
+          itemsEl.classList.remove('collapsed');
+          expandBtn.textContent = '▼';
+          expandBtn.title = 'Click to collapse';
+        } else {
+          itemsEl.classList.add('collapsed');
+          expandBtn.textContent = '▶';
+          expandBtn.title = 'Click to expand';
+        }
+        if (debugMode) {
+          scrollToBottom();
+        }
+      });
+
+      headerEl.appendChild(expandBtn);
+      messageEl.appendChild(headerEl);
+      messageEl.appendChild(itemsEl);
+    } else {
+      messageEl.appendChild(headerEl);
+    }
+
     messagesContainer.appendChild(messageEl);
 
     if (debugMode) {
@@ -258,16 +343,27 @@
         break;
 
       case 'debug':
+        addDebugMessage('debug', data.message || '...');
+        break;
+
       case 'skill_start':
-        addDebugMessage(data.skill || 'skill', data.input || data.message || 'Starting...');
+        addDebugMessage('tool:' + (data.skill || 'skill'), data.input || data.message || 'Starting...', 'tool-start');
         break;
 
       case 'skill_complete':
-        addDebugMessage(data.skill || 'result', data.output || data.result || 'Complete');
+        addDebugMessage('tool:' + (data.skill || 'skill'), data.output || data.result || 'Complete', 'tool-complete');
+        break;
+
+      case 'skill_error':
+        addDebugMessage('error:' + (data.skill || 'skill'), data.error || 'Unknown error', 'tool-error');
+        break;
+
+      case 'memory':
+        addMemoryDebugMessage(data.action || 'search', data.message || `${data.count || 0} items`, data.items || []);
         break;
 
       case 'thinking':
-        addDebugMessage('thinking', data.message || '...');
+        addDebugMessage('thinking', data.message || '...', 'thinking');
         break;
 
       case 'trigger':

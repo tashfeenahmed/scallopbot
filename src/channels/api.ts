@@ -97,7 +97,7 @@ interface WsMessage {
 }
 
 interface WsResponse {
-  type: 'response' | 'chunk' | 'error' | 'pong' | 'trigger' | 'file' | 'skill_start' | 'skill_complete' | 'thinking' | 'debug';
+  type: 'response' | 'chunk' | 'error' | 'pong' | 'trigger' | 'file' | 'skill_start' | 'skill_complete' | 'skill_error' | 'thinking' | 'debug' | 'memory';
   sessionId?: string;
   content?: string;
   error?: string;
@@ -110,6 +110,10 @@ interface WsResponse {
   input?: string;
   output?: string;
   message?: string;
+  /** For memory messages */
+  count?: number;
+  action?: string;
+  items?: { type: string; content: string; subject?: string }[];
 }
 
 /**
@@ -661,7 +665,7 @@ export class ApiChannel implements Channel, TriggerSource {
 
         try {
           // Progress callback to send debug updates to WebSocket
-          const onProgress = async (update: { type: string; message: string; toolName?: string; iteration?: number }) => {
+          const onProgress = async (update: { type: string; message: string; toolName?: string; iteration?: number; count?: number; action?: string; items?: { type: string; content: string; subject?: string }[] }) => {
             if (update.type === 'tool_start') {
               this.sendWsMessage(ws, {
                 type: 'skill_start',
@@ -674,10 +678,24 @@ export class ApiChannel implements Channel, TriggerSource {
                 skill: update.toolName || 'skill',
                 output: update.message
               });
+            } else if (update.type === 'tool_error') {
+              this.sendWsMessage(ws, {
+                type: 'skill_error',
+                skill: update.toolName || 'skill',
+                error: update.message
+              });
             } else if (update.type === 'thinking') {
               this.sendWsMessage(ws, {
                 type: 'thinking',
                 message: update.message
+              });
+            } else if (update.type === 'memory') {
+              this.sendWsMessage(ws, {
+                type: 'memory',
+                action: update.action || 'search',
+                message: update.message,
+                count: update.count,
+                items: update.items
               });
             } else if (update.type === 'status') {
               this.sendWsMessage(ws, {

@@ -1,7 +1,7 @@
 /**
  * Skill Installer
  * Downloads and installs skills from URLs or skill registries
- * Complements the SkillPackageManager API with local installation support
+ * Supports ClawHub (clawhub.ai) - the OpenClaw skill registry
  */
 
 import * as fs from 'fs/promises';
@@ -12,10 +12,62 @@ import type { Logger } from 'pino';
 import { parseFrontmatter } from './parser.js';
 import { checkGates } from './loader.js';
 import type { Skill, SkillFrontmatter } from './types.js';
+import { unzipSync } from 'fflate';
 
 import { execSync, exec } from 'child_process';
 import { promisify } from 'util';
 import type { SkillInstaller as SkillInstallerSpec } from './types.js';
+
+// ClawHub API base URL
+const CLAWHUB_API_URL = process.env.CLAWHUB_REGISTRY || 'https://clawhub.ai';
+
+/**
+ * ClawHub skill metadata from API
+ */
+export interface ClawHubSkill {
+  slug: string;
+  displayName: string;
+  summary: string;
+  version?: string;
+  stats?: {
+    downloads: number;
+    stars: number;
+    versions?: number;
+  };
+  badges?: {
+    official?: boolean;
+    highlighted?: boolean;
+  };
+  owner?: {
+    handle: string;
+    displayName: string;
+    image?: string;
+  };
+  createdAt?: number;
+  updatedAt?: number;
+}
+
+/**
+ * ClawHub search response
+ */
+export interface ClawHubSearchResponse {
+  results: ClawHubSkill[];
+  scores?: number[];
+}
+
+/**
+ * ClawHub version info
+ */
+export interface ClawHubVersion {
+  version: string;
+  createdAt: number;
+  changelog?: string;
+  files?: Array<{
+    path: string;
+    size: number;
+    sha256?: string;
+  }>;
+}
 
 const execAsync = promisify(exec);
 const DEFAULT_LOCAL_SKILLS_DIR = path.join(homedir(), '.scallopbot', 'skills');
@@ -830,6 +882,249 @@ export class SkillPackageManager {
    */
   getSkillsDir(): string {
     return this.skillsDir;
+  }
+
+  // ==================== ClawHub API Methods ====================
+
+  /**
+   * Search ClawHub for skills
+   */
+  async searchClawHub(query: string, limit: number = 10): Promise<ClawHubSkill[]> {
+    try {
+      const url = `${CLAWHUB_API_URL}/api/v1/search?q=${encodeURIComponent(query)}&limit=${limit}`;
+      this.logger?.info({ query, limit }, 'Searching ClawHub');
+
+      const response = await fetch(url);
+      if (!response.ok) {
+        this.logger?.warn({ status: response.status }, 'ClawHub search failed');
+        return [];
+      }
+
+      const data = (await response.json()) as ClawHubSearchResponse;
+      return data.results || [];
+    } catch (error) {
+      this.logger?.error({ error: (error as Error).message }, 'ClawHub search error');
+      return [];
+    }
+  }
+
+  /**
+   * Get skill details from ClawHub
+   */
+  async getClawHubSkill(slug: string): Promise<ClawHubSkill | null> {
+    try {
+      const url = `${CLAWHUB_API_URL}/api/v1/skills/${encodeURIComponent(slug)}`;
+      const response = await fetch(url);
+
+      if (!response.ok) {
+        return null;
+      }
+
+      const data = await response.json();
+      // API wraps skill in a "skill" object
+      const skillData = (data as { skill?: ClawHubSkill }).skill || data;
+      return skillData as ClawHubSkill;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Get versions of a skill from ClawHub
+   */
+  async getClawHubVersions(slug: string): Promise<ClawHubVersion[]> {
+    try {
+      const url = `${CLAWHUB_API_URL}/api/v1/skills/${encodeURIComponent(slug)}/versions`;
+      const response = await fetch(url);
+
+      if (!response.ok) {
+        return [];
+      }
+
+      const data = await response.json();
+      // API returns { items: [...], nextCursor: ... }
+      if (Array.isArray(data)) {
+        return data as ClawHubVersion[];
+      }
+      // Check for items (paginated response) or versions
+      const wrapper = data as { items?: ClawHubVersion[]; versions?: ClawHubVersion[] };
+      return wrapper.items || wrapper.versions || [];
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Download skill ZIP from ClawHub
+   */
+  async downloadFromClawHub(slug: string, version?: string): Promise<Buffer | null> {
+    try {
+      let url = `${CLAWHUB_API_URL}/api/v1/download?slug=${encodeURIComponent(slug)}`;
+      if (version) {
+        url += `&version=${encodeURIComponent(version)}`;
+      }
+
+      this.logger?.info({ slug, version }, 'Downloading from ClawHub');
+
+      const response = await fetch(url);
+      if (!response.ok) {
+        this.logger?.warn({ status: response.status, slug }, 'ClawHub download failed');
+        return null;
+      }
+
+      const arrayBuffer = await response.arrayBuffer();
+      return Buffer.from(arrayBuffer);
+    } catch (error) {
+      this.logger?.error({ error: (error as Error).message, slug }, 'ClawHub download error');
+      return null;
+    }
+  }
+
+  /**
+   * Install a skill from ClawHub
+   */
+  async installFromClawHub(slug: string, version?: string): Promise<InstallResult> {
+    try {
+      // Sanitize slug
+      let safeSlug: string;
+      try {
+        safeSlug = sanitizeSkillName(slug);
+      } catch (err) {
+        return {
+          success: false,
+          error: (err as Error).message,
+        };
+      }
+
+      this.logger?.info({ slug: safeSlug, version }, 'Installing from ClawHub');
+
+      // Get skill info first
+      const skillInfo = await this.getClawHubSkill(safeSlug);
+      if (!skillInfo) {
+        return {
+          success: false,
+          error: `Skill "${safeSlug}" not found on ClawHub`,
+        };
+      }
+
+      // Download ZIP
+      const zipBuffer = await this.downloadFromClawHub(safeSlug, version);
+      if (!zipBuffer) {
+        return {
+          success: false,
+          error: `Failed to download skill "${safeSlug}" from ClawHub`,
+        };
+      }
+
+      // Create skill directory
+      const skillDir = path.join(this.skillsDir, safeSlug);
+      await fs.mkdir(skillDir, { recursive: true });
+
+      // Extract ZIP
+      try {
+        const unzipped = unzipSync(new Uint8Array(zipBuffer));
+
+        for (const [filePath, content] of Object.entries(unzipped)) {
+          // Skip directories and hidden files
+          if (filePath.endsWith('/') || filePath.startsWith('.') || filePath.includes('/.')) {
+            continue;
+          }
+
+          const fullPath = path.join(skillDir, filePath);
+          const dir = path.dirname(fullPath);
+
+          // Create parent directories
+          await fs.mkdir(dir, { recursive: true });
+
+          // Write file
+          await fs.writeFile(fullPath, content);
+          this.logger?.debug({ file: filePath }, 'Extracted file');
+        }
+      } catch (extractError) {
+        return {
+          success: false,
+          error: `Failed to extract ZIP: ${(extractError as Error).message}`,
+        };
+      }
+
+      // Find and parse SKILL.md
+      const skillMdPath = path.join(skillDir, 'SKILL.md');
+      let parsed: { frontmatter: SkillFrontmatter; content: string };
+
+      try {
+        const skillMdContent = await fs.readFile(skillMdPath, 'utf-8');
+        parsed = parseFrontmatter(skillMdContent, skillMdPath);
+      } catch (parseError) {
+        // Clean up on failure
+        await fs.rm(skillDir, { recursive: true, force: true });
+        return {
+          success: false,
+          error: `Invalid SKILL.md format: ${(parseError as Error).message}`,
+        };
+      }
+
+      // Write version metadata
+      const versionMeta: VersionMetadata = {
+        version: version || skillInfo.version || '1.0.0',
+        installedAt: new Date().toISOString(),
+        checksum: createHash('sha256').update(zipBuffer).digest('hex'),
+        sourceUrl: `${CLAWHUB_API_URL}/api/v1/download?slug=${safeSlug}`,
+      };
+      await fs.writeFile(
+        path.join(skillDir, '.version.json'),
+        JSON.stringify(versionMeta, null, 2),
+        'utf-8'
+      );
+
+      // Check gates
+      const gateResult = checkGates(parsed.frontmatter.metadata);
+
+      // Check if skill has scripts
+      const scriptsDir = path.join(skillDir, 'scripts');
+      let hasScripts = false;
+      try {
+        const stat = await fs.stat(scriptsDir);
+        hasScripts = stat.isDirectory();
+      } catch {
+        // No scripts directory
+      }
+
+      const skill: Skill = {
+        name: parsed.frontmatter.name || safeSlug,
+        description: parsed.frontmatter.description || skillInfo.summary,
+        path: skillMdPath,
+        source: 'local',
+        frontmatter: parsed.frontmatter,
+        content: parsed.content,
+        available: gateResult.available,
+        unavailableReason: gateResult.reason,
+        hasScripts,
+        scriptsDir: hasScripts ? scriptsDir : undefined,
+      };
+
+      this.logger?.info(
+        {
+          name: skill.name,
+          path: skillMdPath,
+          available: skill.available,
+          hasScripts,
+          version: versionMeta.version,
+        },
+        'Skill installed from ClawHub'
+      );
+
+      return {
+        success: true,
+        skill,
+        path: skillMdPath,
+        checksum: versionMeta.checksum,
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: `ClawHub installation failed: ${(error as Error).message}`,
+      };
+    }
   }
 }
 

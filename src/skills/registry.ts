@@ -118,13 +118,37 @@ export class SkillRegistry {
   }
 
   /**
+   * Get executable skills (have scripts that can be executed)
+   */
+  getExecutableSkills(): Skill[] {
+    return this.state.availableSkills.filter(
+      (skill) =>
+        skill.hasScripts &&
+        skill.frontmatter['disable-model-invocation'] !== true
+    );
+  }
+
+  /**
+   * Get documentation skills (provide context but no scripts)
+   * These are typically OpenClaw-style skills that guide the LLM
+   */
+  getDocumentationSkills(): Skill[] {
+    return this.state.availableSkills.filter(
+      (skill) =>
+        !skill.hasScripts &&
+        skill.frontmatter['disable-model-invocation'] !== true
+    );
+  }
+
+  /**
    * Generate ToolDefinition[] from skills for LLM tool_use protocol
    *
-   * Skills become "tools" from the LLM's perspective.
-   * Skills without inputSchema get an empty schema (no required parameters).
+   * Only executable skills (with scripts) become tools.
+   * Documentation skills provide context but aren't directly executable.
    */
   getToolDefinitions(): ToolDefinition[] {
-    const skills = this.getModelSkills();
+    // Only return executable skills as tools
+    const skills = this.getExecutableSkills();
     return skills.map((skill) => ({
       name: skill.name,
       description: skill.description,
@@ -217,46 +241,79 @@ export class SkillRegistry {
    */
   generateSkillPrompt(options: GenerateSkillPromptOptions = {}): string {
     const { includeInstructions = false, maxInstructionLength = 500 } = options;
-    const skills = this.getModelSkills();
+    const executableSkills = this.getExecutableSkills();
+    const documentationSkills = this.getDocumentationSkills();
 
-    if (skills.length === 0) {
+    if (executableSkills.length === 0 && documentationSkills.length === 0) {
       return '';
     }
 
-    const lines: string[] = [
-      '# Available Skills',
-      '',
-      'You can invoke the following skills using the Skill tool:',
-      '',
-    ];
+    const lines: string[] = [];
 
-    for (const skill of skills) {
-      const emoji = skill.frontmatter.metadata?.openclaw?.emoji || '';
-      lines.push(`- **${skill.name}**${emoji ? ` ${emoji}` : ''}: ${skill.description}`);
+    // Section 1: Executable skills (can be invoked as tools)
+    if (executableSkills.length > 0) {
+      lines.push('# Available Skills');
+      lines.push('');
+      lines.push('You can invoke the following skills directly:');
+      lines.push('');
 
-      // Add input parameter documentation if schema exists
-      const schema = skill.frontmatter.inputSchema;
-      if (schema && schema.properties && Object.keys(schema.properties).length > 0) {
-        const params = this.formatInputSchema(schema);
-        if (params) {
-          lines.push(`  Parameters: ${params}`);
+      for (const skill of executableSkills) {
+        const emoji = skill.frontmatter.metadata?.openclaw?.emoji || '';
+        lines.push(`- **${skill.name}**${emoji ? ` ${emoji}` : ''}: ${skill.description}`);
+
+        // Add input parameter documentation if schema exists
+        const schema = skill.frontmatter.inputSchema;
+        if (schema && schema.properties && Object.keys(schema.properties).length > 0) {
+          const params = this.formatInputSchema(schema);
+          if (params) {
+            lines.push(`  Parameters: ${params}`);
+          }
         }
-      }
 
-      if (includeInstructions && skill.content.trim()) {
-        const content = skill.content.trim();
-        const truncated =
-          content.length > maxInstructionLength
-            ? content.slice(0, maxInstructionLength) + '...'
-            : content;
-        lines.push('');
-        lines.push(`  Instructions: ${truncated}`);
-        lines.push('');
+        if (includeInstructions && skill.content.trim()) {
+          const content = skill.content.trim();
+          const truncated =
+            content.length > maxInstructionLength
+              ? content.slice(0, maxInstructionLength) + '...'
+              : content;
+          lines.push('');
+          lines.push(`  Instructions: ${truncated}`);
+          lines.push('');
+        }
       }
     }
 
-    lines.push('');
-    lines.push('To use a skill, invoke the Skill tool with the skill name.');
+    // Section 2: Documentation skills (provide guidance, use bash/browser to execute)
+    if (documentationSkills.length > 0) {
+      if (executableSkills.length > 0) {
+        lines.push('');
+      }
+      lines.push('# Skill Guides');
+      lines.push('');
+      lines.push('The following skills provide guidance. Use bash or browser tools to execute tasks:');
+      lines.push('');
+
+      for (const skill of documentationSkills) {
+        const emoji = skill.frontmatter.metadata?.openclaw?.emoji || '';
+        lines.push(`## ${skill.name}${emoji ? ` ${emoji}` : ''}`);
+        lines.push('');
+        lines.push(skill.description);
+        lines.push('');
+
+        // Include full content for documentation skills (they ARE the instructions)
+        if (skill.content.trim()) {
+          const content = skill.content.trim();
+          // Limit to 2000 chars per documentation skill to avoid context overflow
+          const maxDocLength = 2000;
+          const truncated =
+            content.length > maxDocLength
+              ? content.slice(0, maxDocLength) + '\n\n...(truncated)'
+              : content;
+          lines.push(truncated);
+          lines.push('');
+        }
+      }
+    }
 
     return lines.join('\n');
   }
