@@ -92,7 +92,7 @@ Plans:
 
 Plans:
 - [x] 07-01: Update system prompt to include skill descriptions
-- [ ] 07-02: Implement skill selection and invocation in agent loop
+- [x] 07-02: Implement skill selection and invocation in agent loop
 - [ ] 07-03: Remove old tool layer and update imports
 
 ### Phase 8: Kimi K2.5 Thinking Mode
@@ -119,5 +119,5 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8
 | 4. Web Search Skill | 1/1 | Complete | 2026-02-04 |
 | 5. Browser Skill | 1/1 | Complete | 2026-02-04 |
 | 6. Telegram & Memory Skills | 2/2 | Complete | 2026-02-04 |
-| 7. Agent Loop Refactor | 1/3 | In progress | - |
+| 7. Agent Loop Refactor | 2/3 | In progress | - |
 | 8. Kimi K2.5 Thinking Mode | 0/3 | Not started | - |

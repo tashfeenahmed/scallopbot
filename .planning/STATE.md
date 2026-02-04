@@ -10,18 +10,18 @@ See: .planning/PROJECT.md (updated 2026-02-04)
 ## Current Position
 
 Phase: 7 of 8 (Agent Loop Refactor)
-Plan: 1 of 3 in current phase
+Plan: 2 of 3 in current phase
 Status: In progress
-Last activity: 2026-02-04 — Completed 07-01-PLAN.md
+Last activity: 2026-02-04 — Completed 07-02-PLAN.md
 
-Progress: █████████░ 69%
+Progress: █████████░ 77%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 9
+- Total plans completed: 10
 - Average duration: 3 min
-- Total execution time: 24 min
+- Total execution time: 26 min
 
 **By Phase:**
 
@@ -33,7 +33,7 @@ Progress: █████████░ 69%
 | 4 | 1 | 3 min | 3 min |
 | 5 | 1 | 2 min | 2 min |
 | 6 | 2 | 5 min | 3 min |
-| 7 | 1 | 2 min | 2 min |
+| 7 | 2 | 4 min | 2 min |
 
 **Recent Trend:**
 - Last 5 plans: 3min, 2min, 2min, 3min, 2min
@@ -66,6 +66,7 @@ Recent decisions affecting current work:
 - Gateway wires telegram singleton after channel starts
 - Generic skills reference in prompt (skills describe themselves via inputSchema)
 - inputSchema optional in frontmatter for backward compatibility
+- Skills are primary capability source; tools are fallback during transition
 
 ### Deferred Issues
 
@@ -81,6 +82,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-02-04T10:45:37Z
-Stopped at: Completed 07-01-PLAN.md
+Last session: 2026-02-04T10:52:00Z
+Stopped at: Completed 07-02-PLAN.md
 Resume file: None
