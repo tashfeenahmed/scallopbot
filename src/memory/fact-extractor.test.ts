@@ -123,6 +123,66 @@ describe('LLMFactExtractor', () => {
       expect(result.facts[0].content).toContain('Globex');
     });
 
+    it('should extract relationship facts with subject as "user"', async () => {
+      // This tests the critical fix: "My wife is Jamie" should have subject: "user"
+      const mockProvider = createMockProvider(JSON.stringify({
+        facts: [
+          { content: 'Wife is Jamie', subject: 'user', category: 'relationship' },
+        ],
+      }));
+
+      const extractor = new LLMFactExtractor({
+        provider: mockProvider,
+        memoryStore,
+        hybridSearch,
+        logger,
+      });
+
+      const result = await extractor.extractFacts(
+        'My wife is Jamie',
+        'user-123'
+      );
+
+      expect(result.facts.length).toBe(1);
+      expect(result.facts[0].subject).toBe('user'); // Critical: relationship belongs to user
+      expect(result.facts[0].content).toContain('Jamie');
+      expect(result.facts[0].category).toBe('relationship');
+    });
+
+    it('should extract both relationship and attribute facts for spouse', async () => {
+      // "My wife Jamie is a TikToker" should produce TWO facts
+      const mockProvider = createMockProvider(JSON.stringify({
+        facts: [
+          { content: 'Wife is Jamie', subject: 'user', category: 'relationship' },
+          { content: 'Is a TikToker', subject: 'Jamie', category: 'work' },
+        ],
+      }));
+
+      const extractor = new LLMFactExtractor({
+        provider: mockProvider,
+        memoryStore,
+        hybridSearch,
+        logger,
+      });
+
+      const result = await extractor.extractFacts(
+        'My wife Jamie is a TikToker',
+        'user-123'
+      );
+
+      expect(result.facts.length).toBe(2);
+
+      // Relationship fact has subject: "user"
+      const relationshipFact = result.facts.find(f => f.category === 'relationship');
+      expect(relationshipFact?.subject).toBe('user');
+      expect(relationshipFact?.content).toContain('Jamie');
+
+      // Work fact has subject: "Jamie"
+      const workFact = result.facts.find(f => f.category === 'work');
+      expect(workFact?.subject).toBe('Jamie');
+      expect(workFact?.content).toContain('TikToker');
+    });
+
     it('should extract location facts', async () => {
       const mockProvider = createMockProvider(JSON.stringify({
         facts: [
