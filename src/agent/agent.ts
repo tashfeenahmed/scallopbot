@@ -12,6 +12,7 @@ import type {
 import type { ToolRegistry, ToolContext } from '../tools/types.js';
 import type { SessionManager } from './session.js';
 import type { SkillRegistry } from '../skills/registry.js';
+import type { SkillExecutor } from '../skills/executor.js';
 import type { Router } from '../routing/router.js';
 import type { CostTracker } from '../routing/cost.js';
 import type { HotCollector, HybridSearch } from '../memory/memory.js';
@@ -26,6 +27,7 @@ export interface AgentOptions {
   sessionManager: SessionManager;
   toolRegistry: ToolRegistry;
   skillRegistry?: SkillRegistry;
+  skillExecutor?: SkillExecutor;
   router?: Router;
   costTracker?: CostTracker;
   hotCollector?: HotCollector;
@@ -162,6 +164,7 @@ export class Agent {
   private sessionManager: SessionManager;
   private toolRegistry: ToolRegistry;
   private skillRegistry: SkillRegistry | null;
+  private skillExecutor: SkillExecutor | null;
   private router: Router | null;
   private costTracker: CostTracker | null;
   private hotCollector: HotCollector | null;
@@ -183,6 +186,7 @@ export class Agent {
     this.sessionManager = options.sessionManager;
     this.toolRegistry = options.toolRegistry;
     this.skillRegistry = options.skillRegistry || null;
+    this.skillExecutor = options.skillExecutor || null;
     this.router = options.router || null;
     this.costTracker = options.costTracker || null;
     this.hotCollector = options.hotCollector || null;
@@ -818,55 +822,100 @@ export class Agent {
     const results: ContentBlock[] = [];
 
     for (const toolUse of toolUses) {
-      const tool = this.toolRegistry.getTool(toolUse.name);
+      // Try skill first (skills are now the primary execution path)
+      const skill = this.skillRegistry?.getSkill(toolUse.name);
 
-      if (!tool) {
-        this.logger.warn({ toolName: toolUse.name }, 'Unknown tool requested');
-        results.push({
-          type: 'tool_result',
-          tool_use_id: toolUse.id,
-          content: `Error: Unknown tool "${toolUse.name}"`,
-          is_error: true,
-        });
+      if (skill && this.skillExecutor) {
+        this.logger.debug({ skillName: toolUse.name, input: toolUse.input }, 'Executing skill');
+
+        try {
+          const result = await this.skillExecutor.execute(skill, {
+            skillName: toolUse.name,
+            args: toolUse.input,
+            cwd: this.workspace,
+          });
+
+          results.push({
+            type: 'tool_result',
+            tool_use_id: toolUse.id,
+            content: result.success
+              ? (result.output || 'Success')
+              : `Error: ${result.error}`,
+            is_error: !result.success,
+          });
+
+          // Collect in memory
+          if (this.hotCollector && result.success) {
+            this.hotCollector.collect({
+              content: `Skill ${toolUse.name} executed: ${(result.output || '').slice(0, 500)}`,
+              sessionId,
+              source: `skill:${toolUse.name}`,
+              tags: ['skill-execution', toolUse.name],
+              metadata: { skillInput: toolUse.input },
+            });
+          }
+        } catch (error) {
+          const err = error as Error;
+          this.logger.error({ skillName: toolUse.name, error: err.message }, 'Skill execution failed');
+          results.push({
+            type: 'tool_result',
+            tool_use_id: toolUse.id,
+            content: `Error executing skill: ${err.message}`,
+            is_error: true,
+          });
+        }
         continue;
       }
 
-      const context: ToolContext = {
-        workspace: this.workspace,
-        sessionId,
-        userId,
-        logger: this.logger.child({ tool: toolUse.name }),
-      };
+      // Fallback to tool (for backward compatibility during transition)
+      const tool = this.toolRegistry?.getTool(toolUse.name);
 
-      this.logger.debug({ toolName: toolUse.name, input: toolUse.input }, 'Executing tool');
+      if (tool) {
+        const context: ToolContext = {
+          workspace: this.workspace,
+          sessionId,
+          userId,
+          logger: this.logger.child({ tool: toolUse.name }),
+        };
 
-      try {
-        const result = await tool.execute(toolUse.input, context);
+        this.logger.debug({ toolName: toolUse.name, input: toolUse.input }, 'Executing tool (fallback)');
 
-        results.push({
-          type: 'tool_result',
-          tool_use_id: toolUse.id,
-          content: result.success ? result.output : `Error: ${result.error}`,
-          is_error: !result.success,
-        });
+        try {
+          const result = await tool.execute(toolUse.input, context);
 
-        // Collect tool execution in memory
-        if (this.hotCollector && result.success) {
-          this.hotCollector.collect({
-            content: `Tool ${toolUse.name} executed: ${result.output.slice(0, 500)}${result.output.length > 500 ? '...' : ''}`,
-            sessionId,
-            source: `tool:${toolUse.name}`,
-            tags: ['tool-execution', toolUse.name],
-            metadata: { toolInput: toolUse.input },
+          results.push({
+            type: 'tool_result',
+            tool_use_id: toolUse.id,
+            content: result.success ? result.output : `Error: ${result.error}`,
+            is_error: !result.success,
+          });
+
+          // Collect tool execution in memory
+          if (this.hotCollector && result.success) {
+            this.hotCollector.collect({
+              content: `Tool ${toolUse.name} executed: ${result.output.slice(0, 500)}${result.output.length > 500 ? '...' : ''}`,
+              sessionId,
+              source: `tool:${toolUse.name}`,
+              tags: ['tool-execution', toolUse.name],
+              metadata: { toolInput: toolUse.input },
+            });
+          }
+        } catch (error) {
+          const err = error as Error;
+          this.logger.error({ toolName: toolUse.name, error: err.message }, 'Tool execution failed');
+          results.push({
+            type: 'tool_result',
+            tool_use_id: toolUse.id,
+            content: `Error executing tool: ${err.message}`,
+            is_error: true,
           });
         }
-      } catch (error) {
-        const err = error as Error;
-        this.logger.error({ toolName: toolUse.name, error: err.message }, 'Tool execution failed');
+      } else {
+        this.logger.warn({ name: toolUse.name }, 'Unknown skill/tool requested');
         results.push({
           type: 'tool_result',
           tool_use_id: toolUse.id,
-          content: `Error executing tool: ${err.message}`,
+          content: `Error: Unknown skill "${toolUse.name}"`,
           is_error: true,
         });
       }
