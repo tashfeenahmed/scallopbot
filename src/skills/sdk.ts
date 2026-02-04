@@ -286,6 +286,7 @@ export class SkillBuilder {
       content: this.options.instructions || '',
       available: gateResult.available,
       unavailableReason: gateResult.reason,
+      hasScripts: false,
     };
 
     const handler = this.handler;

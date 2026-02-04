@@ -525,6 +525,7 @@ export class SkillPackageManager {
         content: parsed.content,
         available: gateResult.available,
         unavailableReason: gateResult.reason,
+        hasScripts: false,
       };
 
       this.logger?.info(
@@ -638,6 +639,7 @@ export class SkillPackageManager {
         content: parsed.content,
         available: gateResult.available,
         unavailableReason: gateResult.reason,
+        hasScripts: false,
       };
 
       this.logger?.info(
