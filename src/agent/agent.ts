@@ -386,6 +386,9 @@ export class Agent {
       const textContent = this.extractTextContent(response.content);
       const toolUses = this.extractToolUses(response.content);
 
+      // Check for explicit task completion marker
+      const taskComplete = this.isTaskComplete(textContent);
+
       this.logger.info({
         iteration: iterations,
         stopReason: response.stopReason,
@@ -393,11 +396,15 @@ export class Agent {
         textLength: textContent?.length || 0,
         toolUseCount: toolUses.length,
         toolNames: toolUses.map(t => t.name),
+        taskComplete,
       }, 'LLM response received');
 
-      // If no tool use, we're done
-      if (response.stopReason === 'end_turn' || toolUses.length === 0) {
-        finalResponse = textContent || 'I completed the task.';
+      // If task is explicitly complete OR no tool use with end_turn, we're done
+      if (taskComplete || (response.stopReason === 'end_turn' && toolUses.length === 0)) {
+        // Strip [DONE] marker from response if present
+        finalResponse = taskComplete
+          ? this.stripDoneMarker(textContent) || 'I completed the task.'
+          : textContent || 'I completed the task.';
 
         // Add assistant response to session
         await this.sessionManager.addMessage(sessionId, {
@@ -718,6 +725,23 @@ export class Agent {
       // Parsing failed, return null
     }
     return null;
+  }
+
+  /**
+   * Check if task is explicitly marked as complete via [DONE] marker
+   * The LLM can signal task completion by ending its response with [DONE]
+   */
+  private isTaskComplete(textContent: string): boolean {
+    if (!textContent) return false;
+    // Check for [DONE] at the end of the response (case insensitive, allow trailing whitespace)
+    return /\[done\]\s*$/i.test(textContent.trim());
+  }
+
+  /**
+   * Strip the [DONE] marker from the response text
+   */
+  private stripDoneMarker(text: string): string {
+    return text.replace(/\[done\]\s*$/i, '').trim();
   }
 
   /**
