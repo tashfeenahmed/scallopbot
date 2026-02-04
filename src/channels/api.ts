@@ -25,6 +25,7 @@ import type { Logger } from 'pino';
 import type { Agent } from '../agent/agent.js';
 import type { SessionManager } from '../agent/session.js';
 import type { Channel } from './types.js';
+import type { TriggerSource } from '../triggers/types.js';
 import { nanoid } from 'nanoid';
 
 /** Maximum request body size (1MB) */
@@ -96,16 +97,21 @@ interface WsMessage {
 }
 
 interface WsResponse {
-  type: 'response' | 'chunk' | 'error' | 'pong';
+  type: 'response' | 'chunk' | 'error' | 'pong' | 'trigger' | 'file';
   sessionId?: string;
   content?: string;
   error?: string;
+  /** For 'file' type: path to the file */
+  path?: string;
+  /** For 'file' type: optional caption */
+  caption?: string;
 }
 
 /**
- * API Channel
+ * API Channel - implements both Channel and TriggerSource interfaces.
+ * TriggerSource allows sending proactive messages to connected WebSocket clients.
  */
-export class ApiChannel implements Channel {
+export class ApiChannel implements Channel, TriggerSource {
   name = 'api';
 
   private config: Required<Omit<ApiChannelConfig, 'apiKey' | 'allowedOrigins' | 'staticDir'>> & {
@@ -118,6 +124,8 @@ export class ApiChannel implements Channel {
   private logger: Logger;
   private running = false;
   private userSessions: Map<string, string> = new Map();
+  /** Track WebSocket clients by userId for trigger support */
+  private clientsByUser: Map<string, Set<WebSocket>> = new Map();
 
   constructor(config: ApiChannelConfig) {
     this.config = {
@@ -165,6 +173,9 @@ export class ApiChannel implements Channel {
     if (!this.running) {
       return;
     }
+
+    // Clear client tracking before closing connections
+    this.clientsByUser.clear();
 
     // Close WebSocket connections
     if (this.wss) {
@@ -549,7 +560,9 @@ export class ApiChannel implements Channel {
    */
   private handleWebSocket(ws: WebSocket, req: IncomingMessage): void {
     const clientId = nanoid(8);
-    this.logger.debug({ clientId }, 'WebSocket client connected');
+    // UserId follows the ws-{clientId} pattern used by session management
+    const userId = `ws-${clientId}`;
+    this.logger.debug({ clientId, userId }, 'WebSocket client connected');
 
     // Check authentication using constant-time comparison
     if (this.config.apiKey) {
@@ -561,6 +574,9 @@ export class ApiChannel implements Channel {
         return;
       }
     }
+
+    // Track this client by userId for trigger support
+    this.addClientToUser(userId, ws);
 
     ws.on('message', async (data) => {
       try {
@@ -574,12 +590,40 @@ export class ApiChannel implements Channel {
     });
 
     ws.on('close', () => {
-      this.logger.debug({ clientId }, 'WebSocket client disconnected');
+      this.removeClientFromUser(userId, ws);
+      this.logger.debug({ clientId, userId }, 'WebSocket client disconnected');
     });
 
     ws.on('error', (error) => {
       this.logger.error({ clientId, error: error.message }, 'WebSocket error');
     });
+  }
+
+  /**
+   * Add a WebSocket client to the user's client set
+   */
+  private addClientToUser(userId: string, ws: WebSocket): void {
+    let clients = this.clientsByUser.get(userId);
+    if (!clients) {
+      clients = new Set();
+      this.clientsByUser.set(userId, clients);
+    }
+    clients.add(ws);
+    this.logger.debug({ userId, clientCount: clients.size }, 'Client added to user');
+  }
+
+  /**
+   * Remove a WebSocket client from the user's client set
+   */
+  private removeClientFromUser(userId: string, ws: WebSocket): void {
+    const clients = this.clientsByUser.get(userId);
+    if (clients) {
+      clients.delete(ws);
+      if (clients.size === 0) {
+        this.clientsByUser.delete(userId);
+      }
+      this.logger.debug({ userId, clientCount: clients.size }, 'Client removed from user');
+    }
   }
 
   /**
@@ -681,5 +725,77 @@ export class ApiChannel implements Channel {
       return null;
     }
     return { host: addr.address, port: addr.port };
+  }
+
+  // ============================================
+  // TriggerSource interface implementation
+  // ============================================
+
+  /**
+   * Send a message to all connected WebSocket clients for a user.
+   * Implements TriggerSource.sendMessage
+   *
+   * @param userId - The user identifier (e.g., "ws-abc123")
+   * @param message - The message content
+   * @returns true if at least one message was sent
+   */
+  async sendMessage(userId: string, message: string): Promise<boolean> {
+    const clients = this.clientsByUser.get(userId);
+
+    if (!clients || clients.size === 0) {
+      this.logger.debug({ userId }, 'No WebSocket clients for user');
+      return false;
+    }
+
+    let sentCount = 0;
+    for (const ws of clients) {
+      if (ws.readyState === WebSocket.OPEN) {
+        this.sendWsMessage(ws, { type: 'trigger', content: message });
+        sentCount++;
+      }
+    }
+
+    this.logger.debug({ userId, sentCount, clientCount: clients.size }, 'Trigger message sent');
+    return sentCount > 0;
+  }
+
+  /**
+   * Send a file notification to all connected WebSocket clients for a user.
+   * Implements TriggerSource.sendFile
+   *
+   * Note: For WebSocket clients, we send a file notification with path.
+   * The client is responsible for downloading the file if needed.
+   *
+   * @param userId - The user identifier
+   * @param filePath - Path to the file
+   * @param caption - Optional caption
+   * @returns true if at least one notification was sent
+   */
+  async sendFile(userId: string, filePath: string, caption?: string): Promise<boolean> {
+    const clients = this.clientsByUser.get(userId);
+
+    if (!clients || clients.size === 0) {
+      this.logger.debug({ userId }, 'No WebSocket clients for user');
+      return false;
+    }
+
+    let sentCount = 0;
+    for (const ws of clients) {
+      if (ws.readyState === WebSocket.OPEN) {
+        this.sendWsMessage(ws, { type: 'file', path: filePath, caption });
+        sentCount++;
+      }
+    }
+
+    this.logger.debug({ userId, filePath, sentCount, clientCount: clients.size }, 'File notification sent');
+    return sentCount > 0;
+  }
+
+  /**
+   * Get the name of this trigger source.
+   * Implements TriggerSource.getName
+   */
+  getName(): string {
+    return 'api';
   }
 }
