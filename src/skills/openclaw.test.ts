@@ -626,13 +626,16 @@ New content.
     it('should include full skill instructions when enabled', () => {
       const prompt = registry.generateSkillPrompt({ includeInstructions: true });
 
+      // Documentation skills (like available-skill) always show their content
       expect(prompt).toContain('Available skill content');
     });
 
-    it('should not include instructions when disabled', () => {
+    it('should always include documentation skill content (they ARE instructions)', () => {
       const prompt = registry.generateSkillPrompt({ includeInstructions: false });
 
-      expect(prompt).not.toContain('Available skill content');
+      // Documentation skills always show content regardless of includeInstructions flag
+      // because their content IS their purpose (they have no executable scripts)
+      expect(prompt).toContain('Available skill content');
     });
   });
 });

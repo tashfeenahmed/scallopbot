@@ -211,13 +211,22 @@ describe('Config Schema', () => {
       expect(config.agent.workspace).toBe(process.cwd());
     });
 
-    it('should throw error if ANTHROPIC_API_KEY is missing', async () => {
+    it('should throw error if no LLM provider API key is set', async () => {
+      // Import first (which triggers dotenv)
+      const { loadConfig } = await import('./config.js');
+
+      // Then delete all provider keys AFTER dotenv has loaded
       delete process.env.ANTHROPIC_API_KEY;
+      delete process.env.OPENAI_API_KEY;
+      delete process.env.GROQ_API_KEY;
+      delete process.env.OPENROUTER_API_KEY;
+      delete process.env.MOONSHOT_API_KEY;
+      delete process.env.XAI_API_KEY;
+      delete process.env.OLLAMA_BASE_URL;
       process.env.TELEGRAM_BOT_TOKEN = 'env-bot-token';
       process.env.AGENT_WORKSPACE = '/env/workspace';
 
-      const { loadConfig } = await import('./config.js');
-      expect(() => loadConfig()).toThrow();
+      expect(() => loadConfig()).toThrow('At least one LLM provider API key is required');
     });
 
     it('should allow telegram to be disabled when no token provided', async () => {
