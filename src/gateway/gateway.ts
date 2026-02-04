@@ -405,6 +405,7 @@ export class Gateway {
         port: this.config.channels.api.port,
         host: this.config.channels.api.host,
         apiKey: this.config.channels.api.apiKey,
+        staticDir: path.join(process.cwd(), 'public'),
         agent: this.agent!,
         sessionManager: this.sessionManager!,
         logger: this.logger,
