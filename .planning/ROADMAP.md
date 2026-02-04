@@ -81,14 +81,14 @@ Plans:
 
 **Milestone Goal:** Clean up codebase, add tests, build web UI, and transform the agent into a proactive personal assistant that loops until task completion with human-like messaging.
 
-#### Phase 9: Code Cleanup
+#### Phase 9: Code Cleanup (In Progress)
 **Goal**: Unwire tool system, delete unused code, replace console.log with structured logger
 **Depends on**: v1.0 complete
 **Research**: Unlikely (internal cleanup)
-**Plans**: 2
+**Plans**: 1/2 complete
 
 Plans:
-- [ ] 09-01: Remove tool fallback from Agent (skills-only execution)
+- [x] 09-01: Remove tool fallback from Agent (skills-only execution)
 - [ ] 09-02: Delete duplicate files and cleanup console.log
 
 #### Phase 10: Test Infrastructure
@@ -172,7 +172,7 @@ Phases execute in numeric order: 9 → 10 → 11 → 12 → 13 → 14 → 15 →
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
 | 1-7 | v1.0 | 11/11 | Complete | 2026-02-04 |
-| 9. Code Cleanup | v2.0 | 0/2 | Planned | - |
+| 9. Code Cleanup | v2.0 | 1/2 | In progress | - |
 | 10. Test Infrastructure | v2.0 | 0/? | Not started | - |
 | 11. Web UI | v2.0 | 0/? | Not started | - |
 | 12. Loop Until Done | v2.0 | 0/? | Not started | - |
