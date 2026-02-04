@@ -38,6 +38,8 @@ export type {
   SkillRegistryState,
   SkillContext,
   SkillResult,
+  SkillExecutionRequest,
+  SkillExecutionResult,
 } from './types.js';
 
 export {
@@ -51,6 +53,9 @@ export type { ParsedSkill } from './parser.js';
 export { SkillLoader, createSkillLoader, checkGates } from './loader.js';
 export { SkillRegistry, createSkillRegistry } from './registry.js';
 export type { SkillHandler } from './registry.js';
+
+// Skill executor for running scripts
+export { SkillExecutor, createSkillExecutor } from './executor.js';
 
 // Skill package manager for downloading from registries
 export { SkillPackageManager, createSkillPackageManager } from './clawhub.js';
