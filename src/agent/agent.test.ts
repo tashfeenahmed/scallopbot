@@ -415,7 +415,7 @@ describe('Agent', () => {
     it('should preserve conversation history', async () => {
       const { Agent } = await import('./agent.js');
       const { SessionManager } = await import('./session.js');
-      
+
       const provider: LLMProvider = {
         name: 'history-check',
         isAvailable: () => true,
@@ -449,6 +449,229 @@ describe('Agent', () => {
       const secondCallArgs = (provider.complete as any).mock.calls[1][0];
       expect(secondCallArgs.messages.length).toBeGreaterThan(1);
       expect(secondCallArgs.messages[0].content).toBe('First message');
+    });
+  });
+
+  describe('skills execution', () => {
+    it('should execute skill via SkillExecutor when skill is registered', async () => {
+      const { Agent } = await import('./agent.js');
+      const { SessionManager } = await import('./session.js');
+
+      // Mock skill registry
+      const mockSkill = {
+        name: 'test-skill',
+        description: 'A test skill',
+        path: '/mock/SKILL.md',
+        source: 'workspace' as const,
+        frontmatter: { name: 'test-skill', description: 'Test' },
+        content: 'Test instructions',
+        available: true,
+        hasScripts: true,
+        scriptsDir: '/mock/scripts',
+      };
+
+      const mockSkillRegistry = {
+        getSkill: vi.fn().mockReturnValue(mockSkill),
+        getToolDefinitions: vi.fn().mockReturnValue([
+          { name: 'test-skill', description: 'A test skill', input_schema: { type: 'object', properties: {} } },
+        ]),
+        generateSkillPrompt: vi.fn().mockReturnValue('## Skills\n- test-skill: A test skill'),
+      };
+
+      // Mock skill executor
+      const mockSkillExecutor = {
+        execute: vi.fn().mockResolvedValue({
+          success: true,
+          output: 'Skill executed successfully',
+          exitCode: 0,
+        }),
+      };
+
+      const provider = createMockProvider([
+        // First response: invoke skill
+        {
+          content: [
+            {
+              type: 'tool_use',
+              id: 'skill-1',
+              name: 'test-skill',
+              input: { action: 'run' },
+            },
+          ],
+          stopReason: 'tool_use',
+          usage: { inputTokens: 20, outputTokens: 15 },
+          model: 'test-model',
+        },
+        // Second response: final answer based on skill result
+        {
+          content: [{ type: 'text', text: 'The skill ran successfully.' }],
+          stopReason: 'end_turn',
+          usage: { inputTokens: 30, outputTokens: 10 },
+          model: 'test-model',
+        },
+      ]);
+
+      const sessionManager = new SessionManager(sessionsDir);
+      const logger = pino({ level: 'silent' });
+
+      const agent = new Agent({
+        provider,
+        sessionManager,
+        skillRegistry: mockSkillRegistry as any,
+        skillExecutor: mockSkillExecutor as any,
+        workspace: testDir,
+        logger,
+        maxIterations: 20,
+      });
+
+      const session = await sessionManager.createSession();
+      const result = await agent.processMessage(session.id, 'Run the test skill');
+
+      // Verify skill was looked up and executed
+      expect(mockSkillRegistry.getSkill).toHaveBeenCalledWith('test-skill');
+      expect(mockSkillExecutor.execute).toHaveBeenCalledWith(
+        mockSkill,
+        expect.objectContaining({
+          skillName: 'test-skill',
+          args: { action: 'run' },
+        })
+      );
+      expect(result.response).toBe('The skill ran successfully.');
+    });
+
+    it('should handle skill execution failure gracefully', async () => {
+      const { Agent } = await import('./agent.js');
+      const { SessionManager } = await import('./session.js');
+
+      const mockSkill = {
+        name: 'failing-skill',
+        description: 'A skill that fails',
+        path: '/mock/SKILL.md',
+        source: 'workspace' as const,
+        frontmatter: { name: 'failing-skill', description: 'Fails' },
+        content: 'Instructions',
+        available: true,
+        hasScripts: true,
+        scriptsDir: '/mock/scripts',
+      };
+
+      const mockSkillRegistry = {
+        getSkill: vi.fn().mockReturnValue(mockSkill),
+        getToolDefinitions: vi.fn().mockReturnValue([]),
+        generateSkillPrompt: vi.fn().mockReturnValue(''),
+      };
+
+      const mockSkillExecutor = {
+        execute: vi.fn().mockResolvedValue({
+          success: false,
+          error: 'Script failed with exit code 1',
+          exitCode: 1,
+        }),
+      };
+
+      const provider = createMockProvider([
+        // First response: invoke failing skill
+        {
+          content: [
+            {
+              type: 'tool_use',
+              id: 'skill-1',
+              name: 'failing-skill',
+              input: {},
+            },
+          ],
+          stopReason: 'tool_use',
+          usage: { inputTokens: 20, outputTokens: 15 },
+          model: 'test-model',
+        },
+        // Second response: acknowledge failure
+        {
+          content: [{ type: 'text', text: 'The skill failed to execute.' }],
+          stopReason: 'end_turn',
+          usage: { inputTokens: 30, outputTokens: 10 },
+          model: 'test-model',
+        },
+      ]);
+
+      const sessionManager = new SessionManager(sessionsDir);
+      const logger = pino({ level: 'silent' });
+
+      const agent = new Agent({
+        provider,
+        sessionManager,
+        skillRegistry: mockSkillRegistry as any,
+        skillExecutor: mockSkillExecutor as any,
+        workspace: testDir,
+        logger,
+        maxIterations: 20,
+      });
+
+      const session = await sessionManager.createSession();
+      const result = await agent.processMessage(session.id, 'Run failing skill');
+
+      // Verify skill was executed
+      expect(mockSkillExecutor.execute).toHaveBeenCalled();
+      // Agent should handle the error and continue
+      expect(result.response).toBe('The skill failed to execute.');
+    });
+
+    it('should return unknown skill error when skill not in registry', async () => {
+      const { Agent } = await import('./agent.js');
+      const { SessionManager } = await import('./session.js');
+
+      const mockSkillRegistry = {
+        getSkill: vi.fn().mockReturnValue(null), // Skill not found
+        getToolDefinitions: vi.fn().mockReturnValue([]),
+        generateSkillPrompt: vi.fn().mockReturnValue(''),
+      };
+
+      const mockSkillExecutor = {
+        execute: vi.fn(),
+      };
+
+      const provider = createMockProvider([
+        // First response: try to invoke non-existent skill
+        {
+          content: [
+            {
+              type: 'tool_use',
+              id: 'skill-1',
+              name: 'nonexistent-skill',
+              input: {},
+            },
+          ],
+          stopReason: 'tool_use',
+          usage: { inputTokens: 20, outputTokens: 15 },
+          model: 'test-model',
+        },
+        // Second response: handle error
+        {
+          content: [{ type: 'text', text: 'That skill does not exist.' }],
+          stopReason: 'end_turn',
+          usage: { inputTokens: 30, outputTokens: 10 },
+          model: 'test-model',
+        },
+      ]);
+
+      const sessionManager = new SessionManager(sessionsDir);
+      const logger = pino({ level: 'silent' });
+
+      const agent = new Agent({
+        provider,
+        sessionManager,
+        skillRegistry: mockSkillRegistry as any,
+        skillExecutor: mockSkillExecutor as any,
+        workspace: testDir,
+        logger,
+        maxIterations: 20,
+      });
+
+      const session = await sessionManager.createSession();
+      const result = await agent.processMessage(session.id, 'Use nonexistent skill');
+
+      // Skill executor should NOT be called since skill wasn't found
+      expect(mockSkillExecutor.execute).not.toHaveBeenCalled();
+      expect(result.response).toBe('That skill does not exist.');
     });
   });
 });
