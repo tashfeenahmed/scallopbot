@@ -9,19 +9,19 @@ See: .planning/PROJECT.md (updated 2026-02-04)
 
 ## Current Position
 
-Phase: 6 of 8 (Telegram & Memory Skills)
-Plan: 2 of 2 in current phase
-Status: Phase complete
-Last activity: 2026-02-04 — Completed 06-02-PLAN.md
+Phase: 7 of 8 (Agent Loop Refactor)
+Plan: 1 of 3 in current phase
+Status: In progress
+Last activity: 2026-02-04 — Completed 07-01-PLAN.md
 
-Progress: ████████░░ 62%
+Progress: █████████░ 69%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 8
+- Total plans completed: 9
 - Average duration: 3 min
-- Total execution time: 22 min
+- Total execution time: 24 min
 
 **By Phase:**
 
@@ -33,10 +33,11 @@ Progress: ████████░░ 62%
 | 4 | 1 | 3 min | 3 min |
 | 5 | 1 | 2 min | 2 min |
 | 6 | 2 | 5 min | 3 min |
+| 7 | 1 | 2 min | 2 min |
 
 **Recent Trend:**
-- Last 5 plans: 5min, 3min, 2min, 2min, 3min
-- Trend: Stable (~3 min/plan)
+- Last 5 plans: 3min, 2min, 2min, 3min, 2min
+- Trend: Stable (~2-3 min/plan)
 
 ## Accumulated Context
 
@@ -63,6 +64,8 @@ Recent decisions affecting current work:
 - Lazy singleton for MemoryStore/HybridSearch in skill scripts
 - TelegramGateway singleton matches BrowserSession pattern
 - Gateway wires telegram singleton after channel starts
+- Generic skills reference in prompt (skills describe themselves via inputSchema)
+- inputSchema optional in frontmatter for backward compatibility
 
 ### Deferred Issues
 
@@ -78,6 +81,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-02-04T10:37:22Z
-Stopped at: Completed 06-02-PLAN.md, Phase 6 complete
+Last session: 2026-02-04T10:45:37Z
+Stopped at: Completed 07-01-PLAN.md
 Resume file: None

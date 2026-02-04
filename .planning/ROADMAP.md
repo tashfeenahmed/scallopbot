@@ -20,7 +20,7 @@ None
 - [x] **Phase 4: Web Search Skill** - Brave API integration for web search (Complete)
 - [x] **Phase 5: Browser Skill** - Web browsing and content extraction (Complete)
 - [x] **Phase 6: Telegram & Memory Skills** - Messaging and semantic memory search (Complete)
-- [ ] **Phase 7: Agent Loop Refactor** - Skills-only execution loop replacing tools
+- [ ] **Phase 7: Agent Loop Refactor** - Skills-only execution loop replacing tools (In progress)
 - [ ] **Phase 8: Kimi K2.5 Thinking Mode** - Thinking mode with reasoning_content support
 
 ## Phase Details
@@ -91,7 +91,7 @@ Plans:
 **Plans**: TBD
 
 Plans:
-- [ ] 07-01: Update system prompt to include skill descriptions
+- [x] 07-01: Update system prompt to include skill descriptions
 - [ ] 07-02: Implement skill selection and invocation in agent loop
 - [ ] 07-03: Remove old tool layer and update imports
 
@@ -119,5 +119,5 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8
 | 4. Web Search Skill | 1/1 | Complete | 2026-02-04 |
 | 5. Browser Skill | 1/1 | Complete | 2026-02-04 |
 | 6. Telegram & Memory Skills | 2/2 | Complete | 2026-02-04 |
-| 7. Agent Loop Refactor | 0/3 | Not started | - |
+| 7. Agent Loop Refactor | 1/3 | In progress | - |
 | 8. Kimi K2.5 Thinking Mode | 0/3 | Not started | - |
