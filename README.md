@@ -231,6 +231,28 @@ Help with git operations: status, commit, push, pull, branch management...
 
 ## Deployment
 
+### PM2 (Recommended)
+
+```bash
+# Copy to server
+rsync -avz --exclude node_modules ./ user@server:/opt/scallopbot/
+
+# On server
+cd /opt/scallopbot
+npm install
+npm run build
+
+# Create log directory
+sudo mkdir -p /var/log/scallopbot
+
+# Start with PM2 (uses ecosystem.config.cjs)
+npx pm2 start ecosystem.config.cjs --env production
+npx pm2 save
+npx pm2 startup  # Enable auto-start on boot
+```
+
+**Important:** Always use `dist/cli.js start`, not `dist/index.js`. The ecosystem config handles this automatically.
+
 ### Systemd Service
 
 ```bash
