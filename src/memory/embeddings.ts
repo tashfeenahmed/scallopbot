@@ -352,29 +352,78 @@ export function euclideanDistance(a: number[], b: number[]): number {
 }
 
 /**
+ * Options for EmbeddingCache
+ */
+export interface EmbeddingCacheOptions {
+  /** Maximum number of entries (default: 2000 for ~8MB with 1000-dim vectors) */
+  maxSize?: number;
+  /** Estimated bytes per float (default: 8 for Float64) */
+  bytesPerFloat?: number;
+  /** Maximum memory in bytes (default: 50MB). Takes precedence over maxSize if set. */
+  maxMemoryBytes?: number;
+}
+
+/**
  * Embedding cache for avoiding recomputation
+ * Memory-aware with configurable limits suitable for 4GB servers
  */
 export class EmbeddingCache {
   private cache: Map<string, number[]> = new Map();
+  private accessOrder: string[] = []; // For LRU eviction
   private maxSize: number;
+  private maxMemoryBytes: number;
+  private bytesPerFloat: number;
+  private estimatedDimension: number = 0;
 
-  constructor(maxSize: number = 10000) {
-    this.maxSize = maxSize;
+  constructor(options: EmbeddingCacheOptions | number = {}) {
+    // Support legacy constructor signature
+    if (typeof options === 'number') {
+      this.maxSize = options;
+      this.maxMemoryBytes = 50 * 1024 * 1024; // 50MB default
+      this.bytesPerFloat = 8;
+    } else {
+      this.maxSize = options.maxSize ?? 2000;
+      this.maxMemoryBytes = options.maxMemoryBytes ?? 50 * 1024 * 1024;
+      this.bytesPerFloat = options.bytesPerFloat ?? 8;
+    }
   }
 
   get(key: string): number[] | undefined {
-    return this.cache.get(key);
+    const value = this.cache.get(key);
+    if (value) {
+      // Move to end of access order (most recently used)
+      const idx = this.accessOrder.indexOf(key);
+      if (idx > -1) {
+        this.accessOrder.splice(idx, 1);
+        this.accessOrder.push(key);
+      }
+    }
+    return value;
   }
 
   set(key: string, embedding: number[]): void {
-    // Simple LRU-like eviction (remove oldest entries when full)
-    if (this.cache.size >= this.maxSize) {
-      const firstKey = this.cache.keys().next().value;
-      if (firstKey) {
-        this.cache.delete(firstKey);
+    // Track dimension for memory estimation
+    if (this.estimatedDimension === 0 && embedding.length > 0) {
+      this.estimatedDimension = embedding.length;
+    }
+
+    // Check memory limit
+    const currentMemory = this.estimateMemoryUsage();
+    const newEntrySize = embedding.length * this.bytesPerFloat;
+
+    // Evict entries if needed (LRU)
+    while (
+      (this.cache.size >= this.maxSize || currentMemory + newEntrySize > this.maxMemoryBytes) &&
+      this.accessOrder.length > 0
+    ) {
+      const oldestKey = this.accessOrder.shift();
+      if (oldestKey) {
+        this.cache.delete(oldestKey);
       }
     }
+
     this.cache.set(key, embedding);
+    this.accessOrder.push(key);
   }
 
   has(key: string): boolean {
@@ -383,10 +432,30 @@ export class EmbeddingCache {
 
   clear(): void {
     this.cache.clear();
+    this.accessOrder = [];
   }
 
   get size(): number {
     return this.cache.size;
+  }
+
+  /**
+   * Estimate current memory usage in bytes
+   */
+  estimateMemoryUsage(): number {
+    if (this.estimatedDimension === 0) return 0;
+    return this.cache.size * this.estimatedDimension * this.bytesPerFloat;
+  }
+
+  /**
+   * Get cache statistics
+   */
+  getStats(): { size: number; estimatedMemoryMB: number; maxMemoryMB: number } {
+    return {
+      size: this.cache.size,
+      estimatedMemoryMB: this.estimateMemoryUsage() / (1024 * 1024),
+      maxMemoryMB: this.maxMemoryBytes / (1024 * 1024),
+    };
   }
 }
 

@@ -173,7 +173,6 @@ export class Gateway {
         logger: this.logger,
         embedder,
         deduplicationThreshold: 0.95, // Higher threshold - only skip true duplicates
-        enableFactUpdates: true,
         scallopStore: this.scallopMemoryStore ?? undefined,
       });
       this.logger.debug({ provider: factExtractionProvider.name }, 'LLM fact extractor initialized');
