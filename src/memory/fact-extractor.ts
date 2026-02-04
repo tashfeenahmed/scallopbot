@@ -12,6 +12,11 @@ import type { MemoryStore, HybridSearch, MemoryEntry } from './memory.js';
 import { cosineSimilarity, type EmbeddingProvider } from './embeddings.js';
 import type { ScallopMemoryStore } from './scallop-store.js';
 import type { MemoryCategory } from './db.js';
+import {
+  RelationshipClassifier,
+  createRelationshipClassifier,
+  type ExistingFact,
+} from './relation-classifier.js';
 
 /**
  * Categories for extracted facts
@@ -48,6 +53,20 @@ export interface FactExtractionResult {
 }
 
 /**
+ * Resource limits for memory-constrained environments
+ */
+export interface ResourceLimits {
+  /** Maximum facts to process per message (default: 20) */
+  maxFactsPerMessage?: number;
+  /** Maximum concurrent embedding operations (default: 5) */
+  maxConcurrentEmbeddings?: number;
+  /** Maximum batch size for LLM classification (default: 10) */
+  maxClassificationBatchSize?: number;
+  /** Disable LLM classification when memory is low (default: false) */
+  disableClassificationOnLowMemory?: boolean;
+}
+
+/**
  * Options for LLMFactExtractor
  */
 export interface LLMFactExtractorOptions {
@@ -56,12 +75,14 @@ export interface LLMFactExtractorOptions {
   hybridSearch: HybridSearch;
   logger: Logger;
   embedder?: EmbeddingProvider;
-  /** Similarity threshold for deduplication (0-1, default 0.85) */
+  /** Similarity threshold for deduplication (0-1, default 0.95) */
   deduplicationThreshold?: number;
-  /** Whether to update existing facts with more specific info */
-  enableFactUpdates?: boolean;
+  /** Whether to use LLM for relationship classification (recommended) */
+  useRelationshipClassifier?: boolean;
   /** ScallopMemoryStore for enhanced fact storage (optional) */
   scallopStore?: ScallopMemoryStore;
+  /** Resource limits for memory-constrained environments */
+  resourceLimits?: ResourceLimits;
 }
 
 /**
@@ -108,9 +129,10 @@ export class LLMFactExtractor {
   private logger: Logger;
   private embedder?: EmbeddingProvider;
   private deduplicationThreshold: number;
-  private enableFactUpdates: boolean;
+  private relationshipClassifier?: RelationshipClassifier;
   private processingQueue: Map<string, Promise<FactExtractionResult>> = new Map();
   private scallopStore?: ScallopMemoryStore;
+  private resourceLimits: Required<ResourceLimits>;
 
   constructor(options: LLMFactExtractorOptions) {
     this.provider = options.provider;
@@ -118,9 +140,24 @@ export class LLMFactExtractor {
     this.hybridSearch = options.hybridSearch;
     this.logger = options.logger.child({ component: 'fact-extractor' });
     this.embedder = options.embedder;
-    this.deduplicationThreshold = options.deduplicationThreshold ?? 0.85;
-    this.enableFactUpdates = options.enableFactUpdates ?? true;
+    this.deduplicationThreshold = options.deduplicationThreshold ?? 0.95;
     this.scallopStore = options.scallopStore;
+
+    // Set resource limits with defaults suitable for 4GB RAM
+    this.resourceLimits = {
+      maxFactsPerMessage: options.resourceLimits?.maxFactsPerMessage ?? 20,
+      maxConcurrentEmbeddings: options.resourceLimits?.maxConcurrentEmbeddings ?? 5,
+      maxClassificationBatchSize: options.resourceLimits?.maxClassificationBatchSize ?? 10,
+      disableClassificationOnLowMemory: options.resourceLimits?.disableClassificationOnLowMemory ?? false,
+    };
+
+    // Use LLM-based relationship classifier by default
+    if (options.useRelationshipClassifier !== false) {
+      this.relationshipClassifier = createRelationshipClassifier(options.provider, {
+        maxBatchSize: this.resourceLimits.maxClassificationBatchSize,
+      });
+      this.logger.debug('LLM relationship classifier enabled with batch classification');
+    }
   }
 
   /**
@@ -172,17 +209,11 @@ export class LLMFactExtractor {
         'Facts extracted from message'
       );
 
-      // Process each fact: deduplicate and store
-      for (const fact of result.facts) {
-        const storeResult = await this.processAndStoreFact(fact, userId);
-        if (storeResult === 'stored') {
-          result.factsStored++;
-        } else if (storeResult === 'updated') {
-          result.factsUpdated++;
-        } else if (storeResult === 'duplicate') {
-          result.duplicatesSkipped++;
-        }
-      }
+      // Process facts with batch classification for efficiency
+      const processResults = await this.processFactsBatch(result.facts, userId);
+      result.factsStored = processResults.stored;
+      result.factsUpdated = processResults.updated;
+      result.duplicatesSkipped = processResults.duplicates;
 
       this.logger.info(
         {
@@ -220,6 +251,215 @@ export class LLMFactExtractor {
       return result;
     } finally {
       this.processingQueue.delete(key);
+    }
+  }
+
+  /**
+   * Process multiple facts in a batch with single LLM classification call
+   * Much more efficient than calling processAndStoreFact for each fact
+   */
+  private async processFactsBatch(
+    facts: ExtractedFactWithEmbedding[],
+    userId: string
+  ): Promise<{ stored: number; updated: number; duplicates: number }> {
+    const result = { stored: 0, updated: 0, duplicates: 0 };
+
+    if (facts.length === 0) {
+      return result;
+    }
+
+    // Apply resource limit: cap facts per message
+    const limitedFacts = facts.slice(0, this.resourceLimits.maxFactsPerMessage);
+    if (facts.length > this.resourceLimits.maxFactsPerMessage) {
+      this.logger.warn(
+        { total: facts.length, processed: limitedFacts.length },
+        'Truncated facts due to resource limits'
+      );
+    }
+
+    // Step 1: Compute embeddings with concurrency limit
+    if (this.embedder) {
+      const concurrencyLimit = this.resourceLimits.maxConcurrentEmbeddings;
+      for (let i = 0; i < limitedFacts.length; i += concurrencyLimit) {
+        const batch = limitedFacts.slice(i, i + concurrencyLimit);
+        await Promise.all(
+          batch.map(async (fact) => {
+            try {
+              fact.embedding = await this.embedder!.embed(fact.content);
+            } catch (embedError) {
+              this.logger.warn(
+                { error: (embedError as Error).message, fact: fact.content },
+                'Embedding failed for fact'
+              );
+            }
+          })
+        );
+      }
+    }
+
+    // Use limitedFacts from here on
+    const facts_to_process = limitedFacts;
+
+    // Step 2: Quick deduplication pass using embeddings
+    const factsToClassify: ExtractedFactWithEmbedding[] = [];
+    const duplicateFacts: Set<number> = new Set();
+
+    for (let i = 0; i < facts_to_process.length; i++) {
+      const fact = facts_to_process[i];
+      const existingFacts = this.hybridSearch.search(fact.content, {
+        type: 'fact',
+        subject: fact.subject,
+        limit: 3,
+        minScore: 0.3,
+      });
+
+      // Check for exact duplicates using embeddings
+      let isDuplicate = false;
+      if (fact.embedding && existingFacts.length > 0) {
+        for (const existing of existingFacts) {
+          if (existing.entry.embedding) {
+            const similarity = cosineSimilarity(fact.embedding, existing.entry.embedding);
+            if (similarity >= this.deduplicationThreshold) {
+              isDuplicate = true;
+              break;
+            }
+          }
+        }
+      }
+
+      if (isDuplicate) {
+        duplicateFacts.add(i);
+        result.duplicates++;
+      } else {
+        factsToClassify.push(fact);
+      }
+    }
+
+    // Step 3: Batch classification with single LLM call
+    if (this.relationshipClassifier && factsToClassify.length > 0) {
+      const allUserFacts = this.memoryStore.searchByType('fact')
+        .filter(f => f.metadata?.userId === userId || f.metadata?.subject === 'user');
+
+      if (allUserFacts.length > 0) {
+        const existingFactsForClassifier: ExistingFact[] = allUserFacts.map(f => ({
+          id: f.id,
+          content: f.content,
+          subject: (f.metadata?.subject as string) || 'user',
+          category: (f.metadata?.category as string) || 'general',
+        }));
+
+        try {
+          // Single batch LLM call instead of N calls
+          const classifications = await this.relationshipClassifier.classifyBatch(
+            factsToClassify.map(f => ({
+              content: f.content,
+              subject: f.subject,
+              category: f.category,
+            })),
+            existingFactsForClassifier
+          );
+
+          this.logger.debug(
+            { factCount: factsToClassify.length, classifications: classifications.length },
+            'Batch classification complete'
+          );
+
+          // Step 4: Apply classifications and store
+          for (let i = 0; i < factsToClassify.length; i++) {
+            const fact = factsToClassify[i];
+            const classification = classifications[i];
+
+            if (classification.classification === 'UPDATES' && classification.targetId) {
+              const targetFact = this.memoryStore.get(classification.targetId);
+              if (targetFact) {
+                this.memoryStore.update(classification.targetId, {
+                  content: fact.content,
+                  timestamp: new Date(),
+                  embedding: fact.embedding,
+                  metadata: {
+                    ...targetFact.metadata,
+                    previousContent: targetFact.content,
+                    updatedAt: new Date().toISOString(),
+                  },
+                });
+                result.updated++;
+                continue;
+              }
+            }
+
+            // Store as new fact (NEW or EXTENDS)
+            await this.storeNewFact(fact, userId);
+            result.stored++;
+          }
+        } catch (classifyError) {
+          this.logger.warn(
+            { error: (classifyError as Error).message },
+            'Batch classification failed, storing all as new'
+          );
+          // Fallback: store all as new
+          for (const fact of factsToClassify) {
+            await this.storeNewFact(fact, userId);
+            result.stored++;
+          }
+        }
+      } else {
+        // No existing facts to classify against, store all as new
+        for (const fact of factsToClassify) {
+          await this.storeNewFact(fact, userId);
+          result.stored++;
+        }
+      }
+    } else {
+      // No classifier, store all non-duplicate facts as new
+      for (const fact of factsToClassify) {
+        await this.storeNewFact(fact, userId);
+        result.stored++;
+      }
+    }
+
+    return result;
+  }
+
+  /**
+   * Store a new fact (helper for batch processing)
+   */
+  private async storeNewFact(fact: ExtractedFactWithEmbedding, userId: string): Promise<void> {
+    let searchableContent = fact.content;
+    if (fact.subject !== 'user') {
+      if (!fact.content.toLowerCase().includes(fact.subject.toLowerCase())) {
+        searchableContent = `${fact.subject} ${fact.content.toLowerCase()}`;
+      }
+    }
+
+    if (this.scallopStore) {
+      const scallopCategory = this.mapToScallopCategory(fact.category);
+      await this.scallopStore.add({
+        userId,
+        content: searchableContent,
+        category: scallopCategory,
+        importance: 5,
+        confidence: 0.8,
+        metadata: {
+          subject: fact.subject,
+          originalCategory: fact.category,
+          extractedBy: 'llm',
+        },
+      });
+    } else {
+      this.memoryStore.add({
+        content: searchableContent,
+        type: 'fact',
+        sessionId: userId,
+        timestamp: new Date(),
+        metadata: {
+          subject: fact.subject,
+          category: fact.category,
+          userId,
+          extractedBy: 'llm',
+        },
+        tags: [fact.category, fact.subject === 'user' ? 'about-user' : `about-${fact.subject}`],
+        embedding: fact.embedding,
+      });
     }
   }
 
@@ -328,7 +568,7 @@ export class LLMFactExtractor {
       }
 
       // If exact duplicate but new fact is more detailed, update
-      if (isDuplicate && this.enableFactUpdates && mostSimilarFact) {
+      if (isDuplicate && mostSimilarFact) {
         if (fact.content.length > mostSimilarFact.content.length * 1.2) {
           // New fact is significantly more detailed - update
           this.memoryStore.update(mostSimilarFact.id, {
@@ -342,10 +582,7 @@ export class LLMFactExtractor {
           );
           return 'updated';
         }
-        return 'duplicate';
-      }
 
-      if (isDuplicate) {
         this.logger.info(
           { fact: fact.content, similarity: highestSimilarity.toFixed(3), mostSimilar: mostSimilarFact?.content },
           'Skipping duplicate fact'
@@ -353,55 +590,60 @@ export class LLMFactExtractor {
         return 'duplicate';
       }
 
-      // FACT ENRICHMENT: Search for related facts by category+subject
-      // This catches corrections like "office in Wicklow" → "office in Dublin"
-      if (this.enableFactUpdates) {
-        const categoryFacts = this.findFactsByCategoryAndSubject(fact.category, fact.subject);
+      // Use LLM-based relationship classifier if available
+      if (this.relationshipClassifier) {
+        // Get all existing facts for this user to compare against
+        const allUserFacts = this.memoryStore.searchByType('fact')
+          .filter(f => f.metadata?.userId === userId || f.metadata?.subject === fact.subject);
 
-        if (categoryFacts.length > 0 && newEmbedding) {
-          // Find the most semantically related fact in the same category
-          let mostRelatedFact: MemoryEntry | null = null;
-          let highestRelation = 0;
-          const ENRICHMENT_THRESHOLD = 0.5; // Lower threshold for same-category enrichment
+        if (allUserFacts.length > 0) {
+          // Convert to classifier format
+          const existingFactsForClassifier: ExistingFact[] = allUserFacts.map(f => ({
+            id: f.id,
+            content: f.content,
+            subject: (f.metadata?.subject as string) || 'user',
+            category: (f.metadata?.category as string) || 'general',
+          }));
 
-          for (const existingFact of categoryFacts) {
-            let existingEmbedding = existingFact.embedding;
-            if (!existingEmbedding && this.embedder) {
-              try {
-                existingEmbedding = await this.embedder.embed(existingFact.content);
-              } catch {
-                // Skip this fact if embedding fails
-                continue;
-              }
-            }
-
-            if (existingEmbedding) {
-              const similarity = cosineSimilarity(newEmbedding, existingEmbedding);
-
-              if (similarity > highestRelation && similarity >= ENRICHMENT_THRESHOLD) {
-                highestRelation = similarity;
-                mostRelatedFact = existingFact;
-              }
-            }
-          }
-
-          // If we found a related fact, UPDATE it with the new info (newer takes precedence)
-          if (mostRelatedFact) {
-            this.memoryStore.update(mostRelatedFact.id, {
-              content: fact.content,
-              timestamp: new Date(),
-              embedding: fact.embedding,
-            });
-            this.logger.info(
-              {
-                old: mostRelatedFact.content,
-                new: fact.content,
-                category: fact.category,
-                similarity: highestRelation.toFixed(2)
-              },
-              'Enriched existing fact with updated info'
+          try {
+            const classification = await this.relationshipClassifier.classify(
+              { content: fact.content, subject: fact.subject, category: fact.category },
+              existingFactsForClassifier
             );
-            return 'updated';
+
+            this.logger.debug(
+              { fact: fact.content, classification: classification.classification, reason: classification.reason },
+              'LLM relationship classification'
+            );
+
+            if (classification.classification === 'UPDATES' && classification.targetId) {
+              // Update the existing fact
+              const targetFact = this.memoryStore.get(classification.targetId);
+              if (targetFact) {
+                this.memoryStore.update(classification.targetId, {
+                  content: fact.content,
+                  timestamp: new Date(),
+                  embedding: fact.embedding,
+                  metadata: {
+                    ...targetFact.metadata,
+                    previousContent: targetFact.content,
+                    updatedAt: new Date().toISOString(),
+                  },
+                });
+                this.logger.info(
+                  { old: targetFact.content, new: fact.content, reason: classification.reason },
+                  'Updated fact via LLM classification'
+                );
+                return 'updated';
+              }
+            }
+            // For EXTENDS and NEW, we store as new (EXTENDS creates a link, handled by graph)
+            // Classification result is logged for debugging
+          } catch (classifyError) {
+            this.logger.warn(
+              { error: (classifyError as Error).message },
+              'LLM classification failed, storing as new fact'
+            );
           }
         }
       }

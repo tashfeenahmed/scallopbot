@@ -771,8 +771,14 @@ export class BackgroundGardener {
     }
   }
 
+  /** Track which facts have already been linked to avoid O(n²) on every run */
+  private linkedFactIds: Set<string> = new Set();
+  /** Maximum comparisons per run to limit CPU usage */
+  private static readonly MAX_COMPARISONS_PER_RUN = 100;
+
   /**
-   * Link semantically related facts bidirectionally
+   * Link semantically related facts bidirectionally (incremental)
+   * Only processes new/unlinked facts to avoid O(n²) on every run
    */
   linkRelatedFacts(): void {
     const facts = this.store.searchByType('fact');
@@ -780,30 +786,63 @@ export class BackgroundGardener {
     // Skip if too few facts
     if (facts.length < 2) return;
 
-    // Build embeddings for all facts
-    const embeddings = new Map<string, number[]>();
-    for (const fact of facts) {
-      embeddings.set(fact.id, this.embedder.embedSync(fact.content));
+    // Find new facts that haven't been linked yet
+    const newFacts = facts.filter(f => !this.linkedFactIds.has(f.id));
+    const existingFacts = facts.filter(f => this.linkedFactIds.has(f.id));
+
+    // If no new facts, nothing to do
+    if (newFacts.length === 0) return;
+
+    // Build embeddings only for new facts
+    const newEmbeddings = new Map<string, number[]>();
+    for (const fact of newFacts) {
+      newEmbeddings.set(fact.id, this.embedder.embedSync(fact.content));
     }
 
-    // Find related pairs
+    // Cache embeddings for existing facts (or compute if missing)
+    const existingEmbeddings = new Map<string, number[]>();
+    for (const fact of existingFacts) {
+      if (fact.embedding) {
+        existingEmbeddings.set(fact.id, fact.embedding);
+      } else {
+        existingEmbeddings.set(fact.id, this.embedder.embedSync(fact.content));
+      }
+    }
+
+    // Find related pairs: new facts vs existing facts + new facts vs new facts
     const relatedPairs: Array<[string, string, number]> = [];
-    const processedPairs = new Set<string>();
+    let comparisons = 0;
 
-    for (let i = 0; i < facts.length; i++) {
-      for (let j = i + 1; j < facts.length; j++) {
-        const factA = facts[i];
-        const factB = facts[j];
-        const pairKey = [factA.id, factB.id].sort().join('|');
+    // Compare new facts against existing facts (O(n*m) where n=new, m=existing)
+    for (const newFact of newFacts) {
+      if (comparisons >= BackgroundGardener.MAX_COMPARISONS_PER_RUN) break;
 
-        if (processedPairs.has(pairKey)) continue;
-        processedPairs.add(pairKey);
+      const newEmb = newEmbeddings.get(newFact.id)!;
 
-        const embeddingA = embeddings.get(factA.id)!;
-        const embeddingB = embeddings.get(factB.id)!;
-        const similarity = cosineSimilarity(embeddingA, embeddingB);
+      for (const existingFact of existingFacts) {
+        if (comparisons >= BackgroundGardener.MAX_COMPARISONS_PER_RUN) break;
+        comparisons++;
 
-        // Link if similarity is high enough (but not a duplicate)
+        const existingEmb = existingEmbeddings.get(existingFact.id)!;
+        const similarity = cosineSimilarity(newEmb, existingEmb);
+
+        if (similarity > 0.3 && similarity < 0.95) {
+          relatedPairs.push([newFact.id, existingFact.id, similarity]);
+        }
+      }
+    }
+
+    // Compare new facts against each other (O(n²) but n is small - only new facts)
+    for (let i = 0; i < newFacts.length && comparisons < BackgroundGardener.MAX_COMPARISONS_PER_RUN; i++) {
+      for (let j = i + 1; j < newFacts.length && comparisons < BackgroundGardener.MAX_COMPARISONS_PER_RUN; j++) {
+        comparisons++;
+
+        const factA = newFacts[i];
+        const factB = newFacts[j];
+        const embA = newEmbeddings.get(factA.id)!;
+        const embB = newEmbeddings.get(factB.id)!;
+        const similarity = cosineSimilarity(embA, embB);
+
         if (similarity > 0.3 && similarity < 0.95) {
           relatedPairs.push([factA.id, factB.id, similarity]);
         }
@@ -838,8 +877,13 @@ export class BackgroundGardener {
       }
     }
 
+    // Mark new facts as linked
+    for (const fact of newFacts) {
+      this.linkedFactIds.add(fact.id);
+    }
+
     if (linksAdded > 0) {
-      this.logger.debug({ linksAdded }, 'Linked related facts');
+      this.logger.debug({ linksAdded, comparisons }, 'Linked related facts (incremental)');
     }
   }
 

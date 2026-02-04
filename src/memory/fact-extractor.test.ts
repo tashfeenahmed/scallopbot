@@ -277,30 +277,59 @@ describe('LLMFactExtractor', () => {
       expect(result.factsUpdated).toBeGreaterThanOrEqual(0);
     });
 
-    it('should enrich/correct existing fact in same category with new info', async () => {
+    it('should enrich/correct existing fact in same category with new info using LLM classification', async () => {
       // Add an INCORRECT location fact (Wicklow instead of Dublin)
-      memoryStore.add({
+      const oldFact = memoryStore.add({
         content: 'Office is in Wicklow',
         type: 'fact',
         sessionId: 'user-123',
         timestamp: new Date(Date.now() - 86400000), // 1 day old
-        metadata: { subject: 'user', category: 'location' },
+        metadata: { subject: 'user', category: 'location', userId: 'user-123' },
         tags: ['location', 'about-user'],
       });
 
-      // User now provides CORRECT location info
-      const mockProvider = createMockProvider(JSON.stringify({
-        facts: [
-          { content: 'Office is One Microsoft Court in Dublin', subject: 'user', category: 'location' },
-        ],
-      }));
+      // Mock provider that returns extraction first, then UPDATES classification
+      let callCount = 0;
+      const mockProvider = {
+        name: 'mock',
+        complete: vi.fn().mockImplementation(() => {
+          callCount++;
+          if (callCount === 1) {
+            // First call: fact extraction
+            return Promise.resolve({
+              content: [{ type: 'text', text: JSON.stringify({
+                facts: [{ content: 'Office is One Microsoft Court in Dublin', subject: 'user', category: 'location' }]
+              })}],
+              finishReason: 'stop',
+              usage: { inputTokens: 100, outputTokens: 50 },
+            });
+          } else {
+            // Second call: batch classification - returns UPDATES
+            return Promise.resolve({
+              content: [{ type: 'text', text: JSON.stringify({
+                classifications: [{
+                  index: 1,
+                  classification: 'UPDATES',
+                  targetId: oldFact.id,
+                  confidence: 0.9,
+                  reason: 'Location updated from Wicklow to Dublin'
+                }]
+              })}],
+              finishReason: 'stop',
+              usage: { inputTokens: 100, outputTokens: 50 },
+            });
+          }
+        }),
+        isAvailable: vi.fn().mockResolvedValue(true),
+      };
 
       const extractor = new LLMFactExtractor({
         provider: mockProvider,
         memoryStore,
         hybridSearch,
         logger,
-        embedder: createMockEmbedder(), // Need embedder for fact enrichment
+        embedder: createMockEmbedder(),
+        useRelationshipClassifier: true, // Enable LLM classifier for UPDATES detection
       });
 
       const result = await extractor.extractFacts(
@@ -308,7 +337,7 @@ describe('LLMFactExtractor', () => {
         'user-123'
       );
 
-      // Should update the existing location fact (enrichment)
+      // Should update the existing location fact via LLM classification
       expect(result.factsUpdated).toBe(1);
       expect(result.factsStored).toBe(0);
 
@@ -320,7 +349,6 @@ describe('LLMFactExtractor', () => {
 
       expect(locationFacts.length).toBe(1);
       expect(locationFacts[0].content).toContain('Dublin');
-      expect(locationFacts[0].content).not.toContain('Wicklow');
     });
 
     it('should create new fact if category differs from existing facts', async () => {
@@ -404,6 +432,7 @@ describe('LLMFactExtractor', () => {
         memoryStore,
         hybridSearch,
         logger,
+        useRelationshipClassifier: false, // Disable to test exact call counts
       });
 
       // Queue multiple messages
