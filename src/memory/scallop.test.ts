@@ -549,40 +549,46 @@ describe('ProfileManager', () => {
 
 describe('TemporalExtractor', () => {
   let extractor: TemporalExtractor;
-  const refDate = new Date('2026-02-03T12:00:00Z');
+  // Use a mid-month date to avoid month boundary issues
+  const refDate = new Date('2026-02-15T12:00:00Z');
+  const refTimestamp = refDate.getTime();
 
   beforeEach(() => {
     extractor = new TemporalExtractor(refDate);
   });
 
   it('should extract relative dates', () => {
-    const tomorrow = extractor.extract('Meeting tomorrow at 3pm');
+    // Pass refTimestamp as documentDate so relative dates are computed from it
+    const tomorrow = extractor.extract('Meeting tomorrow at 3pm', refTimestamp);
     expect(tomorrow.eventDate).not.toBeNull();
 
     const tomorrowDate = new Date(tomorrow.eventDate!);
-    expect(tomorrowDate.getDate()).toBe(4); // Feb 4
+    // Check it's approximately 1 day after refDate
+    const diffMs = tomorrowDate.getTime() - refTimestamp;
+    const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
+    expect(diffDays).toBe(1);
   });
 
   it('should extract "next week"', () => {
-    const result = extractor.extract('Conference next week');
+    const result = extractor.extract('Conference next week', refTimestamp);
     expect(result.eventDate).not.toBeNull();
 
     const eventDate = new Date(result.eventDate!);
-    const expectedDate = new Date(refDate);
-    expectedDate.setDate(expectedDate.getDate() + 7);
-
-    expect(eventDate.getDate()).toBe(expectedDate.getDate());
+    // Check it's approximately 7 days after refDate
+    const diffMs = eventDate.getTime() - refTimestamp;
+    const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
+    expect(diffDays).toBe(7);
   });
 
   it('should extract "3 days ago"', () => {
-    const result = extractor.extract('Finished the project 3 days ago');
+    const result = extractor.extract('Finished the project 3 days ago', refTimestamp);
     expect(result.eventDate).not.toBeNull();
 
     const eventDate = new Date(result.eventDate!);
-    const expectedDate = new Date(refDate);
-    expectedDate.setDate(expectedDate.getDate() - 3);
-
-    expect(eventDate.getDate()).toBe(expectedDate.getDate());
+    // Check it's approximately 3 days before refDate
+    const diffMs = refTimestamp - eventDate.getTime();
+    const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
+    expect(diffDays).toBe(3);
   });
 
   it('should extract absolute dates', () => {
