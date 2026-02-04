@@ -35,6 +35,7 @@ import {
 import { ContextManager } from '../routing/context.js';
 import { MediaProcessor } from '../media/index.js';
 import { VoiceManager } from '../voice/index.js';
+import { type TriggerSource, type TriggerSourceRegistry, parseUserIdPrefix } from '../triggers/index.js';
 
 export interface GatewayOptions {
   config: Config;
@@ -64,6 +65,9 @@ export class Gateway {
   private agent: Agent | null = null;
   private telegramChannel: TelegramChannel | null = null;
   private apiChannel: ApiChannel | null = null;
+
+  /** Registry of active trigger sources for multi-channel message dispatch */
+  private triggerSources: TriggerSourceRegistry = new Map();
 
   private isInitialized = false;
   private isRunning = false;
@@ -397,6 +401,9 @@ export class Gateway {
 
       // Wire singleton for skill access
       TelegramGateway.getInstance().setChannel(this.telegramChannel);
+
+      // Register as trigger source
+      this.registerTelegramTriggerSource(this.telegramChannel);
     }
 
     // Start API channel if enabled (web UI)
@@ -411,10 +418,53 @@ export class Gateway {
         logger: this.logger,
       });
       await this.apiChannel.start();
+
+      // Register as trigger source if it implements TriggerSource
+      if (this.isApiChannelTriggerSource(this.apiChannel)) {
+        this.triggerSources.set('api', this.apiChannel);
+        this.logger.debug('Registered api trigger source');
+      }
     }
 
     this.isRunning = true;
     this.logger.info('Gateway started');
+  }
+
+  /**
+   * Type guard to check if ApiChannel implements TriggerSource.
+   * ApiChannel gains TriggerSource support in Task 2.
+   */
+  private isApiChannelTriggerSource(channel: ApiChannel): channel is ApiChannel & TriggerSource {
+    return (
+      typeof (channel as unknown as TriggerSource).sendMessage === 'function' &&
+      typeof (channel as unknown as TriggerSource).sendFile === 'function' &&
+      typeof (channel as unknown as TriggerSource).getName === 'function'
+    );
+  }
+
+  /**
+   * Register TelegramChannel as a trigger source.
+   * Creates a TriggerSource wrapper that adapts the TelegramChannel API.
+   */
+  private registerTelegramTriggerSource(channel: TelegramChannel): void {
+    const triggerSource: TriggerSource = {
+      sendMessage: async (userId: string, message: string): Promise<boolean> => {
+        try {
+          await channel.sendMessage(userId, message);
+          return true;
+        } catch (error) {
+          this.logger.error({ userId, error: (error as Error).message }, 'Telegram trigger sendMessage failed');
+          return false;
+        }
+      },
+      sendFile: async (userId: string, filePath: string, caption?: string): Promise<boolean> => {
+        return channel.sendFile(userId, filePath, caption);
+      },
+      getName: () => 'telegram',
+    };
+
+    this.triggerSources.set('telegram', triggerSource);
+    this.logger.debug('Registered telegram trigger source');
   }
 
   async stop(): Promise<void> {
@@ -428,6 +478,9 @@ export class Gateway {
     if (this.backgroundGardener) {
       this.backgroundGardener.stop();
     }
+
+    // Clear trigger sources before stopping channels
+    this.triggerSources.clear();
 
     // Stop API channel
     if (this.apiChannel) {
@@ -499,16 +552,53 @@ export class Gateway {
   }
 
   /**
+   * Resolve which trigger source to use for a given userId.
+   * Supports prefixed userIds (e.g., "telegram:12345", "api:ws-abc123").
+   * Falls back to first available trigger source if no prefix or unknown channel.
+   */
+  private resolveTriggerSource(userId: string): { source: TriggerSource | null; rawUserId: string } {
+    const { channel, rawUserId } = parseUserIdPrefix(userId);
+
+    // If a specific channel is requested, try to use it
+    if (channel) {
+      const source = this.triggerSources.get(channel);
+      if (source) {
+        this.logger.debug({ channel, userId: rawUserId }, 'Using prefixed trigger source');
+        return { source, rawUserId };
+      }
+      this.logger.warn({ channel, userId: rawUserId }, 'Requested trigger source not available, falling back');
+    }
+
+    // Fall back to first available trigger source (prefer telegram for backward compat)
+    const telegram = this.triggerSources.get('telegram');
+    if (telegram) {
+      return { source: telegram, rawUserId };
+    }
+
+    const api = this.triggerSources.get('api');
+    if (api) {
+      return { source: api, rawUserId };
+    }
+
+    // No trigger sources available
+    return { source: null, rawUserId };
+  }
+
+  /**
    * Handle a triggered reminder by executing it through the agent
    * If the reminder contains an action (like "check the weather"), the agent will perform it
    */
   private async handleReminderTrigger(reminder: Reminder): Promise<void> {
     this.logger.info({ reminderId: reminder.id, userId: reminder.userId, message: reminder.message }, 'Reminder triggered');
 
-    if (!this.telegramChannel) {
-      this.logger.warn({ reminderId: reminder.id }, 'No channel available to send reminder');
+    const { source: triggerSource, rawUserId } = this.resolveTriggerSource(reminder.userId);
+
+    if (!triggerSource) {
+      this.logger.warn({ reminderId: reminder.id }, 'No trigger source available to send reminder');
       return;
     }
+
+    this.logger.debug({ reminderId: reminder.id, triggerSource: triggerSource.getName() }, 'Using trigger source for reminder');
 
     // Check if this is an actionable reminder (contains action words)
     const actionKeywords = ['check', 'get', 'find', 'search', 'look up', 'tell me', 'show', 'fetch', 'run', 'execute', 'do'];
@@ -529,61 +619,63 @@ export class Gateway {
           async (update) => {
             // Send progress updates to user
             if (update.type === 'thinking' && update.message) {
-              await this.telegramChannel!.sendMessage(reminder.userId, update.message);
+              await triggerSource.sendMessage(rawUserId, update.message);
             }
           }
         );
 
         // Send the agent's response
         if (result.response) {
-          await this.telegramChannel.sendMessage(reminder.userId, result.response);
+          await triggerSource.sendMessage(rawUserId, result.response);
         }
 
         this.logger.debug({ reminderId: reminder.id }, 'Actionable reminder executed');
       } catch (error) {
         this.logger.error({ reminderId: reminder.id, error: (error as Error).message }, 'Failed to execute actionable reminder');
         // Fallback to simple reminder
-        await this.telegramChannel.sendMessage(reminder.userId, `**Reminder!**\n\n${reminder.message}`);
+        await triggerSource.sendMessage(rawUserId, `**Reminder!**\n\n${reminder.message}`);
       }
     } else {
       // Simple reminder - just send the message
-      await this.telegramChannel.sendMessage(reminder.userId, `**Reminder!**\n\n${reminder.message}`);
+      await triggerSource.sendMessage(rawUserId, `**Reminder!**\n\n${reminder.message}`);
       this.logger.debug({ reminderId: reminder.id }, 'Simple reminder sent');
     }
   }
 
   /**
    * Handle sending a file to a user
+   * Uses trigger source abstraction for multi-channel support
    */
   private async handleFileSend(userId: string, filePath: string, caption?: string): Promise<boolean> {
     this.logger.info({ userId, filePath }, 'Sending file to user');
 
-    if (this.telegramChannel) {
-      return await this.telegramChannel.sendFile(userId, filePath, caption);
+    const { source: triggerSource, rawUserId } = this.resolveTriggerSource(userId);
+
+    if (triggerSource) {
+      this.logger.debug({ triggerSource: triggerSource.getName(), userId: rawUserId }, 'Using trigger source for file send');
+      return await triggerSource.sendFile(rawUserId, filePath, caption);
     }
 
-    this.logger.warn({ userId, filePath }, 'No channel available to send file');
+    this.logger.warn({ userId, filePath }, 'No trigger source available to send file');
     return false;
   }
 
   /**
    * Handle sending a message to a user immediately
    * This allows the agent to send multiple messages during its execution loop
+   * Uses trigger source abstraction for multi-channel support
    */
   private async handleMessageSend(userId: string, message: string): Promise<boolean> {
     this.logger.debug({ userId, messageLength: message.length }, 'Sending message to user');
 
-    if (this.telegramChannel) {
-      try {
-        await this.telegramChannel.sendMessage(userId, message);
-        return true;
-      } catch (error) {
-        this.logger.error({ userId, error: (error as Error).message }, 'Failed to send message');
-        return false;
-      }
+    const { source: triggerSource, rawUserId } = this.resolveTriggerSource(userId);
+
+    if (triggerSource) {
+      this.logger.debug({ triggerSource: triggerSource.getName(), userId: rawUserId }, 'Using trigger source for message send');
+      return await triggerSource.sendMessage(rawUserId, message);
     }
 
-    this.logger.warn({ userId }, 'No channel available to send message');
+    this.logger.warn({ userId }, 'No trigger source available to send message');
     return false;
   }
 }
