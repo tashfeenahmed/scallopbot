@@ -26,6 +26,7 @@ const createMockConfig = (testDir: string, overrides: Record<string, unknown> = 
   channels: {
     telegram: { enabled: false, botToken: '', allowedUsers: [], enableVoiceReply: false },
     discord: { enabled: false, botToken: '', applicationId: '' },
+    api: { enabled: false, port: 3000, host: '127.0.0.1' },
     ...((overrides.channels as Record<string, unknown>) || {}),
   },
   agent: {
@@ -183,6 +184,7 @@ describe('Gateway', () => {
           channels: {
             telegram: { enabled: true, botToken: 'test-bot-token' },
             discord: { enabled: false, botToken: '', applicationId: '' },
+            api: { enabled: false, port: 3000, host: '127.0.0.1' },
           },
         }),
         logger: pino({ level: 'silent' }),
@@ -205,6 +207,7 @@ describe('Gateway', () => {
           channels: {
             telegram: { enabled: true, botToken: 'test-bot-token' },
             discord: { enabled: false, botToken: '', applicationId: '' },
+            api: { enabled: false, port: 3000, host: '127.0.0.1' },
           },
         }),
         logger: pino({ level: 'silent' }),

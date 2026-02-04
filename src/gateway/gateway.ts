@@ -17,6 +17,7 @@ import { SessionManager } from '../agent/session.js';
 import { Agent } from '../agent/agent.js';
 import { TelegramChannel } from '../channels/telegram.js';
 import { TelegramGateway } from '../channels/telegram-gateway.js';
+import { ApiChannel } from '../channels/api.js';
 import { createSkillRegistry, type SkillRegistry } from '../skills/registry.js';
 import { createSkillExecutor, type SkillExecutor } from '../skills/executor.js';
 import { Router } from '../routing/router.js';
@@ -62,6 +63,7 @@ export class Gateway {
   private voiceManager: VoiceManager | null = null;
   private agent: Agent | null = null;
   private telegramChannel: TelegramChannel | null = null;
+  private apiChannel: ApiChannel | null = null;
 
   private isInitialized = false;
   private isRunning = false;
@@ -397,6 +399,19 @@ export class Gateway {
       TelegramGateway.getInstance().setChannel(this.telegramChannel);
     }
 
+    // Start API channel if enabled (web UI)
+    if (this.config.channels.api.enabled) {
+      this.apiChannel = new ApiChannel({
+        port: this.config.channels.api.port,
+        host: this.config.channels.api.host,
+        apiKey: this.config.channels.api.apiKey,
+        agent: this.agent!,
+        sessionManager: this.sessionManager!,
+        logger: this.logger,
+      });
+      await this.apiChannel.start();
+    }
+
     this.isRunning = true;
     this.logger.info('Gateway started');
   }
@@ -411,6 +426,12 @@ export class Gateway {
     // Stop background gardener
     if (this.backgroundGardener) {
       this.backgroundGardener.stop();
+    }
+
+    // Stop API channel
+    if (this.apiChannel) {
+      await this.apiChannel.stop();
+      this.apiChannel = null;
     }
 
     // Stop Telegram channel
