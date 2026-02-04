@@ -36,11 +36,11 @@ A personal AI agent that runs locally with CLI access, using a pure skills-based
   - [ ] `memory_search` skill — Search conversation memory
   - [ ] `browser` skill — Web browsing and scraping
 
-- [ ] Kimi K2.5 thinking mode integration:
-  - [ ] Enable thinking mode via `enableThinking` flag
-  - [ ] Handle `reasoning_content` in responses
-  - [ ] Temperature constraints (1.0 for thinking, 0.6 for instant)
-  - [ ] Test end-to-end with complex reasoning tasks
+- [x] Kimi K2.5 thinking mode integration:
+  - [x] Enable thinking mode via `enableThinking` flag
+  - [x] Handle `reasoning_content` in responses
+  - [x] Temperature constraints (1.0 for thinking, 0.6 for instant)
+  - [x] Test end-to-end with complex reasoning tasks
 
 - [ ] Simplified agent loop:
   - [ ] Load skill descriptions into system prompt
@@ -91,7 +91,8 @@ The codebase has a working tool system (`src/tools/`) with 16 tool files and a s
 | Skills-only (no tools) | Simpler architecture, one abstraction for all capabilities | — Pending |
 | Scripts in skill folders | Skills need to execute actions; scripts/ folder keeps code near definition | — Pending |
 | Triggers + description in frontmatter | Agent needs to know WHEN to use a skill and WHAT it does | — Pending |
-| Kimi K2.5 as thinking provider | Already integrated; best open reasoning model for complex tasks | — Pending |
+| Kimi K2.5 as thinking provider | Already integrated; best open reasoning model for complex tasks | Done - v2.0 |
+| Kimi thinking mode | Better reasoning for complex tasks with temperature/param constraints | Done - v2.0 |
 
 ---
-*Last updated: 2026-02-04 after initialization*
+*Last updated: 2026-02-04 after Phase 17 completion*
