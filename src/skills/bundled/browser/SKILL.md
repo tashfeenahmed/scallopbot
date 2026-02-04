@@ -5,6 +5,33 @@ user-invocable: true
 triggers: [browse, web, website, page, scrape, click, navigate, screenshot]
 scripts:
   run: "scripts/run.ts"
+inputSchema:
+  type: object
+  properties:
+    operation:
+      type: string
+      enum: [navigate, snapshot, click, type, fill, extract, screenshot, close]
+      description: "The operation to perform"
+    url:
+      type: string
+      description: "URL to navigate to (for navigate operation)"
+    target:
+      type: string
+      description: "Element ref number, CSS selector, or text selector (for click/type/fill)"
+    text:
+      type: string
+      description: "Text to type or fill (for type/fill operations)"
+    fullPage:
+      type: boolean
+      description: "Capture full page screenshot (default: false)"
+    format:
+      type: string
+      enum: [text, html]
+      description: "Extract format (default: text)"
+    selector:
+      type: string
+      description: "CSS selector for extract operation"
+  required: [operation]
 metadata:
   openclaw:
     emoji: "\U0001F310"

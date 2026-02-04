@@ -5,6 +5,20 @@ user-invocable: true
 triggers: [search, web, google, lookup, find information]
 scripts:
   run: "scripts/run.ts"
+inputSchema:
+  type: object
+  properties:
+    query:
+      type: string
+      description: "The search query"
+    count:
+      type: number
+      description: "Number of results to return (default: 5, max: 20)"
+    freshness:
+      type: string
+      enum: [pd, pw, pm, py]
+      description: "Filter by recency: pd=past day, pw=past week, pm=past month, py=past year"
+  required: [query]
 metadata:
   openclaw:
     emoji: "\U0001F50D"

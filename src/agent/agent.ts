@@ -409,7 +409,7 @@ export class Agent {
       // Execute tools and gather results
       this.logger.info({ toolCount: toolUses.length, tools: toolUses.map(t => t.name) }, 'Executing tools');
       const userId = currentSession?.metadata?.userId;
-      const toolResults = await this.executeTools(toolUses, sessionId, userId);
+      const toolResults = await this.executeTools(toolUses, sessionId, userId, onProgress);
       this.logger.info({
         resultCount: toolResults.length,
         results: toolResults.map(r => ({
@@ -805,7 +805,8 @@ export class Agent {
   private async executeTools(
     toolUses: ToolUseContent[],
     sessionId: string,
-    userId?: string
+    userId?: string,
+    onProgress?: ProgressCallback
   ): Promise<ContentBlock[]> {
     const results: ContentBlock[] = [];
 
@@ -816,6 +817,15 @@ export class Agent {
       if (skill && this.skillExecutor) {
         this.logger.debug({ skillName: toolUse.name, input: toolUse.input }, 'Executing skill');
 
+        // Send progress: skill starting
+        if (onProgress) {
+          await onProgress({
+            type: 'tool_start',
+            message: JSON.stringify(toolUse.input),
+            toolName: toolUse.name,
+          });
+        }
+
         try {
           const result = await this.skillExecutor.execute(skill, {
             skillName: toolUse.name,
@@ -823,14 +833,25 @@ export class Agent {
             cwd: this.workspace,
           });
 
+          const resultContent = result.success
+            ? (result.output || 'Success')
+            : `Error: ${result.error}`;
+
           results.push({
             type: 'tool_result',
             tool_use_id: toolUse.id,
-            content: result.success
-              ? (result.output || 'Success')
-              : `Error: ${result.error}`,
+            content: resultContent,
             is_error: !result.success,
           });
+
+          // Send progress: skill complete
+          if (onProgress) {
+            await onProgress({
+              type: 'tool_complete',
+              message: resultContent.slice(0, 500),
+              toolName: toolUse.name,
+            });
+          }
 
           // Collect in memory
           if (this.hotCollector && result.success) {
