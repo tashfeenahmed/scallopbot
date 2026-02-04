@@ -306,11 +306,10 @@ export class Agent {
     // Build system prompt with memory context
     const systemPrompt = await this.buildSystemPrompt(userMessage, sessionId);
 
-    // Get filtered tool definitions (respects policy allowlist/denylist)
-    const registry = this.toolRegistry as any;
-    const tools = typeof registry.getFilteredToolDefinitions === 'function'
-      ? registry.getFilteredToolDefinitions()
-      : this.toolRegistry.getToolDefinitions();
+    // Get tool definitions from skills (skills are now the primary capability source)
+    const tools = this.skillRegistry
+      ? this.skillRegistry.getToolDefinitions()
+      : [];
 
     // Track usage across iterations
     let totalInputTokens = 0;
