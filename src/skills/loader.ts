@@ -301,6 +301,7 @@ export class SkillLoader extends EventEmitter {
         content: parsed.content,
         available: gateResult.passed,
         unavailableReason: gateResult.reason,
+        hasScripts: false,
       };
 
       this.logger?.debug(

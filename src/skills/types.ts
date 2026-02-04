@@ -71,6 +71,10 @@ export interface SkillFrontmatter {
   'command-arg-mode'?: 'raw';
   /** Metadata JSON object */
   metadata?: SkillMetadata;
+  /** Keyword patterns that suggest this skill */
+  triggers?: string[];
+  /** Map of action names to script paths relative to skill folder */
+  scripts?: { [action: string]: string };
 }
 
 /**
@@ -93,6 +97,10 @@ export interface Skill {
   available: boolean;
   /** Reason if not available */
   unavailableReason?: string;
+  /** Absolute path to scripts/ folder if it exists */
+  scriptsDir?: string;
+  /** Whether skill has executable scripts */
+  hasScripts: boolean;
 }
 
 /**
@@ -140,4 +148,32 @@ export interface SkillResult {
   success: boolean;
   output?: string;
   error?: string;
+}
+
+/**
+ * Request to execute a skill script
+ */
+export interface SkillExecutionRequest {
+  /** Name of the skill to execute */
+  skillName: string;
+  /** Optional action name (defaults to 'run' or 'default') */
+  action?: string;
+  /** Arguments to pass to script */
+  args?: Record<string, unknown>;
+  /** Working directory for script execution */
+  cwd?: string;
+}
+
+/**
+ * Result of executing a skill script
+ */
+export interface SkillExecutionResult {
+  /** Whether the script executed successfully */
+  success: boolean;
+  /** stdout from script */
+  output?: string;
+  /** stderr or error message */
+  error?: string;
+  /** Exit code from script */
+  exitCode?: number;
 }
