@@ -11,6 +11,31 @@ import { spawn, type ChildProcess } from 'child_process';
 const DEFAULT_TIMEOUT = 60000; // 60 seconds
 const MAX_OUTPUT_SIZE = 30 * 1024; // 30KB
 
+// Dangerous command patterns (basic protection, not a security sandbox)
+const DANGEROUS_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
+  // rm -rf / variations
+  {
+    pattern: /rm\s+.*-[rf]*\s+\/\s*($|[;&|])/i,
+    reason: 'Removing root filesystem',
+  },
+  { pattern: /--no-preserve-root/i, reason: 'Bypassing root protection' },
+  // Fork bombs
+  { pattern: /:\(\)\s*\{\s*:\|:&\s*\}\s*;?\s*:/i, reason: 'Fork bomb detected' },
+  { pattern: /\.\/\s*&\s*\.\/\s*&/i, reason: 'Potential fork bomb pattern' },
+  // Raw device access
+  { pattern: /\/dev\/sd[a-z]/i, reason: 'Direct disk device access' },
+  { pattern: /\/dev\/nvme/i, reason: 'Direct NVMe device access' },
+  { pattern: /\/dev\/hd[a-z]/i, reason: 'Direct disk device access' },
+  // Filesystem destruction
+  { pattern: /mkfs(\.[a-z0-9]+)?(\s|$)/i, reason: 'Filesystem formatting command' },
+  { pattern: /dd\s+.*if=.*of=\/dev\//i, reason: 'Writing to raw device with dd' },
+  // System directory writes
+  { pattern: />\s*\/etc\//i, reason: 'Writing to /etc directory' },
+  { pattern: />\s*\/boot\//i, reason: 'Writing to /boot directory' },
+  { pattern: />\s*\/sys\//i, reason: 'Writing to /sys directory' },
+  { pattern: />\s*\/proc\//i, reason: 'Writing to /proc directory' },
+];
+
 // Types
 interface BashArgs {
   command: string;
@@ -23,6 +48,24 @@ interface BashResult {
   output: string;
   error?: string;
   exitCode: number;
+}
+
+interface ValidationResult {
+  valid: boolean;
+  reason?: string;
+}
+
+/**
+ * Validate command against dangerous patterns
+ * Note: This is basic protection to prevent obvious accidents, not a security sandbox
+ */
+function validateCommand(command: string): ValidationResult {
+  for (const { pattern, reason } of DANGEROUS_PATTERNS) {
+    if (pattern.test(command)) {
+      return { valid: false, reason };
+    }
+  }
+  return { valid: true };
 }
 
 /**
@@ -109,6 +152,18 @@ function parseArgs(): BashArgs {
  * Execute bash command
  */
 async function executeBash(args: BashArgs): Promise<void> {
+  // Validate command against dangerous patterns
+  const commandValidation = validateCommand(args.command);
+  if (!commandValidation.valid) {
+    outputResult({
+      success: false,
+      output: '',
+      error: `Command blocked: ${commandValidation.reason}`,
+      exitCode: 126, // Command cannot execute
+    });
+    return;
+  }
+
   let stdout = '';
   let stderr = '';
   let killed = false;
