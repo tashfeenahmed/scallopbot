@@ -5,23 +5,23 @@
 See: .planning/PROJECT.md (updated 2026-02-04)
 
 **Core value:** Skills-only execution: Every capability the agent has comes from a skill file that advertises itself to the agent.
-**Current focus:** Phase 5 — Browser Skill
+**Current focus:** Phase 6 — Telegram & Memory Skills
 
 ## Current Position
 
-Phase: 5 of 8 (Browser Skill)
-Plan: 1 of 1 in current phase
-Status: Phase complete
-Last activity: 2026-02-04 — Completed 05-01-PLAN.md
+Phase: 6 of 8 (Telegram & Memory Skills)
+Plan: 1 of 2 in current phase
+Status: In progress
+Last activity: 2026-02-04 — Completed 06-01-PLAN.md
 
-Progress: ██████░░░░ 46%
+Progress: ███████░░░ 54%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 6
+- Total plans completed: 7
 - Average duration: 3 min
-- Total execution time: 17 min
+- Total execution time: 19 min
 
 **By Phase:**
 
@@ -32,9 +32,10 @@ Progress: ██████░░░░ 46%
 | 3 | 1 | 5 min | 5 min |
 | 4 | 1 | 3 min | 3 min |
 | 5 | 1 | 2 min | 2 min |
+| 6 | 1 | 2 min | 2 min |
 
 **Recent Trend:**
-- Last 5 plans: 2min, 2min, 5min, 3min, 2min
+- Last 5 plans: 2min, 5min, 3min, 2min, 2min
 - Trend: Stable (~3 min/plan)
 
 ## Accumulated Context
@@ -58,6 +59,8 @@ Recent decisions affecting current work:
 - user-invocable: true for search skill (slash command enabled)
 - Browser skill wraps existing BrowserSession (wrapper pattern)
 - Browser skill user-invocable: true (slash command enabled)
+- memory_search defaults to 'fact' type (not raw logs)
+- Lazy singleton for MemoryStore/HybridSearch in skill scripts
 
 ### Deferred Issues
 
@@ -73,6 +76,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-02-04T10:21:43Z
-Stopped at: Phase 5 complete, ready for Phase 6
+Last session: 2026-02-04T10:30:57Z
+Stopped at: Completed 06-01-PLAN.md, ready for 06-02
 Resume file: None
