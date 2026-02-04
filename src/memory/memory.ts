@@ -824,6 +824,9 @@ export class BackgroundGardener {
         comparisons++;
 
         const existingEmb = existingEmbeddings.get(existingFact.id)!;
+        // Skip if embeddings have different dimensions (e.g., Ollama vs TF-IDF)
+        if (newEmb.length !== existingEmb.length) continue;
+
         const similarity = cosineSimilarity(newEmb, existingEmb);
 
         if (similarity > 0.3 && similarity < 0.95) {
@@ -841,6 +844,9 @@ export class BackgroundGardener {
         const factB = newFacts[j];
         const embA = newEmbeddings.get(factA.id)!;
         const embB = newEmbeddings.get(factB.id)!;
+        // Skip if embeddings have different dimensions
+        if (embA.length !== embB.length) continue;
+
         const similarity = cosineSimilarity(embA, embB);
 
         if (similarity > 0.3 && similarity < 0.95) {
