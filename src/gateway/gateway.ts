@@ -18,6 +18,7 @@ import { Agent } from '../agent/agent.js';
 import { TelegramChannel } from '../channels/telegram.js';
 import { TelegramGateway } from '../channels/telegram-gateway.js';
 import { createSkillRegistry, type SkillRegistry } from '../skills/registry.js';
+import { createSkillExecutor, type SkillExecutor } from '../skills/executor.js';
 import { Router } from '../routing/router.js';
 import { CostTracker } from '../routing/cost.js';
 import {
@@ -47,6 +48,7 @@ export class Gateway {
   private toolRegistry: ToolRegistry | null = null;
   private sessionManager: SessionManager | null = null;
   private skillRegistry: SkillRegistry | null = null;
+  private skillExecutor: SkillExecutor | null = null;
   private router: Router | null = null;
   private costTracker: CostTracker | null = null;
   private memoryStore: MemoryStore | null = null;
@@ -206,6 +208,10 @@ export class Gateway {
       'Skills loaded'
     );
 
+    // Create skill executor for skill-based execution
+    this.skillExecutor = createSkillExecutor(this.logger);
+    this.logger.debug('Skill executor created');
+
     // Initialize voice manager (for voice reply tool)
     this.voiceManager = VoiceManager.fromEnv(this.logger);
     const voiceStatus = await this.voiceManager.isAvailable();
@@ -248,6 +254,7 @@ export class Gateway {
       sessionManager: this.sessionManager,
       toolRegistry: this.toolRegistry,
       skillRegistry: this.skillRegistry,
+      skillExecutor: this.skillExecutor,
       router: this.router,
       costTracker: this.costTracker,
       hotCollector: this.hotCollector,
