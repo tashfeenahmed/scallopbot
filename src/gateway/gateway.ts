@@ -225,6 +225,9 @@ export class Gateway {
       fileSendCallback: async (userId: string, filePath: string, caption?: string) => {
         return this.handleFileSend(userId, filePath, caption);
       },
+      messageSendCallback: async (userId: string, message: string) => {
+        return this.handleMessageSend(userId, message);
+      },
     });
     this.logger.debug({ tools: this.toolRegistry.getAllTools().map((t) => t.name) }, 'Tools registered');
 
@@ -524,6 +527,27 @@ export class Gateway {
     }
 
     this.logger.warn({ userId, filePath }, 'No channel available to send file');
+    return false;
+  }
+
+  /**
+   * Handle sending a message to a user immediately
+   * This allows the agent to send multiple messages during its execution loop
+   */
+  private async handleMessageSend(userId: string, message: string): Promise<boolean> {
+    this.logger.debug({ userId, messageLength: message.length }, 'Sending message to user');
+
+    if (this.telegramChannel) {
+      try {
+        await this.telegramChannel.sendMessage(userId, message);
+        return true;
+      } catch (error) {
+        this.logger.error({ userId, error: (error as Error).message }, 'Failed to send message');
+        return false;
+      }
+    }
+
+    this.logger.warn({ userId }, 'No channel available to send message');
     return false;
   }
 }

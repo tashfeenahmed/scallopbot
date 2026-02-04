@@ -5,6 +5,7 @@ import type { SkillRegistry } from '../skills/registry.js';
 import type { VoiceManager } from '../voice/index.js';
 import type { ReminderCallback } from './reminder.js';
 import type { FileSendCallback } from './file-send.js';
+import type { MessageSendCallback } from './message-send.js';
 
 /**
  * Standard tool groups for common workflows
@@ -167,6 +168,10 @@ export interface ToolRegistryOptions {
   fileSendCallback?: FileSendCallback;
   /** Whether to include file send tool (default: true if fileSendCallback provided) */
   includeFileSendTool?: boolean;
+  /** Callback for sending messages to user immediately */
+  messageSendCallback?: MessageSendCallback;
+  /** Whether to include message send tool (default: true if messageSendCallback provided) */
+  includeMessageSendTool?: boolean;
 }
 
 /**
@@ -237,6 +242,14 @@ export async function createDefaultToolRegistry(
     const { FileSendTool, initializeFileSend } = await import('./file-send.js');
     initializeFileSend(options.fileSendCallback);
     registry.registerTool(new FileSendTool());
+  }
+
+  // Add message send tool if callback is provided
+  const includeMessageSend = options.includeMessageSendTool ?? !!options.messageSendCallback;
+  if (includeMessageSend && options.messageSendCallback) {
+    const { MessageSendTool, initializeMessageSend } = await import('./message-send.js');
+    initializeMessageSend(options.messageSendCallback);
+    registry.registerTool(new MessageSendTool());
   }
 
   // Apply initial policy if provided
