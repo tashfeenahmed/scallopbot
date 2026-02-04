@@ -858,6 +858,18 @@ export class Agent {
       // Try skill first (skills are now the primary execution path)
       const skill = this.skillRegistry?.getSkill(toolUse.name);
 
+      // Documentation-only skills cannot be invoked as tools
+      if (skill && !skill.hasScripts) {
+        this.logger.warn({ skillName: toolUse.name }, 'LLM tried to invoke documentation-only skill as tool');
+        results.push({
+          type: 'tool_result',
+          tool_use_id: toolUse.id,
+          content: `Error: "${toolUse.name}" is a documentation-only skill and cannot be invoked as a tool. Use the bash skill to run CLI commands instead. Refer to the skill guide in your instructions for available commands.`,
+          is_error: true,
+        });
+        continue;
+      }
+
       if (skill && this.skillExecutor) {
         this.logger.debug({ skillName: toolUse.name, input: toolUse.input }, 'Executing skill');
 
@@ -892,7 +904,7 @@ export class Agent {
           if (onProgress) {
             await onProgress({
               type: 'tool_complete',
-              message: resultContent.slice(0, 500),
+              message: resultContent.slice(0, 2000),
               toolName: toolUse.name,
             });
           }
