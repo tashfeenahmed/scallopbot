@@ -123,6 +123,66 @@ describe('LLMFactExtractor', () => {
       expect(result.facts[0].content).toContain('Henry Schein');
     });
 
+    it('should extract relationship facts with subject as "user"', async () => {
+      // This tests the critical fix: "My wife is Hayat" should have subject: "user"
+      const mockProvider = createMockProvider(JSON.stringify({
+        facts: [
+          { content: 'Wife is Hayat', subject: 'user', category: 'relationship' },
+        ],
+      }));
+
+      const extractor = new LLMFactExtractor({
+        provider: mockProvider,
+        memoryStore,
+        hybridSearch,
+        logger,
+      });
+
+      const result = await extractor.extractFacts(
+        'My wife is Hayat',
+        'user-123'
+      );
+
+      expect(result.facts.length).toBe(1);
+      expect(result.facts[0].subject).toBe('user'); // Critical: relationship belongs to user
+      expect(result.facts[0].content).toContain('Hayat');
+      expect(result.facts[0].category).toBe('relationship');
+    });
+
+    it('should extract both relationship and attribute facts for spouse', async () => {
+      // "My wife Hayat is a TikToker" should produce TWO facts
+      const mockProvider = createMockProvider(JSON.stringify({
+        facts: [
+          { content: 'Wife is Hayat', subject: 'user', category: 'relationship' },
+          { content: 'Is a TikToker', subject: 'Hayat', category: 'work' },
+        ],
+      }));
+
+      const extractor = new LLMFactExtractor({
+        provider: mockProvider,
+        memoryStore,
+        hybridSearch,
+        logger,
+      });
+
+      const result = await extractor.extractFacts(
+        'My wife Hayat is a TikToker',
+        'user-123'
+      );
+
+      expect(result.facts.length).toBe(2);
+
+      // Relationship fact has subject: "user"
+      const relationshipFact = result.facts.find(f => f.category === 'relationship');
+      expect(relationshipFact?.subject).toBe('user');
+      expect(relationshipFact?.content).toContain('Hayat');
+
+      // Work fact has subject: "Hayat"
+      const workFact = result.facts.find(f => f.category === 'work');
+      expect(workFact?.subject).toBe('Hayat');
+      expect(workFact?.content).toContain('TikToker');
+    });
+
     it('should extract location facts', async () => {
       const mockProvider = createMockProvider(JSON.stringify({
         facts: [
