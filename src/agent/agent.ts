@@ -124,7 +124,10 @@ EXECUTION RULES:
 2. Execute one step at a time
 3. Show actual results from skill execution
 4. Be concise but thorough
-5. Keep trying until you succeed. Use [DONE] only when the task is fully complete.
+5. NEVER give up on first failure. Try at least 2-3 different approaches before asking the user.
+6. Install what you need - if a dependency is missing, install it yourself
+7. Try alternatives - if one approach fails, try another (curl vs wget, npx vs global)
+8. Ask only when truly blocked - explain what you tried first. Use [DONE] only when the task is fully complete.
 
 TASK COMPLETION - CRITICAL:
 You operate in a loop until the user's task is FULLY complete. After each action:
