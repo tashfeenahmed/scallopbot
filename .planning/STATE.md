@@ -5,25 +5,25 @@
 See: .planning/PROJECT.md (updated 2026-02-04)
 
 **Core value:** Skills-only execution: Every capability the agent has comes from a skill file that advertises itself to the agent.
-**Current focus:** Phase 7 — Agent Loop Refactor
+**Current focus:** Milestone v2.0 — Agent Polish & Enhanced Loop
 
 ## Current Position
 
-Phase: 7 of 8 (Agent Loop Refactor)
-Plan: 3 of 3 in current phase
-Status: Phase complete
-Last activity: 2026-02-04 — Completed 07-03-PLAN.md
+Phase: 9 of 17 (Code Cleanup)
+Plan: Not started
+Status: Ready to plan
+Last activity: 2026-02-04 — Milestone v2.0 created
 
-Progress: █████████░ 85%
+Progress: ░░░░░░░░░░ 0%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 11
+- Total plans completed: 11 (v1.0)
 - Average duration: 3 min
 - Total execution time: 29 min
 
-**By Phase:**
+**By Phase (v1.0):**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
@@ -80,8 +80,13 @@ None yet.
 
 None yet.
 
+### Roadmap Evolution
+
+- v1.0 Skills-Only Architecture shipped: Phases 1-7, 11 plans (2026-02-04)
+- v2.0 Agent Polish & Enhanced Loop created: 9 phases (Phase 9-17)
+
 ## Session Continuity
 
-Last session: 2026-02-04T10:58:00Z
-Stopped at: Completed 07-03-PLAN.md (Phase 7 complete)
+Last session: 2026-02-04T11:10:00Z
+Stopped at: Milestone v2.0 initialization
 Resume file: None
