@@ -76,6 +76,32 @@ The skill returns JSON to stdout:
 4. **Long-running processes**: Use appropriate timeouts; default is 60 seconds
 5. **Resource limits**: Output is truncated at 30KB to prevent memory issues
 
+## Security Features
+
+The bash skill includes basic protections against accidental damage:
+
+### Dangerous Command Blocking
+
+The following patterns are automatically blocked with exit code 126:
+
+- `rm -rf /` and variations (root filesystem removal)
+- `--no-preserve-root` flag (bypassing safety)
+- Fork bombs like `:(){ :|:& };:`
+- Direct device access (`/dev/sda`, `/dev/nvme`, etc.)
+- Filesystem formatting (`mkfs` commands)
+- `dd` writes to raw devices
+- Writes to system directories (`/etc`, `/boot`, `/sys`, `/proc`)
+
+### Path Restrictions
+
+The `cwd` parameter is validated to prevent escaping the workspace:
+
+- Path traversal with `../` that escapes workspace is blocked
+- Symlinks that resolve outside workspace are blocked
+- All paths are resolved relative to the workspace root
+
+**Note:** These are basic protections to prevent obvious accidents, not a security sandbox. They don't protect against determined malicious use.
+
 ## Examples
 
 ### Check directory contents

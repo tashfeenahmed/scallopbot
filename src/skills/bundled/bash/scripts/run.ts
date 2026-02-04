@@ -6,6 +6,8 @@
  */
 
 import { spawn, type ChildProcess } from 'child_process';
+import * as path from 'path';
+import * as fs from 'fs';
 
 // Configuration
 const DEFAULT_TIMEOUT = 60000; // 60 seconds
@@ -65,6 +67,42 @@ function validateCommand(command: string): ValidationResult {
       return { valid: false, reason };
     }
   }
+  return { valid: true };
+}
+
+/**
+ * Validate working directory stays within workspace boundaries
+ * Prevents path traversal attacks that could escape the workspace
+ */
+function validateCwd(cwd: string, basePath: string): ValidationResult {
+  // Resolve both paths to absolute
+  const resolvedCwd = path.resolve(basePath, cwd);
+  const resolvedBase = path.resolve(basePath);
+
+  // Check if resolved path starts with base path
+  if (!resolvedCwd.startsWith(resolvedBase)) {
+    return {
+      valid: false,
+      reason: `Path traversal blocked: ${cwd} escapes workspace`,
+    };
+  }
+
+  // Handle symlinks - resolve real path if it exists
+  try {
+    if (fs.existsSync(resolvedCwd)) {
+      const realPath = fs.realpathSync(resolvedCwd);
+      const realBase = fs.realpathSync(resolvedBase);
+      if (!realPath.startsWith(realBase)) {
+        return {
+          valid: false,
+          reason: `Symlink escape blocked: resolves to ${realPath} outside workspace`,
+        };
+      }
+    }
+  } catch {
+    // If realpath fails, directory doesn't exist - let bash handle that error
+  }
+
   return { valid: true };
 }
 
@@ -140,11 +178,32 @@ function parseArgs(): BashArgs {
     throw new Error('Missing command');
   }
 
+  // Determine workspace root (from SKILL_DIR or cwd)
+  const workspaceRoot = process.env.SKILL_DIR || process.cwd();
+
+  // Determine target cwd
+  const targetCwd =
+    typeof argsObj.cwd === 'string'
+      ? path.resolve(workspaceRoot, argsObj.cwd)
+      : workspaceRoot;
+
+  // Validate cwd stays within workspace
+  const cwdValidation = validateCwd(targetCwd, workspaceRoot);
+  if (!cwdValidation.valid) {
+    outputResult({
+      success: false,
+      output: '',
+      error: `Path blocked: ${cwdValidation.reason}`,
+      exitCode: 126,
+    });
+    throw new Error('Path validation failed');
+  }
+
   return {
     command: argsObj.command,
     timeout:
       typeof argsObj.timeout === 'number' ? argsObj.timeout : DEFAULT_TIMEOUT,
-    cwd: typeof argsObj.cwd === 'string' ? argsObj.cwd : process.cwd(),
+    cwd: targetCwd,
   };
 }
 
