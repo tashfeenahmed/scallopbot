@@ -7,6 +7,7 @@
 
 import * as fs from 'fs/promises';
 import * as path from 'path';
+import type { Logger } from 'pino';
 
 export interface BotPersonality {
   id: string;
@@ -138,10 +139,12 @@ export class BotConfigManager {
   private configPath: string;
   private store: BotConfigStore;
   private saveDebounce: NodeJS.Timeout | null = null;
+  private logger?: Logger;
 
-  constructor(workspacePath: string) {
+  constructor(workspacePath: string, logger?: Logger) {
     this.configPath = path.join(workspacePath, 'bot-config.json');
     this.store = { users: {}, version: CURRENT_VERSION };
+    this.logger = logger;
   }
 
   /**
@@ -177,7 +180,7 @@ export class BotConfigManager {
       try {
         await fs.writeFile(this.configPath, JSON.stringify(this.store, null, 2));
       } catch (error) {
-        console.error('Failed to save bot config:', error);
+        this.logger?.error({ error }, 'Failed to save bot config');
       }
     }, 500);
   }
