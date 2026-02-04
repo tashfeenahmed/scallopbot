@@ -12,7 +12,11 @@ metadata:
 
 # Browser Skill (agent-browser CLI)
 
-Use the `agent-browser` CLI via bash for all web automation. This is a powerful headless browser optimized for AI agents.
+**IMPORTANT: There is NO "browser" tool. Use the `bash` tool to run agent-browser CLI commands.**
+
+Use the `agent-browser` CLI via the `bash` tool for all web automation. This is a powerful headless browser optimized for AI agents.
+
+Example: `bash("agent-browser open https://example.com")`
 
 ## Workflow
 
@@ -48,9 +52,9 @@ agent-browser press Enter                    # Press key
 agent-browser select @e5 "option-value"
 
 # Extract content
-agent-browser get text                # Get all page text
+agent-browser get text body           # Get all page text
 agent-browser get text @e1            # Get element text
-agent-browser get html                # Get page HTML
+agent-browser get html body           # Get page HTML
 agent-browser get url                 # Get current URL
 agent-browser get title               # Get page title
 
@@ -98,7 +102,7 @@ agent-browser --ignore-https-errors open https://self-signed.example.com
 
 # JSON output (for parsing)
 agent-browser --json snapshot
-agent-browser --json get text
+agent-browser --json get text body
 
 # Custom user agent
 agent-browser --user-agent "Mozilla/5.0..." open example.com
@@ -130,7 +134,7 @@ agent-browser snapshot -i
 agent-browser fill @e1 "search query"
 agent-browser press Enter
 agent-browser wait 2000
-agent-browser get text   # Get search results
+agent-browser get text body   # Get search results
 ```
 
 ### Take screenshot for visual analysis
@@ -146,7 +150,7 @@ agent-browser screenshot --full page.png
 ```bash
 agent-browser open https://news.example.com/article
 agent-browser wait 1000
-agent-browser get text
+agent-browser get text body
 ```
 
 ## Session Management

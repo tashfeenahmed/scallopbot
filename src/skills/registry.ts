@@ -303,8 +303,8 @@ export class SkillRegistry {
         // Include full content for documentation skills (they ARE the instructions)
         if (skill.content.trim()) {
           const content = skill.content.trim();
-          // Limit to 2000 chars per documentation skill to avoid context overflow
-          const maxDocLength = 2000;
+          // Documentation skills need enough room for full command references
+          const maxDocLength = 6000;
           const truncated =
             content.length > maxDocLength
               ? content.slice(0, maxDocLength) + '\n\n...(truncated)'
