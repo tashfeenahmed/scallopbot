@@ -340,7 +340,7 @@ export interface ExtractedFact {
 /**
  * Relationship types we track
  */
-const RELATIONSHIP_TYPES = [
+const _RELATIONSHIP_TYPES = [
   'friend', 'flatmate', 'roommate', 'colleague', 'coworker',
   'brother', 'sister', 'mom', 'dad', 'mother', 'father',
   'wife', 'husband', 'partner', 'boss', 'manager', 'teammate',

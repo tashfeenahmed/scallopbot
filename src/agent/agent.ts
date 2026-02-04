@@ -762,7 +762,7 @@ export class Agent {
    */
   private cleanProgressMessage(text: string): string {
     // Remove JSON blocks that look like tool calls
-    let cleaned = text
+    const cleaned = text
       // Remove JSON objects with function/arguments keys
       .replace(/\{[\s\S]*?"function"[\s\S]*?"arguments"[\s\S]*?\}/g, '')
       // Remove JSON objects with name/input keys

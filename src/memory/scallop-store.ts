@@ -15,8 +15,6 @@ import {
   ScallopDatabase,
   type ScallopMemoryEntry,
   type MemoryCategory,
-  type ScallopMemoryType,
-  type RelationType,
 } from './db.js';
 import { DecayEngine, PROMINENCE_THRESHOLDS, type DecayConfig } from './decay.js';
 import { RelationGraph, type RelationDetectionOptions } from './relations.js';

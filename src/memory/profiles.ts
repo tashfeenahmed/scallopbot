@@ -9,7 +9,6 @@
 
 import type {
   ScallopDatabase,
-  UserProfileEntry,
   DynamicProfile,
   BehavioralPatterns,
   ScallopMemoryEntry,

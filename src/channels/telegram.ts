@@ -8,13 +8,10 @@ import {
   BotConfigManager,
   DEFAULT_PERSONALITIES,
   AVAILABLE_MODELS,
-  type OnboardingStep,
-  type UserBotConfig,
 } from './bot-config.js';
 
 const MAX_MESSAGE_LENGTH = 4096;
 const TYPING_INTERVAL = 5000; // 5 seconds
-const MAX_VOICE_RESPONSE_LENGTH = 500; // Characters before truncating voice response
 
 export interface TelegramChannelOptions {
   botToken: string;
