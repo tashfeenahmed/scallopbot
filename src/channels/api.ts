@@ -18,6 +18,9 @@
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { timingSafeEqual } from 'crypto';
+import { createReadStream } from 'fs';
+import { stat } from 'fs/promises';
+import * as path from 'path';
 import type { Logger } from 'pino';
 import type { Agent } from '../agent/agent.js';
 import type { SessionManager } from '../agent/session.js';
@@ -41,6 +44,8 @@ export interface ApiChannelConfig {
   allowedOrigins?: string[];
   /** Maximum request body size in bytes (default: 1MB) */
   maxBodySize?: number;
+  /** Directory to serve static files from (optional) */
+  staticDir?: string;
   /** Agent instance */
   agent: Agent;
   /** Session manager */
@@ -48,6 +53,22 @@ export interface ApiChannelConfig {
   /** Logger */
   logger: Logger;
 }
+
+/** Content-Type mapping for static files */
+const CONTENT_TYPES: Record<string, string> = {
+  '.html': 'text/html',
+  '.css': 'text/css',
+  '.js': 'text/javascript',
+  '.json': 'application/json',
+  '.png': 'image/png',
+  '.svg': 'image/svg+xml',
+  '.ico': 'image/x-icon',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+};
 
 /**
  * Chat request body
@@ -87,9 +108,10 @@ interface WsResponse {
 export class ApiChannel implements Channel {
   name = 'api';
 
-  private config: Required<Omit<ApiChannelConfig, 'apiKey' | 'allowedOrigins'>> & {
+  private config: Required<Omit<ApiChannelConfig, 'apiKey' | 'allowedOrigins' | 'staticDir'>> & {
     apiKey?: string;
     allowedOrigins: string[];
+    staticDir?: string;
   };
   private server: Server | null = null;
   private wss: WebSocketServer | null = null;
@@ -104,6 +126,7 @@ export class ApiChannel implements Channel {
       apiKey: config.apiKey,
       allowedOrigins: config.allowedOrigins || [],
       maxBodySize: config.maxBodySize || MAX_BODY_SIZE,
+      staticDir: config.staticDir,
       agent: config.agent,
       sessionManager: config.sessionManager,
       logger: config.logger,
@@ -222,7 +245,7 @@ export class ApiChannel implements Channel {
    */
   private async handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = new URL(req.url || '/', `http://${req.headers.host}`);
-    const path = url.pathname;
+    const urlPath = url.pathname;
     const method = req.method?.toUpperCase();
 
     // CORS headers - only allow configured origins
@@ -242,7 +265,15 @@ export class ApiChannel implements Channel {
       return;
     }
 
-    // Check authentication
+    // Serve static files (no auth required for static assets)
+    if (this.config.staticDir && !urlPath.startsWith('/api/') && urlPath !== '/ws') {
+      const served = await this.serveStaticFile(urlPath, res);
+      if (served) {
+        return;
+      }
+    }
+
+    // Check authentication for API routes
     if (this.config.apiKey && !this.authenticateRequest(req)) {
       this.sendJson(res, 401, { error: 'Unauthorized' });
       return;
@@ -250,27 +281,77 @@ export class ApiChannel implements Channel {
 
     try {
       // Route requests
-      if (path === '/api/health' && method === 'GET') {
+      if (urlPath === '/api/health' && method === 'GET') {
         this.sendJson(res, 200, { status: 'ok', timestamp: new Date().toISOString() });
-      } else if (path === '/api/chat' && method === 'POST') {
+      } else if (urlPath === '/api/chat' && method === 'POST') {
         await this.handleChat(req, res);
-      } else if (path === '/api/chat/stream' && method === 'POST') {
+      } else if (urlPath === '/api/chat/stream' && method === 'POST') {
         await this.handleChatStream(req, res);
-      } else if (path === '/api/sessions' && method === 'GET') {
+      } else if (urlPath === '/api/sessions' && method === 'GET') {
         await this.handleListSessions(res);
-      } else if (path.startsWith('/api/sessions/') && method === 'GET') {
-        const sessionId = path.slice('/api/sessions/'.length);
+      } else if (urlPath.startsWith('/api/sessions/') && method === 'GET') {
+        const sessionId = urlPath.slice('/api/sessions/'.length);
         await this.handleGetSession(res, sessionId);
-      } else if (path.startsWith('/api/sessions/') && method === 'DELETE') {
-        const sessionId = path.slice('/api/sessions/'.length);
+      } else if (urlPath.startsWith('/api/sessions/') && method === 'DELETE') {
+        const sessionId = urlPath.slice('/api/sessions/'.length);
         await this.handleDeleteSession(res, sessionId);
       } else {
         this.sendJson(res, 404, { error: 'Not found' });
       }
     } catch (error) {
       const err = error as Error;
-      this.logger.error({ error: err.message, path }, 'Request error');
+      this.logger.error({ error: err.message, path: urlPath }, 'Request error');
       this.sendJson(res, 500, { error: 'Internal server error' });
+    }
+  }
+
+  /**
+   * Serve a static file from the configured static directory
+   * Returns true if file was served, false if not found
+   */
+  private async serveStaticFile(urlPath: string, res: ServerResponse): Promise<boolean> {
+    if (!this.config.staticDir) {
+      return false;
+    }
+
+    // Determine file path
+    let filePath = path.join(this.config.staticDir, urlPath === '/' ? 'index.html' : urlPath);
+
+    // Security: Prevent directory traversal
+    const resolvedPath = path.resolve(filePath);
+    const resolvedStaticDir = path.resolve(this.config.staticDir);
+    if (!resolvedPath.startsWith(resolvedStaticDir)) {
+      this.logger.warn({ urlPath, resolvedPath }, 'Directory traversal attempt blocked');
+      return false;
+    }
+
+    try {
+      // Try the exact path first
+      let stats = await stat(resolvedPath).catch(() => null);
+
+      // If not found and no extension, try with .html
+      if (!stats && !path.extname(urlPath)) {
+        const htmlPath = resolvedPath + '.html';
+        stats = await stat(htmlPath).catch(() => null);
+        if (stats) {
+          filePath = htmlPath;
+        }
+      }
+
+      if (!stats || !stats.isFile()) {
+        return false;
+      }
+
+      // Determine content type
+      const ext = path.extname(filePath).toLowerCase();
+      const contentType = CONTENT_TYPES[ext] || 'application/octet-stream';
+
+      // Serve the file
+      res.writeHead(200, { 'Content-Type': contentType });
+      createReadStream(filePath).pipe(res);
+      return true;
+    } catch {
+      return false;
     }
   }
 
