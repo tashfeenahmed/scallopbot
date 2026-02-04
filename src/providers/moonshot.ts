@@ -13,6 +13,7 @@
  */
 
 import OpenAI from 'openai';
+import type { Logger } from 'pino';
 import type {
   LLMProvider,
   ProviderOptions,
@@ -68,8 +69,10 @@ export class MoonshotProvider implements LLMProvider {
   private maxRetries: number;
   private baseUrl: string;
   private timeout?: number;
+  private logger?: Logger;
 
-  constructor(options: ProviderOptions) {
+  constructor(options: ProviderOptions, logger?: Logger) {
+    this.logger = logger;
     // Support both single apiKey and multiple apiKeys
     this.apiKeys = options.apiKeys?.length ? options.apiKeys : [options.apiKey];
     this.model = options.model || DEFAULT_MODEL;
@@ -104,7 +107,7 @@ export class MoonshotProvider implements LLMProvider {
       ...(this.timeout && { timeout: this.timeout }),
     });
 
-    console.log(`[MOONSHOT] Rotated to API key ${this.currentKeyIndex + 1}/${this.apiKeys.length}`);
+    this.logger?.info(`Rotated to API key ${this.currentKeyIndex + 1}/${this.apiKeys.length}`);
     return this.currentKeyIndex !== 0; // true if we haven't cycled back to start
   }
 
@@ -138,13 +141,13 @@ export class MoonshotProvider implements LLMProvider {
     };
 
     // Debug logging - log the full request
-    console.log('[MOONSHOT DEBUG] Request params:', JSON.stringify({
+    this.logger?.debug({
       model: params.model,
       messageCount: messages.length,
       hasTools: !!request.tools,
       toolCount: request.tools?.length || 0,
-    }));
-    console.log('[MOONSHOT DEBUG] Messages:', JSON.stringify(messages, null, 2));
+    }, 'Request params');
+    this.logger?.debug({ messages }, 'Messages');
 
     try {
       const response = await this.executeWithRetry(() =>
@@ -152,7 +155,7 @@ export class MoonshotProvider implements LLMProvider {
       );
 
       // Debug logging - log the response
-      console.log('[MOONSHOT DEBUG] Response:', JSON.stringify({
+      this.logger?.debug({
         model: response.model,
         finishReason: response.choices[0]?.finish_reason,
         hasToolCalls: !!response.choices[0]?.message?.tool_calls,
@@ -164,16 +167,16 @@ export class MoonshotProvider implements LLMProvider {
         })),
         contentLength: response.choices[0]?.message?.content?.length || 0,
         usage: response.usage,
-      }));
+      }, 'Response');
 
       return this.formatResponse(response);
     } catch (error) {
       // Debug logging - log any errors
-      console.error('[MOONSHOT DEBUG] Error:', {
+      this.logger?.error({
         message: (error as Error).message,
         name: (error as Error).name,
         stack: (error as Error).stack?.split('\n').slice(0, 3).join('\n'),
-      });
+      }, 'Error');
       throw error;
     }
   }
@@ -203,7 +206,7 @@ export class MoonshotProvider implements LLMProvider {
           for (const toolResult of toolResults) {
             // Validate tool_use_id exists and is not empty
             if (!toolResult.tool_use_id) {
-              console.error('[MOONSHOT] Missing tool_use_id in tool_result:', JSON.stringify(toolResult));
+              this.logger?.error({ toolResult }, 'Missing tool_use_id in tool_result');
               continue;
             }
             messages.push({
