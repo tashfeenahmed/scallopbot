@@ -133,10 +133,14 @@ export class ScallopMemoryStore {
     const temporal = this.temporalExtractor.extract(content);
     const eventDate = options.eventDate ?? temporal.eventDate;
 
-    // Generate embedding if embedder available
+    // Generate embedding if embedder available (non-fatal if it fails)
     let embedding: number[] | undefined;
     if (this.embedder) {
-      embedding = await this.embedder.embed(content);
+      try {
+        embedding = await this.embedder.embed(content);
+      } catch (err) {
+        this.logger.warn({ error: (err as Error).message }, 'Embedding generation failed, storing without embedding');
+      }
     }
 
     // Add memory to database
