@@ -190,6 +190,8 @@ export class Agent {
     this.maxIterations = options.maxIterations;
     this.baseSystemPrompt = options.systemPrompt || DEFAULT_SYSTEM_PROMPT;
     this.enableThinking = options.enableThinking ?? false;
+
+    this.logger.info({ enableThinking: this.enableThinking }, 'Agent thinking mode configured');
   }
 
   /**
