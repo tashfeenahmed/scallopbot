@@ -100,15 +100,15 @@ Plans:
 Plans:
 - [x] 10-01: Add SkillExecutor unit tests and verify agent skills integration
 
-#### Phase 11: Web UI
+#### Phase 11: Web UI (Complete)
 **Goal**: Local web interface for testing alongside Telegram
 **Depends on**: Phase 10
 **Research**: Likely (framework choice: Express+static, Next.js, simple HTML+WS)
 **Research topics**: WebSocket vs SSE for streaming, simple UI framework choice
-**Plans**: TBD
+**Plans**: 1/1 complete
 
 Plans:
-- [ ] 11-01: TBD
+- [x] 11-01: Web UI foundation (API channel config, static serving, chat interface)
 
 #### Phase 12: Loop Until Done
 **Goal**: Agent continues in loops until task complete (stop vs next-task decision each iteration)
@@ -174,7 +174,7 @@ Phases execute in numeric order: 9 → 10 → 11 → 12 → 13 → 14 → 15 →
 | 1-7 | v1.0 | 11/11 | Complete | 2026-02-04 |
 | 9. Code Cleanup | v2.0 | 2/2 | Complete | 2026-02-04 |
 | 10. Test Infrastructure | v2.0 | 1/1 | Complete | 2026-02-04 |
-| 11. Web UI | v2.0 | 0/? | Not started | - |
+| 11. Web UI | v2.0 | 1/1 | Complete | 2026-02-04 |
 | 12. Loop Until Done | v2.0 | 0/? | Not started | - |
 | 13. Unified Triggers | v2.0 | 0/? | Not started | - |
 | 14. Proactive Execution | v2.0 | 0/? | Not started | - |
