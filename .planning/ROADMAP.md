@@ -18,7 +18,7 @@ None
 - [x] **Phase 2: Bash Skill** - Shell command execution as first complete skill (Complete)
 - [x] **Phase 3: Skill Executor** - Infrastructure to run skill scripts with SKILL_ARGS (Complete)
 - [x] **Phase 4: Web Search Skill** - Brave API integration for web search (Complete)
-- [ ] **Phase 5: Browser Skill** - Web browsing and content extraction
+- [x] **Phase 5: Browser Skill** - Web browsing and content extraction (Complete)
 - [ ] **Phase 6: Telegram & Memory Skills** - Messaging and semantic memory search
 - [ ] **Phase 7: Agent Loop Refactor** - Skills-only execution loop replacing tools
 - [ ] **Phase 8: Kimi K2.5 Thinking Mode** - Thinking mode with reasoning_content support
@@ -72,7 +72,7 @@ Plans:
 **Plans**: 1
 
 Plans:
-- [ ] 05-01: Create browser skill wrapping existing BrowserSession
+- [x] 05-01: Create browser skill wrapping existing BrowserSession
 
 ### Phase 6: Telegram & Memory Skills
 **Goal**: Implement telegram messaging and semantic memory search skills
@@ -117,7 +117,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8
 | 2. Bash Skill | 2/2 | Complete | 2026-02-04 |
 | 3. Skill Executor | 1/1 | Complete | 2026-02-04 |
 | 4. Web Search Skill | 1/1 | Complete | 2026-02-04 |
-| 5. Browser Skill | 0/1 | Not started | - |
+| 5. Browser Skill | 1/1 | Complete | 2026-02-04 |
 | 6. Telegram & Memory Skills | 0/2 | Not started | - |
 | 7. Agent Loop Refactor | 0/3 | Not started | - |
 | 8. Kimi K2.5 Thinking Mode | 0/3 | Not started | - |

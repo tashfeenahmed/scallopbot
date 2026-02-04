@@ -9,19 +9,19 @@ See: .planning/PROJECT.md (updated 2026-02-04)
 
 ## Current Position
 
-Phase: 4 of 8 (Web Search Skill)
+Phase: 5 of 8 (Browser Skill)
 Plan: 1 of 1 in current phase
 Status: Phase complete
-Last activity: 2026-02-04 — Phase 4 complete (04-01 covered all work)
+Last activity: 2026-02-04 — Completed 05-01-PLAN.md
 
-Progress: █████░░░░░ 38%
+Progress: ██████░░░░ 46%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 5
+- Total plans completed: 6
 - Average duration: 3 min
-- Total execution time: 15 min
+- Total execution time: 17 min
 
 **By Phase:**
 
@@ -31,9 +31,10 @@ Progress: █████░░░░░ 38%
 | 2 | 2 | 4 min | 2 min |
 | 3 | 1 | 5 min | 5 min |
 | 4 | 1 | 3 min | 3 min |
+| 5 | 1 | 2 min | 2 min |
 
 **Recent Trend:**
-- Last 5 plans: 3min, 2min, 2min, 5min, 3min
+- Last 5 plans: 2min, 2min, 5min, 3min, 2min
 - Trend: Stable (~3 min/plan)
 
 ## Accumulated Context
@@ -55,6 +56,8 @@ Recent decisions affecting current work:
 - 5-second grace period between SIGTERM and SIGKILL
 - web_search skill uses native fetch() (Node.js 18+)
 - user-invocable: true for search skill (slash command enabled)
+- Browser skill wraps existing BrowserSession (wrapper pattern)
+- Browser skill user-invocable: true (slash command enabled)
 
 ### Deferred Issues
 
@@ -70,6 +73,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-02-04T10:20:00Z
-Stopped at: Phase 4 complete, ready for Phase 5
+Last session: 2026-02-04T10:21:43Z
+Stopped at: Phase 5 complete, ready for Phase 6
 Resume file: None
