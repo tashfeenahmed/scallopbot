@@ -100,6 +100,7 @@ export class TelegramChannel {
   private allowedUsers: Set<string>;
   public userSessions: Map<string, string> = new Map();
   private isRunning = false;
+  private stopRequests: Set<string> = new Set(); // Track users who want to stop processing
   private voiceManager: VoiceManager | null = null;
   private voiceAvailable = false;
   private enableVoiceReply: boolean;
@@ -238,6 +239,21 @@ export class TelegramChannel {
 
       await this.configManager.resetUserConfig(userId);
       await this.handleStart(ctx, userId);
+    });
+
+    // /stop command - stop current processing
+    this.bot.command('stop', async (ctx) => {
+      const userId = ctx.from?.id.toString();
+      if (!userId) return;
+
+      if (!this.isUserAllowed(userId)) {
+        await this.sendUnauthorized(ctx);
+        return;
+      }
+
+      this.stopRequests.add(userId);
+      await ctx.reply('Stopping current task...');
+      this.logger.info({ userId }, 'Stop requested by user');
     });
 
     // Handle regular messages
@@ -604,7 +620,9 @@ export class TelegramChannel {
         }
       };
 
-      const result = await this.agent.processMessage(sessionId, transcription.text, undefined, onProgress);
+      const shouldStop = () => this.stopRequests.has(userId);
+      const result = await this.agent.processMessage(sessionId, transcription.text, undefined, onProgress, shouldStop);
+      this.stopRequests.delete(userId);
 
       clearInterval(typingInterval);
 
@@ -693,7 +711,9 @@ export class TelegramChannel {
         }
       };
 
-      const result = await this.agent.processMessage(sessionId, prompt, undefined, onProgress);
+      const shouldStop = () => this.stopRequests.has(userId);
+      const result = await this.agent.processMessage(sessionId, prompt, undefined, onProgress, shouldStop);
+      this.stopRequests.delete(userId);
 
       clearInterval(typingInterval);
 
@@ -783,7 +803,9 @@ export class TelegramChannel {
         }
       };
 
-      const result = await this.agent.processMessage(sessionId, prompt, undefined, onProgress);
+      const shouldStop = () => this.stopRequests.has(userId);
+      const result = await this.agent.processMessage(sessionId, prompt, undefined, onProgress, shouldStop);
+      this.stopRequests.delete(userId);
 
       clearInterval(typingInterval);
 
@@ -843,7 +865,13 @@ export class TelegramChannel {
         }
       };
 
-      const result = await this.agent.processMessage(sessionId, messageText, undefined, onProgress);
+      // Check if user wants to stop
+      const shouldStop = () => this.stopRequests.has(userId);
+
+      const result = await this.agent.processMessage(sessionId, messageText, undefined, onProgress, shouldStop);
+
+      // Clear stop request after processing
+      this.stopRequests.delete(userId);
 
       clearInterval(typingInterval);
 
@@ -951,6 +979,7 @@ export class TelegramChannel {
     await this.bot.api.setMyCommands([
       { command: 'start', description: 'Start the bot / Show welcome message' },
       { command: 'help', description: 'Show available commands' },
+      { command: 'stop', description: 'Stop current task' },
       { command: 'settings', description: 'View your current settings' },
       { command: 'setup', description: 'Reconfigure bot (name, personality, model)' },
       { command: 'new', description: 'Start a new conversation' },
