@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SmartBot Chat</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="app">
+    <header class="header">
+      <h1>SmartBot</h1>
+      <div id="status" class="status disconnected">Disconnected</div>
+    </header>
+
+    <main class="chat-container">
+      <div id="messages" class="messages"></div>
+    </main>
+
+    <footer class="input-area">
+      <form id="chat-form" class="chat-form">
+        <input
+          type="text"
+          id="message-input"
+          class="message-input"
+          placeholder="Type a message..."
+          autocomplete="off"
+          disabled
+        />
+        <button type="submit" id="send-btn" class="send-btn" disabled>Send</button>
+      </form>
+    </footer>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
