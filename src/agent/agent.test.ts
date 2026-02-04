@@ -37,8 +37,7 @@ describe('Agent', () => {
     it('should process simple user message and return response', async () => {
       const { Agent } = await import('./agent.js');
       const { SessionManager } = await import('./session.js');
-      const { ToolRegistryImpl } = await import('../tools/registry.js');
-
+      
       const provider = createMockProvider([
         {
           content: [{ type: 'text', text: 'Hello! How can I help you?' }],
@@ -49,14 +48,12 @@ describe('Agent', () => {
       ]);
 
       const sessionManager = new SessionManager(sessionsDir);
-      const toolRegistry = new ToolRegistryImpl();
-      const logger = pino({ level: 'silent' });
+            const logger = pino({ level: 'silent' });
 
       const agent = new Agent({
         provider,
         sessionManager,
-        toolRegistry,
-        workspace: testDir,
+                workspace: testDir,
         logger,
         maxIterations: 20,
       });
@@ -71,9 +68,7 @@ describe('Agent', () => {
     it('should execute tool and continue conversation', async () => {
       const { Agent } = await import('./agent.js');
       const { SessionManager } = await import('./session.js');
-      const { ToolRegistryImpl } = await import('../tools/registry.js');
-      const { ReadTool } = await import('../tools/read.js');
-
+            
       // Create a test file
       const testFile = path.join(testDir, 'test.txt');
       await fs.writeFile(testFile, 'Test content');
@@ -103,15 +98,12 @@ describe('Agent', () => {
       ]);
 
       const sessionManager = new SessionManager(sessionsDir);
-      const toolRegistry = new ToolRegistryImpl();
-      toolRegistry.registerTool(new ReadTool());
-      const logger = pino({ level: 'silent' });
+                  const logger = pino({ level: 'silent' });
 
       const agent = new Agent({
         provider,
         sessionManager,
-        toolRegistry,
-        workspace: testDir,
+                workspace: testDir,
         logger,
         maxIterations: 20,
       });
@@ -126,10 +118,7 @@ describe('Agent', () => {
     it('should handle multiple tool calls in sequence', async () => {
       const { Agent } = await import('./agent.js');
       const { SessionManager } = await import('./session.js');
-      const { ToolRegistryImpl } = await import('../tools/registry.js');
-      const { WriteTool } = await import('../tools/write.js');
-      const { ReadTool } = await import('../tools/read.js');
-
+                  
       const testFile = path.join(testDir, 'output.txt');
 
       const provider = createMockProvider([
@@ -171,16 +160,12 @@ describe('Agent', () => {
       ]);
 
       const sessionManager = new SessionManager(sessionsDir);
-      const toolRegistry = new ToolRegistryImpl();
-      toolRegistry.registerTool(new WriteTool());
-      toolRegistry.registerTool(new ReadTool());
-      const logger = pino({ level: 'silent' });
+                        const logger = pino({ level: 'silent' });
 
       const agent = new Agent({
         provider,
         sessionManager,
-        toolRegistry,
-        workspace: testDir,
+                workspace: testDir,
         logger,
         maxIterations: 20,
       });
@@ -195,9 +180,7 @@ describe('Agent', () => {
     it('should stop at max iterations to prevent infinite loops', async () => {
       const { Agent } = await import('./agent.js');
       const { SessionManager } = await import('./session.js');
-      const { ToolRegistryImpl } = await import('../tools/registry.js');
-      const { BashTool } = await import('../tools/bash.js');
-
+            
       // Provider that always returns tool use (infinite loop scenario)
       const infiniteProvider: LLMProvider = {
         name: 'infinite',
@@ -218,15 +201,12 @@ describe('Agent', () => {
       };
 
       const sessionManager = new SessionManager(sessionsDir);
-      const toolRegistry = new ToolRegistryImpl();
-      toolRegistry.registerTool(new BashTool());
-      const logger = pino({ level: 'silent' });
+                  const logger = pino({ level: 'silent' });
 
       const agent = new Agent({
         provider: infiniteProvider,
         sessionManager,
-        toolRegistry,
-        workspace: testDir,
+                workspace: testDir,
         logger,
         maxIterations: 5, // Low limit for testing
       });
@@ -242,9 +222,7 @@ describe('Agent', () => {
     it('should handle tool execution errors gracefully', async () => {
       const { Agent } = await import('./agent.js');
       const { SessionManager } = await import('./session.js');
-      const { ToolRegistryImpl } = await import('../tools/registry.js');
-      const { ReadTool } = await import('../tools/read.js');
-
+            
       const provider = createMockProvider([
         // Try to read non-existent file
         {
@@ -270,15 +248,12 @@ describe('Agent', () => {
       ]);
 
       const sessionManager = new SessionManager(sessionsDir);
-      const toolRegistry = new ToolRegistryImpl();
-      toolRegistry.registerTool(new ReadTool());
-      const logger = pino({ level: 'silent' });
+                  const logger = pino({ level: 'silent' });
 
       const agent = new Agent({
         provider,
         sessionManager,
-        toolRegistry,
-        workspace: testDir,
+                workspace: testDir,
         logger,
         maxIterations: 20,
       });
@@ -292,8 +267,7 @@ describe('Agent', () => {
     it('should handle unknown tool gracefully', async () => {
       const { Agent } = await import('./agent.js');
       const { SessionManager } = await import('./session.js');
-      const { ToolRegistryImpl } = await import('../tools/registry.js');
-
+      
       const provider = createMockProvider([
         // Try to use unknown tool
         {
@@ -319,14 +293,12 @@ describe('Agent', () => {
       ]);
 
       const sessionManager = new SessionManager(sessionsDir);
-      const toolRegistry = new ToolRegistryImpl();
-      const logger = pino({ level: 'silent' });
+            const logger = pino({ level: 'silent' });
 
       const agent = new Agent({
         provider,
         sessionManager,
-        toolRegistry,
-        workspace: testDir,
+                workspace: testDir,
         logger,
         maxIterations: 20,
       });
@@ -340,8 +312,7 @@ describe('Agent', () => {
     it('should include system prompt with workspace context', async () => {
       const { Agent } = await import('./agent.js');
       const { SessionManager } = await import('./session.js');
-      const { ToolRegistryImpl } = await import('../tools/registry.js');
-
+      
       const provider = createMockProvider([
         {
           content: [{ type: 'text', text: 'Response' }],
@@ -352,14 +323,12 @@ describe('Agent', () => {
       ]);
 
       const sessionManager = new SessionManager(sessionsDir);
-      const toolRegistry = new ToolRegistryImpl();
-      const logger = pino({ level: 'silent' });
+            const logger = pino({ level: 'silent' });
 
       const agent = new Agent({
         provider,
         sessionManager,
-        toolRegistry,
-        workspace: testDir,
+                workspace: testDir,
         logger,
         maxIterations: 20,
         systemPrompt: 'You are a helpful assistant.',
@@ -376,8 +345,7 @@ describe('Agent', () => {
     it('should load SOUL.md if present in workspace', async () => {
       const { Agent } = await import('./agent.js');
       const { SessionManager } = await import('./session.js');
-      const { ToolRegistryImpl } = await import('../tools/registry.js');
-
+      
       // Create SOUL.md
       const soulContent = 'Always be friendly and helpful.';
       await fs.writeFile(path.join(testDir, 'SOUL.md'), soulContent);
@@ -392,14 +360,12 @@ describe('Agent', () => {
       ]);
 
       const sessionManager = new SessionManager(sessionsDir);
-      const toolRegistry = new ToolRegistryImpl();
-      const logger = pino({ level: 'silent' });
+            const logger = pino({ level: 'silent' });
 
       const agent = new Agent({
         provider,
         sessionManager,
-        toolRegistry,
-        workspace: testDir,
+                workspace: testDir,
         logger,
         maxIterations: 20,
       });
@@ -414,8 +380,7 @@ describe('Agent', () => {
     it('should track token usage in session', async () => {
       const { Agent } = await import('./agent.js');
       const { SessionManager } = await import('./session.js');
-      const { ToolRegistryImpl } = await import('../tools/registry.js');
-
+      
       const provider = createMockProvider([
         {
           content: [{ type: 'text', text: 'Response' }],
@@ -426,14 +391,12 @@ describe('Agent', () => {
       ]);
 
       const sessionManager = new SessionManager(sessionsDir);
-      const toolRegistry = new ToolRegistryImpl();
-      const logger = pino({ level: 'silent' });
+            const logger = pino({ level: 'silent' });
 
       const agent = new Agent({
         provider,
         sessionManager,
-        toolRegistry,
-        workspace: testDir,
+                workspace: testDir,
         logger,
         maxIterations: 20,
       });
@@ -452,8 +415,7 @@ describe('Agent', () => {
     it('should preserve conversation history', async () => {
       const { Agent } = await import('./agent.js');
       const { SessionManager } = await import('./session.js');
-      const { ToolRegistryImpl } = await import('../tools/registry.js');
-
+      
       const provider: LLMProvider = {
         name: 'history-check',
         isAvailable: () => true,
@@ -466,14 +428,12 @@ describe('Agent', () => {
       };
 
       const sessionManager = new SessionManager(sessionsDir);
-      const toolRegistry = new ToolRegistryImpl();
-      const logger = pino({ level: 'silent' });
+            const logger = pino({ level: 'silent' });
 
       const agent = new Agent({
         provider,
         sessionManager,
-        toolRegistry,
-        workspace: testDir,
+                workspace: testDir,
         logger,
         maxIterations: 20,
       });

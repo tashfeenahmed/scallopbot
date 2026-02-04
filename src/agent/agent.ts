@@ -9,7 +9,6 @@ import type {
   CompletionRequest,
   CompletionResponse,
 } from '../providers/types.js';
-import type { ToolRegistry, ToolContext } from '../tools/types.js';
 import type { SessionManager } from './session.js';
 import type { SkillRegistry } from '../skills/registry.js';
 import type { SkillExecutor } from '../skills/executor.js';
@@ -25,7 +24,6 @@ import { analyzeComplexity } from '../routing/complexity.js';
 export interface AgentOptions {
   provider: LLMProvider;
   sessionManager: SessionManager;
-  toolRegistry?: ToolRegistry;
   skillRegistry?: SkillRegistry;
   skillExecutor?: SkillExecutor;
   router?: Router;
@@ -162,7 +160,6 @@ You are running on the user's server. Act autonomously and persistently to help 
 export class Agent {
   private provider: LLMProvider;
   private sessionManager: SessionManager;
-  private toolRegistry: ToolRegistry | null;
   private skillRegistry: SkillRegistry | null;
   private skillExecutor: SkillExecutor | null;
   private router: Router | null;
@@ -184,7 +181,6 @@ export class Agent {
   constructor(options: AgentOptions) {
     this.provider = options.provider;
     this.sessionManager = options.sessionManager;
-    this.toolRegistry = options.toolRegistry || null;
     this.skillRegistry = options.skillRegistry || null;
     this.skillExecutor = options.skillExecutor || null;
     this.router = options.router || null;
