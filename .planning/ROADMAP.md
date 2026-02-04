@@ -16,7 +16,7 @@ None
 
 - [ ] **Phase 1: Skill System Foundation** - SKILL.md format, discovery, and loading infrastructure (In progress)
 - [x] **Phase 2: Bash Skill** - Shell command execution as first complete skill (Complete)
-- [ ] **Phase 3: File Operation Skills** - read, write, edit skills for file management
+- [ ] **Phase 3: Skill Executor** - Infrastructure to run skill scripts with SKILL_ARGS
 - [ ] **Phase 4: Web Search Skill** - Brave API integration for web search
 - [ ] **Phase 5: Browser Skill** - Web browsing and content extraction
 - [ ] **Phase 6: Telegram & Memory Skills** - Messaging and semantic memory search
@@ -46,16 +46,14 @@ Plans:
 - [x] 02-01: Create bash skill folder structure and SKILL.md
 - [x] 02-02: Implement bash execution script with sandboxing
 
-### Phase 3: File Operation Skills
-**Goal**: Implement read, write, and edit skills for comprehensive file management
+### Phase 3: Skill Executor
+**Goal**: Build infrastructure to run skill scripts (spawn process, pass SKILL_ARGS, capture output)
 **Depends on**: Phase 2
-**Research**: Unlikely (file operation patterns exist in current tools)
+**Research**: Unlikely (child_process patterns established in bash skill)
 **Plans**: TBD
 
 Plans:
-- [ ] 03-01: Create read skill with file content retrieval
-- [ ] 03-02: Create write skill with file creation/overwrite
-- [ ] 03-03: Create edit skill with search-and-replace functionality
+- [ ] 03-01: Create SkillExecutor class with script spawning, output capture, and timeout handling
 
 ### Phase 4: Web Search Skill
 **Goal**: Implement web search skill using Brave Search API
@@ -120,7 +118,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8
 |-------|----------------|--------|-----------|
 | 1. Skill System Foundation | 1/3 | In progress | - |
 | 2. Bash Skill | 2/2 | Complete | 2026-02-04 |
-| 3. File Operation Skills | 0/3 | Not started | - |
+| 3. Skill Executor | 0/1 | Not started | - |
 | 4. Web Search Skill | 0/2 | Not started | - |
 | 5. Browser Skill | 0/2 | Not started | - |
 | 6. Telegram & Memory Skills | 0/2 | Not started | - |
