@@ -867,50 +867,8 @@ export class Agent {
         continue;
       }
 
-      // Fallback to tool (for backward compatibility during transition)
-      const tool = this.toolRegistry?.getTool(toolUse.name);
-
-      if (tool) {
-        const context: ToolContext = {
-          workspace: this.workspace,
-          sessionId,
-          userId,
-          logger: this.logger.child({ tool: toolUse.name }),
-        };
-
-        this.logger.debug({ toolName: toolUse.name, input: toolUse.input }, 'Executing tool (fallback)');
-
-        try {
-          const result = await tool.execute(toolUse.input, context);
-
-          results.push({
-            type: 'tool_result',
-            tool_use_id: toolUse.id,
-            content: result.success ? result.output : `Error: ${result.error}`,
-            is_error: !result.success,
-          });
-
-          // Collect tool execution in memory
-          if (this.hotCollector && result.success) {
-            this.hotCollector.collect({
-              content: `Tool ${toolUse.name} executed: ${result.output.slice(0, 500)}${result.output.length > 500 ? '...' : ''}`,
-              sessionId,
-              source: `tool:${toolUse.name}`,
-              tags: ['tool-execution', toolUse.name],
-              metadata: { toolInput: toolUse.input },
-            });
-          }
-        } catch (error) {
-          const err = error as Error;
-          this.logger.error({ toolName: toolUse.name, error: err.message }, 'Tool execution failed');
-          results.push({
-            type: 'tool_result',
-            tool_use_id: toolUse.id,
-            content: `Error executing tool: ${err.message}`,
-            is_error: true,
-          });
-        }
-      } else {
+      // Skill not found - return error (skills are the only execution path)
+      {
         this.logger.warn({ name: toolUse.name }, 'Unknown skill/tool requested');
         results.push({
           type: 'tool_result',
