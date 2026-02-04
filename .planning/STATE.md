@@ -5,23 +5,23 @@
 See: .planning/PROJECT.md (updated 2026-02-04)
 
 **Core value:** Skills-only execution: Every capability the agent has comes from a skill file that advertises itself to the agent.
-**Current focus:** Phase 3 — Skill Executor
+**Current focus:** Phase 4 — Web Search Skill
 
 ## Current Position
 
-Phase: 3 of 8 (Skill Executor)
-Plan: 1 of 1 in current phase
-Status: Phase complete
-Last activity: 2026-02-04 — Completed 03-01-PLAN.md
+Phase: 4 of 8 (Web Search Skill)
+Plan: 1 of 2 in current phase
+Status: In progress
+Last activity: 2026-02-04 — Completed 04-01-PLAN.md
 
-Progress: ████░░░░░░ 25%
+Progress: █████░░░░░ 31%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 4
+- Total plans completed: 5
 - Average duration: 3 min
-- Total execution time: 12 min
+- Total execution time: 15 min
 
 **By Phase:**
 
@@ -30,9 +30,10 @@ Progress: ████░░░░░░ 25%
 | 1 | 1 | 3 min | 3 min |
 | 2 | 2 | 4 min | 2 min |
 | 3 | 1 | 5 min | 5 min |
+| 4 | 1 | 3 min | 3 min |
 
 **Recent Trend:**
-- Last 5 plans: 3min, 2min, 2min, 5min
+- Last 5 plans: 3min, 2min, 2min, 5min, 3min
 - Trend: Stable (~3 min/plan)
 
 ## Accumulated Context
@@ -52,6 +53,8 @@ Recent decisions affecting current work:
 - SKILL_DIR env var for workspace root, falls back to cwd
 - Exit code 124 for timeout (standard Unix convention)
 - 5-second grace period between SIGTERM and SIGKILL
+- web_search skill uses native fetch() (Node.js 18+)
+- user-invocable: true for search skill (slash command enabled)
 
 ### Deferred Issues
 
@@ -67,6 +70,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-02-04T10:05:00Z
-Stopped at: Completed 03-01-PLAN.md
+Last session: 2026-02-04T10:12:00Z
+Stopped at: Completed 04-01-PLAN.md
 Resume file: None
