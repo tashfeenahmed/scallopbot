@@ -252,7 +252,6 @@ export class Gateway {
     this.agent = new Agent({
       provider,
       sessionManager: this.sessionManager,
-      toolRegistry: this.toolRegistry,
       skillRegistry: this.skillRegistry,
       skillExecutor: this.skillExecutor,
       router: this.router,
@@ -435,6 +434,9 @@ export class Gateway {
     return this.providerRegistry?.getDefaultProvider();
   }
 
+  /**
+   * Get the internal tool registry (used for reminders and file send callbacks, not for Agent)
+   */
   getToolRegistry(): ToolRegistry {
     if (!this.toolRegistry) {
       throw new Error('Gateway not initialized');
