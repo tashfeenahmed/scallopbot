@@ -133,12 +133,11 @@ describe('Gateway', () => {
       expect(toolNames).toContain('write');
       expect(toolNames).toContain('edit');
       expect(toolNames).toContain('bash');
-      expect(toolNames).toContain('browser');
       expect(toolNames).toContain('memory_search');
       expect(toolNames).toContain('memory_get');
 
-      // At least 7 core tools, plus optional (Skill, voice_reply, web_search, reminder, send_file)
-      expect(tools.length).toBeGreaterThanOrEqual(7);
+      // At least 6 core tools, plus optional (Skill, voice_reply, web_search, reminder, send_file)
+      expect(tools.length).toBeGreaterThanOrEqual(6);
     });
 
     it('should initialize session manager', async () => {

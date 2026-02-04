@@ -37,6 +37,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.72.1",
+    "agent-browser": "^0.9.0",
     "better-sqlite3": "^12.6.2",
     "chalk": "^5.6.2",
     "commander": "^14.0.3",
@@ -57,7 +58,6 @@
     "@hapi/boom": "^10.0.1",
     "@slack/bolt": "^4.3.1",
     "@whiskeysockets/baileys": "^6.7.17",
-    "matrix-js-sdk": "^36.2.0",
-    "playwright": "^1.50.0"
+    "matrix-js-sdk": "^36.2.0"
   }
 }

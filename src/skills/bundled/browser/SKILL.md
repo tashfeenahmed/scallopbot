@@ -1,285 +1,175 @@
 ---
 name: browser
-description: Browse websites, interact with elements, and extract content using Playwright
-user-invocable: true
+description: Browse websites using agent-browser CLI - navigate, interact, extract content
+user-invocable: false
 triggers: [browse, web, website, page, scrape, click, navigate, screenshot]
-scripts:
-  run: "scripts/run.ts"
-inputSchema:
-  type: object
-  properties:
-    operation:
-      type: string
-      enum: [navigate, snapshot, click, type, fill, extract, screenshot, screenshot_analyze, close]
-      description: "The operation to perform"
-    url:
-      type: string
-      description: "URL to navigate to (for navigate operation)"
-    target:
-      type: string
-      description: "Element ref number, CSS selector, or text selector (for click/type/fill)"
-    text:
-      type: string
-      description: "Text to type or fill (for type/fill operations)"
-    fullPage:
-      type: boolean
-      description: "Capture full page screenshot (default: false)"
-    format:
-      type: string
-      enum: [text, html]
-      description: "Extract format (default: text)"
-    selector:
-      type: string
-      description: "CSS selector for extract operation"
-    waitForIdle:
-      type: boolean
-      description: "Wait for network idle after navigation (helps with JS-heavy sites)"
-    blockResources:
-      type: boolean
-      description: "Block images/fonts/CSS for faster page loads"
-  required: [operation]
 metadata:
   openclaw:
     emoji: "\U0001F310"
     requires:
-      bins: []
+      bins: [agent-browser]
 ---
 
-# Browser Skill
+# Browser Skill (agent-browser CLI)
 
-Browse websites, interact with page elements, extract content, and take screenshots. Wraps existing Playwright-based BrowserSession with stealth mode.
+Use the `agent-browser` CLI via bash for all web automation. This is a powerful headless browser optimized for AI agents.
 
-## When to Use
+## Workflow
 
-Use the browser skill for:
+1. **Navigate** to a URL with `open`
+2. **Snapshot** to see interactive elements with refs (@e1, @e2, etc.)
+3. **Interact** using refs from snapshot (click, fill, type)
+4. **Extract** content with `get text` or `screenshot`
 
-- **Browsing websites**: Navigate to URLs and explore web pages
-- **Scraping content**: Extract text or HTML from web pages
-- **Form automation**: Fill forms, click buttons, submit data
-- **Screenshots**: Capture page screenshots for visual verification
-- **Interactive workflows**: Multi-step flows requiring element interaction
+## Core Commands
 
-## Input Format
+```bash
+# Navigation
+agent-browser open <url>              # Go to URL
+agent-browser back                    # Go back
+agent-browser forward                 # Go forward
+agent-browser reload                  # Reload page
 
-The skill accepts JSON arguments via the `SKILL_ARGS` environment variable:
+# Get page state (ALWAYS do this after navigating)
+agent-browser snapshot                # Get elements with refs
+agent-browser snapshot -i             # Interactive elements only (recommended)
 
-```json
-{
-  "operation": "navigate",
-  "url": "https://example.com"
-}
+# Click elements
+agent-browser click @e2               # Click by ref from snapshot
+agent-browser click "text=Submit"     # Click by visible text
+agent-browser click "#login-btn"      # Click by CSS selector
+
+# Fill forms
+agent-browser fill @e3 "user@example.com"   # Fill input by ref
+agent-browser type @e4 "password"           # Type character by character
+agent-browser press Enter                    # Press key
+
+# Select dropdowns
+agent-browser select @e5 "option-value"
+
+# Extract content
+agent-browser get text                # Get all page text
+agent-browser get text @e1            # Get element text
+agent-browser get html                # Get page HTML
+agent-browser get url                 # Get current URL
+agent-browser get title               # Get page title
+
+# Screenshots
+agent-browser screenshot              # Viewport screenshot
+agent-browser screenshot --full       # Full page screenshot
+agent-browser screenshot page.png     # Save to file
+
+# Wait
+agent-browser wait @e1                # Wait for element
+agent-browser wait 2000               # Wait 2 seconds
+
+# Scroll
+agent-browser scroll down 500         # Scroll down 500px
+agent-browser scrollintoview @e10     # Scroll element into view
 ```
 
-### Parameters
+## Understanding Refs
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `operation` | string | Yes | One of: navigate, snapshot, click, type, fill, extract, screenshot, close |
-| `url` | string | navigate | URL to navigate to |
-| `target` | string \| number | click, type, fill | Element ref number, CSS selector, or "text=..." |
-| `text` | string | type, fill | Text to type or fill |
-| `fullPage` | boolean | screenshot | Capture full page (default: false) |
-| `format` | string | extract | "text" (default) or "html" |
-| `selector` | string | extract | Optional selector to extract from |
+After `snapshot`, elements have refs like `@e1`, `@e2`. Use these refs for reliable interaction:
 
-## Output Format
+```bash
+# Example snapshot output:
+# @e1 link "Home"
+# @e2 link "Products"
+# @e3 textbox "Search..."
+# @e4 button "Search"
 
-The skill returns JSON to stdout:
-
-```json
-{
-  "success": true,
-  "output": "Navigation complete: https://example.com - Example Domain",
-  "exitCode": 0
-}
+# Then interact:
+agent-browser fill @e3 "laptop"
+agent-browser click @e4
 ```
 
-### Response Fields
+## Advanced Options
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `success` | boolean | True if operation completed successfully |
-| `output` | string | Operation result or extracted content |
-| `error` | string | Error message if operation failed |
-| `exitCode` | number | Process exit code (0 = success) |
+```bash
+# Run headed (visible browser)
+agent-browser --headed open example.com
 
-## Operations Reference
+# Use proxy
+agent-browser --proxy "http://127.0.0.1:8888" open example.com
 
-### navigate
+# Ignore HTTPS errors
+agent-browser --ignore-https-errors open https://self-signed.example.com
 
-Navigate to a URL. Clears previous element refs.
+# JSON output (for parsing)
+agent-browser --json snapshot
+agent-browser --json get text
 
-```json
-{ "operation": "navigate", "url": "https://example.com" }
+# Custom user agent
+agent-browser --user-agent "Mozilla/5.0..." open example.com
+
+# Persistent profile (keeps cookies/state)
+agent-browser --profile ~/.browser-profile open example.com
 ```
 
-**Output:** URL and page title
+## Common Workflows
 
-### snapshot
+### Login to a website
 
-Get list of interactable elements with ref numbers for later operations.
-
-```json
-{ "operation": "snapshot" }
+```bash
+agent-browser open https://example.com/login
+agent-browser snapshot -i
+# Find email/password fields from snapshot
+agent-browser fill @e2 "user@example.com"
+agent-browser fill @e3 "password123"
+agent-browser click @e4  # Submit button
+agent-browser wait 2000
+agent-browser get url    # Verify redirect
 ```
 
-**Output:** Formatted list of elements with refs, e.g.:
-```
-[1] <a> "Click me" href=/page
-[2] <input> placeholder="Search"
-[3] <button> "Submit"
-```
+### Search and extract results
 
-### click
-
-Click an element by ref number, CSS selector, or text selector.
-
-```json
-{ "operation": "click", "target": 3 }
-{ "operation": "click", "target": "#submit-btn" }
-{ "operation": "click", "target": "text=Submit" }
+```bash
+agent-browser open https://search.example.com
+agent-browser snapshot -i
+agent-browser fill @e1 "search query"
+agent-browser press Enter
+agent-browser wait 2000
+agent-browser get text   # Get search results
 ```
 
-**Output:** Confirmation of click
+### Take screenshot for visual analysis
 
-### type
-
-Type text into an element character by character (with delay).
-
-```json
-{ "operation": "type", "target": 2, "text": "search query" }
+```bash
+agent-browser open https://example.com
+agent-browser wait 2000
+agent-browser screenshot --full page.png
 ```
 
-**Output:** Confirmation of typing
+### Scrape content from page
 
-### fill
-
-Fill input field instantly (replaces existing content).
-
-```json
-{ "operation": "fill", "target": "input[name=email]", "text": "user@example.com" }
+```bash
+agent-browser open https://news.example.com/article
+agent-browser wait 1000
+agent-browser get text
 ```
 
-**Output:** Confirmation of fill
+## Session Management
 
-### extract
+Sessions keep browser state between commands:
 
-Extract content from page or specific element.
+```bash
+# All commands in same session share state
+export AGENT_BROWSER_SESSION="my-session"
+agent-browser open https://example.com
+agent-browser snapshot
+agent-browser click @e1
+# Browser stays open between commands
 
-```json
-{ "operation": "extract" }
-{ "operation": "extract", "format": "html", "selector": "#main" }
+# Close when done
+agent-browser close
 ```
 
-**Output:** Extracted text or HTML content
+## Tips
 
-### screenshot
-
-Take a screenshot of the page.
-
-```json
-{ "operation": "screenshot" }
-{ "operation": "screenshot", "fullPage": true }
-```
-
-**Output:** Screenshot metadata (dimensions, format)
-
-### screenshot_analyze
-
-Take a screenshot and return base64 image data for model visual analysis. Use this when you need to understand page layout, visual content, or when text extraction fails.
-
-```json
-{ "operation": "screenshot_analyze" }
-{ "operation": "screenshot_analyze", "fullPage": true }
-```
-
-**Output:** JSON with base64 image data that can be sent to the model for visual understanding. Automatically waits for network idle before capturing.
-
-**When to use:**
-- Page has complex visual layout (charts, graphs, images)
-- Text extraction times out or returns empty
-- Need to understand visual positioning of elements
-- Debugging page rendering issues
-
-### close
-
-Close the browser session.
-
-```json
-{ "operation": "close" }
-```
-
-**Output:** Confirmation of close
-
-## Workflow Example
-
-Typical multi-step workflow:
-
-1. Navigate to page:
-   ```json
-   { "operation": "navigate", "url": "https://example.com/login" }
-   ```
-
-2. Take snapshot to see elements:
-   ```json
-   { "operation": "snapshot" }
-   ```
-
-3. Fill form fields using refs from snapshot:
-   ```json
-   { "operation": "fill", "target": 1, "text": "user@example.com" }
-   { "operation": "fill", "target": 2, "text": "password123" }
-   ```
-
-4. Click submit button:
-   ```json
-   { "operation": "click", "target": 3 }
-   ```
-
-5. Extract result:
-   ```json
-   { "operation": "extract" }
-   ```
-
-6. Close when done:
-   ```json
-   { "operation": "close" }
-   ```
-
-## Session Behavior
-
-- **Singleton session**: All operations use the same browser instance
-- **Stealth mode**: Anti-detection measures (user agent rotation, webdriver removal)
-- **Headless by default**: Browser runs without visible window
-- **Element refs reset**: After navigate, previous refs are invalid; run snapshot again
-
-## Robustness Features
-
-- **Network idle wait**: Extract operations automatically wait for network idle before extracting content
-- **Resource blocking**: Images/fonts/CSS can be blocked for faster page loads (`blockResources: true`)
-- **Increased timeouts**: Navigate has 60s timeout, extract waits up to 15s for network idle
-- **Visual fallback**: Use `screenshot_analyze` when text extraction fails on complex pages
-
-## Examples
-
-### Check if website is accessible
-
-```json
-{ "operation": "navigate", "url": "https://status.example.com" }
-```
-
-### Scrape article text
-
-```json
-{ "operation": "navigate", "url": "https://news.example.com/article" }
-{ "operation": "extract", "format": "text" }
-```
-
-### Submit search form
-
-```json
-{ "operation": "navigate", "url": "https://search.example.com" }
-{ "operation": "snapshot" }
-{ "operation": "fill", "target": "input[type=search]", "text": "query" }
-{ "operation": "click", "target": "text=Search" }
-```
+1. **Always snapshot after navigation** - refs change when page changes
+2. **Use `-i` flag** for snapshot to see only interactive elements
+3. **Use `--json` flag** when you need to parse output programmatically
+4. **Wait after actions** that trigger page loads
+5. **Use refs (@e1)** instead of CSS selectors when possible - more reliable
+6. **Check `get url`** after clicks to verify navigation happened

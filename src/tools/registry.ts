@@ -13,8 +13,8 @@ import type { MessageSendCallback } from './message-send.js';
 export const STANDARD_GROUPS: ToolGroup[] = [
   { id: 'fs', name: 'File System', description: 'File read/write/edit operations', tools: ['read', 'write', 'edit'] },
   { id: 'dev', name: 'Development', description: 'Full development workflow', tools: ['read', 'write', 'edit', 'bash'] },
-  { id: 'web', name: 'Web', description: 'Web browsing and search', tools: ['browser', 'web_search'] },
-  { id: 'all-coding', name: 'All Coding', description: 'All coding-related tools', tools: ['read', 'write', 'edit', 'bash', 'browser'] },
+  { id: 'web', name: 'Web', description: 'Web browsing and search', tools: ['web_search'] },
+  { id: 'all-coding', name: 'All Coding', description: 'All coding-related tools', tools: ['read', 'write', 'edit', 'bash'] },
 ];
 
 export class ToolRegistryImpl implements ToolRegistry {
@@ -184,14 +184,12 @@ export async function createDefaultToolRegistry(
   const { WriteTool } = await import('./write.js');
   const { EditTool } = await import('./edit.js');
   const { BashTool } = await import('./bash.js');
-  const { BrowserTool } = await import('./browser/index.js');
 
   const registry = new ToolRegistryImpl();
   registry.registerTool(new ReadTool());
   registry.registerTool(new WriteTool());
   registry.registerTool(new EditTool());
   registry.registerTool(new BashTool());
-  registry.registerTool(new BrowserTool());
 
   // Add memory tools if store is provided
   const includeMemory = options.includeMemoryTools ?? !!options.memoryStore;
