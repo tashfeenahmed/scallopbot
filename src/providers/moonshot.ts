@@ -115,12 +115,22 @@ export class MoonshotProvider implements LLMProvider {
     // Enable thinking mode if explicitly requested AND model supports it
     const enableThinking = request.enableThinking === true && isKimiK2;
 
+    // Temperature rules for Kimi K2 models:
+    // - Thinking disabled (instant mode): MUST be exactly 0.6
+    // - Thinking enabled: MUST be exactly 1.0
+    // We override any requested temperature to comply with API constraints
+    let temperature: number | undefined;
+    if (isKimiK2) {
+      temperature = enableThinking ? 1.0 : 0.6;
+    } else {
+      temperature = request.temperature;
+    }
+
     const params: OpenAI.ChatCompletionCreateParams & { thinking?: { type: string } } = {
       model: this.model,
       messages,
       max_tokens: request.maxTokens || DEFAULT_MAX_TOKENS,
-      // Temperature: 1.0 for thinking mode, 0.6 for instant mode
-      temperature: request.temperature ?? (isKimiK2 ? (enableThinking ? 1.0 : 0.6) : undefined),
+      temperature,
       ...(request.stopSequences && { stop: request.stopSequences }),
       ...(request.tools && { tools: this.formatTools(request.tools) }),
       // Only disable thinking if NOT enabling it (for Kimi K2 models)
