@@ -183,6 +183,7 @@ export class SkillExecutor {
       SKILL_NAME: skill.name,
       SKILL_DIR: skill.scriptsDir ? join(skill.scriptsDir, '..') : '',
       SKILL_ARGS: JSON.stringify(request.args || {}),
+      SKILL_WORKSPACE: process.env.AGENT_WORKSPACE || process.cwd(),
     };
 
     // Working directory: use request.cwd, or skill directory, or process.cwd()

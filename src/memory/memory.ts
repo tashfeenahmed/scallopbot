@@ -125,7 +125,9 @@ export class MemoryStore {
     // Append to disk if auto-save enabled
     if (this.autoSave && this.filePath) {
       // Fire and forget - don't block on disk write
-      this.appendEntry(memory).catch(() => {});
+      this.appendEntry(memory).catch((err) => {
+        console.error('MemoryStore: failed to append entry to disk:', err);
+      });
     }
 
     return memory;
@@ -140,7 +142,9 @@ export class MemoryStore {
 
     // Save full state on delete (can't append a delete)
     if (result && this.autoSave && this.filePath) {
-      this.save().catch(() => {});
+      this.save().catch((err) => {
+        console.error('MemoryStore: failed to save after delete:', err);
+      });
     }
 
     return result;
@@ -155,7 +159,9 @@ export class MemoryStore {
 
     // Save full state on update (can't append an update)
     if (this.autoSave && this.filePath) {
-      this.save().catch(() => {});
+      this.save().catch((err) => {
+        console.error('MemoryStore: failed to save after update:', err);
+      });
     }
 
     return updated;
@@ -226,7 +232,9 @@ export class MemoryStore {
 
     // Clear the file too
     if (this.autoSave && this.filePath) {
-      this.save().catch(() => {});
+      this.save().catch((err) => {
+        console.error('MemoryStore: failed to save after clear:', err);
+      });
     }
   }
 
@@ -256,6 +264,8 @@ export interface CollectOptions {
 export interface HotCollectorOptions {
   store: MemoryStore;
   maxBuffer?: number;
+  /** ScallopMemoryStore for SQLite persistence (optional) */
+  scallopStore?: ScallopMemoryStore;
 }
 
 /**
@@ -263,11 +273,13 @@ export interface HotCollectorOptions {
  */
 export class HotCollector {
   private store: MemoryStore;
+  private scallopStore: ScallopMemoryStore | null;
   private buffers: Map<string, MemoryEntry[]> = new Map();
   private maxBuffer: number;
 
   constructor(options: HotCollectorOptions) {
     this.store = options.store;
+    this.scallopStore = options.scallopStore ?? null;
     this.maxBuffer = options.maxBuffer ?? 100;
   }
 
@@ -307,10 +319,31 @@ export class HotCollector {
 
   flush(sessionId: string): void {
     const buffer = this.buffers.get(sessionId);
-    if (!buffer) return;
+    if (!buffer || buffer.length === 0) return;
 
     for (const entry of buffer) {
+      // Always write to legacy store (for HybridSearch conversation context)
       this.store.add(entry);
+    }
+
+    // Also persist conversation entries to ScallopStore (SQLite)
+    if (this.scallopStore) {
+      for (const entry of buffer) {
+        this.scallopStore.add({
+          userId: sessionId,
+          content: entry.content,
+          category: 'event', // conversation entries are events
+          importance: 3,
+          confidence: 1.0,
+          metadata: {
+            ...entry.metadata,
+            type: entry.type,
+            tags: entry.tags,
+          },
+        }).catch((err) => {
+          console.error('HotCollector: failed to flush to ScallopStore:', err);
+        });
+      }
     }
 
     this.buffers.set(sessionId, []);
@@ -691,7 +724,8 @@ export class BackgroundGardener {
   processMemories(): void {
     this.logger.debug('Processing memories');
 
-    // Process ScallopMemory decay if enabled
+    // When ScallopMemoryStore is available, only run SQLite decay
+    // Fact extraction is handled by LLMFactExtractor, dedup/linking/pruning by RelationGraph
     if (this.scallopStore) {
       const decayResult = this.scallopStore.processDecay();
       if (decayResult.updated > 0 || decayResult.archived > 0) {
@@ -700,7 +734,10 @@ export class BackgroundGardener {
           'ScallopMemory decay processed'
         );
       }
+      return; // Skip legacy O(n²) operations
     }
+
+    // === Legacy path (no ScallopStore) ===
 
     // Get raw memories that need processing
     const rawMemories = this.store.searchByType('raw');
@@ -1097,6 +1134,23 @@ export interface BM25Options {
   docCount: number;
   k1?: number;
   b?: number;
+  /** Document frequency map: term -> number of documents containing that term */
+  docFreq?: Map<string, number>;
+}
+
+/**
+ * Build a document frequency map from an array of text documents.
+ * Counts how many documents contain each unique term.
+ */
+export function buildDocFreqMap(documents: string[]): Map<string, number> {
+  const docFreq = new Map<string, number>();
+  for (const doc of documents) {
+    const uniqueTerms = new Set(doc.toLowerCase().split(/\s+/));
+    for (const term of uniqueTerms) {
+      docFreq.set(term, (docFreq.get(term) || 0) + 1);
+    }
+  }
+  return docFreq;
 }
 
 /**
@@ -1126,8 +1180,9 @@ export function calculateBM25Score(
     const tf = docTermFreq.get(term) || 0;
     if (tf === 0) continue;
 
-    // Simple IDF approximation
-    const idf = Math.log((options.docCount + 0.5) / (1 + 0.5));
+    // IDF: use actual document frequency when available
+    const df = options.docFreq?.get(term) ?? 1;
+    const idf = Math.log((options.docCount - df + 0.5) / (df + 0.5) + 1);
 
     // BM25 term score
     const numerator = tf * (k1 + 1);
@@ -1280,14 +1335,17 @@ export class HybridSearch {
       return results;
     }
 
-    // Calculate average document length
+    // Pre-compute BM25 statistics once for all candidates
+    const contentTexts = candidates.map((m) => m.content);
     const avgDocLength =
-      candidates.reduce((sum, m) => sum + m.content.split(/\s+/).length, 0) /
-      candidates.length;
+      contentTexts.reduce((sum, c) => sum + c.split(/\s+/).length, 0) /
+      contentTexts.length;
+    const docFreq = buildDocFreqMap(contentTexts);
 
     const bm25Options: BM25Options = {
       avgDocLength,
       docCount: candidates.length,
+      docFreq,
     };
 
     // Score each candidate
@@ -1359,14 +1417,17 @@ export class HybridSearch {
       return [];
     }
 
-    // Calculate average document length
+    // Pre-compute BM25 statistics once for all candidates
+    const contentTexts = candidates.map((m) => m.content);
     const avgDocLength =
-      candidates.reduce((sum, m) => sum + m.content.split(/\s+/).length, 0) /
-      candidates.length;
+      contentTexts.reduce((sum, c) => sum + c.split(/\s+/).length, 0) /
+      contentTexts.length;
+    const docFreq = buildDocFreqMap(contentTexts);
 
     const bm25Options: BM25Options = {
       avgDocLength,
       docCount: candidates.length,
+      docFreq,
     };
 
     // Get query embedding

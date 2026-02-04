@@ -22,6 +22,7 @@ import { ProfileManager, type ProfileUpdateOptions } from './profiles.js';
 import { TemporalExtractor, TemporalQuery } from './temporal.js';
 import type { EmbeddingProvider } from './embeddings.js';
 import { cosineSimilarity } from './embeddings.js';
+import { calculateBM25Score, buildDocFreqMap, type BM25Options } from './memory.js';
 
 /**
  * Options for ScallopMemoryStore
@@ -303,12 +304,23 @@ export class ScallopMemoryStore {
       queryEmbedding = await this.embedder.embed(query);
     }
 
+    // Pre-compute BM25 statistics for proper keyword scoring
+    const contentTexts = candidates.map((m) => m.content);
+    const avgDocLength =
+      contentTexts.reduce((sum, c) => sum + c.split(/\s+/).length, 0) / contentTexts.length;
+    const docFreq = buildDocFreqMap(contentTexts);
+    const bm25Options: BM25Options = {
+      avgDocLength,
+      docCount: candidates.length,
+      docFreq,
+    };
+
     for (const memory of candidates) {
       let score = 0;
       let matchType: 'semantic' | 'keyword' | 'hybrid' = 'keyword';
 
-      // Keyword score (BM25-like)
-      const keywordScore = this.calculateKeywordScore(queryLower, memory.content.toLowerCase());
+      // Keyword score (proper BM25)
+      const keywordScore = calculateBM25Score(queryLower, memory.content.toLowerCase(), bm25Options);
 
       // Semantic score
       let semanticScore = 0;
@@ -355,24 +367,7 @@ export class ScallopMemoryStore {
     return topResults;
   }
 
-  /**
-   * Calculate keyword score (simple BM25-like)
-   */
-  private calculateKeywordScore(query: string, content: string): number {
-    const queryTerms = query.split(/\s+/).filter((t) => t.length > 2);
-    const contentTerms = content.split(/\s+/);
-
-    if (queryTerms.length === 0) return 0;
-
-    let matches = 0;
-    for (const term of queryTerms) {
-      if (contentTerms.some((t) => t.includes(term))) {
-        matches++;
-      }
-    }
-
-    return matches / queryTerms.length;
-  }
+  // calculateKeywordScore removed — now using imported calculateBM25Score from memory.ts
 
   /**
    * Temporal search - find memories by time range

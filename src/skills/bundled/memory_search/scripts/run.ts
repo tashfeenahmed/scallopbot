@@ -1,33 +1,16 @@
 /**
  * Memory Search Skill Execution Script
  *
- * Wraps existing HybridSearch to expose memory search via skill interface.
- * Receives arguments via SKILL_ARGS environment variable.
+ * Opens the SQLite memories database directly (safe in WAL mode)
+ * and searches using BM25 keyword scoring.
  */
 
+import * as path from 'path';
 import {
-  MemoryStore,
-  HybridSearch,
-  type MemoryType,
-  type SearchResult,
-} from '../../../../memory/index.js';
-
-// Lazy singleton instances (initialized on first use)
-let memoryStore: MemoryStore | null = null;
-let hybridSearch: HybridSearch | null = null;
-
-/**
- * Get or create HybridSearch singleton
- */
-function getHybridSearch(): HybridSearch {
-  if (!hybridSearch) {
-    if (!memoryStore) {
-      memoryStore = new MemoryStore();
-    }
-    hybridSearch = new HybridSearch({ store: memoryStore });
-  }
-  return hybridSearch;
-}
+  ScallopDatabase,
+  type ScallopMemoryEntry,
+} from '../../../../memory/db.js';
+import { calculateBM25Score, buildDocFreqMap, type BM25Options } from '../../../../memory/memory.js';
 
 // Types
 interface MemorySearchArgs {
@@ -79,7 +62,6 @@ function parseArgs(): MemorySearchArgs {
     });
   }
 
-  // Validate args is an object
   if (!args || typeof args !== 'object') {
     outputResult({
       success: false,
@@ -91,7 +73,6 @@ function parseArgs(): MemorySearchArgs {
 
   const argsObj = args as Record<string, unknown>;
 
-  // Validate required query field
   if (!argsObj.query || typeof argsObj.query !== 'string') {
     outputResult({
       success: false,
@@ -101,18 +82,6 @@ function parseArgs(): MemorySearchArgs {
     });
   }
 
-  // Validate optional type field
-  const validTypes = ['raw', 'fact', 'summary', 'preference', 'context', 'all'];
-  if (argsObj.type && !validTypes.includes(argsObj.type as string)) {
-    outputResult({
-      success: false,
-      output: '',
-      error: `Invalid type "${argsObj.type}". Must be one of: ${validTypes.join(', ')}`,
-      exitCode: 1,
-    });
-  }
-
-  // Validate optional limit field
   if (argsObj.limit !== undefined && (typeof argsObj.limit !== 'number' || argsObj.limit < 1)) {
     outputResult({
       success: false,
@@ -126,23 +95,62 @@ function parseArgs(): MemorySearchArgs {
 }
 
 /**
- * Format search results for output
+ * Score and rank memories using BM25
  */
-function formatSearchResults(results: SearchResult[]): string {
+function searchMemories(
+  memories: ScallopMemoryEntry[],
+  query: string,
+  limit: number
+): { memory: ScallopMemoryEntry; score: number }[] {
+  if (memories.length === 0) return [];
+
+  const contentTexts = memories.map((m) => m.content);
+  const avgDocLength =
+    contentTexts.reduce((sum, c) => sum + c.split(/\s+/).length, 0) / contentTexts.length;
+  const docFreq = buildDocFreqMap(contentTexts);
+
+  const bm25Options: BM25Options = {
+    avgDocLength,
+    docCount: memories.length,
+    docFreq,
+  };
+
+  const results: { memory: ScallopMemoryEntry; score: number }[] = [];
+
+  for (const memory of memories) {
+    const score = calculateBM25Score(query, memory.content, bm25Options);
+
+    // Boost for exact substring match
+    const boostedScore = memory.content.toLowerCase().includes(query.toLowerCase())
+      ? score * 1.5
+      : score;
+
+    if (boostedScore > 0.01) {
+      results.push({ memory, score: boostedScore });
+    }
+  }
+
+  results.sort((a, b) => b.score - a.score);
+  return results.slice(0, limit);
+}
+
+/**
+ * Format search results
+ */
+function formatResults(results: { memory: ScallopMemoryEntry; score: number }[]): string {
   if (results.length === 0) {
     return 'No memories found matching the query.';
   }
 
   const formatted = results.map((result, index) => {
-    const entry = result.entry;
+    const m = result.memory;
     const lines: string[] = [];
-    lines.push(`--- Result ${index + 1} (score: ${result.score.toFixed(3)}, match: ${result.matchType}) ---`);
-    lines.push(`ID: ${entry.id}`);
-    lines.push(`Type: ${entry.type}`);
-    lines.push(`Content: ${entry.content}`);
-    lines.push(`Timestamp: ${entry.timestamp.toISOString()}`);
-    if (entry.tags?.length) {
-      lines.push(`Tags: ${entry.tags.join(', ')}`);
+    lines.push(`--- Result ${index + 1} (score: ${result.score.toFixed(3)}) ---`);
+    lines.push(`Category: ${m.category}`);
+    lines.push(`Content: ${m.content}`);
+    lines.push(`Prominence: ${m.prominence.toFixed(2)}`);
+    if (m.metadata?.subject) {
+      lines.push(`Subject: ${m.metadata.subject as string}`);
     }
     return lines.join('\n');
   });
@@ -151,29 +159,47 @@ function formatSearchResults(results: SearchResult[]): string {
 }
 
 /**
- * Execute memory search
+ * Execute memory search against SQLite database
  */
-async function executeSearch(args: MemorySearchArgs): Promise<void> {
+function executeSearch(args: MemorySearchArgs): void {
+  const workspace = process.env.SKILL_WORKSPACE || process.env.AGENT_WORKSPACE || process.cwd();
+  const dbPath = path.join(workspace, 'memories.db');
+
+  let db: ScallopDatabase | null = null;
   try {
-    const search = getHybridSearch();
+    db = new ScallopDatabase(dbPath);
 
-    // Determine type: default to 'fact', use undefined for 'all'
-    const type: MemoryType | undefined = args.type === 'all' ? undefined : (args.type as MemoryType || 'fact');
+    // Get candidate memories
+    const allMemories = db.getAllMemories({ minProminence: 0.1, limit: 200 });
 
-    // Apply limit with max cap
+    // Filter by subject if requested
+    let candidates = allMemories;
+    if (args.subject) {
+      const subjectLower = args.subject.toLowerCase();
+      candidates = candidates.filter((m) => {
+        const subject = m.metadata?.subject as string | undefined;
+        return subject?.toLowerCase() === subjectLower;
+      });
+    }
+
+    // Filter by category if requested (map old types to new categories)
+    if (args.type && args.type !== 'all') {
+      const categoryMap: Record<string, string[]> = {
+        fact: ['fact', 'relationship'],
+        preference: ['preference'],
+        event: ['event'],
+        insight: ['insight'],
+      };
+      const allowedCategories = categoryMap[args.type] || [args.type];
+      candidates = candidates.filter((m) => allowedCategories.includes(m.category));
+    }
+
     const limit = Math.min(args.limit || 10, 50);
-
-    const results = search.search(args.query, {
-      type,
-      limit,
-      subject: args.subject,
-      recencyBoost: true,
-      userSubjectBoost: 1.5,
-    });
+    const results = searchMemories(candidates, args.query, limit);
 
     outputResult({
       success: true,
-      output: formatSearchResults(results),
+      output: formatResults(results),
       exitCode: 0,
     });
   } catch (error) {
@@ -184,6 +210,8 @@ async function executeSearch(args: MemorySearchArgs): Promise<void> {
       error: `Memory search failed: ${err.message}`,
       exitCode: 1,
     });
+  } finally {
+    db?.close();
   }
 }
 

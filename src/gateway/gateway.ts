@@ -114,60 +114,54 @@ export class Gateway {
       this.logger.debug({ model: 'nomic-embed-text', baseUrl: ollamaConfig.baseUrl }, 'Using Ollama for semantic embeddings');
     }
 
-    // Initialize memory system - use ScallopMemory if configured, otherwise legacy JSONL
-    if (this.config.memory.useScallopMemory) {
-      // ScallopMemory: SQLite-based with relationships, decay, profiles
-      const dbPath = path.join(this.config.agent.workspace, this.config.memory.dbPath);
-      this.scallopMemoryStore = new ScallopMemoryStore({
-        dbPath,
-        logger: this.logger,
-        embedder,
-      });
-      this.logger.info({ dbPath, count: this.scallopMemoryStore.getCount() }, 'ScallopMemory initialized');
+    // Initialize memory system — ScallopMemory (SQLite) is always the primary backend
+    const dbPath = path.join(this.config.agent.workspace, this.config.memory.dbPath);
+    this.scallopMemoryStore = new ScallopMemoryStore({
+      dbPath,
+      logger: this.logger,
+      embedder,
+    });
+    this.logger.info({ dbPath, count: this.scallopMemoryStore.getCount() }, 'ScallopMemory initialized');
 
-      // Legacy system still needed for HotCollector compatibility
-      const memoryFilePath = this.config.memory.persist
-        ? path.join(this.config.agent.workspace, this.config.memory.filePath)
-        : undefined;
-      this.memoryStore = new MemoryStore({ filePath: memoryFilePath });
-      if (memoryFilePath) {
-        await this.memoryStore.load();
+    // Legacy MemoryStore/HybridSearch kept for backward compat (HotCollector, fact extractor dedup)
+    const memoryFilePath = this.config.memory.persist
+      ? path.join(this.config.agent.workspace, this.config.memory.filePath)
+      : undefined;
+    this.memoryStore = new MemoryStore({ filePath: memoryFilePath });
+    if (memoryFilePath) {
+      await this.memoryStore.load();
+    }
+    this.hotCollector = new HotCollector({ store: this.memoryStore, scallopStore: this.scallopMemoryStore });
+
+    this.hybridSearch = new HybridSearch({
+      store: this.memoryStore,
+      embedder,
+    });
+
+    // Background gardener processes ScallopMemory decay
+    this.backgroundGardener = new BackgroundGardener({
+      store: this.memoryStore,
+      logger: this.logger,
+      interval: 60000, // 1 minute
+      scallopStore: this.scallopMemoryStore,
+    });
+
+    // Auto-migrate: if JSONL exists and SQLite is empty, migrate
+    if (memoryFilePath && this.memoryStore.size() > 0 && this.scallopMemoryStore.getCount() === 0) {
+      this.logger.info({ jsonlCount: this.memoryStore.size() }, 'Migrating JSONL memories to SQLite...');
+      try {
+        const { migrateJsonlToSqlite } = await import('../memory/migrate.js');
+        const result = await migrateJsonlToSqlite({
+          jsonlPath: memoryFilePath,
+          dbPath,
+        });
+        this.logger.info(
+          { migrated: result.memoriesImported, skipped: result.memoriesSkipped, errors: result.errors },
+          'JSONL → SQLite migration complete'
+        );
+      } catch (err) {
+        this.logger.error({ error: (err as Error).message }, 'JSONL → SQLite migration failed');
       }
-      this.hotCollector = new HotCollector({ store: this.memoryStore });
-
-      this.hybridSearch = new HybridSearch({
-        store: this.memoryStore,
-        embedder,
-      });
-
-      // Background gardener now also processes ScallopMemory decay
-      this.backgroundGardener = new BackgroundGardener({
-        store: this.memoryStore,
-        logger: this.logger,
-        interval: 60000, // 1 minute
-        scallopStore: this.scallopMemoryStore,
-      });
-    } else {
-      // Legacy JSONL-based memory system
-      const memoryFilePath = this.config.memory.persist
-        ? path.join(this.config.agent.workspace, this.config.memory.filePath)
-        : undefined;
-      this.memoryStore = new MemoryStore({ filePath: memoryFilePath });
-      if (memoryFilePath) {
-        await this.memoryStore.load();
-        this.logger.debug({ filePath: memoryFilePath, count: this.memoryStore.size() }, 'Memories loaded from disk');
-      }
-      this.hotCollector = new HotCollector({ store: this.memoryStore });
-
-      this.hybridSearch = new HybridSearch({
-        store: this.memoryStore,
-        embedder,
-      });
-      this.backgroundGardener = new BackgroundGardener({
-        store: this.memoryStore,
-        logger: this.logger,
-        interval: 60000, // 1 minute
-      });
     }
 
     // Initialize LLM-based fact extractor
@@ -267,6 +261,7 @@ export class Gateway {
       costTracker: this.costTracker,
       hotCollector: this.hotCollector,
       hybridSearch: this.hybridSearch || undefined,
+      scallopStore: this.scallopMemoryStore || undefined,
       factExtractor: this.factExtractor || undefined,
       contextManager: this.contextManager,
       mediaProcessor: this.mediaProcessor,

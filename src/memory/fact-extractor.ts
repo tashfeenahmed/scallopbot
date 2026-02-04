@@ -316,12 +316,27 @@ export class LLMFactExtractor {
 
     for (let i = 0; i < facts_to_process.length; i++) {
       const fact = facts_to_process[i];
-      const existingFacts = this.hybridSearch.search(fact.content, {
-        type: 'fact',
-        subject: fact.subject,
-        limit: 3,
-        minScore: 0.3,
-      });
+
+      // Prefer ScallopStore search for dedup (indexed SQLite vs O(n) JSONL)
+      let existingFacts: { entry: { embedding?: number[] }; score: number }[] = [];
+      if (this.scallopStore) {
+        const scallopResults = await this.scallopStore.search(fact.content, {
+          userId,
+          limit: 3,
+          minProminence: 0.1,
+        });
+        existingFacts = scallopResults.map((r) => ({
+          entry: { embedding: r.memory.embedding ?? undefined },
+          score: r.score,
+        }));
+      } else {
+        existingFacts = this.hybridSearch.search(fact.content, {
+          type: 'fact',
+          subject: fact.subject,
+          limit: 3,
+          minScore: 0.3,
+        });
+      }
 
       // Check for exact duplicates using embeddings
       let isDuplicate = false;
@@ -443,11 +458,13 @@ export class LLMFactExtractor {
 
     if (this.scallopStore) {
       const scallopCategory = this.mapToScallopCategory(fact.category);
+      // Identity facts (personal, relationship) get higher importance to resist decay
+      const isIdentityFact = fact.category === 'relationship' || fact.category === 'personal';
       await this.scallopStore.add({
         userId,
         content: searchableContent,
         category: scallopCategory,
-        importance: 5,
+        importance: isIdentityFact ? 8 : 5,
         confidence: 0.8,
         metadata: {
           subject: fact.subject,
@@ -672,11 +689,13 @@ export class LLMFactExtractor {
       if (this.scallopStore) {
         // Map fact category to ScallopMemory category
         const scallopCategory = this.mapToScallopCategory(fact.category);
+        // Identity facts (personal, relationship) get higher importance to resist decay
+        const isIdentityFact = fact.category === 'relationship' || fact.category === 'personal';
         await this.scallopStore.add({
           userId,
           content: searchableContent,
           category: scallopCategory,
-          importance: 5,
+          importance: isIdentityFact ? 8 : 5,
           confidence: 0.8,
           metadata: {
             subject: fact.subject,

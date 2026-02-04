@@ -319,7 +319,7 @@ describe('DecayEngine', () => {
     });
 
     const prominence = decay.calculateProminence(memory);
-    expect(prominence).toBeLessThan(0.8); // Should have decayed
+    expect(prominence).toBeLessThan(0.9); // Should have decayed (slower rates = higher threshold)
   });
 
   it('should not decay static profile memories', () => {

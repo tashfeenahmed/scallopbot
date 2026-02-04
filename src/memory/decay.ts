@@ -41,11 +41,11 @@ const DEFAULT_TYPE_DECAY_RATES: Record<ScallopMemoryType, number> = {
  * Default decay rates by category
  */
 const DEFAULT_CATEGORY_DECAY_RATES: Record<MemoryCategory, number> = {
-  preference: 0.99, // 69 days half-life
-  fact: 0.98, // 34 days half-life
-  event: 0.95, // 14 days half-life
-  relationship: 0.99, // 69 days half-life
-  insight: 0.97, // 23 days half-life
+  preference: 0.995, // ~138 days half-life
+  fact: 0.99, // ~69 days half-life
+  event: 0.95, // ~14 days half-life
+  relationship: 0.998, // ~346 days half-life
+  insight: 0.97, // ~23 days half-life
 };
 
 /**
@@ -140,6 +140,11 @@ export class DecayEngine {
       accessBoost * DECAY_WEIGHTS.accessFrequency +
       recencyBoost * DECAY_WEIGHTS.recencyOfAccess +
       importanceWeight * DECAY_WEIGHTS.semanticImportance;
+
+    // High-importance identity facts (importance >= 8) get extra protection
+    if (memory.importance >= 8 && (memory.category === 'relationship' || memory.category === 'fact')) {
+      return Math.max(0.5, Math.min(1, prominence));
+    }
 
     // Normalize to 0-1 range
     return Math.max(0, Math.min(1, prominence));
