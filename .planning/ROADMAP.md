@@ -146,14 +146,14 @@ Plans:
 Plans:
 - [x] 15-01: Add human-like messaging guidelines to system prompt
 
-#### Phase 16: System Prompt Refinement
+#### Phase 16: System Prompt Refinement (Complete)
 **Goal**: Simplify prompt for achievement focus + personal assistant tone
 **Depends on**: Phase 15
 **Research**: Unlikely (prompt engineering)
-**Plans**: TBD
+**Plans**: 1/1 complete
 
 Plans:
-- [ ] 16-01: TBD
+- [x] 16-01: Consolidate and restructure system prompt
 
 #### Phase 17: Kimi K2.5 Thinking Mode
 **Goal**: Enable thinking mode with reasoning_content handling and temperature constraints
@@ -179,5 +179,5 @@ Phases execute in numeric order: 9 → 10 → 11 → 12 → 13 → 14 → 15 →
 | 13. Unified Triggers | v2.0 | 1/1 | Complete | 2026-02-04 |
 | 14. Proactive Execution | v2.0 | 1/1 | Complete | 2026-02-04 |
 | 15. Human-like Messaging | v2.0 | 1/1 | Complete | 2026-02-04 |
-| 16. System Prompt Refinement | v2.0 | 0/? | Not started | - |
+| 16. System Prompt Refinement | v2.0 | 1/1 | Complete | 2026-02-04 |
 | 17. Kimi K2.5 Thinking Mode | v2.0 | 0/? | Not started | - |

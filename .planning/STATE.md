@@ -9,12 +9,12 @@ See: .planning/PROJECT.md (updated 2026-02-04)
 
 ## Current Position
 
-Phase: 15 of 17 (Human-like Messaging)
+Phase: 16 of 17 (System Prompt Refinement)
 Plan: 1 of 1 in current phase
 Status: Phase complete
-Last activity: 2026-02-04 — Completed 15-01-PLAN.md
+Last activity: 2026-02-04 — Completed 16-01-PLAN.md
 
-Progress: ███████░░░ 62%
+Progress: ████████░░ 75%
 
 ## Performance Metrics
 
@@ -76,6 +76,9 @@ Recent decisions affecting current work:
 - Proactive behavior taught via prompt engineering (not code changes)
 - 8 execution rules with proactive emphasis (up from 5)
 - Ask user only after trying 2-3 alternatives
+- System prompt consolidated: 217→60 lines (72% reduction)
+- 7 focused sections: SKILLS, HOW TO WORK, MEMORY, TASK COMPLETION, COMMUNICATION, REMINDERS, EXAMPLES
+- Personal assistant framing over autonomous agent
 
 ### Deferred Issues
 
@@ -96,6 +99,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-02-04T15:31:46Z
-Stopped at: Completed 15-01-PLAN.md (Phase 15 complete)
+Last session: 2026-02-04T15:40:23Z
+Stopped at: Completed 16-01-PLAN.md (Phase 16 complete)
 Resume file: None
