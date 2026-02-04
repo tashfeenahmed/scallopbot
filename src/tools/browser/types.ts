@@ -51,6 +51,8 @@ export interface BrowserSessionConfig {
   viewport?: { width: number; height: number };
   userAgent?: string;
   timeout?: number;
+  /** Block images, fonts, stylesheets for faster page loads */
+  blockResources?: boolean;
   logger?: Logger;
 }
 

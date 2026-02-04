@@ -12,8 +12,8 @@ import { constants } from 'fs';
 import type { Logger } from 'pino';
 import type { Skill, SkillExecutionRequest, SkillExecutionResult } from './types.js';
 
-/** Default timeout for script execution (30 seconds) */
-const DEFAULT_TIMEOUT_MS = 30000;
+/** Default timeout for script execution (60 seconds for browser operations) */
+const DEFAULT_TIMEOUT_MS = 60000;
 
 /**
  * Skill Executor class for running scripts from skill folders

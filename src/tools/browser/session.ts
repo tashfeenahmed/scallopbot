@@ -53,7 +53,8 @@ export class BrowserSession {
     this.config = {
       headless: true,
       viewport: { width: 1920, height: 1080 }, // More realistic viewport
-      timeout: 30000,
+      timeout: 45000, // Increased from 30s for complex pages
+      blockResources: false, // Block images/fonts/CSS for faster loads
       ...config,
     };
     this.logger = config.logger || null;
@@ -149,7 +150,20 @@ export class BrowserSession {
     });
 
     this.page = await this.context.newPage();
-    this.page.setDefaultTimeout(this.config.timeout || 30000);
+    this.page.setDefaultTimeout(this.config.timeout || 45000);
+
+    // Block heavy resources if configured (faster page loads)
+    if (this.config.blockResources) {
+      await this.page.route('**/*', (route: any) => {
+        const resourceType = route.request().resourceType();
+        if (['image', 'font', 'stylesheet', 'media'].includes(resourceType)) {
+          route.abort();
+        } else {
+          route.continue();
+        }
+      });
+      this.logger?.debug('Resource blocking enabled for images, fonts, stylesheets, media');
+    }
 
     // Additional stealth: Remove webdriver flag and automation indicators
     await this.page.addInitScript(`
@@ -207,13 +221,34 @@ export class BrowserSession {
 
     this.logger?.info({ url }, 'Navigating to URL');
 
+    // Use networkidle for more reliable page loads on JS-heavy sites
+    const waitUntil = options.waitUntil || 'domcontentloaded';
+
     await this.page.goto(url, {
-      waitUntil: options.waitUntil || 'domcontentloaded',
-      timeout: options.timeout || this.config.timeout,
+      waitUntil,
+      timeout: options.timeout || 60000, // 60s for navigation
     });
 
     // Clear element refs after navigation
     this.clearRefs();
+  }
+
+  /**
+   * Wait for network to become idle (no requests for 500ms)
+   */
+  async waitForNetworkIdle(timeout?: number): Promise<void> {
+    await this.ensureBrowser();
+
+    this.logger?.debug('Waiting for network idle');
+
+    try {
+      await this.page.waitForLoadState('networkidle', {
+        timeout: timeout || 15000, // 15s max wait for network idle
+      });
+    } catch {
+      // Network idle timeout is not fatal - page may have continuous requests
+      this.logger?.debug('Network idle timeout - continuing anyway');
+    }
   }
 
   /**
@@ -436,6 +471,29 @@ export class BrowserSession {
       format: 'png',
       width: viewport?.width || 1280,
       height: fullPage ? buffer.length / 4 / (viewport?.width || 1280) : viewport?.height || 720,
+    };
+  }
+
+  /**
+   * Take a screenshot and return as base64 for model analysis
+   */
+  async screenshotBase64(fullPage: boolean = false): Promise<{ base64: string; width: number; height: number; mimeType: string }> {
+    await this.ensureBrowser();
+
+    this.logger?.info({ fullPage }, 'Taking screenshot for analysis');
+
+    const buffer = await this.page.screenshot({
+      type: 'png',
+      fullPage,
+    });
+
+    const viewport = this.page.viewportSize();
+
+    return {
+      base64: buffer.toString('base64'),
+      width: viewport?.width || 1280,
+      height: fullPage ? Math.round(buffer.length / 4 / (viewport?.width || 1280)) : viewport?.height || 720,
+      mimeType: 'image/png',
     };
   }
 

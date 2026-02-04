@@ -10,7 +10,7 @@ inputSchema:
   properties:
     operation:
       type: string
-      enum: [navigate, snapshot, click, type, fill, extract, screenshot, close]
+      enum: [navigate, snapshot, click, type, fill, extract, screenshot, screenshot_analyze, close]
       description: "The operation to perform"
     url:
       type: string
@@ -31,6 +31,12 @@ inputSchema:
     selector:
       type: string
       description: "CSS selector for extract operation"
+    waitForIdle:
+      type: boolean
+      description: "Wait for network idle after navigation (helps with JS-heavy sites)"
+    blockResources:
+      type: boolean
+      description: "Block images/fonts/CSS for faster page loads"
   required: [operation]
 metadata:
   openclaw:
@@ -178,6 +184,23 @@ Take a screenshot of the page.
 
 **Output:** Screenshot metadata (dimensions, format)
 
+### screenshot_analyze
+
+Take a screenshot and return base64 image data for model visual analysis. Use this when you need to understand page layout, visual content, or when text extraction fails.
+
+```json
+{ "operation": "screenshot_analyze" }
+{ "operation": "screenshot_analyze", "fullPage": true }
+```
+
+**Output:** JSON with base64 image data that can be sent to the model for visual understanding. Automatically waits for network idle before capturing.
+
+**When to use:**
+- Page has complex visual layout (charts, graphs, images)
+- Text extraction times out or returns empty
+- Need to understand visual positioning of elements
+- Debugging page rendering issues
+
 ### close
 
 Close the browser session.
@@ -229,6 +252,13 @@ Typical multi-step workflow:
 - **Stealth mode**: Anti-detection measures (user agent rotation, webdriver removal)
 - **Headless by default**: Browser runs without visible window
 - **Element refs reset**: After navigate, previous refs are invalid; run snapshot again
+
+## Robustness Features
+
+- **Network idle wait**: Extract operations automatically wait for network idle before extracting content
+- **Resource blocking**: Images/fonts/CSS can be blocked for faster page loads (`blockResources: true`)
+- **Increased timeouts**: Navigate has 60s timeout, extract waits up to 15s for network idle
+- **Visual fallback**: Use `screenshot_analyze` when text extraction fails on complex pages
 
 ## Examples
 

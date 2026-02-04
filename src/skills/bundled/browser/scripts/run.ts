@@ -16,6 +16,10 @@ interface BrowserArgs {
   fullPage?: boolean;
   format?: 'text' | 'html';
   selector?: string;
+  /** Wait for network idle before operation (useful for JS-heavy sites) */
+  waitForIdle?: boolean;
+  /** Block images/fonts/CSS for faster loads */
+  blockResources?: boolean;
 }
 
 interface BrowserResult {
@@ -26,7 +30,7 @@ interface BrowserResult {
 }
 
 // Valid operations
-const VALID_OPERATIONS = ['navigate', 'snapshot', 'click', 'type', 'fill', 'extract', 'screenshot', 'close'];
+const VALID_OPERATIONS = ['navigate', 'snapshot', 'click', 'type', 'fill', 'extract', 'screenshot', 'screenshot_analyze', 'close'];
 
 /**
  * Output result as JSON and exit
@@ -158,12 +162,18 @@ function formatSnapshot(snapshot: { url: string; title: string; elements: Array<
  */
 async function executeOperation(args: BrowserArgs): Promise<void> {
   // Get session (will create browser if needed)
-  const session = BrowserSession.getInstance({ headless: true });
+  // Enable resource blocking for faster loads if requested or for extract operations
+  const blockResources = args.blockResources ?? (args.operation === 'extract');
+  const session = BrowserSession.getInstance({ headless: true, blockResources });
 
   try {
     switch (args.operation) {
       case 'navigate': {
         await session.navigate(args.url!);
+        // Wait for network idle if requested (helps with JS-heavy sites)
+        if (args.waitForIdle) {
+          await session.waitForNetworkIdle();
+        }
         const state = await session.getState();
         outputResult({
           success: true,
@@ -214,6 +224,9 @@ async function executeOperation(args: BrowserArgs): Promise<void> {
       }
 
       case 'extract': {
+        // Wait for network to be idle before extracting (helps with JS-rendered content)
+        await session.waitForNetworkIdle();
+
         let content: string;
         if (args.format === 'html') {
           content = await session.extractHtml(args.selector);
@@ -236,6 +249,27 @@ async function executeOperation(args: BrowserArgs): Promise<void> {
         outputResult({
           success: true,
           output: `Screenshot captured: ${result.width}x${result.height} ${result.format} (${result.data.length} bytes)`,
+          exitCode: 0,
+        });
+        break;
+      }
+
+      case 'screenshot_analyze': {
+        // Wait for network idle to ensure page is fully rendered
+        await session.waitForNetworkIdle();
+
+        const result = await session.screenshotBase64(args.fullPage ?? false);
+        // Return base64 image data that can be sent to the model for analysis
+        outputResult({
+          success: true,
+          output: JSON.stringify({
+            type: 'image',
+            mimeType: result.mimeType,
+            base64: result.base64,
+            width: result.width,
+            height: result.height,
+            description: 'Screenshot of current page for visual analysis. Send this to the model to understand page content.',
+          }),
           exitCode: 0,
         });
         break;
