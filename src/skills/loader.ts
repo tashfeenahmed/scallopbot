@@ -292,6 +292,25 @@ export class SkillLoader extends EventEmitter {
       // Check gates
       const gateResult = await this.checkGates(parsed.frontmatter.metadata);
 
+      // Check for scripts/ directory
+      const skillDir = dirname(path);
+      const scriptsDir = join(skillDir, 'scripts');
+      const hasScripts = await this.directoryExists(scriptsDir);
+
+      // Validate script paths from frontmatter if present
+      if (hasScripts && parsed.frontmatter.scripts) {
+        for (const [action, scriptPath] of Object.entries(parsed.frontmatter.scripts)) {
+          const fullScriptPath = join(skillDir, scriptPath);
+          const scriptExists = await this.fileExists(fullScriptPath);
+          if (!scriptExists) {
+            this.logger?.warn(
+              { skill: parsed.frontmatter.name, action, scriptPath: fullScriptPath },
+              'Script path in frontmatter does not exist'
+            );
+          }
+        }
+      }
+
       const skill: Skill = {
         name: parsed.frontmatter.name,
         description: parsed.frontmatter.description,
@@ -301,11 +320,12 @@ export class SkillLoader extends EventEmitter {
         content: parsed.content,
         available: gateResult.passed,
         unavailableReason: gateResult.reason,
-        hasScripts: false,
+        scriptsDir: hasScripts ? scriptsDir : undefined,
+        hasScripts,
       };
 
       this.logger?.debug(
-        { name: skill.name, path, available: skill.available },
+        { name: skill.name, path, available: skill.available, hasScripts },
         'Loaded skill'
       );
 
@@ -317,6 +337,30 @@ export class SkillLoader extends EventEmitter {
         this.logger?.warn({ path, error: (error as Error).message }, 'Failed to load skill');
       }
       return null;
+    }
+  }
+
+  /**
+   * Check if a directory exists and is readable
+   */
+  private async directoryExists(dirPath: string): Promise<boolean> {
+    try {
+      await access(dirPath, constants.R_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Check if a file exists and is readable
+   */
+  private async fileExists(filePath: string): Promise<boolean> {
+    try {
+      await access(filePath, constants.R_OK);
+      return true;
+    } catch {
+      return false;
     }
   }
 
