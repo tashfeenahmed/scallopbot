@@ -52,6 +52,11 @@ export interface AgentResult {
  */
 export type ProgressCallback = (update: ProgressUpdate) => Promise<void>;
 
+/**
+ * Callback to check if processing should stop (user requested /stop)
+ */
+export type ShouldStopCallback = () => boolean;
+
 export interface ProgressUpdate {
   type: 'thinking' | 'tool_start' | 'tool_complete' | 'status';
   message: string;
@@ -207,12 +212,14 @@ export class Agent {
   /**
    * Process a message with optional attachments
    * @param onProgress - Optional callback for streaming progress updates
+   * @param shouldStop - Optional callback to check if user requested stop
    */
   async processMessage(
     sessionId: string,
     userMessage: string,
     attachments?: Attachment[],
-    onProgress?: ProgressCallback
+    onProgress?: ProgressCallback,
+    shouldStop?: ShouldStopCallback
   ): Promise<AgentResult> {
     const session = await this.sessionManager.getSession(sessionId);
     if (!session) {
@@ -325,6 +332,13 @@ export class Agent {
     // Agent loop
     while (iterations < this.maxIterations) {
       iterations++;
+
+      // Check if user requested stop
+      if (shouldStop && shouldStop()) {
+        this.logger.info({ sessionId, iteration: iterations }, 'User requested stop');
+        finalResponse = 'Stopped by user request.';
+        break;
+      }
 
       // Check budget before each iteration
       if (this.costTracker) {
