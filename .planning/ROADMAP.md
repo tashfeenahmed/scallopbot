@@ -1,0 +1,128 @@
+# Roadmap: SmartBot v2 Skills-Only Architecture
+
+## Overview
+
+Transform SmartBot from a tool-based architecture to a pure skills-only system where every capability is defined as a markdown skill file. Starting with the skill system foundation, we'll implement core skills (bash, files, web), integrate them into a simplified agent loop, and complete with Kimi K2.5 thinking mode support.
+
+## Domain Expertise
+
+None
+
+## Phases
+
+**Phase Numbering:**
+- Integer phases (1, 2, 3): Planned milestone work
+- Decimal phases (2.1, 2.2): Urgent insertions (marked with INSERTED)
+
+- [ ] **Phase 1: Skill System Foundation** - SKILL.md format, discovery, and loading infrastructure
+- [ ] **Phase 2: Bash Skill** - Shell command execution as first complete skill
+- [ ] **Phase 3: File Operation Skills** - read, write, edit skills for file management
+- [ ] **Phase 4: Web Search Skill** - Brave API integration for web search
+- [ ] **Phase 5: Browser Skill** - Web browsing and content extraction
+- [ ] **Phase 6: Telegram & Memory Skills** - Messaging and semantic memory search
+- [ ] **Phase 7: Agent Loop Refactor** - Skills-only execution loop replacing tools
+- [ ] **Phase 8: Kimi K2.5 Thinking Mode** - Thinking mode with reasoning_content support
+
+## Phase Details
+
+### Phase 1: Skill System Foundation
+**Goal**: Define SKILL.md format with YAML frontmatter, implement skill discovery, and create loading infrastructure
+**Depends on**: Nothing (first phase)
+**Research**: Unlikely (internal architecture, patterns from existing skill system)
+**Plans**: TBD
+
+Plans:
+- [ ] 01-01: Define SKILL.md schema and frontmatter format
+- [ ] 01-02: Implement skill directory scanner and loader
+- [ ] 01-03: Create skill registry and description aggregator
+
+### Phase 2: Bash Skill
+**Goal**: Implement bash skill as first complete skill with scripts folder execution
+**Depends on**: Phase 1
+**Research**: Unlikely (bash execution patterns exist in current tools)
+**Plans**: TBD
+
+Plans:
+- [ ] 02-01: Create bash skill folder structure and SKILL.md
+- [ ] 02-02: Implement bash execution script with sandboxing
+
+### Phase 3: File Operation Skills
+**Goal**: Implement read, write, and edit skills for comprehensive file management
+**Depends on**: Phase 2
+**Research**: Unlikely (file operation patterns exist in current tools)
+**Plans**: TBD
+
+Plans:
+- [ ] 03-01: Create read skill with file content retrieval
+- [ ] 03-02: Create write skill with file creation/overwrite
+- [ ] 03-03: Create edit skill with search-and-replace functionality
+
+### Phase 4: Web Search Skill
+**Goal**: Implement web search skill using Brave Search API
+**Depends on**: Phase 3
+**Research**: Likely (external API integration)
+**Research topics**: Current Brave Search API endpoints, rate limits, response format, API key handling
+**Plans**: TBD
+
+Plans:
+- [ ] 04-01: Research Brave API and create web_search skill structure
+- [ ] 04-02: Implement search execution with result formatting
+
+### Phase 5: Browser Skill
+**Goal**: Implement browser skill for web page browsing and content extraction
+**Depends on**: Phase 4
+**Research**: Likely (browser automation library choice)
+**Research topics**: Playwright vs Puppeteer for Node.js, headless configuration, content extraction patterns
+**Plans**: TBD
+
+Plans:
+- [ ] 05-01: Research browser automation and create skill structure
+- [ ] 05-02: Implement page loading and content extraction
+
+### Phase 6: Telegram & Memory Skills
+**Goal**: Implement telegram messaging and semantic memory search skills
+**Depends on**: Phase 5
+**Research**: Unlikely (existing implementations in current codebase)
+**Plans**: TBD
+
+Plans:
+- [ ] 06-01: Create telegram_send skill wrapping existing functionality
+- [ ] 06-02: Create memory_search skill for semantic memory queries
+
+### Phase 7: Agent Loop Refactor
+**Goal**: Replace tool-based execution with skills-only agent loop
+**Depends on**: Phase 6
+**Research**: Unlikely (internal refactor using established patterns)
+**Plans**: TBD
+
+Plans:
+- [ ] 07-01: Update system prompt to include skill descriptions
+- [ ] 07-02: Implement skill selection and invocation in agent loop
+- [ ] 07-03: Remove old tool layer and update imports
+
+### Phase 8: Kimi K2.5 Thinking Mode
+**Goal**: Enable thinking mode with reasoning_content handling and temperature constraints
+**Depends on**: Phase 7
+**Research**: Unlikely (already researched in PROJECT.md)
+**Plans**: TBD
+
+Plans:
+- [ ] 08-01: Implement enableThinking flag and temperature handling
+- [ ] 08-02: Parse reasoning_content from responses
+- [ ] 08-03: End-to-end testing with complex reasoning tasks
+
+## Progress
+
+**Execution Order:**
+Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8
+
+| Phase | Plans Complete | Status | Completed |
+|-------|----------------|--------|-----------|
+| 1. Skill System Foundation | 0/3 | Not started | - |
+| 2. Bash Skill | 0/2 | Not started | - |
+| 3. File Operation Skills | 0/3 | Not started | - |
+| 4. Web Search Skill | 0/2 | Not started | - |
+| 5. Browser Skill | 0/2 | Not started | - |
+| 6. Telegram & Memory Skills | 0/2 | Not started | - |
+| 7. Agent Loop Refactor | 0/3 | Not started | - |
+| 8. Kimi K2.5 Thinking Mode | 0/3 | Not started | - |
