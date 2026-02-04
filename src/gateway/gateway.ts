@@ -16,6 +16,7 @@ import { createDefaultToolRegistry, type ToolRegistry, type Reminder } from '../
 import { SessionManager } from '../agent/session.js';
 import { Agent } from '../agent/agent.js';
 import { TelegramChannel } from '../channels/telegram.js';
+import { TelegramGateway } from '../channels/telegram-gateway.js';
 import { createSkillRegistry, type SkillRegistry } from '../skills/registry.js';
 import { Router } from '../routing/router.js';
 import { CostTracker } from '../routing/cost.js';
@@ -385,6 +386,9 @@ export class Gateway {
         voiceManager: this.voiceManager || undefined, // Share voice manager
       });
       await this.telegramChannel.start();
+
+      // Wire singleton for skill access
+      TelegramGateway.getInstance().setChannel(this.telegramChannel);
     }
 
     this.isRunning = true;
@@ -407,6 +411,7 @@ export class Gateway {
     if (this.telegramChannel) {
       await this.telegramChannel.stop();
       this.telegramChannel = null;
+      TelegramGateway.resetInstance();
     }
 
     // Close ScallopMemoryStore (SQLite database)
