@@ -14,7 +14,7 @@ None
 - Integer phases (1, 2, 3): Planned milestone work
 - Decimal phases (2.1, 2.2): Urgent insertions (marked with INSERTED)
 
-- [ ] **Phase 1: Skill System Foundation** - SKILL.md format, discovery, and loading infrastructure
+- [ ] **Phase 1: Skill System Foundation** - SKILL.md format, discovery, and loading infrastructure (In progress)
 - [ ] **Phase 2: Bash Skill** - Shell command execution as first complete skill
 - [ ] **Phase 3: File Operation Skills** - read, write, edit skills for file management
 - [ ] **Phase 4: Web Search Skill** - Brave API integration for web search
@@ -32,7 +32,7 @@ None
 **Plans**: TBD
 
 Plans:
-- [ ] 01-01: Define SKILL.md schema and frontmatter format
+- [x] 01-01: Define SKILL.md schema and frontmatter format
 - [ ] 01-02: Implement skill directory scanner and loader
 - [ ] 01-03: Create skill registry and description aggregator
 
@@ -118,7 +118,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Skill System Foundation | 0/3 | Not started | - |
+| 1. Skill System Foundation | 1/3 | In progress | - |
 | 2. Bash Skill | 0/2 | Not started | - |
 | 3. File Operation Skills | 0/3 | Not started | - |
 | 4. Web Search Skill | 0/2 | Not started | - |
