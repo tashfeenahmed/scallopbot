@@ -68,13 +68,11 @@ Plans:
 ### Phase 5: Browser Skill
 **Goal**: Implement browser skill for web page browsing and content extraction
 **Depends on**: Phase 4
-**Research**: Likely (browser automation library choice)
-**Research topics**: Playwright vs Puppeteer for Node.js, headless configuration, content extraction patterns
-**Plans**: TBD
+**Research**: Complete (Playwright already in use, wrapping existing BrowserSession)
+**Plans**: 1
 
 Plans:
-- [ ] 05-01: Research browser automation and create skill structure
-- [ ] 05-02: Implement page loading and content extraction
+- [ ] 05-01: Create browser skill wrapping existing BrowserSession
 
 ### Phase 6: Telegram & Memory Skills
 **Goal**: Implement telegram messaging and semantic memory search skills
@@ -119,7 +117,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8
 | 2. Bash Skill | 2/2 | Complete | 2026-02-04 |
 | 3. Skill Executor | 1/1 | Complete | 2026-02-04 |
 | 4. Web Search Skill | 1/1 | Complete | 2026-02-04 |
-| 5. Browser Skill | 0/2 | Not started | - |
+| 5. Browser Skill | 0/1 | Not started | - |
 | 6. Telegram & Memory Skills | 0/2 | Not started | - |
 | 7. Agent Loop Refactor | 0/3 | Not started | - |
 | 8. Kimi K2.5 Thinking Mode | 0/3 | Not started | - |
