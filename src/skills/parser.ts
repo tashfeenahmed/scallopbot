@@ -119,6 +119,35 @@ export function parseFrontmatter(content: string, path?: string): ParsedSkill {
       frontmatter.metadata = parseMetadata(parsed.metadata as Record<string, unknown>);
     }
 
+    // Parse triggers array
+    if (Array.isArray(parsed.triggers)) {
+      frontmatter.triggers = parsed.triggers.filter((x) => typeof x === 'string');
+    }
+
+    // Parse scripts map
+    if (parsed.scripts && typeof parsed.scripts === 'object') {
+      frontmatter.scripts = {};
+      for (const [key, value] of Object.entries(parsed.scripts as Record<string, unknown>)) {
+        if (typeof value === 'string') {
+          frontmatter.scripts[key] = value;
+        }
+      }
+    }
+
+    // Parse inputSchema
+    if (parsed.inputSchema && typeof parsed.inputSchema === 'object') {
+      const schema = parsed.inputSchema as Record<string, unknown>;
+      if (schema.type === 'object' && schema.properties && typeof schema.properties === 'object') {
+        frontmatter.inputSchema = {
+          type: 'object',
+          properties: schema.properties as Record<string, { type: string; description?: string }>,
+        };
+        if (Array.isArray(schema.required)) {
+          frontmatter.inputSchema.required = schema.required.filter((x) => typeof x === 'string');
+        }
+      }
+    }
+
     return {
       frontmatter,
       content: markdownContent.trim(),

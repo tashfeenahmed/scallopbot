@@ -1,6 +1,6 @@
 /**
- * SmartBot Web Chat Client
- * Vanilla JavaScript WebSocket client for the chat interface
+ * Scallopbot Web Chat Client
+ * Telegram-style interface with markdown support and debug mode
  */
 
 (function() {
@@ -8,10 +8,12 @@
 
   // DOM Elements
   const messagesContainer = document.getElementById('messages');
+  const chatContainer = document.querySelector('.chat-container');
   const chatForm = document.getElementById('chat-form');
   const messageInput = document.getElementById('message-input');
   const sendBtn = document.getElementById('send-btn');
   const statusIndicator = document.getElementById('status');
+  const debugToggle = document.getElementById('debug-mode');
 
   // State
   let ws = null;
@@ -19,6 +21,17 @@
   const maxReconnectAttempts = 10;
   const baseReconnectDelay = 1000;
   let isWaitingForResponse = false;
+  let debugMode = false;
+
+  // Configure marked for safe rendering
+  if (typeof marked !== 'undefined') {
+    marked.setOptions({
+      breaks: true,
+      gfm: true,
+      headerIds: false,
+      mangle: false
+    });
+  }
 
   /**
    * Get WebSocket URL based on current location
@@ -33,7 +46,12 @@
    */
   function setStatus(status) {
     statusIndicator.className = `status ${status}`;
-    statusIndicator.textContent = status.charAt(0).toUpperCase() + status.slice(1);
+    const statusText = {
+      connected: 'online',
+      connecting: 'connecting...',
+      disconnected: 'offline'
+    };
+    statusIndicator.textContent = statusText[status] || status;
 
     const isConnected = status === 'connected';
     messageInput.disabled = !isConnected || isWaitingForResponse;
@@ -41,14 +59,70 @@
   }
 
   /**
+   * Render markdown to HTML safely
+   */
+  function renderMarkdown(text) {
+    if (typeof marked === 'undefined') {
+      return escapeHtml(text);
+    }
+    try {
+      return marked.parse(text);
+    } catch (e) {
+      console.error('Markdown parsing error:', e);
+      return escapeHtml(text);
+    }
+  }
+
+  /**
+   * Escape HTML for safe display
+   */
+  function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+  }
+
+  /**
    * Add a message to the chat
    */
-  function addMessage(content, type) {
+  function addMessage(content, type, isMarkdown = false) {
     const messageEl = document.createElement('div');
     messageEl.className = `message ${type}`;
-    messageEl.textContent = content;
+
+    if (isMarkdown && (type === 'assistant' || type === 'user')) {
+      const contentDiv = document.createElement('div');
+      contentDiv.className = 'message-content';
+      contentDiv.innerHTML = renderMarkdown(content);
+      messageEl.appendChild(contentDiv);
+    } else {
+      messageEl.textContent = content;
+    }
+
     messagesContainer.appendChild(messageEl);
     scrollToBottom();
+  }
+
+  /**
+   * Add a debug message (skill call, internal work)
+   */
+  function addDebugMessage(label, content) {
+    const messageEl = document.createElement('div');
+    messageEl.className = 'message debug';
+
+    const labelEl = document.createElement('div');
+    labelEl.className = 'debug-label';
+    labelEl.textContent = label;
+
+    const contentEl = document.createElement('div');
+    contentEl.textContent = typeof content === 'object' ? JSON.stringify(content, null, 2) : content;
+
+    messageEl.appendChild(labelEl);
+    messageEl.appendChild(contentEl);
+    messagesContainer.appendChild(messageEl);
+
+    if (debugMode) {
+      scrollToBottom();
+    }
   }
 
   /**
@@ -79,7 +153,20 @@
    * Scroll to bottom of messages
    */
   function scrollToBottom() {
-    messagesContainer.scrollTop = messagesContainer.scrollHeight;
+    chatContainer.scrollTop = chatContainer.scrollHeight;
+  }
+
+  /**
+   * Toggle debug mode
+   */
+  function toggleDebugMode(enabled) {
+    debugMode = enabled;
+    if (enabled) {
+      messagesContainer.classList.add('debug-enabled');
+    } else {
+      messagesContainer.classList.remove('debug-enabled');
+    }
+    scrollToBottom();
   }
 
   /**
@@ -98,7 +185,7 @@
       ws.onopen = function() {
         reconnectAttempts = 0;
         setStatus('connected');
-        addMessage('Connected to SmartBot', 'system');
+        addMessage('Connected to Scallopbot', 'system');
       };
 
       ws.onmessage = function(event) {
@@ -120,7 +207,7 @@
         if (reconnectAttempts < maxReconnectAttempts) {
           const delay = Math.min(baseReconnectDelay * Math.pow(2, reconnectAttempts), 30000);
           reconnectAttempts++;
-          addMessage(`Disconnected. Reconnecting in ${delay / 1000}s...`, 'system');
+          addMessage(`Reconnecting in ${Math.round(delay / 1000)}s...`, 'system');
           setTimeout(connect, delay);
         } else {
           addMessage('Connection lost. Please refresh the page.', 'error');
@@ -147,24 +234,53 @@
         messageInput.disabled = false;
         sendBtn.disabled = false;
         if (data.content) {
-          addMessage(data.content, 'assistant');
+          addMessage(data.content, 'assistant', true);
         }
         messageInput.focus();
         break;
 
       case 'chunk':
-        // For streaming responses (future enhancement)
+        // For streaming responses
         if (data.content) {
-          // Append to last assistant message or create new one
           let lastMessage = messagesContainer.querySelector('.message.assistant:last-of-type');
           if (!lastMessage || lastMessage.dataset.complete) {
             lastMessage = document.createElement('div');
             lastMessage.className = 'message assistant';
+            const contentDiv = document.createElement('div');
+            contentDiv.className = 'message-content';
+            lastMessage.appendChild(contentDiv);
             messagesContainer.appendChild(lastMessage);
           }
-          lastMessage.textContent += data.content;
+          const contentDiv = lastMessage.querySelector('.message-content') || lastMessage;
+          contentDiv.innerHTML = renderMarkdown(contentDiv.textContent + data.content);
           scrollToBottom();
         }
+        break;
+
+      case 'debug':
+      case 'skill_start':
+        addDebugMessage(data.skill || 'skill', data.input || data.message || 'Starting...');
+        break;
+
+      case 'skill_complete':
+        addDebugMessage(data.skill || 'result', data.output || data.result || 'Complete');
+        break;
+
+      case 'thinking':
+        addDebugMessage('thinking', data.message || '...');
+        break;
+
+      case 'trigger':
+        // Proactive message from server (e.g., reminder)
+        hideTypingIndicator();
+        if (data.content) {
+          addMessage(data.content, 'assistant', true);
+        }
+        break;
+
+      case 'file':
+        // File notification
+        addMessage(`File: ${data.path}${data.caption ? ' - ' + data.caption : ''}`, 'assistant');
         break;
 
       case 'error':
@@ -198,8 +314,8 @@
       return;
     }
 
-    // Show user message
-    addMessage(message, 'user');
+    // Show user message (no markdown for user messages to preserve formatting)
+    addMessage(message, 'user', false);
 
     // Show typing indicator
     showTypingIndicator();
@@ -235,6 +351,13 @@
       e.preventDefault();
       chatForm.dispatchEvent(new Event('submit'));
     }
+  });
+
+  /**
+   * Handle debug toggle
+   */
+  debugToggle.addEventListener('change', function() {
+    toggleDebugMode(this.checked);
   });
 
   /**

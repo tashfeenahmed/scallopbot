@@ -3,17 +3,33 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>SmartBot Chat</title>
+  <title>Scallopbot</title>
   <link rel="stylesheet" href="/style.css">
+  <!-- Marked.js for markdown rendering -->
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 </head>
 <body>
   <div class="app">
     <header class="header">
-      <h1>SmartBot</h1>
-      <div id="status" class="status disconnected">Disconnected</div>
+      <div class="header-left">
+        <div class="avatar">
+          <span class="avatar-emoji">🐚</span>
+        </div>
+        <div class="header-info">
+          <h1>Scallopbot</h1>
+          <div id="status" class="status disconnected">offline</div>
+        </div>
+      </div>
+      <div class="header-right">
+        <label class="debug-toggle">
+          <input type="checkbox" id="debug-mode">
+          <span class="toggle-slider"></span>
+          <span class="toggle-label">Debug</span>
+        </label>
+      </div>
     </header>
 
-    <main class="chat-container">
+    <main class="chat-container" id="chat-bg">
       <div id="messages" class="messages"></div>
     </main>
 
@@ -23,11 +39,15 @@
           type="text"
           id="message-input"
           class="message-input"
-          placeholder="Type a message..."
+          placeholder="Message..."
           autocomplete="off"
           disabled
         />
-        <button type="submit" id="send-btn" class="send-btn" disabled>Send</button>
+        <button type="submit" id="send-btn" class="send-btn" disabled>
+          <svg viewBox="0 0 24 24" width="24" height="24">
+            <path fill="currentColor" d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
+          </svg>
+        </button>
       </form>
     </footer>
   </div>

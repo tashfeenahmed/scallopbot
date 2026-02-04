@@ -97,7 +97,7 @@ interface WsMessage {
 }
 
 interface WsResponse {
-  type: 'response' | 'chunk' | 'error' | 'pong' | 'trigger' | 'file';
+  type: 'response' | 'chunk' | 'error' | 'pong' | 'trigger' | 'file' | 'skill_start' | 'skill_complete' | 'thinking' | 'debug';
   sessionId?: string;
   content?: string;
   error?: string;
@@ -105,6 +105,11 @@ interface WsResponse {
   path?: string;
   /** For 'file' type: optional caption */
   caption?: string;
+  /** For skill messages */
+  skill?: string;
+  input?: string;
+  output?: string;
+  message?: string;
 }
 
 /**
@@ -645,7 +650,9 @@ export class ApiChannel implements Channel, TriggerSource {
           return;
         }
 
-        const sessionId = message.sessionId || `ws-${clientId}`;
+        // Ensure session exists before processing
+        const userId = `ws-${clientId}`;
+        const sessionId = await this.getOrCreateSession(userId);
 
         this.logger.debug(
           { clientId, sessionId, messageLength: message.message.length },
@@ -653,7 +660,39 @@ export class ApiChannel implements Channel, TriggerSource {
         );
 
         try {
-          const result = await this.config.agent.processMessage(sessionId, message.message);
+          // Progress callback to send debug updates to WebSocket
+          const onProgress = async (update: { type: string; message: string; toolName?: string; iteration?: number }) => {
+            if (update.type === 'tool_start') {
+              this.sendWsMessage(ws, {
+                type: 'skill_start',
+                skill: update.toolName || 'skill',
+                input: update.message
+              });
+            } else if (update.type === 'tool_complete') {
+              this.sendWsMessage(ws, {
+                type: 'skill_complete',
+                skill: update.toolName || 'skill',
+                output: update.message
+              });
+            } else if (update.type === 'thinking') {
+              this.sendWsMessage(ws, {
+                type: 'thinking',
+                message: update.message
+              });
+            } else if (update.type === 'status') {
+              this.sendWsMessage(ws, {
+                type: 'debug',
+                message: update.message
+              });
+            }
+          };
+
+          const result = await this.config.agent.processMessage(
+            sessionId,
+            message.message,
+            undefined, // attachments
+            onProgress
+          );
           this.sendWsMessage(ws, { type: 'response', sessionId, content: result.response });
         } catch (error) {
           const err = error as Error;
