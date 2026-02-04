@@ -109,11 +109,11 @@ export class MoonshotProvider implements LLMProvider {
   }
 
   async complete(request: CompletionRequest): Promise<CompletionResponse> {
-    const messages = this.formatMessages(request);
-
     const isKimiK2 = this.model.includes('kimi-k2');
     // Enable thinking mode if explicitly requested AND model supports it
     const enableThinking = request.enableThinking === true && isKimiK2;
+
+    const messages = this.formatMessages(request, enableThinking);
 
     // Temperature rules for Kimi K2 models:
     // - Thinking disabled (instant mode): MUST be exactly 0.6
@@ -179,7 +179,8 @@ export class MoonshotProvider implements LLMProvider {
   }
 
   private formatMessages(
-    request: CompletionRequest
+    request: CompletionRequest,
+    enableThinking: boolean = false
   ): OpenAI.ChatCompletionMessageParam[] {
     const messages: OpenAI.ChatCompletionMessageParam[] = [];
 
@@ -238,13 +239,14 @@ export class MoonshotProvider implements LLMProvider {
             });
 
           if (msg.role === 'assistant') {
-            // Note: For Moonshot/Kimi, when assistant has tool_calls but no text,
-            // we should omit content entirely rather than sending null,
-            // to avoid triggering "thinking is enabled" validation errors.
-            const assistantMsg: OpenAI.ChatCompletionAssistantMessageParam = {
+            // For Moonshot/Kimi with thinking enabled, assistant messages with tool_calls
+            // MUST include reasoning_content. Add placeholder for historical messages.
+            const assistantMsg: OpenAI.ChatCompletionAssistantMessageParam & { reasoning_content?: string } = {
               role: 'assistant',
               ...(textContent ? { content: textContent } : {}),
               ...(toolCalls.length > 0 && { tool_calls: toolCalls }),
+              // When thinking is enabled and there are tool calls, we must include reasoning_content
+              ...(enableThinking && toolCalls.length > 0 && { reasoning_content: '(historical context)' }),
             };
             messages.push(assistantMsg);
           } else {
