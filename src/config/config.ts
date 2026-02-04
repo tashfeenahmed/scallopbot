@@ -68,9 +68,17 @@ const discordChannelSchema = z.object({
   applicationId: z.string().default(''),
 });
 
+const apiChannelSchema = z.object({
+  enabled: z.boolean().default(false),
+  port: z.number().int().positive().default(3000),
+  host: z.string().default('127.0.0.1'),
+  apiKey: z.string().optional(),
+});
+
 const channelsSchema = z.object({
   telegram: telegramChannelSchema,
   discord: discordChannelSchema.default({ enabled: false, botToken: '', applicationId: '' }),
+  api: apiChannelSchema.default({ enabled: false, port: 3000, host: '127.0.0.1' }),
 });
 
 // Agent configuration schema
@@ -222,6 +230,12 @@ export function loadConfig(): Config {
         enabled: !!discordBotToken,
         botToken: discordBotToken || '',
         applicationId: discordAppId || '',
+      },
+      api: {
+        enabled: process.env.WEB_UI_ENABLED === 'true',
+        port: process.env.WEB_UI_PORT ? parseInt(process.env.WEB_UI_PORT, 10) : 3000,
+        host: process.env.WEB_UI_HOST || '127.0.0.1',
+        apiKey: process.env.WEB_UI_API_KEY || undefined,
       },
     },
     agent: {
