@@ -214,6 +214,15 @@ export class SkillRegistry {
       const emoji = skill.frontmatter.metadata?.openclaw?.emoji || '';
       lines.push(`- **${skill.name}**${emoji ? ` ${emoji}` : ''}: ${skill.description}`);
 
+      // Add input parameter documentation if schema exists
+      const schema = skill.frontmatter.inputSchema;
+      if (schema && schema.properties && Object.keys(schema.properties).length > 0) {
+        const params = this.formatInputSchema(schema);
+        if (params) {
+          lines.push(`  Parameters: ${params}`);
+        }
+      }
+
       if (includeInstructions && skill.content.trim()) {
         const content = skill.content.trim();
         const truncated =
@@ -230,6 +239,23 @@ export class SkillRegistry {
     lines.push('To use a skill, invoke the Skill tool with the skill name.');
 
     return lines.join('\n');
+  }
+
+  /**
+   * Format input schema into concise parameter string
+   */
+  private formatInputSchema(schema: NonNullable<import('./types.js').SkillFrontmatter['inputSchema']>): string {
+    const parts: string[] = [];
+    const required = new Set(schema.required || []);
+
+    for (const [name, prop] of Object.entries(schema.properties)) {
+      const isRequired = required.has(name);
+      const typeStr = isRequired ? prop.type : `${prop.type}, optional`;
+      const desc = prop.description ? ` - ${prop.description}` : '';
+      parts.push(`${name} (${typeStr})${desc}`);
+    }
+
+    return parts.join(', ');
   }
 
   /**

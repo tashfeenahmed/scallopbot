@@ -75,6 +75,12 @@ export interface SkillFrontmatter {
   triggers?: string[];
   /** Map of action names to script paths relative to skill folder */
   scripts?: { [action: string]: string };
+  /** Input parameter schema for skill documentation */
+  inputSchema?: {
+    type: 'object';
+    properties: Record<string, { type: string; description?: string }>;
+    required?: string[];
+  };
 }
 
 /**
