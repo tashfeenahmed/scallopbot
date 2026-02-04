@@ -2,7 +2,7 @@
 
 ## What This Is
 
-A personal AI agent that runs locally with CLI access, using a pure skills-based architecture. Instead of hardcoded tools, all capabilities (bash, file ops, web search, telegram messaging, etc.) are defined as markdown skill files that the agent discovers and uses contextually. This enables a simple, extensible system where adding new capabilities means dropping a new skill folder.
+A proactive personal AI agent running locally with CLI access, using a pure skills-based architecture. All capabilities are defined as markdown skill files with YAML frontmatter that the agent discovers and invokes contextually. Includes web UI for testing, loop-until-done execution, and multi-channel trigger support (Telegram, Web, Cron).
 
 ## Core Value
 
@@ -17,67 +17,62 @@ A personal AI agent that runs locally with CLI access, using a pure skills-based
 - ✓ Persistent semantic memory system — existing
 - ✓ Session management with JSONL storage — existing
 - ✓ Cost tracking and budget enforcement — existing
+- ✓ Skills-only architecture — v1.0
+  - ✓ SKILL.md format with YAML frontmatter (name, description, triggers)
+  - ✓ Scripts folder with execution scripts
+  - ✓ Agent discovers skills by scanning skill directories
+  - ✓ Agent selects skills based on description and trigger patterns
+- ✓ Core skills implemented — v1.0
+  - ✓ `bash` skill — Execute shell commands (60s timeout, 30KB limit)
+  - ✓ `web_search` skill — Search the web (Brave API)
+  - ✓ `telegram_send` skill — Send messages via Telegram
+  - ✓ `memory_search` skill — Search conversation memory
+  - ✓ `browser` skill — Web browsing and scraping
+- ✓ Skills-only agent loop — v1.0
+  - ✓ Load skill descriptions into system prompt
+  - ✓ Agent outputs skill name + arguments
+  - ✓ Execute skill's script with arguments
+  - ✓ Return result to agent
+- ✓ Kimi K2.5 thinking mode integration — v2.0
+  - ✓ Enable thinking mode via `enableThinking` flag
+  - ✓ Handle `reasoning_content` in responses
+  - ✓ Temperature constraints (1.0 for thinking, 0.6 for instant)
+- ✓ Web UI for local testing — v2.0
+- ✓ Loop-until-done execution with [DONE] marker — v2.0
+- ✓ TriggerSource abstraction for multi-channel dispatch — v2.0
+- ✓ Proactive execution guidelines — v2.0
+- ✓ Human-like messaging style — v2.0
+- ✓ Consolidated system prompt (60 lines) — v2.0
 
 ### Active
 
-- [ ] Skills-only architecture: Replace all tools with skill files
-  - [ ] SKILL.md format with YAML frontmatter (name, description, triggers)
-  - [ ] Scripts folder (`scripts/`) in each skill for execution
-  - [ ] Agent discovers skills by scanning skill directories
-  - [ ] Agent selects skills based on description and trigger patterns
-
-- [ ] Core skills to implement:
-  - [ ] `bash` skill — Execute shell commands
-  - [ ] `read` skill — Read file contents
-  - [ ] `write` skill — Write/create files
-  - [ ] `edit` skill — Edit existing files
-  - [ ] `web_search` skill — Search the web (Brave API)
-  - [ ] `telegram_send` skill — Send messages via Telegram
-  - [ ] `memory_search` skill — Search conversation memory
-  - [ ] `browser` skill — Web browsing and scraping
-
-- [x] Kimi K2.5 thinking mode integration:
-  - [x] Enable thinking mode via `enableThinking` flag
-  - [x] Handle `reasoning_content` in responses
-  - [x] Temperature constraints (1.0 for thinking, 0.6 for instant)
-  - [x] Test end-to-end with complex reasoning tasks
-
-- [ ] Simplified agent loop:
-  - [ ] Load skill descriptions into system prompt
-  - [ ] Agent outputs skill name + arguments
-  - [ ] Execute skill's script with arguments
-  - [ ] Return result to agent
+- [ ] `read` skill — Read file contents
+- [ ] `write` skill — Write/create files
+- [ ] `edit` skill — Edit existing files
 
 ### Out of Scope
 
-- Agent swarms / multi-agent orchestration — complexity not needed for personal use, can add in future milestone
+- Agent swarms / multi-agent orchestration — complexity not needed for personal use
 - Voice synthesis skills — keep existing TTS implementation for now
-- UI/dashboard — CLI-first approach
 - Custom training / fine-tuning — use off-the-shelf models
 
 ## Context
 
-**Current State:**
-The codebase has a working tool system (`src/tools/`) with 16 tool files and a skill system (`src/skills/`) that's partially implemented. Tools are TypeScript classes with hardcoded definitions. Skills are markdown files with YAML frontmatter that get loaded but currently defer to tools for execution.
+**Current State (v2.0 shipped):**
+- 59,108 lines of TypeScript
+- Skills-only architecture: bash, web_search, browser, memory_search, telegram_send
+- Tool system removed entirely
+- Web UI available at localhost for testing alongside Telegram
+- Loop-until-done execution with [DONE] marker detection
+- TriggerSource abstraction for Telegram, Web, and Cron triggers
+- Consolidated 60-line system prompt with personal assistant framing
 
-**Target Architecture:**
-- Remove the tool layer entirely
-- Skills become the single abstraction for agent capabilities
+**Architecture:**
 - Each skill folder contains: `SKILL.md` (description + instructions) + `scripts/` (execution scripts)
 - Agent reads skill descriptions at startup, includes them in system prompt
 - When user request matches a skill's triggers/description, agent invokes that skill
 - Skill execution runs the appropriate script from `scripts/` folder
-
-**Research Findings (Skills Architecture Best Practices):**
-- [Agent Skills Standard](https://medium.com/@richardhightower/agent-skills-the-universal-standard-transforming-how-ai-agents-work-fc7397406e2e): Open standard with SKILL.md + scripts structure
-- [Claude Skills Deep Dive](https://leehanchung.github.io/blogs/2025/10/26/claude-skills-deep-dive/): Progressive disclosure pattern—show descriptions first, load full instructions when needed
-- Keep SKILL.md under 500 lines; use separate reference files for large content
-
-**Research Findings (Kimi K2.5 Thinking Mode):**
-- [Moonshot Platform Docs](https://platform.moonshot.ai/docs/guide/use-kimi-k2-thinking-model): Thinking mode returns `reasoning_content` field
-- Temperature MUST be 1.0 for thinking mode, 0.6 for instant mode
-- Response includes `<think>...</think>` delimiters in reasoning
-- Supports 256K context, interleaved thinking with tool calls
+- SkillExecutor handles spawning, output capture, timeouts, and graceful shutdown
 
 ## Constraints
 
@@ -88,11 +83,15 @@ The codebase has a working tool system (`src/tools/`) with 16 tool files and a s
 
 | Decision | Rationale | Outcome |
 |----------|-----------|---------|
-| Skills-only (no tools) | Simpler architecture, one abstraction for all capabilities | — Pending |
-| Scripts in skill folders | Skills need to execute actions; scripts/ folder keeps code near definition | — Pending |
-| Triggers + description in frontmatter | Agent needs to know WHEN to use a skill and WHAT it does | — Pending |
-| Kimi K2.5 as thinking provider | Already integrated; best open reasoning model for complex tasks | Done - v2.0 |
-| Kimi thinking mode | Better reasoning for complex tasks with temperature/param constraints | Done - v2.0 |
+| Skills-only (no tools) | Simpler architecture, one abstraction for all capabilities | ✓ Good - v1.0 |
+| Scripts in skill folders | Skills need to execute actions; scripts/ folder keeps code near definition | ✓ Good - v1.0 |
+| Triggers + description in frontmatter | Agent needs to know WHEN to use a skill and WHAT it does | ✓ Good - v1.0 |
+| SKILL_ARGS as JSON env var | Prevents shell injection attacks | ✓ Good - v1.0 |
+| 60s bash timeout, 30KB output limit | Prevents runaway commands and memory issues | ✓ Good - v1.0 |
+| Kimi K2.5 as thinking provider | Already integrated; best open reasoning model for complex tasks | ✓ Good - v2.0 |
+| [DONE] marker for completion | Explicit signal vs heuristic detection | ✓ Good - v2.0 |
+| TriggerSource abstraction | Unified interface for Telegram/Web/Cron triggers | ✓ Good - v2.0 |
+| System prompt 60 lines | Focused, achievement-oriented personal assistant | ✓ Good - v2.0 |
 
 ---
-*Last updated: 2026-02-04 after Phase 17 completion*
+*Last updated: 2026-02-04 after v2.0 milestone*

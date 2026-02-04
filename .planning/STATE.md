@@ -2,103 +2,60 @@
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-02-04)
+See: .planning/PROJECT.md (updated 2026-02-04 after v2.0 milestone)
 
 **Core value:** Skills-only execution: Every capability the agent has comes from a skill file that advertises itself to the agent.
-**Current focus:** Milestone v2.0 — Agent Polish & Enhanced Loop
+**Current focus:** Project operational — no active milestone
 
 ## Current Position
 
-Phase: 17 of 17 (Kimi K2.5 Thinking Mode)
-Plan: 1 of 1 in current phase
-Status: Milestone complete
-Last activity: 2026-02-04 — Completed 17-01-PLAN.md
+Phase: All complete (17 phases across 2 milestones)
+Status: Project operational
+Last activity: 2026-02-04 — v2.0 milestone archived
 
-Progress: ██████████ 100%
+Progress: ██████████ 100% (v1.0 + v2.0)
 
-## Performance Metrics
+## Shipped Milestones
 
-**Velocity:**
-- Total plans completed: 11 (v1.0)
-- Average duration: 3 min
-- Total execution time: 29 min
+| Milestone | Phases | Plans | Shipped |
+|-----------|--------|-------|---------|
+| v1.0 Skills-Only Architecture | 1-7 | 11 | 2026-02-04 |
+| v2.0 Agent Polish & Enhanced Loop | 9-17 | 11 | 2026-02-04 |
 
-**By Phase (v1.0):**
-
-| Phase | Plans | Total | Avg/Plan |
-|-------|-------|-------|----------|
-| 1 | 1 | 3 min | 3 min |
-| 2 | 2 | 4 min | 2 min |
-| 3 | 1 | 5 min | 5 min |
-| 4 | 1 | 3 min | 3 min |
-| 5 | 1 | 2 min | 2 min |
-| 6 | 2 | 5 min | 3 min |
-| 7 | 3 | 7 min | 2 min |
-
-**Recent Trend:**
-- Last 5 plans: 2min, 2min, 3min, 2min, 3min
-- Trend: Stable (~2-3 min/plan)
+**Total:** 22 plans completed in 16 phases
 
 ## Accumulated Context
 
-### Decisions
+### Key Decisions (Summary)
 
-Decisions are logged in PROJECT.md Key Decisions table.
-Recent decisions affecting current work:
+Full decision log in PROJECT.md Key Decisions table.
 
-- Pass script args as JSON in SKILL_ARGS env var (prevents injection)
-- Support .ts, .js, .sh script types with appropriate runners
-- 30-second default timeout for script execution
-- Bash skill user-invocable: false (agent-only, not slash command)
-- 60-second default timeout for bash commands
-- 30KB output truncation for bash to prevent memory issues
-- Exit code 126 for blocked commands (standard "cannot execute" code)
-- SKILL_DIR env var for workspace root, falls back to cwd
-- Exit code 124 for timeout (standard Unix convention)
-- 5-second grace period between SIGTERM and SIGKILL
-- web_search skill uses native fetch() (Node.js 18+)
-- user-invocable: true for search skill (slash command enabled)
-- Browser skill wraps existing BrowserSession (wrapper pattern)
-- Browser skill user-invocable: true (slash command enabled)
-- memory_search defaults to 'fact' type (not raw logs)
-- Lazy singleton for MemoryStore/HybridSearch in skill scripts
-- TelegramGateway singleton matches BrowserSession pattern
-- Gateway wires telegram singleton after channel starts
-- Generic skills reference in prompt (skills describe themselves via inputSchema)
-- inputSchema optional in frontmatter for backward compatibility
-- Skills are primary capability source; tools are fallback during transition
-- [DONE] marker (case insensitive) signals explicit task completion
-- Marker stripped from final response to user for clean output
-- Backward compatible - single-turn responses still work without [DONE]
-- TriggerSource interface: sendMessage/sendFile/getName for unified routing
-- Channel prefix pattern: channel:userId (telegram:123, api:ws-abc) for explicit routing
-- Fallback to first available trigger source maintains backward compatibility
-- Proactive behavior taught via prompt engineering (not code changes)
-- 8 execution rules with proactive emphasis (up from 5)
-- Ask user only after trying 2-3 alternatives
-- System prompt consolidated: 217→60 lines (72% reduction)
-- 7 focused sections: SKILLS, HOW TO WORK, MEMORY, TASK COMPLETION, COMMUNICATION, REMINDERS, EXAMPLES
-- Personal assistant framing over autonomous agent
+**v1.0 Decisions:**
+- Skills-only architecture (no tools)
+- SKILL_ARGS as JSON env var (injection-safe)
+- 60s bash timeout, 30KB output limit
+
+**v2.0 Decisions:**
+- [DONE] marker for explicit completion
+- TriggerSource abstraction for multi-channel
+- 60-line consolidated system prompt
 
 ### Deferred Issues
 
-None yet.
-
-### Pending Todos
-
-None yet.
+- read, write, edit skills (for future milestone)
 
 ### Blockers/Concerns
 
-None yet.
+None.
 
 ### Roadmap Evolution
 
-- v1.0 Skills-Only Architecture shipped: Phases 1-7, 11 plans (2026-02-04)
-- v2.0 Agent Polish & Enhanced Loop created: 9 phases (Phase 9-17)
+- v1.0 shipped: Phases 1-7, 11 plans (2026-02-04)
+- v2.0 shipped: Phases 9-17, 11 plans (2026-02-04)
+- Archives: .planning/milestones/v1.0-ROADMAP.md, v2.0-ROADMAP.md
 
 ## Session Continuity
 
-Last session: 2026-02-04T16:01:00Z
-Stopped at: Completed 17-01-PLAN.md (v2.0 Milestone complete)
+Last session: 2026-02-04
+Stopped at: v2.0 milestone archived
 Resume file: None
