@@ -24,6 +24,7 @@ Unlike cloud-hosted assistants, ScallopBot gives you:
 - **Persistent memory** — remembers your preferences, facts, and context
 - **Multi-provider routing** — uses the right model for each task
 - **Budget controls** — daily/monthly limits with automatic throttling
+- **8 chat channels** — Telegram, Discord, WhatsApp, Slack, Signal, Matrix, CLI, REST API
 
 ## Why ScallopBot?
 
@@ -35,7 +36,7 @@ Both ScallopBot and [OpenClaw](https://github.com/openclaw/openclaw) are self-ho
 | **Multi-provider routing** | ✅ 7 providers | ✅ 2 providers |
 | **Smart model selection** | ✅ Auto-routes by task | ❌ Manual |
 | **Setup complexity** | Simple (just Node.js) | Complex (daemon + apps) |
-| **Channels** | Telegram, CLI | 12+ channels |
+| **Channels** | 8 (Telegram, Discord, WhatsApp, Slack, Signal, Matrix, CLI, API) | 12+ channels |
 | **Native apps** | ❌ | ✅ macOS/iOS/Android |
 | **Voice Wake** | ❌ | ✅ |
 | **Canvas/Visual workspace** | ❌ | ✅ |
@@ -53,13 +54,15 @@ Both ScallopBot and [OpenClaw](https://github.com/openclaw/openclaw) are self-ho
 
 - **🎯 Smart Model Routing** — Routes simple queries to cheap models, complex tasks to capable ones
 - **💰 Real-time Cost Tracking** — Daily/monthly budgets with automatic throttling
-- **🧠 Persistent Memory** — Semantic search + automatic fact extraction
+- **🧠 Persistent Memory** — SQLite-backed semantic search + automatic fact extraction
 - **🔄 Provider Fallback** — Automatically switches providers on failures
+- **💬 8 Chat Channels** — Telegram, Discord, WhatsApp, Slack, Signal, Matrix, CLI, REST API
 - **🗣️ Voice Support** — Speech-to-text input, text-to-speech responses
 - **⏰ Smart Reminders** — Intervals, absolute times, and recurring schedules
 - **📁 File Operations** — Send and receive files via chat
 - **🌐 Browser Automation** — Navigate, scrape, and interact with websites
 - **🔧 Extensible Skills** — OpenClaw-compatible SKILL.md format
+- **📄 Media Processing** — PDF extraction, image analysis, link previews
 
 ## Supported Providers
 
@@ -97,12 +100,15 @@ node dist/cli.js start
 Minimal `.env`:
 
 ```bash
-# At least one provider required
+# At least one LLM provider required
 MOONSHOT_API_KEY=sk-...          # Recommended: cost-effective default
 
-# Telegram bot
+# Telegram bot (optional)
 TELEGRAM_BOT_TOKEN=...
 TELEGRAM_ALLOWED_USERS=123456789
+
+# Discord bot (optional)
+DISCORD_BOT_TOKEN=...
 
 # Optional but recommended
 BRAVE_SEARCH_API_KEY=...         # Enables web search
@@ -142,6 +148,8 @@ COST_WARNING_THRESHOLD=0.8       # Warn at 80% usage
 | `voice_reply` | Comms | Send voice messages |
 | `reminder` | Automation | Set one-time or recurring reminders |
 | `send_file` | Comms | Send files to user |
+| `send_message` | Comms | Send messages to user |
+| `telegram_send` | Comms | Send Telegram messages programmatically |
 
 ## Reminders
 
@@ -186,38 +194,49 @@ Help with git operations: status, commit, push, pull, branch management...
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                         SCALLOPBOT                               │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│    Telegram ──┐                                                  │
-│               ├──▶ GATEWAY ──▶ AGENT ──▶ PROVIDERS              │
-│    CLI ───────┘         │         │         │                    │
-│                         │         │         ├─▶ Anthropic        │
-│                    ┌────┴────┐    │         ├─▶ Moonshot         │
-│                    │ Session │    │         ├─▶ OpenAI           │
-│                    │ Manager │    │         ├─▶ xAI              │
-│                    └─────────┘    │         ├─▶ Groq             │
-│                                   │         └─▶ Ollama           │
-│                              ┌────┴────┐                         │
-│                              │  Tools  │                         │
-│                              │ Memory  │                         │
-│                              │ Skills  │                         │
-│                              └─────────┘                         │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│                            SCALLOPBOT                                │
+├──────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│  Telegram ───┐                                                       │
+│  Discord ────┤                                                       │
+│  WhatsApp ───┤                                                       │
+│  Slack ──────┼──▶ GATEWAY ──▶ AGENT ──▶ ROUTER ──▶ PROVIDERS        │
+│  Signal ─────┤        │         │                    │               │
+│  Matrix ─────┤   ┌────┴────┐    │         ┌──────────┤               │
+│  CLI ────────┤   │ Session │    │         │ Anthropic│               │
+│  API ────────┘   │ Manager │    │         │ Moonshot │               │
+│                  └─────────┘    │         │ OpenAI   │               │
+│                                 │         │ xAI      │               │
+│                            ┌────┴────┐    │ Groq     │               │
+│                            │  Tools  │    │ Ollama   │               │
+│                            │ Memory  │    │ OpenRouter               │
+│                            │ Skills  │    └──────────┘               │
+│                            │ Voice   │                               │
+│                            └─────────┘                               │
+│                                                                      │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
 ## CLI Commands
 
 | Command | Description |
 |---------|-------------|
-| `start` | Start gateway with Telegram |
-| `chat` | Interactive CLI session |
-| `config` | Show current configuration |
-| `skill search <query>` | Search skill registry |
-| `skill install <name>` | Install a skill |
-| `skill list` | List installed skills |
+| `start` | Start gateway with all configured channels |
+| `chat` | Interactive CLI session (supports `-s <id>` to resume) |
+| `config` | Show current configuration (`--json` for JSON output) |
+| `version` | Show version information |
+| `skill search <query>` | Search ClawHub for skills |
+| `skill install <slug>` | Install a skill from ClawHub |
+| `skill uninstall <name>` | Uninstall a skill |
+| `skill list` | List installed skills (`--available` for all) |
+| `skill update [name]` | Update one or all skills |
+| `skill hub <slug>` | Get skill info from ClawHub |
+| `skill versions <slug>` | List available versions |
+| `skill info <name>` | Show details of an installed skill |
+| `migrate run` | Migrate JSONL memories to SQLite |
+| `migrate verify` | Verify migration integrity |
+| `migrate rollback` | Remove SQLite database (requires `--force`) |
 
 ## Telegram Commands
 
@@ -225,9 +244,23 @@ Help with git operations: status, commit, push, pull, branch management...
 |---------|-------------|
 | `/start` | Welcome + onboarding |
 | `/help` | Show all commands |
+| `/stop` | Stop current task |
 | `/settings` | View configuration |
 | `/setup` | Reconfigure bot name/personality |
 | `/new` | Start fresh conversation |
+
+Telegram also supports voice messages (auto-transcribed), document/file uploads, and photo analysis.
+
+## Discord Commands
+
+| Command | Description |
+|---------|-------------|
+| `/ask <message>` | Ask ScallopBot a question |
+| `/reset` | Clear conversation history |
+| `/help` | Show help information |
+| `/status` | Show current session status |
+
+Discord also supports direct message replies and mention-based chat in channels.
 
 ## Deployment
 
@@ -305,13 +338,17 @@ npm run build         # Production build
 
 ## Memory System
 
-ScallopBot automatically:
-- **Extracts facts** from conversations (names, preferences, relationships)
-- **Deduplicates** similar memories to prevent bloat
-- **Prunes** old, low-relevance memories
-- **Searches** using hybrid semantic + keyword matching
+ScallopBot uses a **SQLite-backed memory store** with WAL mode for concurrent access:
 
-Memory is persisted to disk and survives restarts.
+- **Extracts facts** from conversations (names, preferences, relationships)
+- **Hybrid search** — combines semantic (embedding-based) and keyword (BM25) matching
+- **Memory relations** — tracks UPDATES, EXTENDS, and DERIVES relationships between memories
+- **Decay engine** — progressively diminishes importance of old memories
+- **Profile tracking** — maintains user/entity profiles (name, role, relationships)
+- **Temporal grounding** — event dates and document dates for time-aware queries
+- **Categories** — raw, fact, summary, preference, and context memory types
+
+Memory is persisted to disk and survives restarts. Legacy JSONL stores can be migrated to SQLite via `migrate run`.
 
 ## Error Recovery
 
@@ -326,19 +363,27 @@ When things go wrong, ScallopBot handles it gracefully:
 
 ```
 src/
-├── agent/          # Agent loop, session management
-├── channels/       # Telegram, CLI channels
-├── config/         # Configuration schemas
-├── gateway/        # Server orchestration
+├── agent/          # Agent loop, session management, recovery
+├── branching/      # Branching logic
+├── cache/          # Caching layer
+├── channels/       # Telegram, Discord, WhatsApp, Slack, Signal, Matrix, CLI, API
+├── config/         # Configuration schemas (Zod-validated)
+├── dashboard/      # Web dashboard
+├── gateway/        # Server orchestration and initialization
 ├── media/          # PDF, image, URL processing
-├── memory/         # Semantic search, fact extraction
-├── providers/      # LLM provider implementations
-├── reliability/    # Circuit breaker, degradation
-├── routing/        # Cost tracking, model selection
-├── skills/         # Skill loading, registry
-├── tools/          # Tool implementations
+├── memory/         # SQLite-backed semantic search, fact extraction, decay
+├── providers/      # LLM provider implementations (7 providers)
+├── reliability/    # Circuit breaker, graceful degradation
+├── routing/        # Cost tracking, complexity analysis, model selection
+├── scheduler/      # Task scheduling
+├── skills/         # Skill loading, registry, ClawHub integration
+├── tailscale/      # Tailscale VPN integration
+├── tools/          # Tool implementations (12 tools)
+├── triggers/       # Event trigger system
+├── utils/          # Utilities and helpers
 ├── voice/          # STT/TTS support
-└── cli.ts          # CLI entry point
+├── cli.ts          # CLI entry point
+└── index.ts        # Library exports
 ```
 
 ## Contributing
