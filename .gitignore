@@ -43,3 +43,9 @@ data/
 
 # Specs/planning
 specs/
+
+# SSH keys
+hetzner-server
+hetzner-server.pub
+hetzner-server-rsa
+hetzner-server-rsa.pub

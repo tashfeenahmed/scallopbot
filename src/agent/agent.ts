@@ -591,8 +591,20 @@ When you create a file and the user wants to receive it, use the **send_file** t
     try {
       // === ScallopMemoryStore path (preferred) ===
       if (this.scallopStore) {
-        // Tier 1: Ambient profile — always injected, never searched, never decays
+        // Tier 1: Ambient profiles — always injected, never searched, never decays
         const profileManager = this.scallopStore.getProfileManager();
+
+        // Agent identity profile
+        const agentProfile = profileManager.getStaticProfile('agent');
+        if (Object.keys(agentProfile).length > 0) {
+          let agentText = '';
+          for (const [key, value] of Object.entries(agentProfile)) {
+            agentText += `- ${key}: ${value}\n`;
+          }
+          context += `\n\n## YOUR IDENTITY\nThis is who you are. Embody this personality in all responses:\n${agentText}`;
+        }
+
+        // User profile
         const staticProfile = profileManager.getStaticProfile('default');
         if (Object.keys(staticProfile).length > 0) {
           let profileText = '';
