@@ -193,6 +193,61 @@ Help with git operations: status, commit, push, pull, branch management...
 2. Project skills (`./.scallopbot/skills/`)
 3. Bundled skills (built-in)
 
+## Installing Skills from ClawHub
+
+[ClawHub](https://clawhub.ai) is the community skill registry. Browse available skills at https://clawhub.ai/skills
+
+### Search for skills
+
+```bash
+node dist/cli.js skill search git
+```
+
+### View skill details
+
+```bash
+node dist/cli.js skill hub elicitation
+```
+
+### Install a skill
+
+```bash
+# Install by slug (from ClawHub URL: clawhub.ai/username/skill-name → use skill-name)
+node dist/cli.js skill install elicitation
+
+# Install specific version
+node dist/cli.js skill install elicitation -v 1.0.0
+```
+
+### After installing
+
+Restart the bot to load new skills:
+
+```bash
+# If running with PM2
+pm2 restart scallopbot
+
+# If running directly
+# Stop and restart: node dist/cli.js start
+```
+
+### Manage installed skills
+
+```bash
+# List all installed skills
+node dist/cli.js skill list
+
+# Show skill details
+node dist/cli.js skill info elicitation
+
+# Uninstall a skill
+node dist/cli.js skill uninstall elicitation
+
+# Update skills
+node dist/cli.js skill update           # Update all
+node dist/cli.js skill update elicitation  # Update specific
+```
+
 ## Architecture
 
 ```
