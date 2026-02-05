@@ -37,20 +37,36 @@ function outputResult(result: SkillResult): void {
 }
 
 function validatePath(filePath: string, workspaceRoot: string): { valid: boolean; resolved: string; reason?: string } {
-  const resolved = path.resolve(workspaceRoot, filePath);
+  // Handle absolute paths directly, relative paths resolved from workspace
+  const resolved = path.isAbsolute(filePath) ? filePath : path.resolve(workspaceRoot, filePath);
 
-  // Check if path stays within workspace
-  if (!resolved.startsWith(workspaceRoot)) {
-    return { valid: false, resolved, reason: 'Path escapes workspace' };
+  // Allowed directories: workspace, user skills, home directory skills
+  const homeDir = process.env.HOME || process.env.USERPROFILE || '';
+  const allowedRoots = [
+    workspaceRoot,
+    path.join(homeDir, '.scallopbot'),  // User skills directory
+  ];
+
+  // Check if path is within any allowed root
+  const isAllowed = allowedRoots.some(root => resolved.startsWith(root));
+  if (!isAllowed) {
+    return { valid: false, resolved, reason: 'Path outside allowed directories' };
   }
 
-  // Check symlinks
+  // Check symlinks don't escape
   try {
     if (fs.existsSync(resolved)) {
       const realPath = fs.realpathSync(resolved);
-      const realBase = fs.realpathSync(workspaceRoot);
-      if (!realPath.startsWith(realBase)) {
-        return { valid: false, resolved, reason: 'Symlink escapes workspace' };
+      const realAllowed = allowedRoots.some(root => {
+        try {
+          const realRoot = fs.realpathSync(root);
+          return realPath.startsWith(realRoot);
+        } catch {
+          return false;
+        }
+      });
+      if (!realAllowed) {
+        return { valid: false, resolved, reason: 'Symlink escapes allowed directories' };
       }
     }
   } catch {

@@ -303,8 +303,10 @@ export class SkillRegistry {
       lines.push('# Skill Guides');
       lines.push('');
       lines.push(
-        'The following skills provide detailed guidance. When a skill applies to the task, ' +
-          'use read_file to load the full instructions from the SKILL.md path, then follow them.'
+        'These skills provide detailed guidance for specific tasks. ' +
+          'IMPORTANT: If exactly one skill clearly applies to the task, you MUST first use read_file ' +
+          'to load the full SKILL.md from the path shown, then follow its instructions. ' +
+          'Never attempt to use a skill without reading it first.'
       );
       lines.push('');
       lines.push('<available_skills>');
