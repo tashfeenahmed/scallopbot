@@ -103,35 +103,53 @@ export class ProfileManager {
    */
   updateStaticFromFacts(userId: string, facts: ScallopMemoryEntry[]): void {
     for (const fact of facts) {
-      const content = fact.content.toLowerCase();
+      // Only extract profile from user-subject facts
+      const subject = fact.metadata?.subject as string | undefined;
+      if (subject && subject !== 'user') continue;
 
-      // Extract name
-      if (content.startsWith('name:')) {
-        this.setStaticValue(userId, 'name', fact.content.split(':')[1].trim(), fact.confidence);
+      // Skip long content (likely assistant responses stored as facts, not actual extracted facts)
+      if (fact.content.length > 100) continue;
+
+      const content = fact.content;
+      const lower = content.toLowerCase();
+
+      // Extract name: "Name: X", "Name is X", "Named X", "Called X"
+      const nameMatch = lower.match(/^(?:name[:\s]+(?:is\s+)?|named\s+|called\s+)(.+)/i);
+      if (nameMatch) {
+        // Preserve original case from the fact content
+        const nameValue = content.slice(content.length - nameMatch[1].length).trim();
+        this.setStaticValue(userId, 'name', nameValue, fact.confidence);
       }
 
-      // Extract location
-      if (content.startsWith('location:') || content.includes('lives in')) {
-        const location = content.replace(/^location:\s*/i, '').replace(/lives in\s*/i, '').trim();
-        this.setStaticValue(userId, 'location', location, fact.confidence);
+      // Extract location: "Lives in X", "Based in X", "Located in X"
+      // Only match at start of content to avoid false positives from longer text
+      const locationMatch = lower.match(/^(?:lives in|based in|located in)\s+(.+)/i);
+      if (locationMatch) {
+        // Clean extracted location: take only the first phrase (before commas, periods, noise words)
+        const rawLoc = locationMatch[1].trim();
+        const loc = rawLoc.split(/[,.]|\bbtw\b|\bthough\b|\bbut\b/i)[0].trim();
+        if (loc) {
+          this.setStaticValue(userId, 'location', loc, fact.confidence);
+        }
       }
 
       // Extract timezone (if mentioned)
-      const tzMatch = content.match(/timezone[:\s]+([a-z_\/]+)/i);
+      const tzMatch = lower.match(/timezone[:\s]+([a-z_\/]+)/i);
       if (tzMatch) {
         this.setStaticValue(userId, 'timezone', tzMatch[1], fact.confidence);
       }
 
       // Extract language preference
-      const langMatch = content.match(/(?:speaks?|language)[:\s]+([a-z]+)/i);
+      const langMatch = lower.match(/(?:speaks?|language)[:\s]+([a-z]+)/i);
       if (langMatch) {
         this.setStaticValue(userId, 'language', langMatch[1], fact.confidence);
       }
 
-      // Extract occupation
-      if (content.startsWith('occupation:') || content.includes('works as')) {
-        const occupation = content.replace(/^occupation:\s*/i, '').replace(/works as\s*/i, '').trim();
-        this.setStaticValue(userId, 'occupation', occupation, fact.confidence);
+      // Extract occupation: "Occupation: X", "Works as X", "Works at X"
+      // Require start-of-string to avoid false positives like "cron job"
+      const occupationMatch = lower.match(/^(?:occupation[:\s]+|works (?:as|at)\s+|job is\s+)(.+)/i);
+      if (occupationMatch) {
+        this.setStaticValue(userId, 'occupation', occupationMatch[1].trim(), fact.confidence);
       }
     }
   }

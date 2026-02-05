@@ -123,6 +123,12 @@ export class Gateway {
     });
     this.logger.info({ dbPath, count: this.scallopMemoryStore.getCount() }, 'ScallopMemory initialized');
 
+    // Backfill default user profile from existing facts (one-time, idempotent)
+    const backfillResult = this.scallopMemoryStore.backfillDefaultProfile();
+    if (backfillResult.fieldsPopulated > 0) {
+      this.logger.info({ fieldsPopulated: backfillResult.fieldsPopulated }, 'Default user profile backfilled');
+    }
+
     // Legacy MemoryStore/HybridSearch kept for backward compat (HotCollector, fact extractor dedup)
     const memoryFilePath = this.config.memory.persist
       ? path.join(this.config.agent.workspace, this.config.memory.filePath)

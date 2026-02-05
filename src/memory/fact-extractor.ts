@@ -511,8 +511,8 @@ export class LLMFactExtractor {
 
     if (this.scallopStore) {
       const scallopCategory = this.mapToScallopCategory(fact.category);
-      // Identity facts (personal, relationship) get higher importance to resist decay
-      const isIdentityFact = fact.category === 'relationship' || fact.category === 'personal';
+      // Identity facts (personal, relationship, location) get higher importance to resist decay
+      const isIdentityFact = fact.category === 'relationship' || fact.category === 'personal' || fact.category === 'location';
       await this.scallopStore.add({
         userId,
         content: searchableContent,
@@ -738,8 +738,8 @@ export class LLMFactExtractor {
       if (this.scallopStore) {
         // Map fact category to ScallopMemory category
         const scallopCategory = this.mapToScallopCategory(fact.category);
-        // Identity facts (personal, relationship) get higher importance to resist decay
-        const isIdentityFact = fact.category === 'relationship' || fact.category === 'personal';
+        // Identity facts (personal, relationship, location) get higher importance to resist decay
+        const isIdentityFact = fact.category === 'relationship' || fact.category === 'personal' || fact.category === 'location';
         await this.scallopStore.add({
           userId,
           content: searchableContent,

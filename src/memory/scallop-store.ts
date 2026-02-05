@@ -184,8 +184,12 @@ export class ScallopMemoryStore {
       }
     }
 
-    // Update user profile
+    // Update user profiles (both per-session and canonical "default" for cross-session access)
     this.profileManager.updateDynamicFromConversation(userId, content);
+    this.profileManager.updateStaticFromFacts(userId, [memory]);
+    if (userId !== 'default') {
+      this.profileManager.updateStaticFromFacts('default', [memory]);
+    }
 
     return memory;
   }
@@ -518,6 +522,34 @@ export class ScallopMemoryStore {
    */
   getDatabase(): ScallopDatabase {
     return this.db;
+  }
+
+  /**
+   * Backfill the "default" user profile from existing facts across all sessions.
+   * Should be called once on startup to populate the profile for pre-existing data.
+   */
+  backfillDefaultProfile(): { fieldsPopulated: number } {
+    const existing = this.profileManager.getStaticProfile('default');
+    if (Object.keys(existing).length > 0) {
+      this.logger.debug({ existingFields: Object.keys(existing) }, 'Default profile already exists, skipping backfill');
+      return { fieldsPopulated: 0 };
+    }
+
+    // Scan all fact memories for profile-worthy content
+    const allFacts = this.db.getAllMemories({ minProminence: 0.1 });
+    const userFacts = allFacts.filter(
+      (m) => m.category === 'fact' && (!m.metadata?.subject || m.metadata.subject === 'user')
+    );
+
+    this.logger.info({ totalMemories: allFacts.length, userFacts: userFacts.length }, 'Backfilling default profile from existing facts');
+
+    this.profileManager.updateStaticFromFacts('default', userFacts);
+    const populated = this.profileManager.getStaticProfile('default');
+    const count = Object.keys(populated).length;
+
+    this.logger.info({ profile: populated, fieldsPopulated: count }, 'Default profile backfill complete');
+
+    return { fieldsPopulated: count };
   }
 
   /**
