@@ -30,6 +30,11 @@ export type FactCategory =
   | 'general';    // Other facts
 
 /**
+ * Action types for extracted items
+ */
+export type FactAction = 'fact' | 'forget' | 'correction' | 'preference_update';
+
+/**
  * A fact extracted by the LLM
  */
 export interface ExtractedFactWithEmbedding {
@@ -38,6 +43,12 @@ export interface ExtractedFactWithEmbedding {
   category: FactCategory;
   confidence?: number;
   embedding?: number[];
+  /** Action type - defaults to 'fact' for regular storage */
+  action?: FactAction;
+  /** For corrections: the old value being replaced */
+  oldValue?: string;
+  /** For preference updates: what this preference replaces */
+  replaces?: string;
 }
 
 /**
@@ -47,6 +58,7 @@ export interface FactExtractionResult {
   facts: ExtractedFactWithEmbedding[];
   factsStored: number;
   factsUpdated: number;
+  factsDeleted: number;
   duplicatesSkipped: number;
   error?: string;
 }
@@ -84,7 +96,13 @@ export interface LLMFactExtractorOptions {
 /**
  * The prompt used to extract facts from messages
  */
-const FACT_EXTRACTION_PROMPT = `You are a fact extraction system. Extract factual information from the user's message.
+const FACT_EXTRACTION_PROMPT = `You are a fact extraction system. Extract factual information AND detect memory actions from the user's message.
+
+ACTION TYPES:
+- "fact" (default): Store as new knowledge
+- "forget": User wants to REMOVE stored information (forget, delete, remove, don't remember)
+- "correction": User is CORRECTING previous information (actually, no I meant, that's wrong)
+- "preference_update": User is explicitly stating a preference comparison (prefer X over Y)
 
 Rules:
 1. Only extract concrete facts, not opinions or temporary states
@@ -95,6 +113,7 @@ Rules:
 3. Categorize each fact: personal, work, location, preference, relationship, project, general
 4. Be concise - extract the core fact without filler words
 5. If a message references something from context (like "that's my office"), use the context to form a complete fact
+6. DETECT ACTIONS: Look for forget requests, corrections, and preference updates
 
 CRITICAL - Relationship facts:
 When the user says "My [relationship] is [name]" (wife, husband, flatmate, friend, etc.):
@@ -105,36 +124,44 @@ CRITICAL - Agent facts:
 When the user configures the AI assistant (you/your/bot/assistant), use subject: "agent":
 - "Your name is Charlie" → { "content": "Name is Charlie", "subject": "agent", "category": "personal" }
 - "Be witty and casual" → { "content": "Personality is witty and casual", "subject": "agent", "category": "preference" }
-- "You should always respond in bullet points" → { "content": "Should respond in bullet points", "subject": "agent", "category": "preference" }
 
-Examples:
+CRITICAL - Forget requests:
+When user asks to forget/delete/remove information:
+- "Forget that I work at Microsoft" → { "action": "forget", "content": "Works at Microsoft", "subject": "user", "category": "work" }
+- "Delete my location data" → { "action": "forget", "content": "location", "subject": "user", "category": "location" }
+- "Don't remember my wife's name" → { "action": "forget", "content": "Wife", "subject": "user", "category": "relationship" }
+
+CRITICAL - Corrections:
+When user corrects previous information (actually, no, that's wrong, I meant):
+- "Actually I live in Dublin now, not Wicklow" → { "action": "correction", "content": "Lives in Dublin", "old_value": "Wicklow", "subject": "user", "category": "location" }
+- "No, I said Python not JavaScript" → { "action": "correction", "content": "Prefers Python", "old_value": "JavaScript", "subject": "user", "category": "preference" }
+- "That's wrong, my wife's name is Hayat not Sarah" → { "action": "correction", "content": "Wife is Hayat", "old_value": "Sarah", "subject": "user", "category": "relationship" }
+
+CRITICAL - Preference updates:
+When user explicitly compares preferences (prefer X over Y, like X better than Y):
+- "I prefer dark mode over light mode" → { "action": "preference_update", "content": "Prefers dark mode", "replaces": "light mode", "subject": "user", "category": "preference" }
+- "I like Python better than JavaScript for scripting" → { "action": "preference_update", "content": "Prefers Python for scripting", "replaces": "JavaScript", "subject": "user", "category": "preference" }
+
+Regular fact examples (action defaults to "fact"):
 - "I work at Microsoft" → { "content": "Works at Microsoft", "subject": "user", "category": "work" }
 - "My wife is Hayat" → { "content": "Wife is Hayat", "subject": "user", "category": "relationship" }
-- "She is a TikToker" (context: wife is Hayat) → { "content": "Is a TikToker", "subject": "Hayat", "category": "work" }
-- "My wife Hayat is a TikToker" → TWO facts:
-  { "content": "Wife is Hayat", "subject": "user", "category": "relationship" }
-  { "content": "Is a TikToker", "subject": "Hayat", "category": "work" }
-- "My flatmate Hamza works at Google" → TWO facts:
-  { "content": "Flatmate is Hamza", "subject": "user", "category": "relationship" }
-  { "content": "Works at Google", "subject": "Hamza", "category": "work" }
 - "I live in Wicklow" → { "content": "Lives in Wicklow", "subject": "user", "category": "location" }
-- "Yes that's my office" (context: One Microsoft Court) → { "content": "Office is One Microsoft Court", "subject": "user", "category": "location" }
-- "I prefer dark mode" → { "content": "Prefers dark mode", "subject": "user", "category": "preference" }
-- "Your name is Charlie and be witty" → TWO facts:
-  { "content": "Name is Charlie", "subject": "agent", "category": "personal" }
-  { "content": "Personality is witty", "subject": "agent", "category": "preference" }
 
 IMPORTANT: Extract ALL facts from a message. If someone mentions a relationship AND another fact about that person, extract BOTH.
 
 Respond with JSON only:
 {
   "facts": [
-    { "content": "fact text", "subject": "user|agent|name", "category": "category", "confidence": 0.0-1.0 }
+    { "content": "fact text", "subject": "user|agent|name", "category": "category", "confidence": 0.0-1.0, "action": "fact|forget|correction|preference_update", "old_value": "optional", "replaces": "optional" }
   ]
 }
 
-Set confidence based on how certain the extraction is (0.9+ for explicit statements, 0.6-0.8 for inferred facts).
-If no facts can be extracted, return: { "facts": [] }`;
+Notes:
+- "action" defaults to "fact" if not specified
+- "old_value" only for corrections
+- "replaces" only for preference_update
+- Set confidence based on how certain the extraction is (0.9+ for explicit statements, 0.6-0.8 for inferred facts)
+- If no facts can be extracted, return: { "facts": [] }`;
 
 /**
  * LLM-based fact extractor with semantic deduplication
@@ -187,6 +214,7 @@ export class LLMFactExtractor {
       facts: [],
       factsStored: 0,
       factsUpdated: 0,
+      factsDeleted: 0,
       duplicatesSkipped: 0,
     };
 
@@ -213,11 +241,22 @@ export class LLMFactExtractor {
         return result;
       }
 
-      result.facts = parsed.facts.map((f: { content: string; subject: string; category?: string; confidence?: number }) => ({
+      result.facts = parsed.facts.map((f: {
+        content: string;
+        subject: string;
+        category?: string;
+        confidence?: number;
+        action?: string;
+        old_value?: string;
+        replaces?: string;
+      }) => ({
         content: f.content,
         subject: f.subject || 'user',
         category: (f.category as FactCategory) || 'general',
         confidence: typeof f.confidence === 'number' ? f.confidence : undefined,
+        action: (f.action as FactAction) || 'fact',
+        oldValue: f.old_value,
+        replaces: f.replaces,
       }));
 
       this.logger.debug(
@@ -229,12 +268,14 @@ export class LLMFactExtractor {
       const processResults = await this.processFactsBatch(result.facts, userId, message, sourceMessageId);
       result.factsStored = processResults.stored;
       result.factsUpdated = processResults.updated;
+      result.factsDeleted = processResults.deleted;
       result.duplicatesSkipped = processResults.duplicates;
 
       this.logger.info(
         {
           stored: result.factsStored,
           updated: result.factsUpdated,
+          deleted: result.factsDeleted,
           skipped: result.duplicatesSkipped,
         },
         'Fact extraction complete'
@@ -280,18 +321,50 @@ export class LLMFactExtractor {
     userId: string,
     sourceMessage?: string,
     sourceMessageId?: string
-  ): Promise<{ stored: number; updated: number; duplicates: number }> {
-    const result = { stored: 0, updated: 0, duplicates: 0 };
+  ): Promise<{ stored: number; updated: number; duplicates: number; deleted: number }> {
+    const result = { stored: 0, updated: 0, duplicates: 0, deleted: 0 };
 
     if (facts.length === 0) {
       return result;
     }
 
+    // Step 0: Route action-based items first (forget, correction, preference_update)
+    const regularFacts: ExtractedFactWithEmbedding[] = [];
+
+    for (const fact of facts) {
+      const action = fact.action || 'fact';
+
+      if (action === 'forget') {
+        // Handle forget request - delete matching memories
+        const forgetResult = await this.handleForgetRequest(fact, userId);
+        result.deleted += forgetResult.deleted;
+        continue;
+      }
+
+      if (action === 'correction' || action === 'preference_update') {
+        // Handle correction - supersede old and store new
+        await this.handleCorrection(fact, userId, sourceMessage, sourceMessageId);
+        result.updated++;
+        continue;
+      }
+
+      // Regular fact - continue to normal processing
+      regularFacts.push(fact);
+    }
+
+    // If no regular facts remain, we're done
+    if (regularFacts.length === 0) {
+      return result;
+    }
+
+    // Continue with regular fact processing
+    const factsToProcess = regularFacts;
+
     // Apply resource limit: cap facts per message
-    const limitedFacts = facts.slice(0, this.resourceLimits.maxFactsPerMessage);
-    if (facts.length > this.resourceLimits.maxFactsPerMessage) {
+    const limitedFacts = factsToProcess.slice(0, this.resourceLimits.maxFactsPerMessage);
+    if (factsToProcess.length > this.resourceLimits.maxFactsPerMessage) {
       this.logger.warn(
-        { total: facts.length, processed: limitedFacts.length },
+        { total: factsToProcess.length, processed: limitedFacts.length },
         'Truncated facts due to resource limits'
       );
     }
@@ -526,6 +599,92 @@ export class LLMFactExtractor {
   }
 
   /**
+   * Handle a forget request - delete matching memories
+   */
+  private async handleForgetRequest(
+    request: ExtractedFactWithEmbedding,
+    userId: string
+  ): Promise<{ deleted: number }> {
+    // Build search query - include subject if not 'user'
+    let searchQuery = request.content;
+    if (request.subject && request.subject !== 'user') {
+      searchQuery = `${request.subject} ${request.content}`;
+    }
+
+    // Search for matching memories
+    const matches = await this.scallopStore.search(searchQuery, {
+      userId,
+      limit: 10,
+      minProminence: 0.05, // Include low-prominence memories too
+    });
+
+    let deleted = 0;
+    for (const match of matches) {
+      // Only delete if semantic similarity is high enough
+      if (match.score > 0.5) {
+        this.scallopStore.delete(match.memory.id);
+        deleted++;
+        this.logger.info(
+          { id: match.memory.id, content: match.memory.content, score: match.score },
+          'Memory deleted per user forget request'
+        );
+      }
+    }
+
+    if (deleted === 0) {
+      this.logger.debug({ searchQuery }, 'No matching memories found to forget');
+    }
+
+    return { deleted };
+  }
+
+  /**
+   * Handle a correction - supersede old memory and store new one
+   */
+  private async handleCorrection(
+    correction: ExtractedFactWithEmbedding,
+    userId: string,
+    sourceMessage?: string,
+    sourceMessageId?: string
+  ): Promise<{ updated: boolean; newMemoryId?: string }> {
+    // Build search query from old_value if available, otherwise use content
+    const searchQuery = correction.oldValue || correction.replaces || correction.content;
+
+    // Find memories that might be corrected
+    const candidates = await this.scallopStore.search(searchQuery, {
+      userId,
+      limit: 5,
+      minProminence: 0.1,
+    });
+
+    // Supersede matching memories
+    let superseded = 0;
+    for (const candidate of candidates) {
+      if (candidate.score > 0.4) {
+        this.scallopStore.update(candidate.memory.id, { isLatest: false });
+        superseded++;
+        this.logger.info(
+          { oldId: candidate.memory.id, oldContent: candidate.memory.content, newContent: correction.content },
+          'Memory superseded by correction'
+        );
+      }
+    }
+
+    // Store the correction as new fact with high confidence
+    const newMemory = await this.storeNewFact(
+      {
+        ...correction,
+        confidence: 0.95, // High confidence for explicit corrections
+      },
+      userId,
+      sourceMessage,
+      sourceMessageId
+    );
+
+    return { updated: superseded > 0, newMemoryId: newMemory?.id };
+  }
+
+  /**
    * LLM-based memory consolidation + profile extraction in a single API call.
    * 1. Finds and supersedes outdated memories
    * 2. Updates user profile (name, location, personality, mood, focus, etc.)
@@ -582,11 +741,12 @@ export class LLMFactExtractor {
 
     const newFactsList = storedFacts.map((f, i) => `${i + 1}. "${f}"`).join('\n');
 
-    const prompt = `You are a memory manager. Given new facts extracted from a user message, do THREE things:
+    const prompt = `You are a memory manager. Given new facts extracted from a user message, do FOUR things:
 
 1. CONSOLIDATE: Which existing memories are superseded (replaced/updated) by the new facts?
 2. USER PROFILE: Update user profile based on the new facts AND the original message.
 3. AGENT PROFILE: If the user is telling the AI about itself (name, personality, behavior), update the agent profile.
+4. PREFERENCES LEARNED: Extract preference patterns from the message (especially from corrections or comparisons).
 ${sourceContext}
 NEW FACTS STORED:
 ${newFactsList}
@@ -609,14 +769,21 @@ USER PROFILE FIELDS (set any that apply):
 AGENT PROFILE FIELDS (only when user configures the bot):
 - name, personality, and any other relevant fields
 
+PREFERENCES LEARNED:
+- When user says "I prefer X over Y" or corrects from Y to X, record the preference
+- When user shows a pattern (e.g., always chooses concise responses), record it
+- Format: { "domain": "category", "prefers": "X", "over": "Y", "strength": 0.5-1.0 }
+- Domains: communication, technology, lifestyle, work, food, entertainment, etc.
+
 RULES:
 - superseded: IDs of memories replaced by new facts. Empty array if none.
 - user_profile: Only fields that CHANGED or are NEW based on the message. Empty object if no updates.
 - agent_profile: Only if user is addressing the bot about its identity. Empty object if not.
+- preferences_learned: Array of preference objects. Empty array if no clear preferences.
 - Do NOT echo back unchanged profile values.
 
 Respond with JSON only:
-{"superseded": [], "user_profile": {}, "agent_profile": {}}`;
+{"superseded": [], "user_profile": {}, "agent_profile": {}, "preferences_learned": []}`;
 
     try {
       const response = await this.provider.complete({
@@ -637,6 +804,12 @@ Respond with JSON only:
         superseded?: string[];
         user_profile?: Record<string, string>;
         agent_profile?: Record<string, string>;
+        preferences_learned?: Array<{
+          domain?: string;
+          prefers: string;
+          over: string;
+          strength?: number;
+        }>;
       };
 
       // 1. Supersede outdated memories
@@ -669,6 +842,50 @@ Respond with JSON only:
           if (typeof value === 'string' && value.trim()) {
             profileManager.setStaticValue('agent', key, value.trim());
             this.logger.info({ key, value: value.trim() }, 'Agent profile updated via LLM');
+          }
+        }
+      }
+
+      // 4. Store learned preferences
+      if (parsed.preferences_learned && Array.isArray(parsed.preferences_learned) && parsed.preferences_learned.length > 0) {
+        for (const pref of parsed.preferences_learned) {
+          if (pref.prefers && pref.over) {
+            // First, check if a similar preference already exists and supersede it
+            const existingPrefs = await this.scallopStore.search(`Prefers ${pref.over}`, {
+              userId,
+              limit: 3,
+              minProminence: 0.1,
+            });
+            for (const existing of existingPrefs) {
+              if (existing.score > 0.6 && existing.memory.category === 'preference') {
+                this.scallopStore.update(existing.memory.id, { isLatest: false });
+                this.logger.debug(
+                  { oldPref: existing.memory.content },
+                  'Old preference superseded by learned preference'
+                );
+              }
+            }
+
+            // Store the new preference
+            await this.scallopStore.add({
+              userId,
+              content: `Prefers ${pref.prefers} over ${pref.over}`,
+              category: 'preference',
+              importance: 7, // High importance for explicit preferences
+              confidence: pref.strength || 0.8,
+              metadata: {
+                preferenceType: 'learned',
+                domain: pref.domain || 'general',
+                prefers: pref.prefers,
+                over: pref.over,
+                learnedFrom: 'feedback',
+                extractedAt: new Date().toISOString(),
+              },
+            });
+            this.logger.info(
+              { prefers: pref.prefers, over: pref.over, domain: pref.domain },
+              'Preference learned from user feedback'
+            );
           }
         }
       }
