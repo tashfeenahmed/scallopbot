@@ -270,7 +270,7 @@ export class Agent {
     // Queue LLM-based fact extraction (async, non-blocking)
     // Pass the last assistant response as context for references like "that's my office"
     if (this.factExtractor) {
-      const userId = session.metadata?.userId || sessionId;
+      const userId = 'default'; // Single-user agent: all memories under canonical userId
       this.factExtractor.queueForExtraction(
         userMessage,
         userId,
@@ -592,11 +592,8 @@ When you create a file and the user wants to receive it, use the **send_file** t
       // === ScallopMemoryStore path (preferred) ===
       if (this.scallopStore) {
         // Tier 1: Ambient profile — always injected, never searched, never decays
-        // Try canonical "default" profile first (cross-session), fall back to session-specific
         const profileManager = this.scallopStore.getProfileManager();
-        const defaultProfile = profileManager.getStaticProfile('default');
-        const sessionProfile = profileManager.getStaticProfile(sessionId);
-        const staticProfile = { ...defaultProfile, ...sessionProfile };
+        const staticProfile = profileManager.getStaticProfile('default');
         if (Object.keys(staticProfile).length > 0) {
           let profileText = '';
           for (const [key, value] of Object.entries(staticProfile)) {
@@ -607,7 +604,7 @@ When you create a file and the user wants to receive it, use the **send_file** t
 
         // Tier 2: Query-relevant facts via search
         // Phase 1: Get key user facts (high prominence, no query needed)
-        const userFacts = this.scallopStore.getByUser(sessionId, {
+        const userFacts = this.scallopStore.getByUser('default', {
           minProminence: 0.3,
           isLatest: true,
           limit: 20,
@@ -615,7 +612,7 @@ When you create a file and the user wants to receive it, use the **send_file** t
 
         // Phase 2: Get query-relevant facts via hybrid search
         const relevantResults = await this.scallopStore.search(userMessage, {
-          userId: sessionId,
+          userId: 'default',
           minProminence: 0.1,
           limit: 10,
         });

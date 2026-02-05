@@ -513,13 +513,18 @@ export class LLMFactExtractor {
       const scallopCategory = this.mapToScallopCategory(fact.category);
       // Identity facts (personal, relationship, location) get higher importance to resist decay
       const isIdentityFact = fact.category === 'relationship' || fact.category === 'personal' || fact.category === 'location';
-      await this.scallopStore.add({
+      const newMemory = await this.scallopStore.add({
         userId,
         content: searchableContent,
         category: scallopCategory,
         importance: isIdentityFact ? 8 : 5,
         confidence,
         metadata: provenance,
+      });
+
+      // Async LLM-based consolidation: find and supersede outdated memories
+      this.consolidateMemory(newMemory.id, userId, searchableContent).catch((err) => {
+        this.logger.warn({ error: (err as Error).message }, 'Memory consolidation failed');
       });
     } else {
       this.memoryStore.add({
@@ -536,6 +541,81 @@ export class LLMFactExtractor {
         tags: [fact.category, fact.subject === 'user' ? 'about-user' : `about-${fact.subject}`],
         embedding: fact.embedding,
       });
+    }
+  }
+
+  /**
+   * LLM-based memory consolidation: searches for existing memories that should be
+   * superseded by a newly stored fact and marks them as not-latest.
+   * Runs async (fire-and-forget) so it never blocks the agent loop.
+   */
+  private async consolidateMemory(newMemoryId: string, userId: string, content: string): Promise<void> {
+    if (!this.scallopStore) return;
+
+    // Search for similar existing memories
+    const similar = await this.scallopStore.search(content, {
+      userId,
+      minProminence: 0.05,
+      limit: 8,
+    });
+
+    // Filter out the just-stored memory and keep only real candidates
+    const candidates = similar.filter(s => s.memory.id !== newMemoryId && s.memory.isLatest);
+    if (candidates.length === 0) return;
+
+    // Build a concise prompt for the LLM
+    const candidateList = candidates.map((c, i) =>
+      `${i + 1}. [${c.memory.id}] "${c.memory.content}"`
+    ).join('\n');
+
+    const prompt = `You are a memory manager. A new fact has been stored. Determine which existing memories are now OUTDATED because the new fact replaces, updates, or is a more complete version of them.
+
+NEW FACT: "${content}"
+
+EXISTING MEMORIES:
+${candidateList}
+
+Rules:
+- Return ONLY IDs of memories that are SUPERSEDED (replaced/updated) by the new fact
+- "I like gym" is superseded by "I enjoy gym, hiking and swimming" (the new one is more complete)
+- "Lives in Metropolis" is superseded by "Lives in Springfield" (location changed)
+- Do NOT mark memories about different topics as superseded
+- If nothing is superseded, return empty array
+
+Respond with JSON only: {"superseded": ["id1", "id2"]}`;
+
+    try {
+      const response = await this.provider.complete({
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0.1,
+        maxTokens: 200,
+      });
+
+      const responseText = Array.isArray(response.content)
+        ? response.content.map(block => 'text' in block ? block.text : '').join('')
+        : String(response.content);
+
+      // Parse the JSON response
+      const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) return;
+
+      const parsed = JSON.parse(jsonMatch[0]) as { superseded?: string[] };
+      if (!parsed.superseded || !Array.isArray(parsed.superseded) || parsed.superseded.length === 0) return;
+
+      // Validate IDs against actual candidates
+      const validIds = new Set(candidates.map(c => c.memory.id));
+      const toSupersede = parsed.superseded.filter(id => validIds.has(id));
+
+      // Mark superseded memories as not-latest
+      for (const id of toSupersede) {
+        this.scallopStore.update(id, { isLatest: false });
+        this.logger.info(
+          { supersededId: id, newMemoryId, newContent: content.substring(0, 80) },
+          'Memory superseded by newer fact'
+        );
+      }
+    } catch (err) {
+      this.logger.debug({ error: (err as Error).message }, 'Memory consolidation LLM call failed');
     }
   }
 
@@ -740,7 +820,7 @@ export class LLMFactExtractor {
         const scallopCategory = this.mapToScallopCategory(fact.category);
         // Identity facts (personal, relationship, location) get higher importance to resist decay
         const isIdentityFact = fact.category === 'relationship' || fact.category === 'personal' || fact.category === 'location';
-        await this.scallopStore.add({
+        const newMemory = await this.scallopStore.add({
           userId,
           content: searchableContent,
           category: scallopCategory,
@@ -753,6 +833,11 @@ export class LLMFactExtractor {
           },
         });
         this.logger.debug({ fact: searchableContent, subject: fact.subject, store: 'scallop' }, 'Stored new fact in ScallopMemory');
+
+        // Async LLM-based consolidation: find and supersede outdated memories
+        this.consolidateMemory(newMemory.id, userId, searchableContent).catch((err) => {
+          this.logger.warn({ error: (err as Error).message }, 'Memory consolidation failed');
+        });
       } else {
         // Legacy storage
         this.memoryStore.add({
