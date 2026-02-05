@@ -148,6 +148,10 @@ function formatResults(results: { memory: ScallopMemoryEntry; score: number }[])
     lines.push(`--- Result ${index + 1} (score: ${result.score.toFixed(3)}) ---`);
     lines.push(`Category: ${m.category}`);
     lines.push(`Content: ${m.content}`);
+    lines.push(`Stored: ${new Date(m.documentDate).toISOString()}`);
+    if (m.eventDate) {
+      lines.push(`Event date: ${new Date(m.eventDate).toISOString()}`);
+    }
     lines.push(`Prominence: ${m.prominence.toFixed(2)}`);
     if (m.metadata?.subject) {
       lines.push(`Subject: ${m.metadata.subject as string}`);
