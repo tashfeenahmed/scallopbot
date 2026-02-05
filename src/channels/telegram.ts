@@ -803,7 +803,10 @@ export class TelegramChannel {
       return;
     }
 
-    this.logger.info({ userId, message: messageText.substring(0, 100) }, 'Received message');
+    // Extract reply context if user is replying to a previous message
+    const fullMessage = this.buildMessageWithReplyContext(ctx, messageText);
+
+    this.logger.info({ userId, message: messageText.substring(0, 100), hasReply: fullMessage !== messageText }, 'Received message');
 
     const typingInterval = this.startTypingIndicator(ctx);
 
@@ -816,7 +819,7 @@ export class TelegramChannel {
       // Check if user wants to stop
       const shouldStop = () => this.stopRequests.has(userId);
 
-      const result = await this.agent.processMessage(sessionId, messageText, undefined, onProgress, shouldStop);
+      const result = await this.agent.processMessage(sessionId, fullMessage, undefined, onProgress, shouldStop);
 
       // Clear stop request after processing
       this.stopRequests.delete(userId);
@@ -848,6 +851,25 @@ export class TelegramChannel {
       this.logger.error({ userId, error: err.message }, 'Failed to process message');
       await ctx.reply('Sorry, I encountered an error processing your message. Please try again.');
     }
+  }
+
+  /**
+   * Build message text with reply context when user replies to a previous message.
+   * Prepends the quoted message so the agent has full context.
+   */
+  private buildMessageWithReplyContext(ctx: Context, messageText: string): string {
+    const reply = ctx.message?.reply_to_message;
+    if (!reply) return messageText;
+
+    // Extract text from the replied-to message
+    const replyText = reply.text || reply.caption || '';
+    if (!replyText) return messageText;
+
+    // Identify who sent the replied-to message
+    const isBot = reply.from?.is_bot && reply.from?.id === this.bot.botInfo?.id;
+    const sender = isBot ? 'You (assistant)' : (reply.from?.first_name || 'User');
+
+    return `[Replying to ${sender}: "${replyText}"]\n\n${messageText}`;
   }
 
   private startTypingIndicator(ctx: Context): NodeJS.Timeout {
