@@ -231,3 +231,5 @@ export { KokoroTTS, checkKokoroRequirements, KOKORO_VOICES } from './tts/local/k
 export { PiperTTS, downloadPiperModel } from './tts/local/piper.js';
 export { MacOSTTS } from './tts/local/macos.js';
 export { OpenAITTS } from './tts/cloud/openai.js';
+// Voice attachment utilities
+export { addPendingVoiceAttachment, getPendingVoiceAttachments, cleanupVoiceAttachments } from './attachments.js';
