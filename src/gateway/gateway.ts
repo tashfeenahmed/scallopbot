@@ -774,15 +774,13 @@ export class Gateway {
 
       try {
         // Process through agent using the existing session
+        // Note: onProgress is empty to avoid sending thinking to Telegram (same as regular messages)
         const result = await this.agent.processMessage(
           reminder.sessionId,
           `[SCHEDULED REMINDER - Execute this task now]: ${reminder.message}`,
           undefined,
-          async (update) => {
-            // Send progress updates to user
-            if (update.type === 'thinking' && update.message) {
-              await triggerSource.sendMessage(rawUserId, update.message);
-            }
+          async (_update) => {
+            // Thinking stays enabled in the agent but is not surfaced to Telegram users
           }
         );
 
