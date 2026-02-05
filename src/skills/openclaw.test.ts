@@ -622,20 +622,23 @@ New content.
     });
   });
 
-  describe('generateSkillPrompt (rich)', () => {
-    it('should include full skill instructions when enabled', () => {
-      const prompt = registry.generateSkillPrompt({ includeInstructions: true });
+  describe('generateSkillPrompt (lazy-loading)', () => {
+    it('should include skill path for lazy-loading instead of full content', () => {
+      const prompt = registry.generateSkillPrompt();
 
-      // Documentation skills (like available-skill) always show their content
-      expect(prompt).toContain('Available skill content');
+      // Documentation skills use lazy-loading - path included, not full content
+      expect(prompt).toContain('available_skills');
+      expect(prompt).toContain('available-skill');
+      expect(prompt).toContain('SKILL.md'); // Path to the skill file
+      expect(prompt).not.toContain('Available skill content'); // Content NOT included
     });
 
-    it('should always include documentation skill content (they ARE instructions)', () => {
-      const prompt = registry.generateSkillPrompt({ includeInstructions: false });
+    it('should include instructions to read SKILL.md when skill applies', () => {
+      const prompt = registry.generateSkillPrompt();
 
-      // Documentation skills always show content regardless of includeInstructions flag
-      // because their content IS their purpose (they have no executable scripts)
-      expect(prompt).toContain('Available skill content');
+      // Should tell agent to use read_file to load full instructions
+      expect(prompt).toContain('read_file');
+      expect(prompt).toContain('SKILL.md');
     });
   });
 });

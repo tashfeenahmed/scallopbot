@@ -295,36 +295,30 @@ export class SkillRegistry {
       }
     }
 
-    // Section 2: Documentation skills (provide guidance, use bash/browser to execute)
+    // Section 2: Documentation skills (lazy-loaded - agent reads SKILL.md when needed)
     if (documentationSkills.length > 0) {
       if (executableSkills.length > 0) {
         lines.push('');
       }
       lines.push('# Skill Guides');
       lines.push('');
-      lines.push('The following skills provide guidance. Use bash or browser tools to execute tasks:');
+      lines.push(
+        'The following skills provide detailed guidance. When a skill applies to the task, ' +
+          'use read_file to load the full instructions from the SKILL.md path, then follow them.'
+      );
       lines.push('');
+      lines.push('<available_skills>');
 
       for (const skill of documentationSkills) {
         const emoji = skill.frontmatter.metadata?.openclaw?.emoji || '';
-        lines.push(`## ${skill.name}${emoji ? ` ${emoji}` : ''}`);
         lines.push('');
+        lines.push(`${skill.name}${emoji ? ` ${emoji}` : ''}`);
         lines.push(skill.description);
-        lines.push('');
-
-        // Include full content for documentation skills (they ARE the instructions)
-        if (skill.content.trim()) {
-          const content = skill.content.trim();
-          // Documentation skills need enough room for full command references
-          const maxDocLength = 6000;
-          const truncated =
-            content.length > maxDocLength
-              ? content.slice(0, maxDocLength) + '\n\n...(truncated)'
-              : content;
-          lines.push(truncated);
-          lines.push('');
-        }
+        lines.push(skill.path);
       }
+
+      lines.push('');
+      lines.push('</available_skills>');
     }
 
     return lines.join('\n');
