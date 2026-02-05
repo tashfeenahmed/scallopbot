@@ -1,6 +1,6 @@
 import type { Tool, ToolRegistry, ToolCategory, ToolPolicy, ToolGroup } from './types.js';
 import type { ToolDefinition } from '../providers/types.js';
-import type { MemoryStore, HybridSearch } from '../memory/index.js';
+import type { MemoryStore, HybridSearch, ScallopMemoryStore } from '../memory/index.js';
 import type { SkillRegistry } from '../skills/registry.js';
 import type { VoiceManager } from '../voice/index.js';
 import type { ReminderCallback } from './reminder.js';
@@ -146,6 +146,8 @@ export interface ToolRegistryOptions {
   memoryStore?: MemoryStore;
   /** Hybrid search instance for memory tools */
   hybridSearch?: HybridSearch;
+  /** ScallopMemoryStore (SQLite) - preferred backend for memory tools */
+  scallopStore?: ScallopMemoryStore;
   /** Whether to include memory tools (default: true if memoryStore provided) */
   includeMemoryTools?: boolean;
   /** Skill registry for skill tool */
@@ -192,16 +194,17 @@ export async function createDefaultToolRegistry(
   registry.registerTool(new BashTool());
 
   // Add memory tools if store is provided
-  const includeMemory = options.includeMemoryTools ?? !!options.memoryStore;
+  const includeMemory = options.includeMemoryTools ?? !!(options.memoryStore || options.scallopStore);
   if (includeMemory) {
     const { MemorySearchTool, MemoryGetTool, initializeMemoryTools } = await import('./memory.js');
 
     if (options.memoryStore) {
-      initializeMemoryTools(options.memoryStore, options.hybridSearch);
+      initializeMemoryTools(options.memoryStore, options.hybridSearch, options.scallopStore);
     }
 
-    registry.registerTool(new MemorySearchTool());
-    registry.registerTool(new MemoryGetTool());
+    const memToolOpts = { scallopStore: options.scallopStore };
+    registry.registerTool(new MemorySearchTool(memToolOpts));
+    registry.registerTool(new MemoryGetTool(memToolOpts));
   }
 
   // Add skill tool if registry is provided

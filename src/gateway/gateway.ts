@@ -228,6 +228,7 @@ export class Gateway {
       skillRegistry: this.skillRegistry,
       memoryStore: this.memoryStore,
       hybridSearch: this.hybridSearch,
+      scallopStore: this.scallopMemoryStore ?? undefined,
       voiceManager: voiceStatus.tts ? this.voiceManager : undefined, // Only add voice tool if TTS available
       reminderCallback: async (reminder: Reminder) => {
         await this.handleReminderTrigger(reminder);

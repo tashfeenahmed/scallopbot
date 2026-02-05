@@ -307,11 +307,12 @@ export class OpenAIEmbedder implements EmbeddingProvider {
 }
 
 /**
- * Calculate cosine similarity between two vectors
+ * Calculate cosine similarity between two vectors.
+ * Returns 0 for dimension mismatches instead of throwing (graceful degradation).
  */
 export function cosineSimilarity(a: number[], b: number[]): number {
   if (a.length !== b.length) {
-    throw new Error('Vectors must have the same dimension');
+    return 0; // Dimension mismatch - incompatible embeddings, not comparable
   }
 
   let dotProduct = 0;
@@ -526,6 +527,95 @@ export class OllamaEmbedder implements EmbeddingProvider {
       embeddings.push(await this.embed(text));
     }
     return embeddings;
+  }
+}
+
+/**
+ * Fallback Embedder - wraps a primary embedder with TF-IDF fallback.
+ * When the primary embedder fails (network error, API down), automatically
+ * falls back to local TF-IDF embeddings to prevent data loss.
+ */
+export class FallbackEmbedder implements EmbeddingProvider {
+  name: string;
+  dimension: number;
+
+  private primary: EmbeddingProvider;
+  private fallback: TFIDFEmbedder;
+  private usingFallback = false;
+  private consecutiveFailures = 0;
+  private static readonly MAX_FAILURES_BEFORE_FALLBACK = 3;
+
+  constructor(primary: EmbeddingProvider, fallback?: TFIDFEmbedder) {
+    this.primary = primary;
+    this.fallback = fallback ?? new TFIDFEmbedder();
+    this.name = `fallback(${primary.name})`;
+    this.dimension = primary.dimension;
+  }
+
+  isAvailable(): boolean {
+    return this.primary.isAvailable() || this.fallback.isAvailable();
+  }
+
+  async embed(text: string): Promise<number[]> {
+    // If too many consecutive failures, use fallback directly
+    if (this.usingFallback) {
+      return this.fallback.embed(text);
+    }
+
+    try {
+      const result = await this.primary.embed(text);
+      this.consecutiveFailures = 0;
+      return result;
+    } catch {
+      this.consecutiveFailures++;
+      if (this.consecutiveFailures >= FallbackEmbedder.MAX_FAILURES_BEFORE_FALLBACK) {
+        this.usingFallback = true;
+        this.dimension = this.fallback.dimension;
+        // Schedule a retry of the primary after 5 minutes
+        setTimeout(() => {
+          this.usingFallback = false;
+          this.consecutiveFailures = 0;
+          this.dimension = this.primary.dimension;
+        }, 5 * 60 * 1000);
+      }
+      return this.fallback.embed(text);
+    }
+  }
+
+  async embedBatch(texts: string[]): Promise<number[][]> {
+    if (this.usingFallback) {
+      return this.fallback.embedBatch(texts);
+    }
+
+    try {
+      const result = await this.primary.embedBatch(texts);
+      this.consecutiveFailures = 0;
+      return result;
+    } catch {
+      this.consecutiveFailures++;
+      if (this.consecutiveFailures >= FallbackEmbedder.MAX_FAILURES_BEFORE_FALLBACK) {
+        this.usingFallback = true;
+        this.dimension = this.fallback.dimension;
+        setTimeout(() => {
+          this.usingFallback = false;
+          this.consecutiveFailures = 0;
+          this.dimension = this.primary.dimension;
+        }, 5 * 60 * 1000);
+      }
+      return this.fallback.embedBatch(texts);
+    }
+  }
+
+  /** Check if currently using fallback */
+  isUsingFallback(): boolean {
+    return this.usingFallback;
+  }
+
+  /** Reset to try primary again */
+  resetFallback(): void {
+    this.usingFallback = false;
+    this.consecutiveFailures = 0;
+    this.dimension = this.primary.dimension;
   }
 }
 

@@ -123,10 +123,11 @@ IMPORTANT: Extract ALL facts from a message. If someone mentions a relationship 
 Respond with JSON only:
 {
   "facts": [
-    { "content": "fact text", "subject": "user|name", "category": "category" }
+    { "content": "fact text", "subject": "user|name", "category": "category", "confidence": 0.0-1.0 }
   ]
 }
 
+Set confidence based on how certain the extraction is (0.9+ for explicit statements, 0.6-0.8 for inferred facts).
 If no facts can be extracted, return: { "facts": [] }`;
 
 /**
@@ -176,7 +177,9 @@ export class LLMFactExtractor {
   async extractFacts(
     message: string,
     userId: string,
-    context?: string
+    context?: string,
+    /** Optional source message ID for provenance tracking */
+    sourceMessageId?: string
   ): Promise<FactExtractionResult> {
     const result: FactExtractionResult = {
       facts: [],
@@ -208,10 +211,11 @@ export class LLMFactExtractor {
         return result;
       }
 
-      result.facts = parsed.facts.map((f: { content: string; subject: string; category?: string }) => ({
+      result.facts = parsed.facts.map((f: { content: string; subject: string; category?: string; confidence?: number }) => ({
         content: f.content,
         subject: f.subject || 'user',
         category: (f.category as FactCategory) || 'general',
+        confidence: typeof f.confidence === 'number' ? f.confidence : undefined,
       }));
 
       this.logger.debug(
@@ -220,7 +224,7 @@ export class LLMFactExtractor {
       );
 
       // Process facts with batch classification for efficiency
-      const processResults = await this.processFactsBatch(result.facts, userId);
+      const processResults = await this.processFactsBatch(result.facts, userId, message, sourceMessageId);
       result.factsStored = processResults.stored;
       result.factsUpdated = processResults.updated;
       result.duplicatesSkipped = processResults.duplicates;
@@ -249,11 +253,12 @@ export class LLMFactExtractor {
   async queueForExtraction(
     message: string,
     userId: string,
-    context?: string
+    context?: string,
+    sourceMessageId?: string
   ): Promise<FactExtractionResult> {
     const key = `${userId}-${Date.now()}`;
 
-    const promise = this.extractFacts(message, userId, context);
+    const promise = this.extractFacts(message, userId, context, sourceMessageId);
     this.processingQueue.set(key, promise);
 
     try {
@@ -270,7 +275,9 @@ export class LLMFactExtractor {
    */
   private async processFactsBatch(
     facts: ExtractedFactWithEmbedding[],
-    userId: string
+    userId: string,
+    sourceMessage?: string,
+    sourceMessageId?: string
   ): Promise<{ stored: number; updated: number; duplicates: number }> {
     const result = { stored: 0, updated: 0, duplicates: 0 };
 
@@ -287,23 +294,33 @@ export class LLMFactExtractor {
       );
     }
 
-    // Step 1: Compute embeddings with concurrency limit
+    // Step 1: Compute embeddings using batch API for efficiency
     if (this.embedder) {
-      const concurrencyLimit = this.resourceLimits.maxConcurrentEmbeddings;
-      for (let i = 0; i < limitedFacts.length; i += concurrencyLimit) {
-        const batch = limitedFacts.slice(i, i + concurrencyLimit);
-        await Promise.all(
-          batch.map(async (fact) => {
+      const batchSize = this.resourceLimits.maxConcurrentEmbeddings;
+      for (let i = 0; i < limitedFacts.length; i += batchSize) {
+        const batch = limitedFacts.slice(i, i + batchSize);
+        try {
+          const embeddings = await this.embedder.embedBatch(batch.map(f => f.content));
+          for (let j = 0; j < batch.length; j++) {
+            batch[j].embedding = embeddings[j];
+          }
+        } catch (batchError) {
+          this.logger.warn(
+            { error: (batchError as Error).message, batchSize: batch.length },
+            'Batch embedding failed, falling back to individual calls'
+          );
+          // Fallback: try individual embeddings
+          for (const fact of batch) {
             try {
               fact.embedding = await this.embedder!.embed(fact.content);
             } catch (embedError) {
               this.logger.warn(
                 { error: (embedError as Error).message, fact: fact.content },
-                'Embedding failed for fact'
+                'Individual embedding also failed for fact'
               );
             }
-          })
-        );
+          }
+        }
       }
     }
 
@@ -361,9 +378,27 @@ export class LLMFactExtractor {
     }
 
     // Step 3: Batch classification with single LLM call
+    // Only compare against semantically similar existing facts (not ALL user facts)
     if (this.relationshipClassifier && factsToClassify.length > 0) {
-      const allUserFacts = this.memoryStore.searchByType('fact')
-        .filter(f => f.metadata?.userId === userId || f.metadata?.subject === 'user');
+      // Gather relevant existing facts by searching for each new fact's content
+      const relevantFactIds = new Set<string>();
+      const relevantFactMap = new Map<string, MemoryEntry>();
+
+      for (const fact of factsToClassify) {
+        const similar = this.hybridSearch.search(fact.content, {
+          type: 'fact',
+          limit: 10,
+          minScore: 0.1,
+        });
+        for (const result of similar) {
+          if (!relevantFactIds.has(result.entry.id)) {
+            relevantFactIds.add(result.entry.id);
+            relevantFactMap.set(result.entry.id, result.entry);
+          }
+        }
+      }
+
+      const allUserFacts = Array.from(relevantFactMap.values());
 
       if (allUserFacts.length > 0) {
         const existingFactsForClassifier: ExistingFact[] = allUserFacts.map(f => ({
@@ -413,7 +448,7 @@ export class LLMFactExtractor {
             }
 
             // Store as new fact (NEW or EXTENDS)
-            await this.storeNewFact(fact, userId);
+            await this.storeNewFact(fact, userId, sourceMessage, sourceMessageId);
             result.stored++;
           }
         } catch (classifyError) {
@@ -423,7 +458,7 @@ export class LLMFactExtractor {
           );
           // Fallback: store all as new
           for (const fact of factsToClassify) {
-            await this.storeNewFact(fact, userId);
+            await this.storeNewFact(fact, userId, sourceMessage, sourceMessageId);
             result.stored++;
           }
         }
@@ -448,13 +483,31 @@ export class LLMFactExtractor {
   /**
    * Store a new fact (helper for batch processing)
    */
-  private async storeNewFact(fact: ExtractedFactWithEmbedding, userId: string): Promise<void> {
+  private async storeNewFact(
+    fact: ExtractedFactWithEmbedding,
+    userId: string,
+    sourceMessage?: string,
+    sourceMessageId?: string
+  ): Promise<void> {
     let searchableContent = fact.content;
     if (fact.subject !== 'user') {
       if (!fact.content.toLowerCase().includes(fact.subject.toLowerCase())) {
         searchableContent = `${fact.subject} ${fact.content.toLowerCase()}`;
       }
     }
+
+    // Use LLM-provided confidence or default 0.8
+    const confidence = fact.confidence ?? 0.8;
+
+    // Build provenance metadata
+    const provenance: Record<string, unknown> = {
+      subject: fact.subject,
+      originalCategory: fact.category,
+      extractedBy: 'llm',
+    };
+    if (sourceMessageId) provenance.sourceMessageId = sourceMessageId;
+    if (sourceMessage) provenance.sourceMessageExcerpt = sourceMessage.substring(0, 200);
+    provenance.extractedAt = new Date().toISOString();
 
     if (this.scallopStore) {
       const scallopCategory = this.mapToScallopCategory(fact.category);
@@ -465,12 +518,8 @@ export class LLMFactExtractor {
         content: searchableContent,
         category: scallopCategory,
         importance: isIdentityFact ? 8 : 5,
-        confidence: 0.8,
-        metadata: {
-          subject: fact.subject,
-          originalCategory: fact.category,
-          extractedBy: 'llm',
-        },
+        confidence,
+        metadata: provenance,
       });
     } else {
       this.memoryStore.add({
@@ -479,10 +528,10 @@ export class LLMFactExtractor {
         sessionId: userId,
         timestamp: new Date(),
         metadata: {
-          subject: fact.subject,
+          ...provenance,
           category: fact.category,
           userId,
-          extractedBy: 'llm',
+          confidence,
         },
         tags: [fact.category, fact.subject === 'user' ? 'about-user' : `about-${fact.subject}`],
         embedding: fact.embedding,
@@ -730,7 +779,9 @@ export class LLMFactExtractor {
   }
 
   /**
-   * Map fact category to ScallopMemory category
+   * Map fact category to ScallopMemory category.
+   * The original fine-grained category is preserved in metadata.originalCategory
+   * for use in decay calculations and filtering.
    */
   private mapToScallopCategory(category: FactCategory): MemoryCategory {
     switch (category) {
@@ -738,9 +789,10 @@ export class LLMFactExtractor {
         return 'relationship';
       case 'preference':
         return 'preference';
+      case 'project':
+        return 'insight'; // Projects are closer to insights (active context)
       case 'personal':
       case 'work':
-      case 'project':
       case 'location':
       case 'general':
       default:

@@ -321,18 +321,14 @@ export class HotCollector {
     const buffer = this.buffers.get(sessionId);
     if (!buffer || buffer.length === 0) return;
 
-    for (const entry of buffer) {
-      // Always write to legacy store (for HybridSearch conversation context)
-      this.store.add(entry);
-    }
-
-    // Also persist conversation entries to ScallopStore (SQLite)
     if (this.scallopStore) {
+      // When ScallopStore is available, write ONLY to ScallopStore (SQLite)
+      // Avoids doubling write latency with legacy JSONL store
       for (const entry of buffer) {
         this.scallopStore.add({
           userId: sessionId,
           content: entry.content,
-          category: 'event', // conversation entries are events
+          category: 'event',
           importance: 3,
           confidence: 1.0,
           metadata: {
@@ -343,6 +339,11 @@ export class HotCollector {
         }).catch((err) => {
           console.error('HotCollector: failed to flush to ScallopStore:', err);
         });
+      }
+    } else {
+      // Legacy path: write to in-memory store + JSONL
+      for (const entry of buffer) {
+        this.store.add(entry);
       }
     }
 
@@ -380,34 +381,57 @@ const _RELATIONSHIP_TYPES = [
 ];
 
 /**
- * Extract the current subject context from text
- * Looks for patterns like "my flatmate X" and tracks X as the subject
+ * Extract the current subject context from text.
+ * Handles multiple patterns:
+ * - "my flatmate Bob" (relationship then name)
+ * - "Bob is my flatmate" (name then relationship)
+ * - "Bob, my flatmate" (name, comma, relationship - appositive)
+ * - "my flatmates Bob and Sara" (multiple subjects)
  */
 function findThirdPartySubject(text: string): Map<number, string> {
   const subjectRanges = new Map<number, string>();
+  const RELATIONSHIPS = 'friend|flatmate|roommate|colleague|coworker|brother|sister|mom|dad|mother|father|wife|husband|partner|boss|manager|teammate';
 
-  // Pattern: "my <relationship> <Name>" - marks the following clauses as about Name
-  // Use [Mm]y to match both "my" and "My"
-  const myRelPattern = /[Mm]y\s+(friend|flatmate|roommate|colleague|coworker|brother|sister|mom|dad|mother|father|wife|husband|partner|boss|manager|teammate)\s+([A-Z][a-z]+)/g;
+  // Pattern 1: "my <relationship> <Name>"
+  const myRelPattern = new RegExp(`[Mm]y\\s+(${RELATIONSHIPS})\\s+([A-Z][a-z]+)`, 'g');
 
-  // Pattern: "<Name> is my <relationship>" - marks preceding/following as about Name
-  const isMyPattern = /([A-Z][a-z]+)\s+is\s+[Mm]y\s+(friend|flatmate|roommate|colleague|coworker|brother|sister|mom|dad|mother|father|wife|husband|partner|boss|manager|teammate)/g;
+  // Pattern 2: "<Name> is my <relationship>"
+  const isMyPattern = new RegExp(`([A-Z][a-z]+)\\s+is\\s+[Mm]y\\s+(${RELATIONSHIPS})`, 'g');
+
+  // Pattern 3: "<Name>, my <relationship>" (appositive)
+  const appositivePattern = new RegExp(`([A-Z][a-z]+),?\\s+[Mm]y\\s+(${RELATIONSHIPS})`, 'g');
+
+  // Pattern 4: "my <relationship>s? <Name> and <Name>" (multiple subjects)
+  const multipleSubjectPattern = new RegExp(`[Mm]y\\s+(${RELATIONSHIPS})s?\\s+([A-Z][a-z]+)\\s+and\\s+([A-Z][a-z]+)`, 'g');
 
   let match;
 
+  // Find "my flatmates Bob and Sara" patterns (check first - more specific)
+  while ((match = multipleSubjectPattern.exec(text)) !== null) {
+    subjectRanges.set(match.index, match[2]); // First name
+    // Also mark the second name at the "and Name" position
+    const andPos = text.indexOf(` and ${match[3]}`, match.index);
+    if (andPos >= 0) {
+      subjectRanges.set(andPos, match[3]);
+    }
+  }
+
   // Find "my flatmate Bob" patterns
   while ((match = myRelPattern.exec(text)) !== null) {
-    const name = match[2];
-    const startPos = match.index;
-    // This subject applies from here to end of sentence or next subject
-    subjectRanges.set(startPos, name);
+    subjectRanges.set(match.index, match[2]);
   }
 
   // Find "Bob is my flatmate" patterns
   while ((match = isMyPattern.exec(text)) !== null) {
-    const name = match[1];
-    const startPos = match.index;
-    subjectRanges.set(startPos, name);
+    subjectRanges.set(match.index, match[1]);
+  }
+
+  // Find "Bob, my flatmate" patterns (appositive)
+  while ((match = appositivePattern.exec(text)) !== null) {
+    // Avoid duplicate if already matched by isMyPattern
+    if (!subjectRanges.has(match.index)) {
+      subjectRanges.set(match.index, match[1]);
+    }
   }
 
   return subjectRanges;
@@ -1321,12 +1345,12 @@ export class HybridSearch {
       return [];
     }
 
-    // Handle empty query: return all candidates sorted by recency
-    // This is useful for getting all user facts without needing a specific search term
+    // Handle empty query: return candidates sorted by recency, hard cap at 50
     if (!query.trim()) {
+      const cappedLimit = Math.min(limit, 50);
       const results: SearchResult[] = candidates
         .sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())
-        .slice(0, limit)
+        .slice(0, cappedLimit)
         .map((memory) => ({
           entry: memory,
           score: 1.0,
@@ -1529,29 +1553,33 @@ export class HybridSearch {
   }
 
   /**
-   * Fallback score calculation using word overlap
+   * Fallback score calculation using Jaccard similarity (|intersection| / |union|).
+   * More robust than simple word overlap / arbitrary max.
    */
   private calculateFallbackScore(query: string, memory: MemoryEntry): number {
-    const queryTerms = new Set(query.toLowerCase().split(/\s+/));
-    const memTerms = new Set(memory.content.toLowerCase().split(/\s+/));
+    // Filter out stop words for better signal
+    const stopWords = new Set(['the', 'a', 'an', 'is', 'in', 'at', 'of', 'to', 'and', 'or', 'for', 'on', 'it', 'my', 'i']);
+    const queryTerms = new Set(
+      query.toLowerCase().split(/\s+/).filter(t => t.length > 1 && !stopWords.has(t))
+    );
+    const memTerms = new Set(
+      memory.content.toLowerCase().split(/\s+/).filter(t => t.length > 1 && !stopWords.has(t))
+    );
 
-    // Direct overlap
-    const overlap = [...queryTerms].filter((t) => memTerms.has(t)).length;
-
-    // Tag matching
-    let tagScore = 0;
+    // Add tag terms to memory terms
     if (memory.tags) {
       for (const tag of memory.tags) {
-        if (queryTerms.has(tag.toLowerCase())) {
-          tagScore += 1;
-        }
+        memTerms.add(tag.toLowerCase());
       }
     }
 
-    const totalScore = overlap + tagScore;
-    const maxPossible = queryTerms.size + 2;
+    if (queryTerms.size === 0 || memTerms.size === 0) return 0;
 
-    return totalScore / maxPossible;
+    // Jaccard similarity: |intersection| / |union|
+    const intersection = [...queryTerms].filter(t => memTerms.has(t)).length;
+    const union = new Set([...queryTerms, ...memTerms]).size;
+
+    return union > 0 ? intersection / union : 0;
   }
 
   /**

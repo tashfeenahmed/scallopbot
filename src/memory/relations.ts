@@ -183,7 +183,9 @@ export class RelationGraph {
   }
 
   /**
-   * Detect potential relations for a new memory
+   * Detect potential relations for a new memory.
+   * Optimized: uses batch embeddings, early exit on high confidence,
+   * and pre-filters candidates by category.
    */
   async detectRelations(
     newMemory: ScallopMemoryEntry,
@@ -191,11 +193,11 @@ export class RelationGraph {
   ): Promise<DetectedRelation[]> {
     const detected: DetectedRelation[] = [];
 
-    // Get candidates if not provided
+    // Get candidates if not provided - filter by same category for relevance
     const candidates = candidateMemories ?? this.db.getMemoriesByUser(newMemory.userId, {
       category: newMemory.category,
       isLatest: true,
-      limit: 50,
+      limit: 30, // Reduced from 50 - category filter makes this more targeted
     });
 
     // Filter out the new memory itself
@@ -208,18 +210,43 @@ export class RelationGraph {
     // Get embedding for new memory
     const newEmbedding = newMemory.embedding ?? await this.embedder.embed(newMemory.content);
 
+    // Batch-embed candidates that lack embeddings
+    const candidatesNeedingEmbedding = filtered.filter(c => !c.embedding);
+    if (candidatesNeedingEmbedding.length > 0) {
+      try {
+        const batchEmbeddings = await this.embedder.embedBatch(
+          candidatesNeedingEmbedding.map(c => c.content)
+        );
+        for (let i = 0; i < candidatesNeedingEmbedding.length; i++) {
+          candidatesNeedingEmbedding[i].embedding = batchEmbeddings[i];
+        }
+      } catch {
+        // Fallback: skip candidates without embeddings
+      }
+    }
+
     for (const candidate of filtered) {
-      // Get embedding for candidate
-      const candidateEmbedding = candidate.embedding ?? await this.embedder.embed(candidate.content);
+      const candidateEmbedding = candidate.embedding;
+      if (!candidateEmbedding) continue; // Skip if no embedding available
 
       // Calculate similarity
       const similarity = cosineSimilarity(newEmbedding, candidateEmbedding);
+
+      // Early skip for very low similarity
+      if (similarity < this.options.extendThreshold) {
+        continue;
+      }
 
       // Detect relation type based on similarity and content analysis
       const relation = this.classifyRelation(newMemory, candidate, similarity);
 
       if (relation) {
         detected.push(relation);
+
+        // Early exit: high-confidence UPDATE found, no need to check more
+        if (relation.relationType === 'UPDATES' && relation.confidence >= 0.85) {
+          break;
+        }
       }
 
       // Stop if we have enough relations
@@ -277,24 +304,44 @@ export class RelationGraph {
   }
 
   /**
-   * Detect if two contents contradict each other
+   * Normalize a value by stripping prepositions and trimming.
+   * "at Metropolis" -> "dublin", "in Metropolis" -> "dublin", "is Metropolis" -> "dublin"
+   */
+  private normalizeValue(value: string): string {
+    return value
+      .replace(/^(?:is|at|in|for|the|a|an)\s+/i, '')
+      .trim()
+      .toLowerCase();
+  }
+
+  /**
+   * Detect if two contents contradict each other.
+   * Normalizes prepositions before comparison so "office is Metropolis"
+   * and "office at Metropolis" are recognized as the same value.
    */
   private detectContradiction(newContent: string, existingContent: string): boolean {
-    // Common patterns that indicate contradiction
+    // Common patterns that indicate contradiction - capture value with surrounding prepositions
     const patterns = [
-      { key: 'lives in', extract: /lives? in ([a-z]+)/i },
-      { key: 'works at', extract: /works? (?:at|for) ([a-z]+)/i },
-      { key: 'office', extract: /office (?:is |at |in )?([a-z]+)/i },
-      { key: 'prefers', extract: /prefers? ([a-z]+)/i },
-      { key: 'name', extract: /name[: ]+([a-z]+)/i },
+      { extract: /lives?\s+(?:in\s+)?([a-z\s]+?)(?:\.|,|$)/i },
+      { extract: /works?\s+(?:at|for|with)\s+([a-z\s]+?)(?:\.|,|$)/i },
+      { extract: /office\s+(?:is\s+|at\s+|in\s+)?([a-z\s]+?)(?:\.|,|$)/i },
+      { extract: /prefers?\s+([a-z\s]+?)(?:\.|,|$)/i },
+      { extract: /name[:\s]+([a-z\s]+?)(?:\.|,|$)/i },
+      { extract: /based\s+(?:in\s+)?([a-z\s]+?)(?:\.|,|$)/i },
+      { extract: /located\s+(?:in\s+|at\s+)?([a-z\s]+?)(?:\.|,|$)/i },
     ];
 
     for (const { extract } of patterns) {
       const newMatch = newContent.match(extract);
       const existingMatch = existingContent.match(extract);
 
-      if (newMatch && existingMatch && newMatch[1] !== existingMatch[1]) {
-        return true;
+      if (newMatch && existingMatch) {
+        const newVal = this.normalizeValue(newMatch[1]);
+        const existingVal = this.normalizeValue(existingMatch[1]);
+
+        if (newVal !== existingVal && newVal.length > 0 && existingVal.length > 0) {
+          return true;
+        }
       }
     }
 

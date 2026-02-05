@@ -264,7 +264,7 @@ export class ScallopMemoryStore {
       documentDateRange,
     } = options;
 
-    // Get candidate memories
+    // Get candidate memories - warn if userId is omitted (potential cross-user leak)
     let candidates: ScallopMemoryEntry[];
     if (userId) {
       candidates = this.db.getMemoriesByUser(userId, {
@@ -274,6 +274,7 @@ export class ScallopMemoryStore {
         limit: limit * 5, // Get more candidates for filtering
       });
     } else {
+      this.logger.warn('Search called without userId - searching ALL users. This may leak memories across users in multi-user deployments.');
       candidates = this.db.getAllMemories({ minProminence, limit: limit * 5 });
     }
 
@@ -302,9 +303,11 @@ export class ScallopMemoryStore {
     const results: ScallopSearchResult[] = [];
     const queryLower = query.toLowerCase();
 
-    // Get query embedding if embedder available (non-fatal if it fails)
+    // Only compute query embedding if at least one candidate has an embedding
+    // This avoids wasting API calls when no semantic comparison is possible
+    const anyCandidateHasEmbedding = candidates.some(m => m.embedding !== null);
     let queryEmbedding: number[] | undefined;
-    if (this.embedder) {
+    if (this.embedder && anyCandidateHasEmbedding) {
       try {
         queryEmbedding = await this.embedder.embed(query);
       } catch (err) {

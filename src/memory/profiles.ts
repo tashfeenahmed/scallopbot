@@ -245,14 +245,47 @@ export class ProfileManager {
     this.db.updateBehavioralPatterns(userId, patterns);
   }
 
+  /** Track how many messages have been analyzed per user for incremental analysis */
+  private lastAnalyzedCount: Map<string, number> = new Map();
+
   /**
-   * Infer behavioral patterns from conversation history
+   * Infer behavioral patterns from conversation history.
+   * Incremental: only processes new messages since last analysis,
+   * merging with existing patterns instead of recomputing from scratch.
    */
   inferBehavioralPatterns(userId: string, messages: Array<{ content: string; timestamp: number }>): void {
     if (messages.length === 0) return;
 
-    // Analyze communication style
-    const avgLength = messages.reduce((sum, m) => sum + m.content.length, 0) / messages.length;
+    // Only process messages we haven't seen yet
+    const lastCount = this.lastAnalyzedCount.get(userId) ?? 0;
+    const newMessages = messages.slice(lastCount);
+    this.lastAnalyzedCount.set(userId, messages.length);
+
+    // If no new messages, skip entirely
+    if (newMessages.length === 0) return;
+
+    // Load existing patterns for merging
+    const existing = this.getBehavioralPatterns(userId);
+    const existingHourCounts = new Map<number, number>();
+    const existingTechTerms = new Map<string, number>();
+
+    // Restore previous aggregates from existing patterns
+    if (existing?.activeHours) {
+      for (const hour of existing.activeHours) {
+        existingHourCounts.set(hour, (existingHourCounts.get(hour) || 0) + 1);
+      }
+    }
+    if (existing?.expertiseAreas) {
+      for (const area of existing.expertiseAreas) {
+        existingTechTerms.set(area, (existingTechTerms.get(area) || 0) + 1);
+      }
+    }
+
+    // Analyze only new messages
+    let totalLength = existing ? (lastCount * (existing.communicationStyle === 'concise' ? 30 : existing.communicationStyle === 'moderate' ? 125 : 300)) : 0;
+    totalLength += newMessages.reduce((sum, m) => sum + m.content.length, 0);
+    const avgLength = totalLength / messages.length;
+
     let communicationStyle: string;
     if (avgLength < 50) {
       communicationStyle = 'concise';
@@ -262,40 +295,38 @@ export class ProfileManager {
       communicationStyle = 'detailed';
     }
 
-    // Analyze active hours
-    const hourCounts = new Map<number, number>();
-    for (const msg of messages) {
+    // Analyze active hours from new messages only, merge with existing
+    for (const msg of newMessages) {
       const hour = new Date(msg.timestamp).getHours();
-      hourCounts.set(hour, (hourCounts.get(hour) || 0) + 1);
+      existingHourCounts.set(hour, (existingHourCounts.get(hour) || 0) + 1);
     }
 
-    // Get top 3 most active hours
-    const sortedHours = [...hourCounts.entries()]
+    const sortedHours = [...existingHourCounts.entries()]
       .sort((a, b) => b[1] - a[1])
       .slice(0, 3)
       .map(([hour]) => hour);
 
-    // Analyze expertise areas from technical terms
-    const techTerms = new Map<string, number>();
+    // Analyze expertise from new messages only, merge with existing
     const techPatterns = /\b(javascript|typescript|python|react|vue|angular|node|api|database|sql|docker|kubernetes|aws|azure|gcp|machine learning|ai|ml|nlp)\b/gi;
 
-    for (const msg of messages) {
+    for (const msg of newMessages) {
       let match;
       while ((match = techPatterns.exec(msg.content)) !== null) {
         const term = match[1].toLowerCase();
-        techTerms.set(term, (techTerms.get(term) || 0) + 1);
+        existingTechTerms.set(term, (existingTechTerms.get(term) || 0) + 1);
       }
     }
 
-    // Get top expertise areas
-    const expertiseAreas = [...techTerms.entries()]
+    const expertiseAreas = [...existingTechTerms.entries()]
       .sort((a, b) => b[1] - a[1])
       .slice(0, 5)
       .map(([term]) => term);
 
-    // Analyze response preferences
-    const hasCodeBlocks = messages.some((m) => m.content.includes('```'));
-    const hasBulletPoints = messages.some((m) => m.content.includes('- ') || m.content.includes('* '));
+    // Analyze response preferences from new messages
+    const hasCodeBlocks = newMessages.some((m) => m.content.includes('```')) ||
+      (existing?.responsePreferences as Record<string, unknown>)?.prefersCodeExamples === true;
+    const hasBulletPoints = newMessages.some((m) => m.content.includes('- ') || m.content.includes('* ')) ||
+      (existing?.responsePreferences as Record<string, unknown>)?.prefersBulletPoints === true;
     const responsePreferences = {
       prefersCodeExamples: hasCodeBlocks,
       prefersBulletPoints: hasBulletPoints,

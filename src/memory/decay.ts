@@ -141,9 +141,11 @@ export class DecayEngine {
       recencyBoost * DECAY_WEIGHTS.recencyOfAccess +
       importanceWeight * DECAY_WEIGHTS.semanticImportance;
 
-    // High-importance identity facts (importance >= 8) get extra protection
+    // High-importance identity facts (importance >= 8) get moderate protection.
+    // Floor at 0.2 (above DORMANT=0.1, below ACTIVE=0.5) so they remain searchable
+    // but can eventually be corrected/superseded rather than being permanently sticky.
     if (memory.importance >= 8 && (memory.category === 'relationship' || memory.category === 'fact')) {
-      return Math.max(0.5, Math.min(1, prominence));
+      return Math.max(0.2, Math.min(1, prominence));
     }
 
     // Normalize to 0-1 range

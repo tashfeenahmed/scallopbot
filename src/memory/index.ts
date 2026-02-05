@@ -25,6 +25,7 @@ export {
   TFIDFEmbedder,
   OpenAIEmbedder,
   OllamaEmbedder,
+  FallbackEmbedder,
   EmbeddingCache,
   cosineSimilarity,
   euclideanDistance,
@@ -93,6 +94,8 @@ export {
   TemporalQuery,
   createTemporalExtractor,
   type TemporalExtraction,
+  type DateLocale,
+  type TemporalExtractorOptions,
 } from './temporal.js';
 
 // Migration

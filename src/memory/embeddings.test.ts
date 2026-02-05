@@ -205,10 +205,10 @@ describe('cosineSimilarity', () => {
     expect(cosineSimilarity(a, b)).toBeCloseTo(1, 5);
   });
 
-  it('should throw for mismatched dimensions', () => {
+  it('should return 0 for mismatched dimensions (graceful degradation)', () => {
     const a = [1, 0];
     const b = [1, 0, 0];
-    expect(() => cosineSimilarity(a, b)).toThrow('Vectors must have the same dimension');
+    expect(cosineSimilarity(a, b)).toBe(0);
   });
 
   it('should return 0 for zero vectors', () => {

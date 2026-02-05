@@ -35,13 +35,37 @@ interface ParsedDate {
 }
 
 /**
+ * Date format locale for ambiguous slash-separated dates (e.g., 01/02/2026).
+ * - 'us': MM/DD/YYYY (default)
+ * - 'eu': DD/MM/YYYY
+ */
+export type DateLocale = 'us' | 'eu';
+
+/**
+ * Options for TemporalExtractor
+ */
+export interface TemporalExtractorOptions {
+  referenceDate?: Date;
+  /** Date locale for ambiguous slash-separated dates (default: 'us') */
+  dateLocale?: DateLocale;
+}
+
+/**
  * Temporal Extractor
  */
 export class TemporalExtractor {
   private referenceDate: Date;
+  private dateLocale: DateLocale;
 
-  constructor(referenceDate?: Date) {
-    this.referenceDate = referenceDate ?? new Date();
+  constructor(options?: Date | TemporalExtractorOptions) {
+    if (options instanceof Date) {
+      // Backwards-compatible: accept Date directly
+      this.referenceDate = options;
+      this.dateLocale = 'us';
+    } else {
+      this.referenceDate = options?.referenceDate ?? new Date();
+      this.dateLocale = options?.dateLocale ?? 'us';
+    }
   }
 
   /**
@@ -317,16 +341,30 @@ export class TemporalExtractor {
       }
     }
 
-    // DD/MM/YYYY or MM/DD/YYYY (assume MM/DD/YYYY for US)
+    // DD/MM/YYYY or MM/DD/YYYY - interpretation depends on locale setting
     const slashMatch = content.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
     if (slashMatch) {
-      const month = parseInt(slashMatch[1], 10) - 1;
-      const day = parseInt(slashMatch[2], 10);
+      const first = parseInt(slashMatch[1], 10);
+      const second = parseInt(slashMatch[2], 10);
       const year = parseInt(slashMatch[3], 10);
+
+      let month: number;
+      let day: number;
+
+      if (this.dateLocale === 'eu') {
+        // DD/MM/YYYY
+        day = first;
+        month = second - 1;
+      } else {
+        // MM/DD/YYYY (US default)
+        month = first - 1;
+        day = second;
+      }
+
       const date = new Date(year, month, day);
       return {
         date,
-        confidence: 0.8,
+        confidence: 0.75, // Lower confidence for ambiguous format
         isRelative: false,
         rawText: slashMatch[0],
       };
@@ -482,6 +520,6 @@ export class TemporalQuery {
 /**
  * Create a TemporalExtractor instance
  */
-export function createTemporalExtractor(referenceDate?: Date): TemporalExtractor {
-  return new TemporalExtractor(referenceDate);
+export function createTemporalExtractor(options?: Date | TemporalExtractorOptions): TemporalExtractor {
+  return new TemporalExtractor(options);
 }
