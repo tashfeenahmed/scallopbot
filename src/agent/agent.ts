@@ -536,9 +536,9 @@ export class Agent {
 
     // Add file sending instructions
     prompt += `\n\n## FILE SENDING
-When you create a file and the user wants to receive it, use the **send_file** tool with the absolute file_path and an optional caption.
+ALWAYS use **send_file** after creating any file (PDFs, images, documents, scripts, plans, etc.). Never just tell the user the file path — they can't access your filesystem. You MUST call send_file to deliver it.
 - Works on Telegram (sends as document attachment) and web (sends as download link)
-- Do NOT paste file contents into chat or use telegram_send to share files — those are text-only
+- Do NOT paste file contents into chat — use send_file to deliver the actual file
 - For text updates along the way, use **send_message**`;
 
     // Add skills prompt if registry is available
