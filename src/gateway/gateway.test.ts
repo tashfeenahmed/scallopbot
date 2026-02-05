@@ -128,12 +128,11 @@ describe('Gateway', () => {
       const tools = gateway.getToolRegistry().getAllTools();
       const toolNames = tools.map(t => t.name);
 
-      // Remaining legacy tools (most tools migrated to skills)
-      expect(toolNames).toContain('memory_get');
+      // Only the Skill meta-tool remains in the legacy registry
+      // All other tools (memory_get, send_file, send_message, voice_reply)
+      // are now native skills registered in the skill registry
       expect(toolNames).toContain('Skill');
-
-      // memory_get + Skill + comms tools (send_file, send_message, voice_reply)
-      expect(tools.length).toBeGreaterThanOrEqual(2);
+      expect(tools.length).toBeGreaterThanOrEqual(1);
     });
 
     it('should initialize session manager', async () => {

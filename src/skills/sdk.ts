@@ -27,6 +27,7 @@ import type {
   SkillMetadata,
   SkillContext,
   SkillResult,
+  SkillHandlerFn,
 } from './types.js';
 import { checkGates } from './loader.js';
 
@@ -93,6 +94,8 @@ export interface SkillBuilderOptions {
   homepage?: string;
   /** Instruction content for model */
   instructions?: string;
+  /** Input schema for tool definition */
+  inputSchema?: SkillFrontmatter['inputSchema'];
 }
 
 /**
@@ -106,6 +109,7 @@ export class SkillBuilder {
     disableModelInvocation: false,
   };
   private handler?: SkillHandler;
+  private nativeHandler?: SkillHandlerFn;
 
   constructor(name: string, description: string) {
     this.name = name;
@@ -211,10 +215,28 @@ export class SkillBuilder {
   }
 
   /**
-   * Set execution handler
+   * Set input schema for tool definition
+   */
+  inputSchema(schema: NonNullable<SkillFrontmatter['inputSchema']>): this {
+    this.options.inputSchema = schema;
+    return this;
+  }
+
+  /**
+   * Set execution handler (SDK-style, used in SkillDefinition.execute)
    */
   onExecute(handler: SkillHandler): this {
     this.handler = handler;
+    return this;
+  }
+
+  /**
+   * Set native in-process handler (stored on the Skill object).
+   * Use this for skills that need runtime access (channels, memory stores, etc.)
+   * These handlers run in-process, not as subprocesses.
+   */
+  onNativeExecute(handler: SkillHandlerFn): this {
+    this.nativeHandler = handler;
     return this;
   }
 
@@ -276,7 +298,13 @@ export class SkillBuilder {
     // Check gates
     const gateResult = checkGates(metadata);
 
-    // Build skill
+    // Add input schema to frontmatter if provided
+    if (this.options.inputSchema) {
+      frontmatter.inputSchema = this.options.inputSchema;
+    }
+
+    // Build skill — mark hasScripts: true if a native handler is provided
+    // so getExecutableSkills() includes it in tool definitions for the LLM
     const skill: Skill = {
       name: this.name,
       description: this.description,
@@ -286,7 +314,8 @@ export class SkillBuilder {
       content: this.options.instructions || '',
       available: gateResult.available,
       unavailableReason: gateResult.reason,
-      hasScripts: false,
+      hasScripts: !!this.nativeHandler,
+      handler: this.nativeHandler,
     };
 
     const handler = this.handler;
