@@ -195,10 +195,19 @@ export class MoonshotProvider implements LLMProvider {
     // Add conversation messages
     for (const msg of request.messages) {
       if (typeof msg.content === 'string') {
-        messages.push({
-          role: msg.role,
-          content: msg.content,
-        } as OpenAI.ChatCompletionMessageParam);
+        if (msg.role === 'assistant' && enableThinking) {
+          // String-content assistant messages still need reasoning_content when thinking is enabled
+          messages.push({
+            role: 'assistant',
+            content: msg.content,
+            reasoning_content: '.',
+          } as OpenAI.ChatCompletionMessageParam);
+        } else {
+          messages.push({
+            role: msg.role,
+            content: msg.content,
+          } as OpenAI.ChatCompletionMessageParam);
+        }
       } else {
         // Handle content blocks (tool results, etc.)
         const toolResults = msg.content.filter((c): c is ToolResultContent => c.type === 'tool_result');
@@ -242,14 +251,19 @@ export class MoonshotProvider implements LLMProvider {
             });
 
           if (msg.role === 'assistant') {
-            // For Moonshot/Kimi with thinking enabled, assistant messages with tool_calls
-            // MUST include reasoning_content. Add placeholder for historical messages.
+            // Extract preserved reasoning_content from ThinkingContent blocks
+            const thinkingBlocks = msg.content
+              .filter((c) => c.type === 'thinking')
+              .map((c) => (c as { type: 'thinking'; thinking: string }).thinking);
+            const reasoningContent = thinkingBlocks.length > 0 ? thinkingBlocks.join('\n') : undefined;
+
             const assistantMsg: OpenAI.ChatCompletionAssistantMessageParam & { reasoning_content?: string } = {
               role: 'assistant',
               ...(textContent ? { content: textContent } : {}),
               ...(toolCalls.length > 0 && { tool_calls: toolCalls }),
-              // When thinking is enabled and there are tool calls, we must include reasoning_content
-              ...(enableThinking && toolCalls.length > 0 && { reasoning_content: '(historical context)' }),
+              // When thinking is enabled, ALL assistant messages must include reasoning_content.
+              // Use preserved content from previous response, or a minimal placeholder.
+              ...(enableThinking && { reasoning_content: reasoningContent || '.' }),
             };
             messages.push(assistantMsg);
           } else {
@@ -280,9 +294,16 @@ export class MoonshotProvider implements LLMProvider {
     const choice = response.choices[0];
     const content: ContentBlock[] = [];
 
-    // Add text content - ONLY use 'content' field, NOT reasoning_content
-    // reasoning_content contains internal thinking which should not be shown to users
     const message = choice.message as OpenAI.ChatCompletionMessage & { reasoning_content?: string };
+
+    // Preserve reasoning_content as a ThinkingContent block so it survives
+    // session storage and can be sent back in subsequent requests.
+    // The Moonshot API requires reasoning_content on all assistant messages
+    // when thinking mode is enabled.
+    if (message.reasoning_content) {
+      content.push({ type: 'thinking', thinking: message.reasoning_content });
+    }
+
     const textContent = message.content;
     if (textContent) {
       content.push({ type: 'text', text: textContent });

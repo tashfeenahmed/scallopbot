@@ -219,13 +219,12 @@ describe('MoonshotProvider', () => {
       );
     });
 
-    it('should only return content field, not reasoning_content', async () => {
+    it('should preserve reasoning_content as thinking block in response', async () => {
       const { default: OpenAI } = await import('openai');
       const mockCreate = vi.fn().mockResolvedValue({
         choices: [
           {
             message: {
-              // Thinking mode returns both reasoning_content and content
               reasoning_content: 'Let me think about this step by step...',
               content: 'The answer is 42.',
             },
@@ -245,13 +244,79 @@ describe('MoonshotProvider', () => {
         enableThinking: true,
       });
 
-      // Should only return the content, NOT the reasoning_content
-      expect(response.content).toHaveLength(1);
-      expect(response.content[0]).toEqual({ type: 'text', text: 'The answer is 42.' });
-      // Verify reasoning_content is NOT in the response
-      expect(response.content[0]).not.toEqual(
-        expect.objectContaining({ text: expect.stringContaining('step by step') })
-      );
+      // Should return thinking block + text content
+      expect(response.content).toHaveLength(2);
+      expect(response.content[0]).toEqual({
+        type: 'thinking',
+        thinking: 'Let me think about this step by step...',
+      });
+      expect(response.content[1]).toEqual({ type: 'text', text: 'The answer is 42.' });
+    });
+
+    it('should restore reasoning_content from thinking blocks in conversation history', async () => {
+      const { default: OpenAI } = await import('openai');
+      const mockCreate = vi.fn().mockResolvedValue({
+        choices: [{ message: { content: 'Follow-up' }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 20, completion_tokens: 5 },
+        model: 'kimi-k2.5',
+      });
+
+      const mockInstance = new OpenAI({ apiKey: 'test' });
+      (mockInstance.chat.completions.create as unknown) = mockCreate;
+      (provider as unknown as { client: typeof mockInstance }).client = mockInstance;
+
+      // Simulate conversation with preserved thinking block from previous response
+      await provider.complete({
+        messages: [
+          { role: 'user', content: 'What is 2+2?' },
+          {
+            role: 'assistant',
+            content: [
+              { type: 'thinking', thinking: 'Simple arithmetic: 2+2=4' },
+              { type: 'text', text: 'The answer is 4.' },
+            ],
+          },
+          { role: 'user', content: 'Are you sure?' },
+        ],
+        enableThinking: true,
+      });
+
+      // Verify the assistant message includes reasoning_content from the thinking block
+      const callArgs = mockCreate.mock.calls[0][0];
+      const assistantMsg = callArgs.messages.find((m: { role: string }) => m.role === 'assistant');
+      expect(assistantMsg).toBeDefined();
+      expect(assistantMsg.reasoning_content).toBe('Simple arithmetic: 2+2=4');
+      expect(assistantMsg.content).toBe('The answer is 4.');
+    });
+
+    it('should add placeholder reasoning_content when thinking block is missing', async () => {
+      const { default: OpenAI } = await import('openai');
+      const mockCreate = vi.fn().mockResolvedValue({
+        choices: [{ message: { content: 'OK' }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 10, completion_tokens: 5 },
+        model: 'kimi-k2.5',
+      });
+
+      const mockInstance = new OpenAI({ apiKey: 'test' });
+      (mockInstance.chat.completions.create as unknown) = mockCreate;
+      (provider as unknown as { client: typeof mockInstance }).client = mockInstance;
+
+      // Assistant message without thinking block (e.g., from before thinking was enabled)
+      await provider.complete({
+        messages: [
+          { role: 'user', content: 'Hi' },
+          {
+            role: 'assistant',
+            content: [{ type: 'text', text: 'Hello!' }],
+          },
+          { role: 'user', content: 'How are you?' },
+        ],
+        enableThinking: true,
+      });
+
+      const callArgs = mockCreate.mock.calls[0][0];
+      const assistantMsg = callArgs.messages.find((m: { role: string }) => m.role === 'assistant');
+      expect(assistantMsg.reasoning_content).toBe('.');
     });
 
     it('should not enable thinking for non-Kimi models', async () => {
