@@ -386,6 +386,20 @@ export class Agent {
         taskComplete,
       }, 'LLM response received');
 
+      // Send reasoning/thinking content to debug panel (from models with extended thinking)
+      const thinkingContent = this.extractThinkingContent(response.content);
+      if (thinkingContent && onProgress) {
+        try {
+          await onProgress({
+            type: 'thinking',
+            message: thinkingContent,
+            iteration: iterations,
+          });
+        } catch (e) {
+          this.logger.warn({ error: (e as Error).message }, 'Thinking progress callback failed');
+        }
+      }
+
       // If task is explicitly complete OR no tool use with end_turn, we're done
       if (taskComplete || (response.stopReason === 'end_turn' && toolUses.length === 0)) {
         // Strip [DONE] marker from response if present
@@ -402,7 +416,7 @@ export class Agent {
         break;
       }
 
-      // Send assistant's thinking/planning text to user before executing tools
+      // Send assistant's planning text to user before executing tools
       if (textContent && onProgress) {
         // Clean the text content - remove any JSON tool call patterns that some models output
         const cleanedText = this.cleanProgressMessage(textContent);
@@ -769,6 +783,13 @@ When you create a file and the user wants to receive it, use the **send_file** t
       this.logger.warn({ error: (error as Error).message }, 'Failed to build memory context');
       return { context: '', stats: { factsFound: 0, conversationsFound: 0 }, items: [] };
     }
+  }
+
+  private extractThinkingContent(content: ContentBlock[]): string {
+    return content
+      .filter((block): block is { type: 'thinking'; thinking: string } => block.type === 'thinking')
+      .map((block) => block.thinking)
+      .join('\n');
   }
 
   private extractTextContent(content: ContentBlock[]): string {
