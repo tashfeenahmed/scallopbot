@@ -949,8 +949,8 @@ export class TelegramChannel {
     this.isRunning = true;
 
     // Register bot commands with Telegram (makes them show in menu)
+    // Note: /start is intentionally omitted - it still works but doesn't clutter the menu
     await this.bot.api.setMyCommands([
-      { command: 'start', description: 'Start the bot / Show welcome message' },
       { command: 'help', description: 'Show available commands' },
       { command: 'stop', description: 'Stop current task' },
       { command: 'settings', description: 'View your current settings' },
