@@ -134,22 +134,24 @@ COST_WARNING_THRESHOLD=0.8       # Warn at 80% usage
 4. At budget limit, requests are blocked (not charged)
 5. Provider fallback prefers cheaper alternatives
 
-## Tools
+## Bundled Skills
 
-| Tool | Category | Description |
-|------|----------|-------------|
-| `read` | Coding | Read file contents |
-| `write` | Coding | Create/overwrite files |
-| `edit` | Coding | Make targeted edits |
+ScallopBot uses a skills-only architecture with 12 bundled skills:
+
+| Skill | Category | Description |
+|-------|----------|-------------|
 | `bash` | System | Execute shell commands |
+| `read_file` | Coding | Read file contents |
+| `write_file` | Coding | Create/overwrite files |
+| `edit_file` | Coding | Make targeted edits |
 | `browser` | Web | Navigate and scrape websites |
 | `web_search` | Search | Search the web (Brave API) |
-| `memory_search` | Memory | Search conversation history |
-| `voice_reply` | Comms | Send voice messages |
+| `memory_search` | Memory | Search conversation history and memories |
 | `reminder` | Automation | Set one-time or recurring reminders |
-| `send_file` | Comms | Send files to user |
-| `send_message` | Comms | Send messages to user |
 | `telegram_send` | Comms | Send Telegram messages programmatically |
+| `git` | DevOps | Git version control operations |
+| `npm` | DevOps | Node package manager commands |
+| `docker` | DevOps | Docker container management |
 
 ## Reminders
 
@@ -209,10 +211,10 @@ Help with git operations: status, commit, push, pull, branch management...
 │                  └─────────┘    │         │ OpenAI   │               │
 │                                 │         │ xAI      │               │
 │                            ┌────┴────┐    │ Groq     │               │
-│                            │  Tools  │    │ Ollama   │               │
+│                            │ Skills  │    │ Ollama   │               │
 │                            │ Memory  │    │ OpenRouter               │
-│                            │ Skills  │    └──────────┘               │
-│                            │ Voice   │                               │
+│                            │ Voice   │    └──────────┘               │
+│                            │         │                               │
 │                            └─────────┘                               │
 │                                                                      │
 └──────────────────────────────────────────────────────────────────────┘
@@ -376,9 +378,8 @@ src/
 ├── reliability/    # Circuit breaker, graceful degradation
 ├── routing/        # Cost tracking, complexity analysis, model selection
 ├── scheduler/      # Task scheduling
-├── skills/         # Skill loading, registry, ClawHub integration
+├── skills/         # Skill loading, registry, ClawHub integration (12 bundled skills)
 ├── tailscale/      # Tailscale VPN integration
-├── tools/          # Tool implementations (12 tools)
 ├── triggers/       # Event trigger system
 ├── utils/          # Utilities and helpers
 ├── voice/          # STT/TTS support
