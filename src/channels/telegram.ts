@@ -934,7 +934,9 @@ export class TelegramChannel {
       { command: 'new', description: 'Start a new conversation' },
     ]);
 
-    await this.bot.start({
+    // bot.start() runs grammy's long-polling loop and NEVER resolves.
+    // Fire-and-forget so gateway.start() can continue registering trigger sources.
+    this.bot.start({
       onStart: (botInfo) => {
         this.logger.info(
           {
