@@ -602,20 +602,8 @@ export class TelegramChannel {
       // Process transcribed text as regular message (don't echo transcription back)
       const sessionId = await this.getOrCreateSession(userId);
 
-      // Progress callback to send intermediate updates to user
-      const onProgress = async (update: { type: string; message: string }) => {
-        if (update.type === 'thinking' && update.message) {
-          const formatted = formatMarkdownToHtml(update.message);
-          const chunks = splitMessage(formatted);
-          for (const chunk of chunks) {
-            try {
-              await ctx.reply(chunk, { parse_mode: 'HTML' });
-            } catch {
-              await ctx.reply(chunk.replace(/<[^>]*>/g, ''));
-            }
-          }
-        }
-      };
+      // Thinking stays enabled in the agent but is not surfaced to Telegram users
+      const onProgress = async (_update: { type: string; message: string }) => {};
 
       const shouldStop = () => this.stopRequests.has(userId);
       const result = await this.agent.processMessage(sessionId, transcription.text, undefined, onProgress, shouldStop);
@@ -693,20 +681,8 @@ export class TelegramChannel {
       // Process through agent with attachment info
       const sessionId = await this.getOrCreateSession(userId);
 
-      // Progress callback
-      const onProgress = async (update: { type: string; message: string }) => {
-        if (update.type === 'thinking' && update.message) {
-          const formatted = formatMarkdownToHtml(update.message);
-          const chunks = splitMessage(formatted);
-          for (const chunk of chunks) {
-            try {
-              await ctx.reply(chunk, { parse_mode: 'HTML' });
-            } catch {
-              await ctx.reply(chunk.replace(/<[^>]*>/g, ''));
-            }
-          }
-        }
-      };
+      // Thinking stays enabled in the agent but is not surfaced to Telegram users
+      const onProgress = async (_update: { type: string; message: string }) => {};
 
       const shouldStop = () => this.stopRequests.has(userId);
       const result = await this.agent.processMessage(sessionId, prompt, undefined, onProgress, shouldStop);
@@ -785,20 +761,8 @@ export class TelegramChannel {
       // Process through agent
       const sessionId = await this.getOrCreateSession(userId);
 
-      // Progress callback
-      const onProgress = async (update: { type: string; message: string }) => {
-        if (update.type === 'thinking' && update.message) {
-          const formatted = formatMarkdownToHtml(update.message);
-          const chunks = splitMessage(formatted);
-          for (const chunk of chunks) {
-            try {
-              await ctx.reply(chunk, { parse_mode: 'HTML' });
-            } catch {
-              await ctx.reply(chunk.replace(/<[^>]*>/g, ''));
-            }
-          }
-        }
-      };
+      // Thinking stays enabled in the agent but is not surfaced to Telegram users
+      const onProgress = async (_update: { type: string; message: string }) => {};
 
       const shouldStop = () => this.stopRequests.has(userId);
       const result = await this.agent.processMessage(sessionId, prompt, undefined, onProgress, shouldStop);
@@ -846,21 +810,8 @@ export class TelegramChannel {
     try {
       const sessionId = await this.getOrCreateSession(userId);
 
-      // Progress callback to send intermediate updates to user
-      const onProgress = async (update: { type: string; message: string }) => {
-        if (update.type === 'thinking' && update.message) {
-          // Send the assistant's thinking/planning text
-          const formatted = formatMarkdownToHtml(update.message);
-          const chunks = splitMessage(formatted);
-          for (const chunk of chunks) {
-            try {
-              await ctx.reply(chunk, { parse_mode: 'HTML' });
-            } catch {
-              await ctx.reply(chunk.replace(/<[^>]*>/g, ''));
-            }
-          }
-        }
-      };
+      // Thinking stays enabled in the agent but is not surfaced to Telegram users
+      const onProgress = async (_update: { type: string; message: string }) => {};
 
       // Check if user wants to stop
       const shouldStop = () => this.stopRequests.has(userId);
