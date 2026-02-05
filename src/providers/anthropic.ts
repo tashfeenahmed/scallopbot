@@ -107,7 +107,10 @@ export class AnthropicProvider implements LLMProvider {
   private formatMessages(messages: CompletionRequest['messages']): Anthropic.MessageParam[] {
     return messages.map((msg) => ({
       role: msg.role,
-      content: msg.content as string | Anthropic.ContentBlockParam[],
+      // Filter out 'thinking' blocks from other providers (e.g., Moonshot)
+      content: Array.isArray(msg.content)
+        ? msg.content.filter((b) => b.type !== 'thinking') as unknown as Anthropic.ContentBlockParam[]
+        : msg.content,
     }));
   }
 

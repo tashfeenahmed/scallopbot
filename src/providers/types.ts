@@ -33,7 +33,13 @@ export interface ToolResultContent {
   is_error?: boolean;
 }
 
-export type ContentBlock = TextContent | ImageContent | ToolUseContent | ToolResultContent;
+/** Preserved reasoning/thinking from models with extended thinking (e.g., Kimi K2.5) */
+export interface ThinkingContent {
+  type: 'thinking';
+  thinking: string;
+}
+
+export type ContentBlock = TextContent | ImageContent | ToolUseContent | ToolResultContent | ThinkingContent;
 
 // Message types
 export interface Message {
