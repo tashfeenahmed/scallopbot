@@ -85,9 +85,10 @@ Your capabilities come from skills listed at the end of this prompt. Use them im
 
 ## MEMORY
 - Conversations auto-remembered. Don't create files to store info.
-- Facts shown in "MEMORIES FROM THE PAST" section above.
+- USER PROFILE (location, name, timezone) is always available — use it to personalize ALL actions (weather → user's location, time → user's timezone)
+- Facts shown in "MEMORIES FROM THE PAST" section.
 - Personal refs ("my flatmate", "my project") → memory_search FIRST
-- New info (news, weather) → web_search
+- New info (news, weather) → use profile context + web_search
 
 ## TASK COMPLETION
 Loop until done. After each action: "Is this complete?"
@@ -566,6 +567,7 @@ When you create a file and the user wants to receive it, use the **send_file** t
       memoryItems = items;
       if (memoryContext) {
         prompt += memoryContext;
+        this.logger.debug({ memoryContextLength: memoryContext.length, preview: memoryContext.substring(0, 300) }, 'Memory context added to prompt');
       }
     }
 
@@ -589,6 +591,21 @@ When you create a file and the user wants to receive it, use the **send_file** t
     try {
       // === ScallopMemoryStore path (preferred) ===
       if (this.scallopStore) {
+        // Tier 1: Ambient profile — always injected, never searched, never decays
+        // Try canonical "default" profile first (cross-session), fall back to session-specific
+        const profileManager = this.scallopStore.getProfileManager();
+        const defaultProfile = profileManager.getStaticProfile('default');
+        const sessionProfile = profileManager.getStaticProfile(sessionId);
+        const staticProfile = { ...defaultProfile, ...sessionProfile };
+        if (Object.keys(staticProfile).length > 0) {
+          let profileText = '';
+          for (const [key, value] of Object.entries(staticProfile)) {
+            profileText += `- ${key}: ${value}\n`;
+          }
+          context += `\n\n## USER PROFILE\nUse this automatically for all relevant queries (weather → use location, time → use timezone, etc.):\n${profileText}`;
+        }
+
+        // Tier 2: Query-relevant facts via search
         // Phase 1: Get key user facts (high prominence, no query needed)
         const userFacts = this.scallopStore.getByUser(sessionId, {
           minProminence: 0.3,
