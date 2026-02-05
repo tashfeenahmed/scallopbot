@@ -14,9 +14,8 @@ import {
   ProviderRegistry,
   type LLMProvider,
 } from '../providers/index.js';
-import { createDefaultToolRegistry, type ToolRegistry, type Reminder } from '../tools/index.js';
 import { defineSkill } from '../skills/sdk.js';
-// Note: Reminder type is used for file-based reminder monitor (checkFileReminders)
+import type { Reminder } from '../skills/types.js';
 import { SessionManager } from '../agent/session.js';
 import { Agent } from '../agent/agent.js';
 import { TelegramChannel } from '../channels/telegram.js';
@@ -51,7 +50,6 @@ export class Gateway {
   private logger: Logger;
 
   private providerRegistry: ProviderRegistry | null = null;
-  private toolRegistry: ToolRegistry | null = null;
   private sessionManager: SessionManager | null = null;
   private skillRegistry: SkillRegistry | null = null;
   private skillExecutor: SkillExecutor | null = null;
@@ -232,12 +230,6 @@ export class Gateway {
       'Native skills registered'
     );
 
-    // Initialize tool registry (minimal — only SkillTool meta-tool remains)
-    this.toolRegistry = await createDefaultToolRegistry({
-      skillRegistry: this.skillRegistry,
-    });
-    this.logger.debug({ tools: this.toolRegistry.getAllTools().map((t) => t.name) }, 'Tools registered');
-
     // Initialize session manager
     const sessionsDir = path.join(this.config.agent.workspace, 'sessions');
     this.sessionManager = new SessionManager(sessionsDir);
@@ -254,7 +246,6 @@ export class Gateway {
       sessionManager: this.sessionManager,
       skillRegistry: this.skillRegistry,
       skillExecutor: this.skillExecutor,
-      toolRegistry: this.toolRegistry,
       router: this.router,
       costTracker: this.costTracker,
       hotCollector: this.hotCollector,
@@ -514,16 +505,6 @@ export class Gateway {
     return this.providerRegistry?.getDefaultProvider();
   }
 
-  /**
-   * Get the internal tool registry (used for reminders and file send callbacks, not for Agent)
-   */
-  getToolRegistry(): ToolRegistry {
-    if (!this.toolRegistry) {
-      throw new Error('Gateway not initialized');
-    }
-    return this.toolRegistry;
-  }
-
   getSessionManager(): SessionManager {
     if (!this.sessionManager) {
       throw new Error('Gateway not initialized');
@@ -671,14 +652,14 @@ export class Gateway {
             const { tmpdir } = await import('os');
             const { writeFile } = await import('fs/promises');
             const { nanoid } = await import('nanoid');
-            const { getPendingVoiceAttachments: getAttachments } = await import('../tools/voice.js');
+            const { getPendingVoiceAttachments: getAttachments } = await import('../voice/attachments.js');
 
             const result = await voiceManager.synthesize(truncatedText, { voice: 'am_adam', format: 'opus' });
             const tempFile = join(tmpdir(), `voice-reply-${nanoid()}.ogg`);
             await writeFile(tempFile, result.audio);
 
             // Use the shared pending attachments map from voice.ts utilities
-            const { addPendingVoiceAttachment } = await import('../tools/voice.js');
+            const { addPendingVoiceAttachment } = await import('../voice/attachments.js');
             addPendingVoiceAttachment(ctx.sessionId, tempFile);
 
             return {
@@ -693,9 +674,10 @@ export class Gateway {
       this.skillRegistry.registerSkill(voiceSkill.skill);
     }
 
-    // memory_get skill
+    // memory_get skill (inlined — no tool dependency)
     const scallopStore = this.scallopMemoryStore;
     const memoryStore = this.memoryStore;
+    const logger = this.logger;
     const memoryGetSkill = defineSkill('memory_get', 'Retrieve specific memories by ID, session, type, or recency.')
       .userInvocable(false)
       .inputSchema({
@@ -709,17 +691,88 @@ export class Gateway {
         required: [],
       })
       .onNativeExecute(async (ctx) => {
-        const { MemoryGetTool, initializeMemoryTools } = await import('../tools/memory.js');
-        if (memoryStore) {
-          initializeMemoryTools(memoryStore, undefined, scallopStore ?? undefined);
+        const id = ctx.args.id as string | undefined;
+        const sessionId = ctx.args.sessionId as string | undefined;
+        const type = ctx.args.type as string | undefined;
+        const recent = ctx.args.recent as number | undefined;
+
+        try {
+          // Prefer ScallopStore (SQLite)
+          if (scallopStore) {
+            const mapCategory = (t?: string) => {
+              if (!t) return undefined;
+              const map: Record<string, string> = { fact: 'fact', preference: 'preference', context: 'event', summary: 'insight' };
+              return map[t] as 'fact' | 'preference' | 'event' | 'insight' | undefined;
+            };
+
+            let entries: any[] = [];
+            if (id) {
+              const entry = scallopStore.get(id);
+              if (!entry) return { success: false, output: '', error: `Memory not found with ID: ${id}` };
+              entries = [entry];
+            } else if (sessionId) {
+              entries = scallopStore.getByUser(sessionId, { category: mapCategory(type), limit: 100 });
+            } else if (recent) {
+              entries = scallopStore.getByUser('', { category: mapCategory(type), limit: Math.min(recent, 100) });
+            } else if (type) {
+              entries = scallopStore.getByUser('', { category: mapCategory(type), limit: 50 });
+            } else {
+              entries = scallopStore.getByUser('', { limit: 10 });
+            }
+
+            logger.debug({ id, sessionId, type, recent, count: entries.length, backend: 'scallop' }, 'Memory get completed');
+
+            if (entries.length === 0) return { success: true, output: 'No memories found matching the criteria.' };
+            const format = (mem: any) => [
+              `ID: ${mem.id}`, `Category: ${mem.category}`, `Content: ${mem.content}`,
+              `Timestamp: ${new Date(mem.documentDate).toISOString()}`,
+              `Prominence: ${mem.prominence.toFixed(2)}`,
+              ...(mem.userId ? [`User: ${mem.userId}`] : []),
+              ...(mem.metadata?.subject ? [`Subject: ${mem.metadata.subject}`] : []),
+            ].join('\n');
+
+            if (entries.length === 1) return { success: true, output: format(entries[0]) };
+            const formatted = entries.map((e, i) => `--- Memory ${i + 1} ---\n${format(e)}`);
+            return { success: true, output: `Found ${entries.length} memories:\n\n${formatted.join('\n\n')}` };
+          }
+
+          // Fallback to legacy MemoryStore
+          if (memoryStore) {
+            let entries: any[] = [];
+            if (id) {
+              const entry = memoryStore.get(id);
+              if (!entry) return { success: false, output: '', error: `Memory not found with ID: ${id}` };
+              entries = [entry];
+            } else if (sessionId) {
+              entries = memoryStore.getBySession(sessionId);
+              if (type) entries = entries.filter((e: any) => e.type === type);
+            } else if (recent) {
+              entries = memoryStore.getRecent(Math.min(recent, 100));
+              if (type) entries = entries.filter((e: any) => e.type === type);
+            } else if (type) {
+              entries = memoryStore.searchByType(type as any);
+            } else {
+              entries = memoryStore.getRecent(10);
+            }
+
+            logger.debug({ id, sessionId, type, recent, count: entries.length, backend: 'legacy' }, 'Memory get completed');
+
+            if (entries.length === 0) return { success: true, output: 'No memories found matching the criteria.' };
+            const format = (e: any) => [
+              `ID: ${e.id}`, `Type: ${e.type}`, `Content: ${e.content}`,
+              `Timestamp: ${e.timestamp.toISOString()}`, `Session: ${e.sessionId}`,
+              ...(e.tags?.length ? [`Tags: ${e.tags.join(', ')}`] : []),
+            ].join('\n');
+
+            if (entries.length === 1) return { success: true, output: format(entries[0]) };
+            const formatted = entries.map((e: any, i: number) => `--- Memory ${i + 1} ---\n${format(e)}`);
+            return { success: true, output: `Found ${entries.length} memories:\n\n${formatted.join('\n\n')}` };
+          }
+
+          return { success: false, output: '', error: 'No memory store available' };
+        } catch (error) {
+          return { success: false, output: '', error: `Memory get failed: ${(error as Error).message}` };
         }
-        const tool = new MemoryGetTool({ store: memoryStore ?? undefined, scallopStore: scallopStore ?? undefined });
-        return tool.execute(ctx.args, {
-          workspace: ctx.workspace,
-          sessionId: ctx.sessionId,
-          userId: ctx.userId,
-          logger: this.logger,
-        });
       })
       .build();
     this.skillRegistry.registerSkill(memoryGetSkill.skill);

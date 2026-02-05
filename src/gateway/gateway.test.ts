@@ -114,7 +114,7 @@ describe('Gateway', () => {
       expect(provider?.name).toBe('anthropic');
     });
 
-    it('should initialize tool registry with default tools', async () => {
+    it('should initialize skill registry with native skills', async () => {
       const { Gateway } = await import('./gateway.js');
       const { pino } = await import('pino');
 
@@ -125,14 +125,14 @@ describe('Gateway', () => {
 
       await gateway.initialize();
 
-      const tools = gateway.getToolRegistry().getAllTools();
-      const toolNames = tools.map(t => t.name);
+      const skillRegistry = gateway.getSkillRegistry();
+      expect(skillRegistry).toBeDefined();
 
-      // Only the Skill meta-tool remains in the legacy registry
-      // All other tools (memory_get, send_file, send_message, voice_reply)
-      // are now native skills registered in the skill registry
-      expect(toolNames).toContain('Skill');
-      expect(tools.length).toBeGreaterThanOrEqual(1);
+      // Native skills should be registered
+      const skills = skillRegistry.getAvailableSkills();
+      const skillNames = skills.map(s => s.name);
+      expect(skillNames).toContain('send_message');
+      expect(skillNames).toContain('memory_get');
     });
 
     it('should initialize session manager', async () => {

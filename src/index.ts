@@ -3,7 +3,7 @@
 
 export * from './config/index.js';
 export * from './providers/index.js';
-export * from './tools/index.js';
+export * from './skills/types.js';
 export * from './agent/index.js';
 export * from './channels/index.js';
 export * from './gateway/index.js';

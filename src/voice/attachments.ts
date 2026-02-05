@@ -2,8 +2,7 @@
  * Voice Attachment Utilities
  *
  * Manages pending voice attachments per session.
- * The VoiceReplyTool has been migrated to a native skill (voice_reply).
- * These utilities are used by both the skill and the Telegram channel.
+ * Used by the voice_reply native skill and the Telegram channel.
  */
 
 import { unlink } from 'fs/promises';

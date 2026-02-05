@@ -3,7 +3,7 @@ import type { Logger } from 'pino';
 import type { Agent } from '../agent/agent.js';
 import type { SessionManager } from '../agent/session.js';
 import { VoiceManager } from '../voice/index.js';
-import { getPendingVoiceAttachments, cleanupVoiceAttachments } from '../tools/voice.js';
+import { getPendingVoiceAttachments, cleanupVoiceAttachments } from '../voice/attachments.js';
 import {
   BotConfigManager,
   DEFAULT_PERSONALITIES,

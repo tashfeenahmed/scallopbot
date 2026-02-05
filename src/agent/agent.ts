@@ -20,7 +20,6 @@ import type { ScallopMemoryStore } from '../memory/scallop-store.js';
 import type { ContextManager } from '../routing/context.js';
 import type { MediaProcessor } from '../media/index.js';
 import type { Attachment } from '../channels/types.js';
-import type { ToolRegistry, ToolContext } from '../tools/types.js';
 import { analyzeComplexity } from '../routing/complexity.js';
 
 export interface AgentOptions {
@@ -36,7 +35,6 @@ export interface AgentOptions {
   factExtractor?: LLMFactExtractor;
   contextManager?: ContextManager;
   mediaProcessor?: MediaProcessor;
-  toolRegistry?: ToolRegistry;
   workspace: string;
   logger: Logger;
   maxIterations: number;
@@ -146,7 +144,6 @@ export class Agent {
   private factExtractor: LLMFactExtractor | null;
   private contextManager: ContextManager | null;
   private mediaProcessor: MediaProcessor | null;
-  private toolRegistry: ToolRegistry | null;
   private workspace: string;
   private logger: Logger;
   private maxIterations: number;
@@ -169,7 +166,6 @@ export class Agent {
     this.factExtractor = options.factExtractor || null;
     this.contextManager = options.contextManager || null;
     this.mediaProcessor = options.mediaProcessor || null;
-    this.toolRegistry = options.toolRegistry || null;
     this.workspace = options.workspace;
     this.logger = options.logger;
     this.maxIterations = options.maxIterations;
@@ -513,8 +509,9 @@ export class Agent {
   }> {
     let prompt = this.baseSystemPrompt;
 
-    // Add workspace context
-    prompt += `\n\nWorkspace: ${this.workspace}`;
+    // Add date and workspace context
+    prompt += `\n\nToday's date: ${new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}`;
+    prompt += `\nWorkspace: ${this.workspace}`;
 
     // Add channel context from session metadata
     const session = await this.sessionManager.getSession(sessionId);
@@ -1063,77 +1060,14 @@ When you create a file and the user wants to receive it, use the **send_file** t
         continue;
       }
 
-      // Skill not found — try legacy tool registry (send_file, send_message, etc.)
-      const legacyTool = this.toolRegistry?.getTool(toolUse.name);
-      if (legacyTool) {
-        this.logger.debug({ toolName: toolUse.name, input: toolUse.input }, 'Executing legacy tool');
-
-        if (onProgress) {
-          await onProgress({
-            type: 'tool_start',
-            message: JSON.stringify(toolUse.input),
-            toolName: toolUse.name,
-          });
-        }
-
-        try {
-          const toolContext: ToolContext = {
-            workspace: this.workspace,
-            sessionId,
-            userId,
-            logger: this.logger,
-          };
-          const result = await legacyTool.execute(
-            toolUse.input as Record<string, unknown>,
-            toolContext
-          );
-
-          const resultContent = result.success
-            ? (result.output || 'Success')
-            : `Error: ${result.error || result.output}`;
-
-          results.push({
-            type: 'tool_result',
-            tool_use_id: toolUse.id,
-            content: resultContent,
-            is_error: !result.success,
-          });
-
-          if (onProgress) {
-            await onProgress({
-              type: 'tool_complete',
-              message: resultContent.slice(0, 2000),
-              toolName: toolUse.name,
-            });
-          }
-        } catch (error) {
-          const err = error as Error;
-          this.logger.error({ toolName: toolUse.name, error: err.message }, 'Legacy tool execution failed');
-
-          if (onProgress) {
-            await onProgress({
-              type: 'tool_error',
-              message: err.message,
-              toolName: toolUse.name,
-            });
-          }
-
-          results.push({
-            type: 'tool_result',
-            tool_use_id: toolUse.id,
-            content: `Error executing tool: ${err.message}`,
-            is_error: true,
-          });
-        }
-      } else {
-        this.logger.warn({ name: toolUse.name }, 'Unknown skill/tool requested');
-        results.push({
-          type: 'tool_result',
-          tool_use_id: toolUse.id,
-          content: `Error: Unknown skill "${toolUse.name}"`,
-          is_error: true,
-        });
-      }
+      // Skill not found
+      this.logger.warn({ name: toolUse.name }, 'Unknown skill requested');
+      results.push({
+        type: 'tool_result',
+        tool_use_id: toolUse.id,
+        content: `Error: Unknown skill "${toolUse.name}"`,
+        is_error: true,
+      });
     }
 
     return results;
