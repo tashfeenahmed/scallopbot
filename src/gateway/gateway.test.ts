@@ -128,16 +128,12 @@ describe('Gateway', () => {
       const tools = gateway.getToolRegistry().getAllTools();
       const toolNames = tools.map(t => t.name);
 
-      // Core tools that should always be present
-      expect(toolNames).toContain('read');
-      expect(toolNames).toContain('write');
-      expect(toolNames).toContain('edit');
-      expect(toolNames).toContain('bash');
-      expect(toolNames).toContain('memory_search');
+      // Remaining legacy tools (most tools migrated to skills)
       expect(toolNames).toContain('memory_get');
+      expect(toolNames).toContain('Skill');
 
-      // At least 6 core tools, plus optional (Skill, voice_reply, web_search, reminder, send_file)
-      expect(tools.length).toBeGreaterThanOrEqual(6);
+      // memory_get + Skill + comms tools (send_file, send_message, voice_reply)
+      expect(tools.length).toBeGreaterThanOrEqual(2);
     });
 
     it('should initialize session manager', async () => {

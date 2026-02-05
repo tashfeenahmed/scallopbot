@@ -15,6 +15,7 @@ import {
   type LLMProvider,
 } from '../providers/index.js';
 import { createDefaultToolRegistry, type ToolRegistry, type Reminder } from '../tools/index.js';
+// Note: Reminder type is used for file-based reminder monitor (checkFileReminders)
 import { SessionManager } from '../agent/session.js';
 import { Agent } from '../agent/agent.js';
 import { TelegramChannel } from '../channels/telegram.js';
@@ -223,16 +224,15 @@ export class Gateway {
       'Voice manager initialized'
     );
 
-    // Initialize tool registry with skills, memory, voice, reminders, and file sending
+    // Initialize tool registry with remaining legacy tools (comms + memory_get)
+    // Note: Most tools (read, write, edit, bash, web_search, memory_search, reminder)
+    // are now provided by skills via the skill registry.
     this.toolRegistry = await createDefaultToolRegistry({
       skillRegistry: this.skillRegistry,
       memoryStore: this.memoryStore,
       hybridSearch: this.hybridSearch,
       scallopStore: this.scallopMemoryStore ?? undefined,
       voiceManager: voiceStatus.tts ? this.voiceManager : undefined, // Only add voice tool if TTS available
-      reminderCallback: async (reminder: Reminder) => {
-        await this.handleReminderTrigger(reminder);
-      },
       fileSendCallback: async (userId: string, filePath: string, caption?: string) => {
         return this.handleFileSend(userId, filePath, caption);
       },

@@ -3,18 +3,16 @@ import type { ToolDefinition } from '../providers/types.js';
 import type { MemoryStore, HybridSearch, ScallopMemoryStore } from '../memory/index.js';
 import type { SkillRegistry } from '../skills/registry.js';
 import type { VoiceManager } from '../voice/index.js';
-import type { ReminderCallback } from './reminder.js';
 import type { FileSendCallback } from './file-send.js';
 import type { MessageSendCallback } from './message-send.js';
 
 /**
  * Standard tool groups for common workflows
+ * Note: File/dev/search tools are now provided by skills (read_file, write_file, edit_file, bash, web_search).
+ * These groups reference the legacy tool names for backward compatibility with policies.
  */
 export const STANDARD_GROUPS: ToolGroup[] = [
-  { id: 'fs', name: 'File System', description: 'File read/write/edit operations', tools: ['read', 'write', 'edit'] },
-  { id: 'dev', name: 'Development', description: 'Full development workflow', tools: ['read', 'write', 'edit', 'bash'] },
-  { id: 'web', name: 'Web', description: 'Web browsing and search', tools: ['web_search'] },
-  { id: 'all-coding', name: 'All Coding', description: 'All coding-related tools', tools: ['read', 'write', 'edit', 'bash'] },
+  { id: 'comms', name: 'Communication', description: 'Message and file sending tools', tools: ['send_message', 'send_file', 'voice_reply'] },
 ];
 
 export class ToolRegistryImpl implements ToolRegistry {
@@ -140,15 +138,21 @@ export class ToolRegistryImpl implements ToolRegistry {
 
 /**
  * Options for creating tool registry
+ *
+ * Note: Most tools (read, write, edit, bash, web_search, memory_search, reminder)
+ * have been migrated to skills. The tool registry now only manages:
+ * - Communication tools (send_file, send_message, voice_reply)
+ * - Memory get tool (memory_get - no skill equivalent yet)
+ * - Skill meta-tool (for invoking skills by name)
  */
 export interface ToolRegistryOptions {
-  /** Memory store instance for memory tools */
+  /** Memory store instance for memory_get tool */
   memoryStore?: MemoryStore;
-  /** Hybrid search instance for memory tools */
+  /** Hybrid search instance for memory_get tool */
   hybridSearch?: HybridSearch;
-  /** ScallopMemoryStore (SQLite) - preferred backend for memory tools */
+  /** ScallopMemoryStore (SQLite) - preferred backend for memory_get tool */
   scallopStore?: ScallopMemoryStore;
-  /** Whether to include memory tools (default: true if memoryStore provided) */
+  /** Whether to include memory_get tool (default: true if memoryStore provided) */
   includeMemoryTools?: boolean;
   /** Skill registry for skill tool */
   skillRegistry?: SkillRegistry;
@@ -162,10 +166,6 @@ export interface ToolRegistryOptions {
   toolPolicy?: ToolPolicy;
   /** Additional tool groups to register */
   additionalGroups?: ToolGroup[];
-  /** Callback for when reminders trigger */
-  reminderCallback?: ReminderCallback;
-  /** Whether to include reminder tool (default: true if reminderCallback provided) */
-  includeReminderTool?: boolean;
   /** Callback for sending files to user */
   fileSendCallback?: FileSendCallback;
   /** Whether to include file send tool (default: true if fileSendCallback provided) */
@@ -177,33 +177,37 @@ export interface ToolRegistryOptions {
 }
 
 /**
- * Create a registry with all default tools
+ * Create a registry with the remaining legacy tools.
+ *
+ * Most tools have been migrated to skills:
+ * - read → read_file skill
+ * - write → write_file skill
+ * - edit → edit_file skill
+ * - bash → bash skill
+ * - web_search → web_search skill
+ * - memory_search → memory_search skill
+ * - reminder → reminder skill
+ *
+ * This registry now manages only:
+ * - memory_get (no skill equivalent)
+ * - Skill meta-tool
+ * - voice_reply, send_file, send_message (comms tools)
  */
 export async function createDefaultToolRegistry(
   options: ToolRegistryOptions = {}
 ): Promise<ToolRegistryImpl> {
-  const { ReadTool } = await import('./read.js');
-  const { WriteTool } = await import('./write.js');
-  const { EditTool } = await import('./edit.js');
-  const { BashTool } = await import('./bash.js');
-
   const registry = new ToolRegistryImpl();
-  registry.registerTool(new ReadTool());
-  registry.registerTool(new WriteTool());
-  registry.registerTool(new EditTool());
-  registry.registerTool(new BashTool());
 
-  // Add memory tools if store is provided
+  // Add memory_get tool if store is provided (no skill equivalent yet)
   const includeMemory = options.includeMemoryTools ?? !!(options.memoryStore || options.scallopStore);
   if (includeMemory) {
-    const { MemorySearchTool, MemoryGetTool, initializeMemoryTools } = await import('./memory.js');
+    const { MemoryGetTool, initializeMemoryTools } = await import('./memory.js');
 
     if (options.memoryStore) {
       initializeMemoryTools(options.memoryStore, options.hybridSearch, options.scallopStore);
     }
 
     const memToolOpts = { scallopStore: options.scallopStore };
-    registry.registerTool(new MemorySearchTool(memToolOpts));
     registry.registerTool(new MemoryGetTool(memToolOpts));
   }
 
@@ -220,21 +224,6 @@ export async function createDefaultToolRegistry(
   if (includeVoice && options.voiceManager) {
     const { VoiceReplyTool } = await import('./voice.js');
     registry.registerTool(new VoiceReplyTool({ voiceManager: options.voiceManager }));
-  }
-
-  // Add Brave Search tool if API key is available
-  const { initializeBraveSearch } = await import('./search.js');
-  const braveSearch = initializeBraveSearch();
-  if (braveSearch) {
-    registry.registerTool(braveSearch);
-  }
-
-  // Add reminder tool if callback is provided
-  const includeReminder = options.includeReminderTool ?? !!options.reminderCallback;
-  if (includeReminder && options.reminderCallback) {
-    const { ReminderTool, initializeReminders } = await import('./reminder.js');
-    initializeReminders(options.reminderCallback);
-    registry.registerTool(new ReminderTool());
   }
 
   // Add file send tool if callback is provided

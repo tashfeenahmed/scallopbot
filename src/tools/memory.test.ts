@@ -1,10 +1,12 @@
 /**
  * Tests for Memory Tools
+ *
+ * Note: MemorySearchTool tests removed — memory_search is now a skill.
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { MemorySearchTool, MemoryGetTool, initializeMemoryTools } from './memory.js';
-import { MemoryStore, HybridSearch } from '../memory/index.js';
+import { MemoryGetTool, initializeMemoryTools } from './memory.js';
+import { MemoryStore } from '../memory/index.js';
 import type { ToolContext } from './types.js';
 import type { Logger } from 'pino';
 
@@ -27,11 +29,9 @@ const createMockContext = (): ToolContext => ({
 
 describe('Memory Tools', () => {
   let memoryStore: MemoryStore;
-  let hybridSearch: HybridSearch;
 
   beforeEach(() => {
     memoryStore = new MemoryStore();
-    hybridSearch = new HybridSearch({ store: memoryStore });
 
     // Add some test memories
     memoryStore.add({
@@ -72,95 +72,6 @@ describe('Memory Tools', () => {
       sessionId: 'session-2',
       timestamp: new Date(),
       tags: ['project', 'requirements'],
-    });
-  });
-
-  describe('MemorySearchTool', () => {
-    let tool: MemorySearchTool;
-    let context: ToolContext;
-
-    beforeEach(() => {
-      tool = new MemorySearchTool({ store: memoryStore, search: hybridSearch });
-      context = createMockContext();
-    });
-
-    it('should have correct name and description', () => {
-      expect(tool.name).toBe('memory_search');
-      expect(tool.description).toContain('Search');
-    });
-
-    it('should have valid tool definition', () => {
-      expect(tool.definition.name).toBe('memory_search');
-      expect(tool.definition.input_schema.type).toBe('object');
-      expect(tool.definition.input_schema.required).toContain('query');
-    });
-
-    it('should search memories by query', async () => {
-      // Default searches facts, so search for fact content
-      const result = await tool.execute({ query: 'John Acme' }, context);
-
-      expect(result.success).toBe(true);
-      expect(result.output).toContain('John');
-      expect(result.output).toContain('fact');
-    });
-
-    it('should search all memory types when type=all', async () => {
-      const result = await tool.execute({ query: 'dark mode', type: 'all' }, context);
-
-      expect(result.success).toBe(true);
-      expect(result.output).toContain('dark mode');
-      expect(result.output).toContain('preference');
-    });
-
-    it('should search memories with type filter', async () => {
-      const result = await tool.execute({ query: 'user', type: 'fact' }, context);
-
-      expect(result.success).toBe(true);
-      expect(result.output).toContain('John');
-      expect(result.output).toContain('fact');
-    });
-
-    it('should search memories with session filter', async () => {
-      // Need type: 'all' since TypeScript is in a preference, not a fact
-      const result = await tool.execute(
-        { query: 'TypeScript', sessionId: 'session-2', type: 'all' },
-        context
-      );
-
-      expect(result.success).toBe(true);
-      expect(result.output).toContain('TypeScript');
-    });
-
-    it('should respect limit parameter', async () => {
-      const result = await tool.execute({ query: 'user', limit: 2 }, context);
-
-      expect(result.success).toBe(true);
-      // Should not have more than 2 results
-      const resultCount = (result.output.match(/--- Result/g) || []).length;
-      expect(resultCount).toBeLessThanOrEqual(2);
-    });
-
-    it('should return no results message when none found', async () => {
-      // Use truly unique gibberish that won't match any n-grams
-      const result = await tool.execute(
-        { query: 'qwzxzqwzxz' },
-        context
-      );
-
-      expect(result.success).toBe(true);
-      expect(result.output).toContain('No memories found');
-    });
-
-    it('should cap limit at 50', async () => {
-      const result = await tool.execute({ query: 'user', limit: 100 }, context);
-
-      expect(result.success).toBe(true);
-      // Tool should internally cap at 50
-    });
-
-    it('should create search from store if not provided', () => {
-      const toolWithStore = new MemorySearchTool({ store: memoryStore });
-      expect(toolWithStore.name).toBe('memory_search');
     });
   });
 
@@ -260,15 +171,7 @@ describe('Memory Tools', () => {
   });
 
   describe('initializeMemoryTools', () => {
-    it('should initialize with custom store and search', () => {
-      const customStore = new MemoryStore();
-      const customSearch = new HybridSearch({ store: customStore });
-
-      // Should not throw
-      expect(() => initializeMemoryTools(customStore, customSearch)).not.toThrow();
-    });
-
-    it('should create search if not provided', () => {
+    it('should initialize with custom store', () => {
       const customStore = new MemoryStore();
 
       // Should not throw

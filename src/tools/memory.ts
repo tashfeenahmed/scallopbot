@@ -2,8 +2,9 @@
  * Memory Tools
  *
  * Exposes memory system capabilities as tools for the agent:
- * - memory_search: Search memories using hybrid search
  * - memory_get: Retrieve specific memories by ID or session
+ *
+ * Note: memory_search has been migrated to the memory_search skill.
  *
  * Supports both ScallopMemoryStore (SQLite, preferred) and legacy MemoryStore (JSONL).
  * When ScallopStore is available, tools query it directly for accurate results.
@@ -17,8 +18,6 @@ import {
   ScallopMemoryStore,
   type MemoryEntry,
   type MemoryType,
-  type SearchResult,
-  type ScallopSearchResult,
   type ScallopMemoryEntry,
   type MemoryCategory,
 } from '../memory/index.js';
@@ -55,16 +54,6 @@ function getMemoryStore(): MemoryStore {
 }
 
 /**
- * Get or create hybrid search
- */
-function getHybridSearch(): HybridSearch {
-  if (!sharedHybridSearch) {
-    sharedHybridSearch = new HybridSearch({ store: getMemoryStore() });
-  }
-  return sharedHybridSearch;
-}
-
-/**
  * Get scallop store (may be null)
  */
 function getScallopStore(): ScallopMemoryStore | null {
@@ -88,57 +77,6 @@ function formatMemoryEntry(entry: MemoryEntry): string {
     lines.push(`Metadata: ${JSON.stringify(entry.metadata)}`);
   }
   return lines.join('\n');
-}
-
-/**
- * Format search results for display (legacy)
- */
-function formatSearchResults(results: SearchResult[]): string {
-  if (results.length === 0) {
-    return 'No memories found matching the query.';
-  }
-
-  const formatted = results.map((result, index) => {
-    const entry = result.entry;
-    const lines: string[] = [];
-    lines.push(`--- Result ${index + 1} (score: ${result.score.toFixed(3)}, match: ${result.matchType}) ---`);
-    lines.push(`ID: ${entry.id}`);
-    lines.push(`Type: ${entry.type}`);
-    lines.push(`Content: ${entry.content}`);
-    lines.push(`Timestamp: ${entry.timestamp.toISOString()}`);
-    if (entry.tags?.length) {
-      lines.push(`Tags: ${entry.tags.join(', ')}`);
-    }
-    return lines.join('\n');
-  });
-
-  return `Found ${results.length} memories:\n\n${formatted.join('\n\n')}`;
-}
-
-/**
- * Format ScallopStore search results for display
- */
-function formatScallopResults(results: ScallopSearchResult[]): string {
-  if (results.length === 0) {
-    return 'No memories found matching the query.';
-  }
-
-  const formatted = results.map((result, index) => {
-    const mem = result.memory;
-    const lines: string[] = [];
-    lines.push(`--- Result ${index + 1} (score: ${result.score.toFixed(3)}, match: ${result.matchType}) ---`);
-    lines.push(`ID: ${mem.id}`);
-    lines.push(`Category: ${mem.category}`);
-    lines.push(`Content: ${mem.content}`);
-    lines.push(`Timestamp: ${new Date(mem.documentDate).toISOString()}`);
-    lines.push(`Prominence: ${mem.prominence.toFixed(2)}`);
-    if (mem.metadata?.subject) {
-      lines.push(`Subject: ${mem.metadata.subject}`);
-    }
-    return lines.join('\n');
-  });
-
-  return `Found ${results.length} memories:\n\n${formatted.join('\n\n')}`;
 }
 
 /**
@@ -175,151 +113,7 @@ export interface MemoryToolOptions {
   scallopStore?: ScallopMemoryStore;
 }
 
-/**
- * Memory Search Tool
- *
- * Search memories using hybrid BM25 + semantic search
- */
-export class MemorySearchTool implements Tool {
-  name = 'memory_search';
-  category = 'memory' as const;
-  description = 'Search through stored memories using keyword and semantic matching';
-
-  private search: HybridSearch | null;
-  private scallopStore: ScallopMemoryStore | null;
-
-  constructor(options: MemoryToolOptions = {}) {
-    this.scallopStore = options.scallopStore || null;
-    if (options.store && !options.search) {
-      this.search = new HybridSearch({ store: options.store });
-    } else {
-      this.search = options.search || null;
-    }
-  }
-
-  definition: ToolDefinition = {
-    name: 'memory_search',
-    description:
-      'Search memories using hybrid search combining keyword matching (BM25) and semantic similarity. ' +
-      'Returns ranked results with relevance scores. Use this to find relevant context, facts, ' +
-      'user preferences, or past conversation details. By default, searches facts (what you learned about the user).',
-    input_schema: {
-      type: 'object',
-      properties: {
-        query: {
-          type: 'string',
-          description: 'The search query - can be keywords, phrases, or natural language questions',
-        },
-        type: {
-          type: 'string',
-          enum: ['raw', 'fact', 'summary', 'preference', 'context', 'all'],
-          description:
-            'Filter by memory type: fact (default - extracted facts about the user), ' +
-            'raw (unprocessed), summary (condensed), preference (user preferences), context (processed), ' +
-            'all (search all types)',
-        },
-        subject: {
-          type: 'string',
-          description: 'Filter to facts about a specific person (e.g., "user", "Bob", "John"). ' +
-            'Use "user" for facts about the user themselves.',
-        },
-        limit: {
-          type: 'number',
-          description: 'Maximum number of results to return (default: 10, max: 50)',
-        },
-        recencyBoost: {
-          type: 'boolean',
-          description: 'Boost recent memories in ranking (default: true)',
-        },
-        sessionId: {
-          type: 'string',
-          description: 'Filter results to a specific session ID',
-        },
-      },
-      required: ['query'],
-    },
-  };
-
-  /**
-   * Map legacy type filter to ScallopStore category filter
-   */
-  private mapTypeToCategory(type?: string): MemoryCategory | undefined {
-    if (!type) return undefined;
-    switch (type) {
-      case 'fact': return 'fact';
-      case 'preference': return 'preference';
-      case 'context': return 'event';
-      case 'summary': return 'insight';
-      default: return undefined;
-    }
-  }
-
-  async execute(
-    input: Record<string, unknown>,
-    context: ToolContext
-  ): Promise<ToolResult> {
-    const query = input.query as string;
-    const typeInput = input.type as string | undefined;
-    const limit = Math.min((input.limit as number) || 10, 50);
-    const sessionId = input.sessionId as string | undefined;
-
-    try {
-      // Prefer ScallopStore (SQLite) when available - this is where facts are stored
-      const scallop = this.scallopStore || getScallopStore();
-      if (scallop) {
-        const category = typeInput === 'all' ? undefined : this.mapTypeToCategory(typeInput || 'fact');
-        const results = await scallop.search(query, {
-          userId: sessionId,
-          category,
-          limit,
-        });
-
-        context.logger.debug(
-          { query, category, limit, resultsCount: results.length, backend: 'scallop' },
-          'Memory search completed'
-        );
-
-        return {
-          success: true,
-          output: formatScallopResults(results),
-        };
-      }
-
-      // Fallback to legacy HybridSearch
-      const recencyBoost = input.recencyBoost !== false;
-      const subject = input.subject as string | undefined;
-      const type: MemoryType | undefined = typeInput === 'all' ? undefined : (typeInput as MemoryType || 'fact');
-
-      const search = this.search || getHybridSearch();
-      const results = search.search(query, {
-        limit,
-        type,
-        recencyBoost,
-        sessionId,
-        subject,
-        userSubjectBoost: 1.5,
-      });
-
-      context.logger.debug(
-        { query, type, subject, limit, resultsCount: results.length, backend: 'legacy' },
-        'Memory search completed'
-      );
-
-      return {
-        success: true,
-        output: formatSearchResults(results),
-      };
-    } catch (error) {
-      const err = error as Error;
-      context.logger.error({ query, error: err.message }, 'Memory search failed');
-      return {
-        success: false,
-        output: '',
-        error: `Memory search failed: ${err.message}`,
-      };
-    }
-  }
-}
+// Note: MemorySearchTool has been removed — replaced by memory_search skill.
 
 /**
  * Memory Get Tool
