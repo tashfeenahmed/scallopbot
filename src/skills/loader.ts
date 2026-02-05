@@ -301,7 +301,12 @@ export class SkillLoader extends EventEmitter {
       if (hasScripts && parsed.frontmatter.scripts) {
         for (const [action, scriptPath] of Object.entries(parsed.frontmatter.scripts)) {
           const fullScriptPath = join(skillDir, scriptPath);
-          const scriptExists = await this.fileExists(fullScriptPath);
+          let scriptExists = await this.fileExists(fullScriptPath);
+          // After TS compilation, .ts files become .js — check compiled path
+          if (!scriptExists && scriptPath.endsWith('.ts')) {
+            const jsPath = join(skillDir, scriptPath.replace(/\.ts$/, '.js'));
+            scriptExists = await this.fileExists(jsPath);
+          }
           if (!scriptExists) {
             this.logger?.warn(
               { skill: parsed.frontmatter.name, action, scriptPath: fullScriptPath },
