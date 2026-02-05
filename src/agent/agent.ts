@@ -297,20 +297,10 @@ export class Agent {
       });
     }
 
-    // Get tool definitions from skills (skills are now the primary capability source)
+    // Get tool definitions from skills (all tools are now skills)
     const tools = this.skillRegistry
       ? this.skillRegistry.getToolDefinitions()
       : [];
-
-    // Merge in comms tools from legacy registry (send_file, send_message)
-    if (this.toolRegistry) {
-      const commsTools = this.toolRegistry.getToolsByCategory('comms');
-      for (const tool of commsTools) {
-        if (!tools.find(t => t.name === tool.name)) {
-          tools.push(tool.definition);
-        }
-      }
-    }
 
     // Track usage across iterations
     let totalInputTokens = 0;
@@ -978,8 +968,8 @@ When you create a file and the user wants to receive it, use the **send_file** t
         continue;
       }
 
-      if (skill && this.skillExecutor) {
-        this.logger.debug({ skillName: toolUse.name, input: toolUse.input }, 'Executing skill');
+      if (skill && (skill.handler || this.skillExecutor)) {
+        this.logger.debug({ skillName: toolUse.name, input: toolUse.input, native: !!skill.handler }, 'Executing skill');
 
         // Send progress: skill starting
         if (onProgress) {
@@ -991,23 +981,44 @@ When you create a file and the user wants to receive it, use the **send_file** t
         }
 
         try {
-          const result = await this.skillExecutor.execute(skill, {
-            skillName: toolUse.name,
-            args: toolUse.input,
-            cwd: this.workspace,
-            userId,
-            sessionId,
-          });
+          let resultContent: string;
+          let resultSuccess: boolean;
+          let resultOutput: string;
 
-          const resultContent = result.success
-            ? (result.output || 'Success')
-            : `Error: ${result.error}`;
+          if (skill.handler) {
+            // Native in-process handler (for skills that need runtime access)
+            const result = await skill.handler({
+              args: toolUse.input as Record<string, unknown>,
+              workspace: this.workspace,
+              sessionId,
+              userId,
+            });
+            resultSuccess = result.success;
+            resultOutput = result.output || '';
+            resultContent = result.success
+              ? (result.output || 'Success')
+              : `Error: ${result.error || result.output}`;
+          } else {
+            // Subprocess execution via skill executor
+            const result = await this.skillExecutor!.execute(skill, {
+              skillName: toolUse.name,
+              args: toolUse.input,
+              cwd: this.workspace,
+              userId,
+              sessionId,
+            });
+            resultSuccess = result.success;
+            resultOutput = result.output || '';
+            resultContent = result.success
+              ? (result.output || 'Success')
+              : `Error: ${result.error}`;
+          }
 
           results.push({
             type: 'tool_result',
             tool_use_id: toolUse.id,
             content: resultContent,
-            is_error: !result.success,
+            is_error: !resultSuccess,
           });
 
           // Send progress: skill complete
@@ -1020,9 +1031,9 @@ When you create a file and the user wants to receive it, use the **send_file** t
           }
 
           // Collect in memory
-          if (this.hotCollector && result.success) {
+          if (this.hotCollector && resultSuccess) {
             this.hotCollector.collect({
-              content: `Skill ${toolUse.name} executed: ${(result.output || '').slice(0, 500)}`,
+              content: `Skill ${toolUse.name} executed: ${resultOutput.slice(0, 500)}`,
               sessionId,
               source: `skill:${toolUse.name}`,
               tags: ['skill-execution', toolUse.name],

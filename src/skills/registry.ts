@@ -161,6 +161,18 @@ export class SkillRegistry {
   }
 
   /**
+   * Register a skill programmatically (e.g., native/SDK skills).
+   * Added after loader initialization, these survive reload if re-registered.
+   */
+  registerSkill(skill: Skill): void {
+    this.state.skills.set(skill.name, skill);
+    if (skill.available && !this.state.availableSkills.find(s => s.name === skill.name)) {
+      this.state.availableSkills.push(skill);
+    }
+    this.logger?.debug({ skill: skill.name, source: skill.source }, 'Skill registered programmatically');
+  }
+
+  /**
    * Check if a skill exists
    */
   hasSkill(name: string): boolean {

@@ -15,6 +15,7 @@ import {
   type LLMProvider,
 } from '../providers/index.js';
 import { createDefaultToolRegistry, type ToolRegistry, type Reminder } from '../tools/index.js';
+import { defineSkill } from '../skills/sdk.js';
 // Note: Reminder type is used for file-based reminder monitor (checkFileReminders)
 import { SessionManager } from '../agent/session.js';
 import { Agent } from '../agent/agent.js';
@@ -224,21 +225,16 @@ export class Gateway {
       'Voice manager initialized'
     );
 
-    // Initialize tool registry with remaining legacy tools (comms + memory_get)
-    // Note: Most tools (read, write, edit, bash, web_search, memory_search, reminder)
-    // are now provided by skills via the skill registry.
+    // Register native skills (comms + memory_get) that need runtime access
+    this.registerNativeSkills(voiceStatus.tts);
+    this.logger.debug(
+      { nativeSkills: ['send_message', 'send_file', 'voice_reply', 'memory_get'].filter(n => this.skillRegistry!.hasSkill(n)) },
+      'Native skills registered'
+    );
+
+    // Initialize tool registry (minimal — only SkillTool meta-tool remains)
     this.toolRegistry = await createDefaultToolRegistry({
       skillRegistry: this.skillRegistry,
-      memoryStore: this.memoryStore,
-      hybridSearch: this.hybridSearch,
-      scallopStore: this.scallopMemoryStore ?? undefined,
-      voiceManager: voiceStatus.tts ? this.voiceManager : undefined, // Only add voice tool if TTS available
-      fileSendCallback: async (userId: string, filePath: string, caption?: string) => {
-        return this.handleFileSend(userId, filePath, caption);
-      },
-      messageSendCallback: async (userId: string, message: string) => {
-        return this.handleMessageSend(userId, message);
-      },
     });
     this.logger.debug({ tools: this.toolRegistry.getAllTools().map((t) => t.name) }, 'Tools registered');
 
@@ -558,6 +554,175 @@ export class Gateway {
 
   isGatewayRunning(): boolean {
     return this.isRunning;
+  }
+
+  /**
+   * Register native skills that need runtime access (channels, memory, voice).
+   * These run in-process via handlers instead of as subprocesses.
+   */
+  private registerNativeSkills(ttsAvailable: boolean): void {
+    if (!this.skillRegistry) return;
+
+    // send_message skill
+    const sendMessageSkill = defineSkill('send_message', 'Send a text message to the user immediately. Use this for conversational, human-like messaging.')
+      .userInvocable(false)
+      .inputSchema({
+        type: 'object',
+        properties: {
+          message: { type: 'string', description: 'The message text to send. Keep it short and conversational, like a text message.' },
+        },
+        required: ['message'],
+      })
+      .onNativeExecute(async (ctx) => {
+        const message = ctx.args.message as string;
+        if (!message || message.trim().length === 0) {
+          return { success: false, output: 'Missing required parameter: message' };
+        }
+        if (!ctx.userId) {
+          return { success: false, output: 'Cannot send message - user ID not available' };
+        }
+        const ok = await this.handleMessageSend(ctx.userId, message.trim());
+        return ok
+          ? { success: true, output: 'Message sent' }
+          : { success: false, output: 'Failed to send message - check logs for details' };
+      })
+      .build();
+    this.skillRegistry.registerSkill(sendMessageSkill.skill);
+
+    // send_file skill
+    const sendFileSkill = defineSkill('send_file', 'Send a file to the user via chat. Use this to send PDFs, images, documents, or any file the user requests.')
+      .userInvocable(false)
+      .inputSchema({
+        type: 'object',
+        properties: {
+          file_path: { type: 'string', description: 'Absolute path to the file to send' },
+          caption: { type: 'string', description: 'Optional caption/message to accompany the file' },
+        },
+        required: ['file_path'],
+      })
+      .onNativeExecute(async (ctx) => {
+        const filePath = ctx.args.file_path as string;
+        const caption = ctx.args.caption as string | undefined;
+        if (!filePath) {
+          return { success: false, output: 'Missing required parameter: file_path' };
+        }
+        if (!ctx.userId) {
+          return { success: false, output: 'Cannot send file - user ID not available' };
+        }
+
+        const fsMod = await import('fs/promises');
+        const pathMod = await import('path');
+        const absolutePath = pathMod.isAbsolute(filePath) ? filePath : pathMod.join(ctx.workspace, filePath);
+
+        try {
+          await fsMod.access(absolutePath);
+        } catch {
+          return { success: false, output: `File not found: ${absolutePath}` };
+        }
+
+        const stats = await fsMod.stat(absolutePath);
+        if (!stats.isFile()) {
+          return { success: false, output: `Not a file: ${absolutePath}` };
+        }
+        const maxSize = 50 * 1024 * 1024;
+        if (stats.size > maxSize) {
+          return { success: false, output: `File too large: ${(stats.size / 1024 / 1024).toFixed(2)}MB (max 50MB)` };
+        }
+
+        const ok = await this.handleFileSend(ctx.userId, absolutePath, caption);
+        if (ok) {
+          const fileName = pathMod.basename(absolutePath);
+          const sizeKB = (stats.size / 1024).toFixed(1);
+          return { success: true, output: `File sent successfully: ${fileName} (${sizeKB}KB)` };
+        }
+        return { success: false, output: 'Failed to send file - check logs for details' };
+      })
+      .build();
+    this.skillRegistry.registerSkill(sendFileSkill.skill);
+
+    // voice_reply skill (only if TTS is available)
+    if (ttsAvailable && this.voiceManager) {
+      const voiceManager = this.voiceManager;
+      const voiceSkill = defineSkill('voice_reply', 'Send a voice message to the user. Use this when the user asks for a voice note, audio response, or when voice would be more appropriate than text.')
+        .userInvocable(false)
+        .inputSchema({
+          type: 'object',
+          properties: {
+            text: { type: 'string', description: 'The text to speak in the voice message. Keep it concise (under 500 characters) for best results.' },
+          },
+          required: ['text'],
+        })
+        .onNativeExecute(async (ctx) => {
+          const text = ctx.args.text as string;
+          if (!text || text.trim().length === 0) {
+            return { success: false, output: '', error: 'No text provided for voice synthesis' };
+          }
+
+          const maxLength = 1000;
+          const truncatedText = text.length > maxLength ? text.substring(0, maxLength) + '...' : text;
+
+          try {
+            const status = await voiceManager.isAvailable();
+            if (!status.tts) {
+              return { success: false, output: '', error: 'Text-to-speech is not available.' };
+            }
+
+            const { join } = await import('path');
+            const { tmpdir } = await import('os');
+            const { writeFile } = await import('fs/promises');
+            const { nanoid } = await import('nanoid');
+            const { getPendingVoiceAttachments: getAttachments } = await import('../tools/voice.js');
+
+            const result = await voiceManager.synthesize(truncatedText, { voice: 'am_adam', format: 'opus' });
+            const tempFile = join(tmpdir(), `voice-reply-${nanoid()}.ogg`);
+            await writeFile(tempFile, result.audio);
+
+            // Use the shared pending attachments map from voice.ts utilities
+            const { addPendingVoiceAttachment } = await import('../tools/voice.js');
+            addPendingVoiceAttachment(ctx.sessionId, tempFile);
+
+            return {
+              success: true,
+              output: `Voice message prepared (${Math.round(result.duration || 0)}s). It will be sent along with this response.`,
+            };
+          } catch (error) {
+            return { success: false, output: '', error: `Failed to create voice message: ${(error as Error).message}` };
+          }
+        })
+        .build();
+      this.skillRegistry.registerSkill(voiceSkill.skill);
+    }
+
+    // memory_get skill
+    const scallopStore = this.scallopMemoryStore;
+    const memoryStore = this.memoryStore;
+    const memoryGetSkill = defineSkill('memory_get', 'Retrieve specific memories by ID, session, type, or recency.')
+      .userInvocable(false)
+      .inputSchema({
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: 'Specific memory ID to retrieve' },
+          sessionId: { type: 'string', description: 'Get all memories for this session' },
+          type: { type: 'string', description: 'Filter by memory type: raw, fact, summary, preference, context' },
+          recent: { type: 'number', description: 'Get N most recent memories (max: 100)' },
+        },
+        required: [],
+      })
+      .onNativeExecute(async (ctx) => {
+        const { MemoryGetTool, initializeMemoryTools } = await import('../tools/memory.js');
+        if (memoryStore) {
+          initializeMemoryTools(memoryStore, undefined, scallopStore ?? undefined);
+        }
+        const tool = new MemoryGetTool({ store: memoryStore ?? undefined, scallopStore: scallopStore ?? undefined });
+        return tool.execute(ctx.args, {
+          workspace: ctx.workspace,
+          sessionId: ctx.sessionId,
+          userId: ctx.userId,
+          logger: this.logger,
+        });
+      })
+      .build();
+    this.skillRegistry.registerSkill(memoryGetSkill.skill);
   }
 
   /**

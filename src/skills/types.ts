@@ -84,6 +84,27 @@ export interface SkillFrontmatter {
 }
 
 /**
+ * Context passed to in-process skill handlers
+ */
+export interface SkillHandlerContext {
+  /** Tool input args from LLM */
+  args: Record<string, unknown>;
+  /** Working directory */
+  workspace: string;
+  /** Session ID */
+  sessionId: string;
+  /** User ID (channel-prefixed) */
+  userId?: string;
+}
+
+/**
+ * In-process skill handler function type
+ */
+export type SkillHandlerFn = (
+  context: SkillHandlerContext
+) => Promise<{ success: boolean; output: string; error?: string }>;
+
+/**
  * Parsed skill definition
  */
 export interface Skill {
@@ -105,8 +126,10 @@ export interface Skill {
   unavailableReason?: string;
   /** Absolute path to scripts/ folder if it exists */
   scriptsDir?: string;
-  /** Whether skill has executable scripts */
+  /** Whether skill has executable scripts or an in-process handler */
   hasScripts: boolean;
+  /** In-process handler (for native/SDK skills that need runtime access) */
+  handler?: SkillHandlerFn;
 }
 
 /**
