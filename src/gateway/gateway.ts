@@ -257,6 +257,7 @@ export class Gateway {
       sessionManager: this.sessionManager,
       skillRegistry: this.skillRegistry,
       skillExecutor: this.skillExecutor,
+      toolRegistry: this.toolRegistry,
       router: this.router,
       costTracker: this.costTracker,
       hotCollector: this.hotCollector,

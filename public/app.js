@@ -103,6 +103,51 @@
   }
 
   /**
+   * Add a file download message to the chat
+   * @param {string} filePath - Server path to the file
+   * @param {string} [caption] - Optional caption
+   */
+  function addFileMessage(filePath, caption) {
+    const messageEl = document.createElement('div');
+    messageEl.className = 'message assistant';
+
+    const fileContainer = document.createElement('div');
+    fileContainer.className = 'file-message';
+
+    const fileName = filePath.split('/').pop() || 'file';
+
+    const iconEl = document.createElement('span');
+    iconEl.className = 'file-icon';
+    iconEl.textContent = '\uD83D\uDCC4';
+
+    const nameEl = document.createElement('span');
+    nameEl.className = 'file-name';
+    nameEl.textContent = fileName;
+
+    const linkEl = document.createElement('a');
+    linkEl.className = 'file-download';
+    linkEl.href = '/api/files?path=' + encodeURIComponent(filePath);
+    linkEl.download = fileName;
+    linkEl.textContent = 'Download';
+    linkEl.target = '_blank';
+
+    fileContainer.appendChild(iconEl);
+    fileContainer.appendChild(nameEl);
+    fileContainer.appendChild(linkEl);
+    messageEl.appendChild(fileContainer);
+
+    if (caption) {
+      const captionEl = document.createElement('div');
+      captionEl.className = 'file-caption';
+      captionEl.textContent = caption;
+      messageEl.appendChild(captionEl);
+    }
+
+    messagesContainer.appendChild(messageEl);
+    scrollToBottom();
+  }
+
+  /**
    * Add a debug message (skill call, internal work)
    * @param {string} label - Label for the debug message
    * @param {string|object} content - Content to display
@@ -375,8 +420,8 @@
         break;
 
       case 'file':
-        // File notification
-        addMessage(`File: ${data.path}${data.caption ? ' - ' + data.caption : ''}`, 'assistant');
+        // File download link
+        addFileMessage(data.path, data.caption);
         break;
 
       case 'error':

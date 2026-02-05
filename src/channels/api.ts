@@ -9,6 +9,7 @@
  * - GET /api/sessions - List sessions
  * - GET /api/sessions/:id - Get session details
  * - DELETE /api/sessions/:id - Delete a session
+ * - GET /api/files?path= - Download a workspace file
  * - GET /api/health - Health check
  *
  * WebSocket:
@@ -69,6 +70,18 @@ const CONTENT_TYPES: Record<string, string> = {
   '.gif': 'image/gif',
   '.woff': 'font/woff',
   '.woff2': 'font/woff2',
+  '.md': 'text/markdown',
+  '.txt': 'text/plain',
+  '.pdf': 'application/pdf',
+  '.csv': 'text/csv',
+  '.xml': 'application/xml',
+  '.zip': 'application/zip',
+  '.py': 'text/x-python',
+  '.ts': 'text/typescript',
+  '.yaml': 'text/yaml',
+  '.yml': 'text/yaml',
+  '.mp3': 'audio/mpeg',
+  '.mp4': 'video/mp4',
 };
 
 /**
@@ -293,8 +306,9 @@ export class ApiChannel implements Channel, TriggerSource {
       }
     }
 
-    // Check authentication for API routes
-    if (this.config.apiKey && !this.authenticateRequest(req)) {
+    // Check authentication for API routes (file downloads exempt when same-origin)
+    const skipAuth = urlPath === '/api/files' && method === 'GET' && this.isSameOriginRequest(req);
+    if (this.config.apiKey && !skipAuth && !this.authenticateRequest(req)) {
       this.sendJson(res, 401, { error: 'Unauthorized' });
       return;
     }
@@ -315,6 +329,8 @@ export class ApiChannel implements Channel, TriggerSource {
       } else if (urlPath.startsWith('/api/sessions/') && method === 'DELETE') {
         const sessionId = urlPath.slice('/api/sessions/'.length);
         await this.handleDeleteSession(res, sessionId);
+      } else if (urlPath === '/api/files' && method === 'GET') {
+        await this.handleFileDownload(res, url);
       } else {
         this.sendJson(res, 404, { error: 'Not found' });
       }
@@ -562,6 +578,79 @@ export class ApiChannel implements Channel, TriggerSource {
     // SessionManager doesn't have a delete method, but we can clear it
     // This could be enhanced to actually delete the session file
     this.sendJson(res, 200, { deleted: true, sessionId });
+  }
+
+  /**
+   * Handle GET /api/files?path=<filePath>
+   * Serves files from the agent workspace for download.
+   */
+  private async handleFileDownload(res: ServerResponse, url: URL): Promise<void> {
+    const filePath = url.searchParams.get('path');
+
+    if (!filePath) {
+      this.sendJson(res, 400, { error: 'Missing required query parameter: path' });
+      return;
+    }
+
+    // Resolve to absolute path
+    const absolutePath = path.resolve(filePath);
+
+    // Security: ensure file is within the workspace
+    const workspace = process.env.AGENT_WORKSPACE || process.cwd();
+    const resolvedWorkspace = path.resolve(workspace);
+    if (!absolutePath.startsWith(resolvedWorkspace + path.sep) && absolutePath !== resolvedWorkspace) {
+      this.logger.warn({ filePath, absolutePath, workspace: resolvedWorkspace }, 'File download path traversal blocked');
+      this.sendJson(res, 403, { error: 'Access denied: file is outside workspace' });
+      return;
+    }
+
+    try {
+      const stats = await stat(absolutePath);
+      if (!stats.isFile()) {
+        this.sendJson(res, 400, { error: 'Path is not a file' });
+        return;
+      }
+
+      // 50MB limit (matches Telegram bot limit)
+      if (stats.size > 50 * 1024 * 1024) {
+        this.sendJson(res, 413, { error: 'File too large (max 50MB)' });
+        return;
+      }
+
+      const fileName = path.basename(absolutePath);
+      const ext = path.extname(absolutePath).toLowerCase();
+      const contentType = CONTENT_TYPES[ext] || 'application/octet-stream';
+
+      res.writeHead(200, {
+        'Content-Type': contentType,
+        'Content-Disposition': `attachment; filename="${fileName}"`,
+        'Content-Length': stats.size,
+      });
+
+      createReadStream(absolutePath).pipe(res);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        this.sendJson(res, 404, { error: 'File not found' });
+      } else {
+        this.logger.error({ filePath, error: (error as Error).message }, 'File download error');
+        this.sendJson(res, 500, { error: 'Failed to serve file' });
+      }
+    }
+  }
+
+  /**
+   * Check if request is from same origin (served by this server)
+   */
+  private isSameOriginRequest(req: IncomingMessage): boolean {
+    const referer = req.headers.referer;
+    if (!referer) return false;
+    try {
+      const refererUrl = new URL(referer);
+      const host = req.headers.host || '';
+      return refererUrl.host === host;
+    } catch {
+      return false;
+    }
   }
 
   /**

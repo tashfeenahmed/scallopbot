@@ -573,3 +573,48 @@ html, body {
     display: none;
   }
 }
+
+/* File message styles */
+.file-message {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  background: rgba(94, 181, 247, 0.1);
+  border-radius: 8px;
+  border: 1px solid rgba(94, 181, 247, 0.2);
+}
+
+.file-icon {
+  font-size: 1.4em;
+}
+
+.file-name {
+  flex: 1;
+  font-weight: 500;
+  color: var(--text-primary);
+  word-break: break-all;
+}
+
+.file-download {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 12px;
+  background: var(--accent);
+  color: #fff;
+  border-radius: 4px;
+  text-decoration: none;
+  font-size: 0.85em;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.file-download:hover {
+  background: var(--accent-dark);
+}
+
+.file-caption {
+  margin-top: 6px;
+  font-size: 0.9em;
+  color: var(--text-secondary);
+}
