@@ -1,7 +1,6 @@
-import * as fs from 'fs/promises';
-import * as path from 'path';
 import { nanoid } from 'nanoid';
 import type { Message, TokenUsage } from '../providers/types.js';
+import type { ScallopDatabase } from '../memory/db.js';
 
 export interface SessionMetadata {
   userId?: string;
@@ -18,294 +17,138 @@ export interface Session {
   tokenUsage?: TokenUsage;
 }
 
-interface SessionEntry {
-  type: 'session' | 'message' | 'metadata' | 'token_usage';
-  timestamp: string;
-  data: unknown;
-}
-
-/**
- * Simple async mutex for session locking
- */
-class SessionLock {
-  private locks: Map<string, Promise<void>> = new Map();
-
-  async acquire(sessionId: string): Promise<() => void> {
-    // Wait for any existing lock
-    const existingLock = this.locks.get(sessionId);
-    if (existingLock) {
-      await existingLock;
-    }
-
-    // Create new lock
-    let release: () => void;
-    const lockPromise = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-
-    this.locks.set(sessionId, lockPromise);
-
-    // Return release function
-    return () => {
-      if (this.locks.get(sessionId) === lockPromise) {
-        this.locks.delete(sessionId);
-      }
-      release!();
-    };
-  }
-
-  isLocked(sessionId: string): boolean {
-    return this.locks.has(sessionId);
-  }
-}
-
 export class SessionManager {
-  private sessionsDir: string;
+  private db: ScallopDatabase;
   private cache: Map<string, Session> = new Map();
-  private lock: SessionLock = new SessionLock();
 
-  constructor(sessionsDir: string) {
-    this.sessionsDir = sessionsDir;
+  constructor(db: ScallopDatabase) {
+    this.db = db;
   }
 
   async createSession(metadata?: SessionMetadata): Promise<Session> {
-    // Ensure sessions directory exists
-    await fs.mkdir(this.sessionsDir, { recursive: true });
+    const id = nanoid();
+    const now = Date.now();
+
+    this.db.createSession(id, metadata as Record<string, unknown> | undefined);
 
     const session: Session = {
-      id: nanoid(),
+      id,
       messages: [],
-      createdAt: new Date(),
-      updatedAt: new Date(),
+      createdAt: new Date(now),
+      updatedAt: new Date(now),
       metadata,
       tokenUsage: { inputTokens: 0, outputTokens: 0 },
     };
 
-    // Write initial session entry to JSONL file
-    await this.appendEntry(session.id, {
-      type: 'session',
-      timestamp: session.createdAt.toISOString(),
-      data: {
-        id: session.id,
-        metadata: session.metadata,
-      },
-    });
-
-    this.cache.set(session.id, session);
+    this.cache.set(id, session);
     return session;
   }
 
   async addMessage(sessionId: string, message: Message): Promise<void> {
-    const release = await this.lock.acquire(sessionId);
-    try {
-      const session = await this.getSession(sessionId);
-      if (!session) {
-        throw new Error(`Session not found: ${sessionId}`);
-      }
-
-      session.messages.push(message);
-      session.updatedAt = new Date();
-
-      await this.appendEntry(sessionId, {
-        type: 'message',
-        timestamp: session.updatedAt.toISOString(),
-        data: message,
-      });
-
-      this.cache.set(sessionId, session);
-    } finally {
-      release();
+    const session = await this.getSession(sessionId);
+    if (!session) {
+      throw new Error(`Session not found: ${sessionId}`);
     }
+
+    // Serialize content: store as JSON string for ContentBlock[]
+    const content = typeof message.content === 'string'
+      ? message.content
+      : JSON.stringify(message.content);
+
+    this.db.addSessionMessage(sessionId, message.role, content);
+
+    session.messages.push(message);
+    session.updatedAt = new Date();
+    this.cache.set(sessionId, session);
   }
 
   async getSession(sessionId: string): Promise<Session | undefined> {
-    // Check cache first
     if (this.cache.has(sessionId)) {
       return this.cache.get(sessionId);
     }
 
-    // Try to load from file
-    const filePath = this.getFilePath(sessionId);
-    try {
-      await fs.access(filePath);
-    } catch {
-      return undefined;
-    }
+    const row = this.db.getSession(sessionId);
+    if (!row) return undefined;
 
-    const session = await this.loadSession(sessionId);
-    if (session) {
-      this.cache.set(sessionId, session);
-    }
+    const messageRows = this.db.getSessionMessages(sessionId);
+    const messages: Message[] = messageRows.map((r) => ({
+      role: r.role as 'user' | 'assistant',
+      content: this.deserializeContent(r.content),
+    }));
+
+    const session: Session = {
+      id: row.id,
+      messages,
+      createdAt: new Date(row.createdAt),
+      updatedAt: new Date(row.updatedAt),
+      metadata: row.metadata as SessionMetadata | undefined,
+      tokenUsage: {
+        inputTokens: row.inputTokens,
+        outputTokens: row.outputTokens,
+      },
+    };
+
+    this.cache.set(sessionId, session);
     return session;
   }
 
   async deleteSession(sessionId: string): Promise<boolean> {
-    const release = await this.lock.acquire(sessionId);
-    try {
-      const filePath = this.getFilePath(sessionId);
-      try {
-        await fs.unlink(filePath);
-        this.cache.delete(sessionId);
-        return true;
-      } catch {
-        return false;
-      }
-    } finally {
-      release();
-    }
-  }
-
-  /**
-   * Check if a session is currently locked (useful for debugging)
-   */
-  isSessionLocked(sessionId: string): boolean {
-    return this.lock.isLocked(sessionId);
+    const result = this.db.deleteSession(sessionId);
+    this.cache.delete(sessionId);
+    return result;
   }
 
   async listSessions(): Promise<{ id: string; createdAt: Date }[]> {
-    try {
-      const files = await fs.readdir(this.sessionsDir);
-      const sessions: { id: string; createdAt: Date }[] = [];
-
-      for (const file of files) {
-        if (file.endsWith('.jsonl')) {
-          const id = file.replace('.jsonl', '');
-          const session = await this.getSession(id);
-          if (session) {
-            sessions.push({ id, createdAt: session.createdAt });
-          }
-        }
-      }
-
-      return sessions;
-    } catch {
-      return [];
-    }
+    const rows = this.db.listSessions();
+    return rows.map((r) => ({ id: r.id, createdAt: new Date(r.createdAt) }));
   }
 
   async updateMetadata(sessionId: string, metadata: Partial<SessionMetadata>): Promise<void> {
-    const release = await this.lock.acquire(sessionId);
-    try {
-      const session = await this.getSession(sessionId);
-      if (!session) {
-        throw new Error(`Session not found: ${sessionId}`);
-      }
-
-      session.metadata = { ...session.metadata, ...metadata };
-      session.updatedAt = new Date();
-
-      await this.appendEntry(sessionId, {
-        type: 'metadata',
-        timestamp: session.updatedAt.toISOString(),
-        data: metadata,
-      });
-
-      this.cache.set(sessionId, session);
-    } finally {
-      release();
+    const session = await this.getSession(sessionId);
+    if (!session) {
+      throw new Error(`Session not found: ${sessionId}`);
     }
+
+    this.db.updateSessionMetadata(sessionId, metadata as Record<string, unknown>);
+
+    session.metadata = { ...session.metadata, ...metadata };
+    session.updatedAt = new Date();
+    this.cache.set(sessionId, session);
   }
 
   async recordTokenUsage(sessionId: string, usage: TokenUsage): Promise<void> {
-    const release = await this.lock.acquire(sessionId);
-    try {
-      const session = await this.getSession(sessionId);
-      if (!session) {
-        throw new Error(`Session not found: ${sessionId}`);
-      }
-
-      if (!session.tokenUsage) {
-        session.tokenUsage = { inputTokens: 0, outputTokens: 0 };
-      }
-
-      session.tokenUsage.inputTokens += usage.inputTokens;
-      session.tokenUsage.outputTokens += usage.outputTokens;
-      session.updatedAt = new Date();
-
-      await this.appendEntry(sessionId, {
-        type: 'token_usage',
-        timestamp: session.updatedAt.toISOString(),
-        data: usage,
-      });
-
-      this.cache.set(sessionId, session);
-    } finally {
-      release();
+    const session = await this.getSession(sessionId);
+    if (!session) {
+      throw new Error(`Session not found: ${sessionId}`);
     }
-  }
 
-  private getFilePath(sessionId: string): string {
-    return path.join(this.sessionsDir, `${sessionId}.jsonl`);
-  }
+    this.db.updateSessionTokenUsage(sessionId, usage.inputTokens, usage.outputTokens);
 
-  private async appendEntry(sessionId: string, entry: SessionEntry): Promise<void> {
-    const filePath = this.getFilePath(sessionId);
-    const line = JSON.stringify(entry) + '\n';
-    await fs.appendFile(filePath, line, 'utf-8');
-  }
-
-  private async loadSession(sessionId: string): Promise<Session | undefined> {
-    const filePath = this.getFilePath(sessionId);
-
-    try {
-      const content = await fs.readFile(filePath, 'utf-8');
-      const lines = content.trim().split('\n');
-
-      let session: Session | undefined;
-      const messages: Message[] = [];
-      const tokenUsage: TokenUsage = { inputTokens: 0, outputTokens: 0 };
-      let metadata: SessionMetadata = {};
-
-      for (const line of lines) {
-        if (!line.trim()) continue;
-
-        const entry: SessionEntry = JSON.parse(line);
-
-        switch (entry.type) {
-          case 'session': {
-            const data = entry.data as { id: string; metadata?: SessionMetadata };
-            session = {
-              id: data.id,
-              messages: [],
-              createdAt: new Date(entry.timestamp),
-              updatedAt: new Date(entry.timestamp),
-              metadata: data.metadata,
-              tokenUsage: { inputTokens: 0, outputTokens: 0 },
-            };
-            if (data.metadata) {
-              metadata = { ...metadata, ...data.metadata };
-            }
-            break;
-          }
-          case 'message':
-            messages.push(entry.data as Message);
-            break;
-          case 'metadata':
-            metadata = { ...metadata, ...(entry.data as Partial<SessionMetadata>) };
-            break;
-          case 'token_usage': {
-            const usage = entry.data as TokenUsage;
-            tokenUsage.inputTokens += usage.inputTokens;
-            tokenUsage.outputTokens += usage.outputTokens;
-            break;
-          }
-        }
-      }
-
-      if (session) {
-        session.messages = messages;
-        session.metadata = metadata;
-        session.tokenUsage = tokenUsage;
-        session.updatedAt = new Date();
-      }
-
-      return session;
-    } catch {
-      return undefined;
+    if (!session.tokenUsage) {
+      session.tokenUsage = { inputTokens: 0, outputTokens: 0 };
     }
+    session.tokenUsage.inputTokens += usage.inputTokens;
+    session.tokenUsage.outputTokens += usage.outputTokens;
+    session.updatedAt = new Date();
+    this.cache.set(sessionId, session);
   }
 
   clearCache(): void {
     this.cache.clear();
+  }
+
+  /**
+   * Deserialize content from SQLite storage.
+   * If it's valid JSON array, parse it as ContentBlock[]; otherwise return as string.
+   */
+  private deserializeContent(content: string): string | Message['content'] {
+    if (content.startsWith('[')) {
+      try {
+        return JSON.parse(content);
+      } catch {
+        return content;
+      }
+    }
+    return content;
   }
 }

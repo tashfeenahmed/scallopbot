@@ -149,6 +149,150 @@ html, body {
   color: var(--text-secondary);
 }
 
+/* Credits toggle button */
+.credits-toggle-btn {
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 6px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  position: relative;
+  transition: color 0.2s, background 0.2s;
+}
+
+.credits-toggle-btn:hover {
+  color: var(--accent);
+  background: rgba(94, 181, 247, 0.1);
+}
+
+.credits-toggle-btn.active {
+  color: var(--accent);
+}
+
+.credits-badge {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  font-size: 8px;
+  background: var(--accent);
+  color: #fff;
+  border-radius: 50%;
+  width: 8px;
+  height: 8px;
+}
+
+/* Credits panel */
+.credits-panel {
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-color);
+  padding: 12px 10%;
+  animation: slideDown 0.15s ease-out;
+}
+
+@keyframes slideDown {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.credits-content {
+  max-width: 800px;
+  margin: 0 auto;
+}
+
+.credits-row {
+  display: flex;
+  gap: 12px;
+}
+
+.credits-card {
+  flex: 1;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
+.credits-card-label {
+  font-size: 11px;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 4px;
+}
+
+.credits-card-value {
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.credits-card-sub {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-top: 2px;
+}
+
+.credits-bar {
+  height: 3px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 2px;
+  margin-top: 8px;
+  overflow: hidden;
+}
+
+.credits-bar-fill {
+  height: 100%;
+  border-radius: 2px;
+  background: var(--accent);
+  transition: width 0.3s ease;
+  width: 0%;
+}
+
+.credits-bar-fill.warning {
+  background: #fbbf24;
+}
+
+.credits-bar-fill.exceeded {
+  background: #f87171;
+}
+
+/* Model breakdown */
+.credits-models {
+  margin-top: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.credits-model-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 11px;
+}
+
+.credits-model-name {
+  color: var(--text-secondary);
+  font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+}
+
+.credits-model-cost {
+  color: var(--accent);
+  font-weight: 500;
+}
+
+.credits-model-pct {
+  color: var(--text-secondary);
+  font-size: 10px;
+}
+
 /* Chat container */
 .chat-container {
   flex: 1;
@@ -571,6 +715,18 @@ html, body {
 
   .toggle-label {
     display: none;
+  }
+
+  .credits-panel {
+    padding: 10px 12px;
+  }
+
+  .credits-row {
+    gap: 8px;
+  }
+
+  .credits-card-value {
+    font-size: 16px;
   }
 }
 

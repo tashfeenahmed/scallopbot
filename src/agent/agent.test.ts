@@ -1,9 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'fs/promises';
+import * as fsSync from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { pino } from 'pino';
 import type { CompletionResponse, LLMProvider, Message } from '../providers/types.js';
+import { ScallopDatabase } from '../memory/db.js';
 
 // Mock provider that simulates LLM responses
 function createMockProvider(responses: CompletionResponse[]): LLMProvider {
@@ -21,15 +23,17 @@ function createMockProvider(responses: CompletionResponse[]): LLMProvider {
 
 describe('Agent', () => {
   let testDir: string;
-  let sessionsDir: string;
+  let dbPath: string;
+  let db: ScallopDatabase;
 
   beforeEach(async () => {
     testDir = await fs.mkdtemp(path.join(os.tmpdir(), 'scallopbot-agent-test-'));
-    sessionsDir = path.join(testDir, 'sessions');
-    await fs.mkdir(sessionsDir, { recursive: true });
+    dbPath = path.join(testDir, 'test.db');
+    db = new ScallopDatabase(dbPath);
   });
 
   afterEach(async () => {
+    db.close();
     await fs.rm(testDir, { recursive: true, force: true });
   });
 
@@ -47,7 +51,7 @@ describe('Agent', () => {
         },
       ]);
 
-      const sessionManager = new SessionManager(sessionsDir);
+      const sessionManager = new SessionManager(db);
             const logger = pino({ level: 'silent' });
 
       const agent = new Agent({
@@ -97,7 +101,7 @@ describe('Agent', () => {
         },
       ]);
 
-      const sessionManager = new SessionManager(sessionsDir);
+      const sessionManager = new SessionManager(db);
                   const logger = pino({ level: 'silent' });
 
       const agent = new Agent({
@@ -159,7 +163,7 @@ describe('Agent', () => {
         },
       ]);
 
-      const sessionManager = new SessionManager(sessionsDir);
+      const sessionManager = new SessionManager(db);
                         const logger = pino({ level: 'silent' });
 
       const agent = new Agent({
@@ -200,7 +204,7 @@ describe('Agent', () => {
         }),
       };
 
-      const sessionManager = new SessionManager(sessionsDir);
+      const sessionManager = new SessionManager(db);
                   const logger = pino({ level: 'silent' });
 
       const agent = new Agent({
@@ -247,7 +251,7 @@ describe('Agent', () => {
         },
       ]);
 
-      const sessionManager = new SessionManager(sessionsDir);
+      const sessionManager = new SessionManager(db);
                   const logger = pino({ level: 'silent' });
 
       const agent = new Agent({
@@ -292,7 +296,7 @@ describe('Agent', () => {
         },
       ]);
 
-      const sessionManager = new SessionManager(sessionsDir);
+      const sessionManager = new SessionManager(db);
             const logger = pino({ level: 'silent' });
 
       const agent = new Agent({
@@ -322,7 +326,7 @@ describe('Agent', () => {
         },
       ]);
 
-      const sessionManager = new SessionManager(sessionsDir);
+      const sessionManager = new SessionManager(db);
             const logger = pino({ level: 'silent' });
 
       const agent = new Agent({
@@ -359,7 +363,7 @@ describe('Agent', () => {
         },
       ]);
 
-      const sessionManager = new SessionManager(sessionsDir);
+      const sessionManager = new SessionManager(db);
             const logger = pino({ level: 'silent' });
 
       const agent = new Agent({
@@ -390,7 +394,7 @@ describe('Agent', () => {
         },
       ]);
 
-      const sessionManager = new SessionManager(sessionsDir);
+      const sessionManager = new SessionManager(db);
             const logger = pino({ level: 'silent' });
 
       const agent = new Agent({
@@ -427,7 +431,7 @@ describe('Agent', () => {
         }),
       };
 
-      const sessionManager = new SessionManager(sessionsDir);
+      const sessionManager = new SessionManager(db);
             const logger = pino({ level: 'silent' });
 
       const agent = new Agent({
@@ -511,7 +515,7 @@ describe('Agent', () => {
         },
       ]);
 
-      const sessionManager = new SessionManager(sessionsDir);
+      const sessionManager = new SessionManager(db);
       const logger = pino({ level: 'silent' });
 
       const agent = new Agent({
@@ -593,7 +597,7 @@ describe('Agent', () => {
         },
       ]);
 
-      const sessionManager = new SessionManager(sessionsDir);
+      const sessionManager = new SessionManager(db);
       const logger = pino({ level: 'silent' });
 
       const agent = new Agent({
@@ -653,7 +657,7 @@ describe('Agent', () => {
         },
       ]);
 
-      const sessionManager = new SessionManager(sessionsDir);
+      const sessionManager = new SessionManager(db);
       const logger = pino({ level: 'silent' });
 
       const agent = new Agent({

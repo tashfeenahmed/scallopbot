@@ -2,6 +2,7 @@ import { Bot, Context, InputFile } from 'grammy';
 import type { Logger } from 'pino';
 import type { Agent } from '../agent/agent.js';
 import type { SessionManager } from '../agent/session.js';
+import type { ScallopDatabase } from '../memory/db.js';
 import { VoiceManager } from '../voice/index.js';
 import { getPendingVoiceAttachments, cleanupVoiceAttachments } from '../voice/attachments.js';
 import {
@@ -19,6 +20,7 @@ export interface TelegramChannelOptions {
   sessionManager: SessionManager;
   logger: Logger;
   workspacePath: string;
+  db: ScallopDatabase;
   allowedUsers?: string[]; // Empty = allow all
   enableVoiceReply?: boolean;
   voiceManager?: VoiceManager; // Optional shared voice manager
@@ -108,7 +110,7 @@ export class TelegramChannel {
     this.agent = options.agent;
     this.sessionManager = options.sessionManager;
     this.logger = options.logger.child({ channel: 'telegram' });
-    this.configManager = new BotConfigManager(options.workspacePath);
+    this.configManager = new BotConfigManager(options.db);
     this.workspacePath = options.workspacePath;
     this.allowedUsers = new Set(options.allowedUsers || []);
     this.enableVoiceReply = options.enableVoiceReply ?? false;

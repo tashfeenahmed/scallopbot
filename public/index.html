@@ -21,6 +21,13 @@
         </div>
       </div>
       <div class="header-right">
+        <button id="credits-toggle" class="credits-toggle-btn" title="Credits usage">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="10"/>
+            <path d="M12 6v6l4 2"/>
+          </svg>
+          <span id="credits-badge" class="credits-badge" style="display:none"></span>
+        </button>
         <label class="debug-toggle">
           <input type="checkbox" id="debug-mode">
           <span class="toggle-slider"></span>
@@ -28,6 +35,31 @@
         </label>
       </div>
     </header>
+
+    <div id="credits-panel" class="credits-panel" style="display:none">
+      <div class="credits-content">
+        <div class="credits-row">
+          <div class="credits-card">
+            <div class="credits-card-label">Today</div>
+            <div class="credits-card-value" id="credits-daily-spent">$0.00</div>
+            <div class="credits-card-sub" id="credits-daily-budget"></div>
+            <div class="credits-bar"><div class="credits-bar-fill" id="credits-daily-bar"></div></div>
+          </div>
+          <div class="credits-card">
+            <div class="credits-card-label">This Month</div>
+            <div class="credits-card-value" id="credits-monthly-spent">$0.00</div>
+            <div class="credits-card-sub" id="credits-monthly-budget"></div>
+            <div class="credits-bar"><div class="credits-bar-fill" id="credits-monthly-bar"></div></div>
+          </div>
+          <div class="credits-card">
+            <div class="credits-card-label">Requests</div>
+            <div class="credits-card-value" id="credits-total-requests">0</div>
+            <div class="credits-card-sub">total</div>
+          </div>
+        </div>
+        <div class="credits-models" id="credits-models"></div>
+      </div>
+    </div>
 
     <main class="chat-container" id="chat-bg">
       <div id="messages" class="messages"></div>

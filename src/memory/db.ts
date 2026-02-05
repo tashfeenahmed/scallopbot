@@ -120,6 +120,58 @@ export interface BehavioralPatterns {
 }
 
 /**
+ * Session entry
+ */
+export interface SessionRow {
+  id: string;
+  metadata: Record<string, unknown> | null;
+  inputTokens: number;
+  outputTokens: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/**
+ * Session message entry
+ */
+export interface SessionMessageRow {
+  id: number;
+  sessionId: string;
+  role: string;
+  content: string;
+  createdAt: number;
+}
+
+/**
+ * Bot config entry
+ */
+export interface BotConfigRow {
+  userId: string;
+  botName: string;
+  personalityId: string;
+  customPersonality: string | null;
+  modelId: string;
+  onboardingComplete: boolean;
+  onboardingStep: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * Cost usage entry
+ */
+export interface CostUsageRow {
+  id: number;
+  model: string;
+  provider: string;
+  sessionId: string;
+  inputTokens: number;
+  outputTokens: number;
+  cost: number;
+  timestamp: number;
+}
+
+/**
  * SQLite Database Manager for ScallopMemory
  */
 export class ScallopDatabase {
@@ -224,7 +276,56 @@ export class ScallopDatabase {
         updated_at INTEGER NOT NULL
       );
 
+      -- Sessions (replaces per-session .jsonl files)
+      CREATE TABLE IF NOT EXISTS sessions (
+        id TEXT PRIMARY KEY,
+        metadata TEXT,
+        input_tokens INTEGER DEFAULT 0,
+        output_tokens INTEGER DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+
+      -- Session messages
+      CREATE TABLE IF NOT EXISTS session_messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        role TEXT NOT NULL,
+        content TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+      );
+
+      -- Bot configuration (replaces bot-config.json)
+      CREATE TABLE IF NOT EXISTS bot_config (
+        user_id TEXT PRIMARY KEY,
+        bot_name TEXT NOT NULL DEFAULT 'ScallopBot',
+        personality_id TEXT NOT NULL DEFAULT 'friendly',
+        custom_personality TEXT,
+        model_id TEXT NOT NULL DEFAULT 'moonshot-v1-128k',
+        onboarding_complete INTEGER NOT NULL DEFAULT 0,
+        onboarding_step TEXT DEFAULT 'welcome',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      -- Cost usage tracking (replaces in-memory array)
+      CREATE TABLE IF NOT EXISTS cost_usage (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        model TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        input_tokens INTEGER NOT NULL,
+        output_tokens INTEGER NOT NULL,
+        cost REAL NOT NULL,
+        timestamp INTEGER NOT NULL
+      );
+
       -- Indexes for performance
+      CREATE INDEX IF NOT EXISTS idx_sessions_created ON sessions(created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_session_messages_session ON session_messages(session_id, id);
+      CREATE INDEX IF NOT EXISTS idx_cost_usage_timestamp ON cost_usage(timestamp);
+      CREATE INDEX IF NOT EXISTS idx_cost_usage_session ON cost_usage(session_id);
       CREATE INDEX IF NOT EXISTS idx_memories_user ON memories(user_id);
       CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category);
       CREATE INDEX IF NOT EXISTS idx_memories_type ON memories(memory_type);
@@ -690,6 +791,168 @@ export class ScallopDatabase {
     return row ? this.rowToBehavioralPatterns(row) : null;
   }
 
+  // ============ Session Operations ============
+
+  createSession(id: string, metadata?: Record<string, unknown>): SessionRow {
+    const now = Date.now();
+    const stmt = this.db.prepare(`
+      INSERT INTO sessions (id, metadata, input_tokens, output_tokens, created_at, updated_at)
+      VALUES (?, ?, 0, 0, ?, ?)
+    `);
+    stmt.run(id, metadata ? JSON.stringify(metadata) : null, now, now);
+    return { id, metadata: metadata || null, inputTokens: 0, outputTokens: 0, createdAt: now, updatedAt: now };
+  }
+
+  getSession(id: string): SessionRow | null {
+    const stmt = this.db.prepare('SELECT * FROM sessions WHERE id = ?');
+    const row = stmt.get(id) as Record<string, unknown> | undefined;
+    return row ? this.rowToSession(row) : null;
+  }
+
+  deleteSession(id: string): boolean {
+    const stmt = this.db.prepare('DELETE FROM sessions WHERE id = ?');
+    const result = stmt.run(id);
+    return result.changes > 0;
+  }
+
+  listSessions(limit?: number, offset?: number): SessionRow[] {
+    let query = 'SELECT * FROM sessions ORDER BY updated_at DESC';
+    const params: unknown[] = [];
+    if (limit) {
+      query += ' LIMIT ?';
+      params.push(limit);
+    }
+    if (offset) {
+      query += ' OFFSET ?';
+      params.push(offset);
+    }
+    const stmt = this.db.prepare(query);
+    const rows = stmt.all(...params) as Record<string, unknown>[];
+    return rows.map(row => this.rowToSession(row));
+  }
+
+  updateSessionMetadata(id: string, metadata: Record<string, unknown>): void {
+    const now = Date.now();
+    // Merge with existing metadata
+    const existing = this.getSession(id);
+    const merged = { ...(existing?.metadata || {}), ...metadata };
+    this.db.prepare('UPDATE sessions SET metadata = ?, updated_at = ? WHERE id = ?')
+      .run(JSON.stringify(merged), now, id);
+  }
+
+  updateSessionTokenUsage(id: string, inputTokens: number, outputTokens: number): void {
+    const now = Date.now();
+    this.db.prepare(`
+      UPDATE sessions SET
+        input_tokens = input_tokens + ?,
+        output_tokens = output_tokens + ?,
+        updated_at = ?
+      WHERE id = ?
+    `).run(inputTokens, outputTokens, now, id);
+  }
+
+  addSessionMessage(sessionId: string, role: string, content: string): SessionMessageRow {
+    const now = Date.now();
+    const stmt = this.db.prepare(`
+      INSERT INTO session_messages (session_id, role, content, created_at)
+      VALUES (?, ?, ?, ?)
+    `);
+    const result = stmt.run(sessionId, role, content, now);
+    // Update session updated_at
+    this.db.prepare('UPDATE sessions SET updated_at = ? WHERE id = ?').run(now, sessionId);
+    return { id: Number(result.lastInsertRowid), sessionId, role, content, createdAt: now };
+  }
+
+  getSessionMessages(sessionId: string): SessionMessageRow[] {
+    const stmt = this.db.prepare('SELECT * FROM session_messages WHERE session_id = ? ORDER BY id');
+    const rows = stmt.all(sessionId) as Record<string, unknown>[];
+    return rows.map(row => this.rowToSessionMessage(row));
+  }
+
+  // ============ Bot Config Operations ============
+
+  getBotConfig(userId: string): BotConfigRow | null {
+    const stmt = this.db.prepare('SELECT * FROM bot_config WHERE user_id = ?');
+    const row = stmt.get(userId) as Record<string, unknown> | undefined;
+    return row ? this.rowToBotConfig(row) : null;
+  }
+
+  upsertBotConfig(userId: string, config: Partial<Omit<BotConfigRow, 'userId'>>): BotConfigRow {
+    const now = new Date().toISOString();
+    const existing = this.getBotConfig(userId);
+
+    if (existing) {
+      this.db.prepare(`
+        UPDATE bot_config SET
+          bot_name = COALESCE(?, bot_name),
+          personality_id = COALESCE(?, personality_id),
+          custom_personality = ?,
+          model_id = COALESCE(?, model_id),
+          onboarding_complete = COALESCE(?, onboarding_complete),
+          onboarding_step = COALESCE(?, onboarding_step),
+          updated_at = ?
+        WHERE user_id = ?
+      `).run(
+        config.botName ?? null,
+        config.personalityId ?? null,
+        config.customPersonality !== undefined ? config.customPersonality : existing.customPersonality,
+        config.modelId ?? null,
+        config.onboardingComplete !== undefined ? (config.onboardingComplete ? 1 : 0) : null,
+        config.onboardingStep ?? null,
+        now,
+        userId
+      );
+      return this.getBotConfig(userId)!;
+    }
+
+    this.db.prepare(`
+      INSERT INTO bot_config (user_id, bot_name, personality_id, custom_personality, model_id, onboarding_complete, onboarding_step, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      userId,
+      config.botName ?? 'ScallopBot',
+      config.personalityId ?? 'friendly',
+      config.customPersonality ?? null,
+      config.modelId ?? 'moonshot-v1-128k',
+      config.onboardingComplete ? 1 : 0,
+      config.onboardingStep ?? 'welcome',
+      config.createdAt ?? now,
+      now
+    );
+    return this.getBotConfig(userId)!;
+  }
+
+  deleteBotConfig(userId: string): boolean {
+    const result = this.db.prepare('DELETE FROM bot_config WHERE user_id = ?').run(userId);
+    return result.changes > 0;
+  }
+
+  // ============ Cost Usage Operations ============
+
+  recordCostUsage(record: Omit<CostUsageRow, 'id'>): CostUsageRow {
+    const stmt = this.db.prepare(`
+      INSERT INTO cost_usage (model, provider, session_id, input_tokens, output_tokens, cost, timestamp)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+    const result = stmt.run(
+      record.model, record.provider, record.sessionId,
+      record.inputTokens, record.outputTokens, record.cost, record.timestamp
+    );
+    return { ...record, id: Number(result.lastInsertRowid) };
+  }
+
+  getCostUsageSince(sinceMs: number): CostUsageRow[] {
+    const stmt = this.db.prepare('SELECT * FROM cost_usage WHERE timestamp >= ? ORDER BY timestamp');
+    const rows = stmt.all(sinceMs) as Record<string, unknown>[];
+    return rows.map(row => this.rowToCostUsage(row));
+  }
+
+  getCostUsageBySession(sessionId: string): CostUsageRow[] {
+    const stmt = this.db.prepare('SELECT * FROM cost_usage WHERE session_id = ? ORDER BY timestamp');
+    const rows = stmt.all(sessionId) as Record<string, unknown>[];
+    return rows.map(row => this.rowToCostUsage(row));
+  }
+
   // ============ Utility Methods ============
 
   /**
@@ -796,6 +1059,54 @@ export class ScallopDatabase {
       responsePreferences: row.response_preferences ? JSON.parse(row.response_preferences as string) : {},
       activeHours: row.active_hours ? JSON.parse(row.active_hours as string) : [],
       updatedAt: row.updated_at as number,
+    };
+  }
+
+  private rowToSession(row: Record<string, unknown>): SessionRow {
+    return {
+      id: row.id as string,
+      metadata: row.metadata ? JSON.parse(row.metadata as string) : null,
+      inputTokens: row.input_tokens as number,
+      outputTokens: row.output_tokens as number,
+      createdAt: row.created_at as number,
+      updatedAt: row.updated_at as number,
+    };
+  }
+
+  private rowToSessionMessage(row: Record<string, unknown>): SessionMessageRow {
+    return {
+      id: row.id as number,
+      sessionId: row.session_id as string,
+      role: row.role as string,
+      content: row.content as string,
+      createdAt: row.created_at as number,
+    };
+  }
+
+  private rowToBotConfig(row: Record<string, unknown>): BotConfigRow {
+    return {
+      userId: row.user_id as string,
+      botName: row.bot_name as string,
+      personalityId: row.personality_id as string,
+      customPersonality: row.custom_personality as string | null,
+      modelId: row.model_id as string,
+      onboardingComplete: (row.onboarding_complete as number) === 1,
+      onboardingStep: row.onboarding_step as string | null,
+      createdAt: row.created_at as string,
+      updatedAt: row.updated_at as string,
+    };
+  }
+
+  private rowToCostUsage(row: Record<string, unknown>): CostUsageRow {
+    return {
+      id: row.id as number,
+      model: row.model as string,
+      provider: row.provider as string,
+      sessionId: row.session_id as string,
+      inputTokens: row.input_tokens as number,
+      outputTokens: row.output_tokens as number,
+      cost: row.cost as number,
+      timestamp: row.timestamp as number,
     };
   }
 }

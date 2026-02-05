@@ -10,7 +10,7 @@ import {
   ScallopDatabase,
   type ScallopMemoryEntry,
 } from '../../../../memory/db.js';
-import { calculateBM25Score, buildDocFreqMap, type BM25Options } from '../../../../memory/memory.js';
+import { calculateBM25Score, buildDocFreqMap, type BM25Options } from '../../../../memory/bm25.js';
 
 // Types
 interface MemorySearchArgs {

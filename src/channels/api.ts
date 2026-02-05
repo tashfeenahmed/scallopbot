@@ -27,6 +27,7 @@ import type { Agent } from '../agent/agent.js';
 import type { SessionManager } from '../agent/session.js';
 import type { Channel } from './types.js';
 import type { TriggerSource } from '../triggers/types.js';
+import type { CostTracker } from '../routing/cost.js';
 import { nanoid } from 'nanoid';
 
 /** Maximum request body size (1MB) */
@@ -54,6 +55,8 @@ export interface ApiChannelConfig {
   sessionManager: SessionManager;
   /** Logger */
   logger: Logger;
+  /** Cost tracker for usage/credits API (optional) */
+  costTracker?: CostTracker;
 }
 
 /** Content-Type mapping for static files */
@@ -136,10 +139,11 @@ interface WsResponse {
 export class ApiChannel implements Channel, TriggerSource {
   name = 'api';
 
-  private config: Required<Omit<ApiChannelConfig, 'apiKey' | 'allowedOrigins' | 'staticDir'>> & {
+  private config: Required<Omit<ApiChannelConfig, 'apiKey' | 'allowedOrigins' | 'staticDir' | 'costTracker'>> & {
     apiKey?: string;
     allowedOrigins: string[];
     staticDir?: string;
+    costTracker?: CostTracker;
   };
   private server: Server | null = null;
   private wss: WebSocketServer | null = null;
@@ -157,6 +161,7 @@ export class ApiChannel implements Channel, TriggerSource {
       allowedOrigins: config.allowedOrigins || [],
       maxBodySize: config.maxBodySize || MAX_BODY_SIZE,
       staticDir: config.staticDir,
+      costTracker: config.costTracker,
       agent: config.agent,
       sessionManager: config.sessionManager,
       logger: config.logger,
@@ -306,8 +311,9 @@ export class ApiChannel implements Channel, TriggerSource {
       }
     }
 
-    // Check authentication for API routes (file downloads exempt when same-origin)
-    const skipAuth = urlPath === '/api/files' && method === 'GET' && this.isSameOriginRequest(req);
+    // Check authentication for API routes (file downloads and costs exempt when same-origin)
+    const sameOriginExempt = (urlPath === '/api/files' || urlPath === '/api/costs') && method === 'GET';
+    const skipAuth = sameOriginExempt && this.isSameOriginRequest(req);
     if (this.config.apiKey && !skipAuth && !this.authenticateRequest(req)) {
       this.sendJson(res, 401, { error: 'Unauthorized' });
       return;
@@ -315,7 +321,9 @@ export class ApiChannel implements Channel, TriggerSource {
 
     try {
       // Route requests
-      if (urlPath === '/api/health' && method === 'GET') {
+      if (urlPath === '/api/costs' && method === 'GET') {
+        this.handleCosts(res);
+      } else if (urlPath === '/api/health' && method === 'GET') {
         this.sendJson(res, 200, { status: 'ok', timestamp: new Date().toISOString() });
       } else if (urlPath === '/api/chat' && method === 'POST') {
         await this.handleChat(req, res);
@@ -636,6 +644,55 @@ export class ApiChannel implements Channel, TriggerSource {
         this.sendJson(res, 500, { error: 'Failed to serve file' });
       }
     }
+  }
+
+  /**
+   * Handle GET /api/costs
+   */
+  private handleCosts(res: ServerResponse): void {
+    const tracker = this.config.costTracker;
+    if (!tracker) {
+      this.sendJson(res, 200, { enabled: false });
+      return;
+    }
+
+    const budget = tracker.getBudgetStatus();
+    const history = tracker.getUsageHistory();
+
+    // Aggregate costs by model
+    const modelCosts = new Map<string, number>();
+    for (const record of history) {
+      modelCosts.set(record.model, (modelCosts.get(record.model) || 0) + record.cost);
+    }
+    const totalCost = Array.from(modelCosts.values()).reduce((a, b) => a + b, 0);
+    const topModels = Array.from(modelCosts.entries())
+      .map(([model, cost]) => ({
+        model,
+        cost,
+        percentage: totalCost > 0 ? Math.round((cost / totalCost) * 100) : 0,
+      }))
+      .sort((a, b) => b.cost - a.cost)
+      .slice(0, 5);
+
+    this.sendJson(res, 200, {
+      enabled: true,
+      daily: {
+        spent: budget.dailySpend,
+        budget: budget.dailyBudget,
+        remaining: budget.dailyRemaining,
+        exceeded: budget.isDailyExceeded,
+        warning: budget.isDailyWarning,
+      },
+      monthly: {
+        spent: budget.monthlySpend,
+        budget: budget.monthlyBudget,
+        remaining: budget.monthlyRemaining,
+        exceeded: budget.isMonthlyExceeded,
+        warning: budget.isMonthlyWarning,
+      },
+      topModels,
+      totalRequests: history.length,
+    });
   }
 
   /**

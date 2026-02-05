@@ -2,12 +2,11 @@
  * Bot Configuration Storage
  *
  * Stores per-user bot configuration (name, personality, model, etc.)
- * Persisted to disk as JSON for durability across restarts.
+ * Persisted in SQLite for durability across restarts.
  */
 
-import * as fs from 'fs/promises';
-import * as path from 'path';
 import type { Logger } from 'pino';
+import type { ScallopDatabase } from '../memory/db.js';
 
 export interface BotPersonality {
   id: string;
@@ -133,104 +132,77 @@ const DEFAULT_CONFIG: UserBotConfig = {
   createdAt: new Date().toISOString(),
 };
 
-const CURRENT_VERSION = 1;
-
 export class BotConfigManager {
-  private configPath: string;
-  private store: BotConfigStore;
-  private saveDebounce: NodeJS.Timeout | null = null;
+  private db: ScallopDatabase;
   private logger?: Logger;
 
-  constructor(workspacePath: string, logger?: Logger) {
-    this.configPath = path.join(workspacePath, 'bot-config.json');
-    this.store = { users: {}, version: CURRENT_VERSION };
+  constructor(db: ScallopDatabase, logger?: Logger) {
+    this.db = db;
     this.logger = logger;
   }
 
   /**
-   * Load configuration from disk
+   * Load configuration — no-op for SQLite (kept for API compat)
    */
   async load(): Promise<void> {
-    try {
-      const data = await fs.readFile(this.configPath, 'utf-8');
-      this.store = JSON.parse(data);
-
-      // Handle version migrations if needed
-      if (this.store.version < CURRENT_VERSION) {
-        await this.migrate();
-      }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-        throw error;
-      }
-      // File doesn't exist, use defaults
-      this.store = { users: {}, version: CURRENT_VERSION };
-    }
+    // SQLite is always ready; no load step needed
   }
 
   /**
-   * Save configuration to disk (debounced)
-   */
-  private async save(): Promise<void> {
-    if (this.saveDebounce) {
-      clearTimeout(this.saveDebounce);
-    }
-
-    this.saveDebounce = setTimeout(async () => {
-      try {
-        await fs.writeFile(this.configPath, JSON.stringify(this.store, null, 2));
-      } catch (error) {
-        this.logger?.error({ error }, 'Failed to save bot config');
-      }
-    }, 500);
-  }
-
-  /**
-   * Force immediate save
+   * Force immediate save — no-op for SQLite (kept for API compat)
    */
   async saveNow(): Promise<void> {
-    if (this.saveDebounce) {
-      clearTimeout(this.saveDebounce);
-      this.saveDebounce = null;
-    }
-    await fs.writeFile(this.configPath, JSON.stringify(this.store, null, 2));
+    // SQLite writes are immediate; no flush needed
   }
 
   /**
    * Get user config, creating default if not exists
    */
   getUserConfig(userId: string): UserBotConfig {
-    if (!this.store.users[userId]) {
-      this.store.users[userId] = {
-        ...DEFAULT_CONFIG,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      };
-      this.save();
+    const row = this.db.getBotConfig(userId);
+    if (row) {
+      return this.rowToUserConfig(row);
     }
-    return this.store.users[userId];
+
+    // Create default
+    const now = new Date().toISOString();
+    this.db.upsertBotConfig(userId, {
+      botName: DEFAULT_CONFIG.botName,
+      personalityId: DEFAULT_CONFIG.personalityId,
+      modelId: DEFAULT_CONFIG.modelId,
+      onboardingComplete: DEFAULT_CONFIG.onboardingComplete,
+      onboardingStep: DEFAULT_CONFIG.onboardingStep,
+      createdAt: now,
+      updatedAt: now,
+    });
+    return { ...DEFAULT_CONFIG, createdAt: now, updatedAt: now };
   }
 
   /**
    * Update user config
    */
   async updateUserConfig(userId: string, updates: Partial<UserBotConfig>): Promise<UserBotConfig> {
-    const current = this.getUserConfig(userId);
-    this.store.users[userId] = {
-      ...current,
-      ...updates,
-      updatedAt: new Date().toISOString(),
-    };
-    await this.save();
-    return this.store.users[userId];
+    // Ensure user exists first
+    this.getUserConfig(userId);
+
+    this.db.upsertBotConfig(userId, {
+      botName: updates.botName,
+      personalityId: updates.personalityId,
+      customPersonality: updates.customPersonality,
+      modelId: updates.modelId,
+      onboardingComplete: updates.onboardingComplete,
+      onboardingStep: updates.onboardingStep,
+    });
+
+    return this.getUserConfig(userId);
   }
 
   /**
    * Check if user has completed onboarding
    */
   hasCompletedOnboarding(userId: string): boolean {
-    const config = this.store.users[userId];
-    return config?.onboardingComplete ?? false;
+    const row = this.db.getBotConfig(userId);
+    return row?.onboardingComplete ?? false;
   }
 
   /**
@@ -265,20 +237,30 @@ export class BotConfigManager {
    * Reset user to defaults
    */
   async resetUserConfig(userId: string): Promise<void> {
-    this.store.users[userId] = {
-      ...DEFAULT_CONFIG,
-      createdAt: this.store.users[userId]?.createdAt || new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
-    await this.save();
+    const existing = this.db.getBotConfig(userId);
+    const now = new Date().toISOString();
+    this.db.upsertBotConfig(userId, {
+      botName: DEFAULT_CONFIG.botName,
+      personalityId: DEFAULT_CONFIG.personalityId,
+      customPersonality: undefined,
+      modelId: DEFAULT_CONFIG.modelId,
+      onboardingComplete: DEFAULT_CONFIG.onboardingComplete,
+      onboardingStep: DEFAULT_CONFIG.onboardingStep,
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+    });
   }
 
-  /**
-   * Migrate old config versions
-   */
-  private async migrate(): Promise<void> {
-    // Add migration logic here as versions change
-    this.store.version = CURRENT_VERSION;
-    await this.save();
+  private rowToUserConfig(row: import('../memory/db.js').BotConfigRow): UserBotConfig {
+    return {
+      botName: row.botName,
+      personalityId: row.personalityId,
+      customPersonality: row.customPersonality ?? undefined,
+      modelId: row.modelId,
+      onboardingComplete: row.onboardingComplete,
+      onboardingStep: (row.onboardingStep as OnboardingStep) ?? undefined,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+    };
   }
 }

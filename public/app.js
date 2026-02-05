@@ -14,6 +14,8 @@
   const sendBtn = document.getElementById('send-btn');
   const statusIndicator = document.getElementById('status');
   const debugToggle = document.getElementById('debug-mode');
+  const creditsToggle = document.getElementById('credits-toggle');
+  const creditsPanel = document.getElementById('credits-panel');
 
   // State
   let ws = null;
@@ -367,6 +369,7 @@
           addMessage(data.content, 'assistant', true);
         }
         messageInput.focus();
+        fetchCredits();
         break;
 
       case 'chunk':
@@ -512,8 +515,106 @@
     }, 30000);
   }
 
+  /**
+   * Format a dollar amount
+   */
+  function formatCost(dollars) {
+    return '$' + dollars.toFixed(4);
+  }
+
+  /**
+   * Fetch and display credits/usage data
+   */
+  function fetchCredits() {
+    fetch('/api/costs')
+      .then(function(res) { return res.json(); })
+      .then(function(data) {
+        if (!data.enabled) {
+          creditsToggle.style.display = 'none';
+          return;
+        }
+        updateCreditsPanel(data);
+      })
+      .catch(function(err) {
+        console.error('Failed to fetch costs:', err);
+      });
+  }
+
+  /**
+   * Update credits panel with data from API
+   */
+  function updateCreditsPanel(data) {
+    // Daily
+    document.getElementById('credits-daily-spent').textContent = formatCost(data.daily.spent);
+    var dailyBar = document.getElementById('credits-daily-bar');
+    if (data.daily.budget != null) {
+      var dailyPct = Math.min((data.daily.spent / data.daily.budget) * 100, 100);
+      document.getElementById('credits-daily-budget').textContent = 'of $' + data.daily.budget.toFixed(2) + ' budget';
+      dailyBar.style.width = dailyPct + '%';
+      dailyBar.className = 'credits-bar-fill' + (data.daily.exceeded ? ' exceeded' : data.daily.warning ? ' warning' : '');
+    } else {
+      document.getElementById('credits-daily-budget').textContent = 'no budget set';
+      dailyBar.style.width = '0%';
+    }
+
+    // Monthly
+    document.getElementById('credits-monthly-spent').textContent = formatCost(data.monthly.spent);
+    var monthlyBar = document.getElementById('credits-monthly-bar');
+    if (data.monthly.budget != null) {
+      var monthlyPct = Math.min((data.monthly.spent / data.monthly.budget) * 100, 100);
+      document.getElementById('credits-monthly-budget').textContent = 'of $' + data.monthly.budget.toFixed(2) + ' budget';
+      monthlyBar.style.width = monthlyPct + '%';
+      monthlyBar.className = 'credits-bar-fill' + (data.monthly.exceeded ? ' exceeded' : data.monthly.warning ? ' warning' : '');
+    } else {
+      document.getElementById('credits-monthly-budget').textContent = 'no budget set';
+      monthlyBar.style.width = '0%';
+    }
+
+    // Requests
+    document.getElementById('credits-total-requests').textContent = data.totalRequests;
+
+    // Top models
+    var modelsContainer = document.getElementById('credits-models');
+    modelsContainer.innerHTML = '';
+    if (data.topModels && data.topModels.length > 0) {
+      for (var i = 0; i < data.topModels.length; i++) {
+        var m = data.topModels[i];
+        var tag = document.createElement('div');
+        tag.className = 'credits-model-tag';
+        tag.innerHTML =
+          '<span class="credits-model-name">' + escapeHtml(m.model) + '</span>' +
+          '<span class="credits-model-cost">' + formatCost(m.cost) + '</span>' +
+          '<span class="credits-model-pct">(' + m.percentage + '%)</span>';
+        modelsContainer.appendChild(tag);
+      }
+    }
+
+    // Show badge dot when panel is closed and there's spend
+    var badge = document.getElementById('credits-badge');
+    if (data.daily.spent > 0 && creditsPanel.style.display === 'none') {
+      badge.style.display = 'block';
+    }
+  }
+
+  /**
+   * Toggle credits panel visibility
+   */
+  creditsToggle.addEventListener('click', function() {
+    var isVisible = creditsPanel.style.display !== 'none';
+    creditsPanel.style.display = isVisible ? 'none' : 'block';
+    creditsToggle.classList.toggle('active', !isVisible);
+    document.getElementById('credits-badge').style.display = 'none';
+    if (!isVisible) {
+      fetchCredits();
+    }
+  });
+
   // Initialize
   connect();
   startHeartbeat();
+
+  // Fetch credits on load and periodically
+  fetchCredits();
+  setInterval(fetchCredits, 30000);
 
 })();

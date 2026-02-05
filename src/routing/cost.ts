@@ -1,7 +1,10 @@
 /**
  * Cost Tracker
  * Tracks LLM usage costs with budget limits and warnings
+ * Optionally persists to SQLite for durability across restarts.
  */
+
+import type { ScallopDatabase } from '../memory/db.js';
 
 export interface ModelPricing {
   inputPerMillion: number;
@@ -35,6 +38,7 @@ export interface CostTrackerOptions {
   dailyBudget?: number;
   monthlyBudget?: number;
   warningThreshold?: number;
+  db?: ScallopDatabase;
 }
 
 export interface UsageHistoryFilter {
@@ -67,6 +71,15 @@ const DEFAULT_PRICING: Record<string, ModelPricing> = {
   'llama-3.1-70b-versatile': { inputPerMillion: 0.59, outputPerMillion: 0.79 },
   'mixtral-8x7b-32768': { inputPerMillion: 0.24, outputPerMillion: 0.24 },
 
+  // Moonshot (Kimi)
+  'kimi-k2.5': { inputPerMillion: 0.6, outputPerMillion: 3 },
+  'kimi-k2.5-thinking': { inputPerMillion: 0.6, outputPerMillion: 3 },
+  'kimi-k2-0905': { inputPerMillion: 0.6, outputPerMillion: 2.5 },
+  'kimi-k2-thinking': { inputPerMillion: 0.6, outputPerMillion: 2.5 },
+  'moonshot-v1-128k': { inputPerMillion: 0.6, outputPerMillion: 2.5 },
+  'moonshot-v1-32k': { inputPerMillion: 0.6, outputPerMillion: 2.5 },
+  'moonshot-v1-8k': { inputPerMillion: 0.6, outputPerMillion: 2.5 },
+
   // Free/Local
   'llama3.2': { inputPerMillion: 0, outputPerMillion: 0 },
   'mistral': { inputPerMillion: 0, outputPerMillion: 0 },
@@ -78,11 +91,29 @@ export class CostTracker {
   private warningThreshold: number;
   private customPricing: Map<string, ModelPricing> = new Map();
   private usageHistory: UsageRecord[] = [];
+  private db?: ScallopDatabase;
 
   constructor(options: CostTrackerOptions) {
     this.dailyBudget = options.dailyBudget;
     this.monthlyBudget = options.monthlyBudget;
     this.warningThreshold = options.warningThreshold ?? 0.75;
+    this.db = options.db;
+
+    // Load existing records from SQLite on startup
+    if (this.db) {
+      const rows = this.db.getCostUsageSince(0);
+      for (const row of rows) {
+        this.usageHistory.push({
+          model: row.model,
+          provider: row.provider,
+          sessionId: row.sessionId,
+          inputTokens: row.inputTokens,
+          outputTokens: row.outputTokens,
+          cost: row.cost,
+          timestamp: new Date(row.timestamp),
+        });
+      }
+    }
   }
 
   getDailyBudget(): number | undefined {
@@ -134,11 +165,26 @@ export class CostTracker {
       outputTokens: params.outputTokens,
     });
 
-    this.usageHistory.push({
+    const record: UsageRecord = {
       ...params,
       cost,
       timestamp: new Date(),
-    });
+    };
+
+    this.usageHistory.push(record);
+
+    // Persist to SQLite if available
+    if (this.db) {
+      this.db.recordCostUsage({
+        model: params.model,
+        provider: params.provider,
+        sessionId: params.sessionId,
+        inputTokens: params.inputTokens,
+        outputTokens: params.outputTokens,
+        cost,
+        timestamp: record.timestamp.getTime(),
+      });
+    }
   }
 
   getDailySpend(): number {

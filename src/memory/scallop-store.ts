@@ -22,7 +22,7 @@ import { ProfileManager, type ProfileUpdateOptions } from './profiles.js';
 import { TemporalExtractor, TemporalQuery } from './temporal.js';
 import type { EmbeddingProvider } from './embeddings.js';
 import { cosineSimilarity } from './embeddings.js';
-import { calculateBM25Score, buildDocFreqMap, type BM25Options } from './memory.js';
+import { calculateBM25Score, buildDocFreqMap, type BM25Options } from './bm25.js';
 
 /**
  * Options for ScallopMemoryStore

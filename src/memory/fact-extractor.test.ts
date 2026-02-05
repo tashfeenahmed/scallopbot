@@ -9,7 +9,7 @@ import {
   type ExtractedFactWithEmbedding,
   type FactExtractionResult,
 } from './fact-extractor.js';
-import { MemoryStore, HybridSearch } from './memory.js';
+import type { ScallopMemoryStore } from './scallop-store.js';
 import type { LLMProvider } from '../providers/types.js';
 import type { EmbeddingProvider } from './embeddings.js';
 import type { Logger } from 'pino';
@@ -62,14 +62,37 @@ const createMockProvider = (response: string): LLMProvider => ({
   isAvailable: vi.fn().mockResolvedValue(true),
 });
 
+// Mock ScallopMemoryStore
+const createMockScallopStore = (): ScallopMemoryStore => {
+  const store = {
+    search: vi.fn().mockResolvedValue([]),
+    add: vi.fn().mockImplementation(async (opts: any) => ({
+      id: `mem-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      content: opts.content,
+      category: opts.category,
+      userId: opts.userId,
+      importance: opts.importance ?? 5,
+      confidence: opts.confidence ?? 0.8,
+      metadata: opts.metadata ?? {},
+      embedding: null,
+      isLatest: true,
+    })),
+    update: vi.fn(),
+    getProfileManager: vi.fn().mockReturnValue({
+      getStaticProfile: vi.fn().mockReturnValue({}),
+      setStaticValue: vi.fn(),
+    }),
+    processDecay: vi.fn().mockReturnValue({ updated: 0, archived: 0 }),
+  };
+  return store as unknown as ScallopMemoryStore;
+};
+
 describe('LLMFactExtractor', () => {
-  let memoryStore: MemoryStore;
-  let hybridSearch: HybridSearch;
+  let mockScallopStore: ScallopMemoryStore;
   let logger: Logger;
 
   beforeEach(() => {
-    memoryStore = new MemoryStore();
-    hybridSearch = new HybridSearch({ store: memoryStore });
+    mockScallopStore = createMockScallopStore();
     logger = createMockLogger();
   });
 
@@ -84,8 +107,7 @@ describe('LLMFactExtractor', () => {
 
       const extractor = new LLMFactExtractor({
         provider: mockProvider,
-        memoryStore,
-        hybridSearch,
+        scallopStore: mockScallopStore,
         logger,
       });
 
@@ -108,8 +130,7 @@ describe('LLMFactExtractor', () => {
 
       const extractor = new LLMFactExtractor({
         provider: mockProvider,
-        memoryStore,
-        hybridSearch,
+        scallopStore: mockScallopStore,
         logger,
       });
 
@@ -133,8 +154,7 @@ describe('LLMFactExtractor', () => {
 
       const extractor = new LLMFactExtractor({
         provider: mockProvider,
-        memoryStore,
-        hybridSearch,
+        scallopStore: mockScallopStore,
         logger,
       });
 
@@ -160,8 +180,7 @@ describe('LLMFactExtractor', () => {
 
       const extractor = new LLMFactExtractor({
         provider: mockProvider,
-        memoryStore,
-        hybridSearch,
+        scallopStore: mockScallopStore,
         logger,
       });
 
@@ -193,8 +212,7 @@ describe('LLMFactExtractor', () => {
 
       const extractor = new LLMFactExtractor({
         provider: mockProvider,
-        memoryStore,
-        hybridSearch,
+        scallopStore: mockScallopStore,
         logger,
       });
 
@@ -217,8 +235,7 @@ describe('LLMFactExtractor', () => {
 
       const extractor = new LLMFactExtractor({
         provider: mockProvider,
-        memoryStore,
-        hybridSearch,
+        scallopStore: mockScallopStore,
         logger,
       });
 
@@ -240,8 +257,7 @@ describe('LLMFactExtractor', () => {
 
       const extractor = new LLMFactExtractor({
         provider: mockProvider,
-        memoryStore,
-        hybridSearch,
+        scallopStore: mockScallopStore,
         logger,
       });
 
@@ -255,8 +271,7 @@ describe('LLMFactExtractor', () => {
 
       const extractor = new LLMFactExtractor({
         provider: mockProvider,
-        memoryStore,
-        hybridSearch,
+        scallopStore: mockScallopStore,
         logger,
       });
 
@@ -264,21 +279,24 @@ describe('LLMFactExtractor', () => {
 
       // Should gracefully return empty array, not crash
       expect(result.facts.length).toBe(0);
-      // Note: No error is set for parse failures - just returns empty array
     });
   });
 
   describe('semantic deduplication', () => {
     it('should not store duplicate facts', async () => {
-      // First, add an existing fact
-      memoryStore.add({
-        content: 'Works at Acme Corp',
-        type: 'fact',
-        sessionId: 'user-123',
-        timestamp: new Date(),
-        metadata: { subject: 'user' },
-        tags: ['work'],
-      });
+      // Existing fact with embedding in ScallopStore
+      const existingEmbedding = [0, 0, 0.9, 0, 0, 0.1, 0.1]; // matches "Works at Acme Corp"
+      (mockScallopStore.search as any).mockResolvedValue([{
+        memory: {
+          id: 'existing-1',
+          content: 'Works at Acme Corp',
+          category: 'fact',
+          metadata: { subject: 'user' },
+          embedding: existingEmbedding,
+          isLatest: true,
+        },
+        score: 0.9,
+      }]);
 
       const mockProvider = createMockProvider(JSON.stringify({
         facts: [
@@ -288,9 +306,9 @@ describe('LLMFactExtractor', () => {
 
       const extractor = new LLMFactExtractor({
         provider: mockProvider,
-        memoryStore,
-        hybridSearch,
+        scallopStore: mockScallopStore,
         logger,
+        embedder: createMockEmbedder(),
         deduplicationThreshold: 0.85,
       });
 
@@ -299,20 +317,22 @@ describe('LLMFactExtractor', () => {
         'user-123'
       );
 
-      // Should detect as duplicate and not add
-      expect(result.duplicatesSkipped).toBeGreaterThanOrEqual(0);
+      // Should detect as duplicate via embedding similarity
+      expect(result.duplicatesSkipped).toBeGreaterThanOrEqual(1);
     });
 
     it('should update existing fact if new info is more specific', async () => {
-      // Add a general fact
-      memoryStore.add({
-        content: 'Works at Acme Corp',
-        type: 'fact',
-        sessionId: 'user-123',
-        timestamp: new Date(),
-        metadata: { subject: 'user' },
-        tags: ['work'],
-      });
+      (mockScallopStore.search as any).mockResolvedValue([{
+        memory: {
+          id: 'existing-1',
+          content: 'Works at Acme Corp',
+          category: 'fact',
+          metadata: { subject: 'user', originalCategory: 'work' },
+          embedding: null,
+          isLatest: true,
+        },
+        score: 0.8,
+      }]);
 
       const mockProvider = createMockProvider(JSON.stringify({
         facts: [
@@ -322,8 +342,7 @@ describe('LLMFactExtractor', () => {
 
       const extractor = new LLMFactExtractor({
         provider: mockProvider,
-        memoryStore,
-        hybridSearch,
+        scallopStore: mockScallopStore,
         logger,
         deduplicationThreshold: 0.7,
       });
@@ -338,15 +357,20 @@ describe('LLMFactExtractor', () => {
     });
 
     it('should enrich/correct existing fact in same category with new info using LLM classification', async () => {
-      // Add an INCORRECT location fact (Springfield instead of Metropolis)
-      const oldFact = memoryStore.add({
-        content: 'Office is in Springfield',
-        type: 'fact',
-        sessionId: 'user-123',
-        timestamp: new Date(Date.now() - 86400000), // 1 day old
-        metadata: { subject: 'user', category: 'location', userId: 'user-123' },
-        tags: ['location', 'about-user'],
-      });
+      const oldFactId = 'old-fact-1';
+
+      // Mock search to return the old (incorrect) location fact
+      (mockScallopStore.search as any).mockResolvedValue([{
+        memory: {
+          id: oldFactId,
+          content: 'Office is in Springfield',
+          category: 'fact',
+          metadata: { subject: 'user', originalCategory: 'location', userId: 'user-123' },
+          embedding: null,
+          isLatest: true,
+        },
+        score: 0.7,
+      }]);
 
       // Mock provider that returns extraction first, then UPDATES classification
       let callCount = 0;
@@ -363,18 +387,25 @@ describe('LLMFactExtractor', () => {
               finishReason: 'stop',
               usage: { inputTokens: 100, outputTokens: 50 },
             });
-          } else {
+          } else if (callCount === 2) {
             // Second call: batch classification - returns UPDATES
             return Promise.resolve({
               content: [{ type: 'text', text: JSON.stringify({
                 classifications: [{
                   index: 1,
                   classification: 'UPDATES',
-                  targetId: oldFact.id,
+                  targetId: oldFactId,
                   confidence: 0.9,
                   reason: 'Location updated from Springfield to Metropolis'
                 }]
               })}],
+              finishReason: 'stop',
+              usage: { inputTokens: 100, outputTokens: 50 },
+            });
+          } else {
+            // Subsequent calls (e.g. consolidation)
+            return Promise.resolve({
+              content: [{ type: 'text', text: '{"superseded": [], "user_profile": {}, "agent_profile": {}}' }],
               finishReason: 'stop',
               usage: { inputTokens: 100, outputTokens: 50 },
             });
@@ -385,8 +416,7 @@ describe('LLMFactExtractor', () => {
 
       const extractor = new LLMFactExtractor({
         provider: mockProvider,
-        memoryStore,
-        hybridSearch,
+        scallopStore: mockScallopStore,
         logger,
         embedder: createMockEmbedder(),
         useRelationshipClassifier: true, // Enable LLM classifier for UPDATES detection
@@ -401,28 +431,18 @@ describe('LLMFactExtractor', () => {
       expect(result.factsUpdated).toBe(1);
       expect(result.factsStored).toBe(0);
 
-      // Verify the old fact was updated, not a new one created
-      const allFacts = memoryStore.getAll().filter(m => m.type === 'fact');
-      const locationFacts = allFacts.filter(f =>
-        f.metadata?.category === 'location' && f.metadata?.subject === 'user'
-      );
+      // Verify old fact was marked as superseded
+      expect(mockScallopStore.update).toHaveBeenCalledWith(oldFactId, { isLatest: false });
 
-      expect(locationFacts.length).toBe(1);
-      expect(locationFacts[0].content).toContain('Metropolis');
+      // Verify new fact was stored with Metropolis content
+      expect(mockScallopStore.add).toHaveBeenCalledWith(
+        expect.objectContaining({
+          content: expect.stringContaining('Metropolis'),
+        })
+      );
     });
 
     it('should create new fact if category differs from existing facts', async () => {
-      // Add a work fact
-      memoryStore.add({
-        content: 'Works at Acme Corp',
-        type: 'fact',
-        sessionId: 'user-123',
-        timestamp: new Date(),
-        metadata: { subject: 'user', category: 'work' },
-        tags: ['work', 'about-user'],
-      });
-
-      // User provides a LOCATION fact (different category)
       const mockProvider = createMockProvider(JSON.stringify({
         facts: [
           { content: 'Lives in Metropolis', subject: 'user', category: 'location' },
@@ -431,8 +451,7 @@ describe('LLMFactExtractor', () => {
 
       const extractor = new LLMFactExtractor({
         provider: mockProvider,
-        memoryStore,
-        hybridSearch,
+        scallopStore: mockScallopStore,
         logger,
       });
 
@@ -441,13 +460,10 @@ describe('LLMFactExtractor', () => {
         'user-123'
       );
 
-      // Should store as new fact (different category)
+      // Should store as new fact
       expect(result.factsStored).toBe(1);
       expect(result.factsUpdated).toBe(0);
-
-      // Verify both facts exist
-      const allFacts = memoryStore.getAll().filter(m => m.type === 'fact');
-      expect(allFacts.length).toBe(2);
+      expect(mockScallopStore.add).toHaveBeenCalled();
     });
   });
 
@@ -461,8 +477,7 @@ describe('LLMFactExtractor', () => {
 
       const extractor = new LLMFactExtractor({
         provider: mockProvider,
-        memoryStore,
-        hybridSearch,
+        scallopStore: mockScallopStore,
         logger,
       });
 
@@ -475,9 +490,8 @@ describe('LLMFactExtractor', () => {
       // Wait for processing
       await promise;
 
-      // Verify fact was stored
-      const facts = memoryStore.getAll().filter(m => m.type === 'fact');
-      expect(facts.length).toBeGreaterThanOrEqual(1);
+      // Verify fact was stored via ScallopStore
+      expect(mockScallopStore.add).toHaveBeenCalled();
     });
 
     it('should handle multiple queued messages', async () => {
@@ -489,10 +503,9 @@ describe('LLMFactExtractor', () => {
 
       const extractor = new LLMFactExtractor({
         provider: mockProvider,
-        memoryStore,
-        hybridSearch,
+        scallopStore: mockScallopStore,
         logger,
-        useRelationshipClassifier: false, // Disable to test exact call counts
+        useRelationshipClassifier: false, // Disable to simplify call tracking
       });
 
       // Queue multiple messages
@@ -504,8 +517,9 @@ describe('LLMFactExtractor', () => {
 
       await Promise.all(promises);
 
-      // All should complete
-      expect(mockProvider.complete).toHaveBeenCalledTimes(3);
+      // Each message triggers at least one extraction call
+      // (additional background consolidation calls may also fire)
+      expect((mockProvider.complete as any).mock.calls.length).toBeGreaterThanOrEqual(3);
     });
   });
 
@@ -522,8 +536,7 @@ describe('LLMFactExtractor', () => {
 
       const extractor = new LLMFactExtractor({
         provider: mockProvider,
-        memoryStore,
-        hybridSearch,
+        scallopStore: mockScallopStore,
         logger,
       });
 

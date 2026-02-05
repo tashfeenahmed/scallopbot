@@ -15,6 +15,7 @@ describe('TelegramChannel', () => {
         sessionManager: {} as any,
         logger: { info: vi.fn(), error: vi.fn(), debug: vi.fn(), child: vi.fn().mockReturnThis() } as any,
         workspacePath: '/tmp/test-workspace',
+        db: { getBotConfig: vi.fn().mockReturnValue(null), upsertBotConfig: vi.fn() } as any,
       });
 
       expect(channel).toBeDefined();
@@ -136,6 +137,7 @@ describe('TelegramChannel', () => {
         sessionManager: mockSessionManager,
         logger: { info: vi.fn(), error: vi.fn(), debug: vi.fn(), child: vi.fn().mockReturnThis() } as any,
         workspacePath: '/tmp/test-workspace',
+        db: { getBotConfig: vi.fn().mockReturnValue(null), upsertBotConfig: vi.fn() } as any,
       });
 
       const sessionId = await channel.getOrCreateSession('user123');
@@ -160,6 +162,7 @@ describe('TelegramChannel', () => {
         sessionManager: mockSessionManager,
         logger: { info: vi.fn(), error: vi.fn(), debug: vi.fn(), child: vi.fn().mockReturnThis() } as any,
         workspacePath: '/tmp/test-workspace',
+        db: { getBotConfig: vi.fn().mockReturnValue(null), upsertBotConfig: vi.fn() } as any,
       });
 
       // Pre-register the session
@@ -196,6 +199,7 @@ describe('TelegramChannel', () => {
         sessionManager: mockSessionManager,
         logger: { info: vi.fn(), error: vi.fn(), debug: vi.fn(), child: vi.fn().mockReturnThis() } as any,
         workspacePath: '/tmp/test-workspace',
+        db: { getBotConfig: vi.fn().mockReturnValue(null), upsertBotConfig: vi.fn() } as any,
       });
 
       channel.userSessions.set('user123', 'old-session');

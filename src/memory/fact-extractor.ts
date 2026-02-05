@@ -8,7 +8,6 @@
 
 import type { Logger } from 'pino';
 import type { LLMProvider } from '../providers/types.js';
-import type { MemoryStore, HybridSearch, MemoryEntry } from './memory.js';
 import { cosineSimilarity, type EmbeddingProvider } from './embeddings.js';
 import type { ScallopMemoryStore } from './scallop-store.js';
 import type { MemoryCategory } from './db.js';
@@ -71,16 +70,13 @@ export interface ResourceLimits {
  */
 export interface LLMFactExtractorOptions {
   provider: LLMProvider;
-  memoryStore: MemoryStore;
-  hybridSearch: HybridSearch;
+  scallopStore: ScallopMemoryStore;
   logger: Logger;
   embedder?: EmbeddingProvider;
   /** Similarity threshold for deduplication (0-1, default 0.95) */
   deduplicationThreshold?: number;
   /** Whether to use LLM for relationship classification (recommended) */
   useRelationshipClassifier?: boolean;
-  /** ScallopMemoryStore for enhanced fact storage (optional) */
-  scallopStore?: ScallopMemoryStore;
   /** Resource limits for memory-constrained environments */
   resourceLimits?: ResourceLimits;
 }
@@ -145,24 +141,20 @@ If no facts can be extracted, return: { "facts": [] }`;
  */
 export class LLMFactExtractor {
   private provider: LLMProvider;
-  private memoryStore: MemoryStore;
-  private hybridSearch: HybridSearch;
+  private scallopStore: ScallopMemoryStore;
   private logger: Logger;
   private embedder?: EmbeddingProvider;
   private deduplicationThreshold: number;
   private relationshipClassifier?: RelationshipClassifier;
   private processingQueue: Map<string, Promise<FactExtractionResult>> = new Map();
-  private scallopStore?: ScallopMemoryStore;
   private resourceLimits: Required<ResourceLimits>;
 
   constructor(options: LLMFactExtractorOptions) {
     this.provider = options.provider;
-    this.memoryStore = options.memoryStore;
-    this.hybridSearch = options.hybridSearch;
+    this.scallopStore = options.scallopStore;
     this.logger = options.logger.child({ component: 'fact-extractor' });
     this.embedder = options.embedder;
     this.deduplicationThreshold = options.deduplicationThreshold ?? 0.95;
-    this.scallopStore = options.scallopStore;
 
     // Set resource limits with defaults suitable for 4GB RAM
     this.resourceLimits = {
@@ -281,7 +273,7 @@ export class LLMFactExtractor {
 
   /**
    * Process multiple facts in a batch with single LLM classification call
-   * Much more efficient than calling processAndStoreFact for each fact
+   * Efficiently processes all facts with a single LLM classification call
    */
   private async processFactsBatch(
     facts: ExtractedFactWithEmbedding[],
@@ -344,26 +336,16 @@ export class LLMFactExtractor {
     for (let i = 0; i < facts_to_process.length; i++) {
       const fact = facts_to_process[i];
 
-      // Prefer ScallopStore search for dedup (indexed SQLite vs O(n) JSONL)
-      let existingFacts: { entry: { embedding?: number[] }; score: number }[] = [];
-      if (this.scallopStore) {
-        const scallopResults = await this.scallopStore.search(fact.content, {
-          userId,
-          limit: 3,
-          minProminence: 0.1,
-        });
-        existingFacts = scallopResults.map((r) => ({
-          entry: { embedding: r.memory.embedding ?? undefined },
-          score: r.score,
-        }));
-      } else {
-        existingFacts = this.hybridSearch.search(fact.content, {
-          type: 'fact',
-          subject: fact.subject,
-          limit: 3,
-          minScore: 0.3,
-        });
-      }
+      // Search ScallopStore for dedup
+      const scallopResults = await this.scallopStore.search(fact.content, {
+        userId,
+        limit: 3,
+        minProminence: 0.1,
+      });
+      const existingFacts = scallopResults.map((r) => ({
+        entry: { embedding: r.memory.embedding ?? undefined },
+        score: r.score,
+      }));
 
       // Check for exact duplicates using embeddings
       let isDuplicate = false;
@@ -399,33 +381,31 @@ export class LLMFactExtractor {
     // Step 3: Batch classification with single LLM call
     // Only compare against semantically similar existing facts (not ALL user facts)
     if (this.relationshipClassifier && factsToClassify.length > 0) {
-      // Gather relevant existing facts by searching for each new fact's content
+      // Gather relevant existing facts by searching ScallopStore
       const relevantFactIds = new Set<string>();
-      const relevantFactMap = new Map<string, MemoryEntry>();
+      const relevantFacts: { id: string; content: string; subject: string; category: string }[] = [];
 
       for (const fact of factsToClassify) {
-        const similar = this.hybridSearch.search(fact.content, {
-          type: 'fact',
+        const similar = await this.scallopStore.search(fact.content, {
+          userId,
           limit: 10,
-          minScore: 0.1,
+          minProminence: 0.1,
         });
         for (const result of similar) {
-          if (!relevantFactIds.has(result.entry.id)) {
-            relevantFactIds.add(result.entry.id);
-            relevantFactMap.set(result.entry.id, result.entry);
+          if (!relevantFactIds.has(result.memory.id)) {
+            relevantFactIds.add(result.memory.id);
+            relevantFacts.push({
+              id: result.memory.id,
+              content: result.memory.content,
+              subject: (result.memory.metadata?.subject as string) || 'user',
+              category: (result.memory.metadata?.originalCategory as string) || result.memory.category || 'general',
+            });
           }
         }
       }
 
-      const allUserFacts = Array.from(relevantFactMap.values());
-
-      if (allUserFacts.length > 0) {
-        const existingFactsForClassifier: ExistingFact[] = allUserFacts.map(f => ({
-          id: f.id,
-          content: f.content,
-          subject: (f.metadata?.subject as string) || 'user',
-          category: (f.metadata?.category as string) || 'general',
-        }));
+      if (relevantFacts.length > 0) {
+        const existingFactsForClassifier: ExistingFact[] = relevantFacts;
 
         try {
           // Single batch LLM call instead of N calls
@@ -449,23 +429,9 @@ export class LLMFactExtractor {
             const classification = classifications[i];
 
             if (classification.classification === 'UPDATES' && classification.targetId) {
-              const targetFact = this.memoryStore.get(classification.targetId);
-              if (targetFact) {
-                this.memoryStore.update(classification.targetId, {
-                  content: fact.content,
-                  timestamp: new Date(),
-                  embedding: fact.embedding,
-                  metadata: {
-                    ...targetFact.metadata,
-                    previousContent: targetFact.content,
-                    updatedAt: new Date().toISOString(),
-                  },
-                });
-              }
-              // Also store in ScallopStore (for consolidation + profile updates)
-              if (this.scallopStore) {
-                await storeAndCollect(fact, sourceMessage, sourceMessageId);
-              }
+              // Mark old fact as superseded and store new version
+              this.scallopStore.update(classification.targetId, { isLatest: false });
+              await storeAndCollect(fact, sourceMessage, sourceMessageId);
               result.updated++;
               continue;
             }
@@ -544,37 +510,19 @@ export class LLMFactExtractor {
     if (sourceMessage) provenance.sourceMessageExcerpt = sourceMessage.substring(0, 200);
     provenance.extractedAt = new Date().toISOString();
 
-    if (this.scallopStore) {
-      const scallopCategory = this.mapToScallopCategory(fact.category);
-      // Identity facts (personal, relationship, location) get higher importance to resist decay
-      const isIdentityFact = fact.category === 'relationship' || fact.category === 'personal' || fact.category === 'location';
-      const newMemory = await this.scallopStore.add({
-        userId,
-        content: searchableContent,
-        category: scallopCategory,
-        importance: isIdentityFact ? 8 : 5,
-        confidence,
-        metadata: provenance,
-      });
+    const scallopCategory = this.mapToScallopCategory(fact.category);
+    // Identity facts (personal, relationship, location) get higher importance to resist decay
+    const isIdentityFact = fact.category === 'relationship' || fact.category === 'personal' || fact.category === 'location';
+    const newMemory = await this.scallopStore.add({
+      userId,
+      content: searchableContent,
+      category: scallopCategory,
+      importance: isIdentityFact ? 8 : 5,
+      confidence,
+      metadata: provenance,
+    });
 
-      return { id: newMemory.id, content: searchableContent };
-    } else {
-      this.memoryStore.add({
-        content: searchableContent,
-        type: 'fact',
-        sessionId: userId,
-        timestamp: new Date(),
-        metadata: {
-          ...provenance,
-          category: fact.category,
-          userId,
-          confidence,
-        },
-        tags: [fact.category, fact.subject === 'user' ? 'about-user' : `about-${fact.subject}`],
-        embedding: fact.embedding,
-      });
-      return null;
-    }
+    return { id: newMemory.id, content: searchableContent };
   }
 
   /**
@@ -726,245 +674,6 @@ Respond with JSON only:
       }
     } catch (err) {
       this.logger.debug({ error: (err as Error).message }, 'Memory consolidation LLM call failed');
-    }
-  }
-
-  /**
-   * Find existing facts by category and subject for enrichment
-   */
-  private findFactsByCategoryAndSubject(
-    category: FactCategory,
-    subject: string
-  ): MemoryEntry[] {
-    const allFacts = this.memoryStore.getAll().filter(m => m.type === 'fact');
-
-    return allFacts.filter(fact => {
-      const factCategory = fact.metadata?.category as string | undefined;
-      const factSubject = fact.metadata?.subject as string | undefined;
-
-      return (
-        factCategory?.toLowerCase() === category.toLowerCase() &&
-        factSubject?.toLowerCase() === subject.toLowerCase()
-      );
-    });
-  }
-
-  /**
-   * Process a fact: check for duplicates, enrich existing facts, or store new
-   *
-   * Fact Enrichment Logic:
-   * 1. If exact/near duplicate found (>0.85 similarity), skip unless more detailed
-   * 2. If related fact in same category+subject found (>0.5 similarity), UPDATE it
-   *    This handles corrections like "office in Springfield" → "office in Metropolis"
-   * 3. If no related fact, store as new
-   */
-  private async processAndStoreFact(
-    fact: ExtractedFactWithEmbedding,
-    userId: string
-  ): Promise<'stored' | 'updated' | 'duplicate' | 'error'> {
-    try {
-      // Get embedding for new fact early (needed for both dedup and enrichment)
-      // Embedding is optional - if it fails, we still store the fact without it
-      let newEmbedding: number[] | undefined;
-      if (this.embedder) {
-        try {
-          newEmbedding = await this.embedder.embed(fact.content);
-          fact.embedding = newEmbedding;
-        } catch (embedError) {
-          this.logger.warn(
-            { error: (embedError as Error).message, fact: fact.content },
-            'Embedding failed, storing fact without embedding'
-          );
-          // Continue without embedding - fact will still be stored
-        }
-      }
-
-      // Search for similar existing facts by content
-      const existingFacts = this.hybridSearch.search(fact.content, {
-        type: 'fact',
-        subject: fact.subject,
-        limit: 5,
-        minScore: 0.3,
-      });
-
-      // Check for semantic duplicates using embeddings if available
-      let isDuplicate = false;
-      let mostSimilarFact: MemoryEntry | null = null;
-      let highestSimilarity = 0;
-
-      if (newEmbedding && existingFacts.length > 0) {
-        for (const result of existingFacts) {
-          // Get or compute embedding for existing fact
-          let existingEmbedding = result.entry.embedding;
-          if (!existingEmbedding && this.embedder) {
-            try {
-              existingEmbedding = await this.embedder.embed(result.entry.content);
-            } catch {
-              // Skip semantic comparison if embedding fails
-              continue;
-            }
-          }
-          if (!existingEmbedding) continue;
-
-          const similarity = cosineSimilarity(newEmbedding, existingEmbedding);
-
-          if (similarity > highestSimilarity) {
-            highestSimilarity = similarity;
-            mostSimilarFact = result.entry;
-          }
-
-          if (similarity >= this.deduplicationThreshold) {
-            isDuplicate = true;
-          }
-        }
-      } else if (existingFacts.length > 0) {
-        // Fallback: use BM25 score for deduplication
-        // BM25 scores are not normalized (0-1), so use a higher threshold
-        const bm25Threshold = 2.0; // Much higher than embedding threshold
-        for (const result of existingFacts) {
-          this.logger.debug({ fact: fact.content, existing: result.entry.content, score: result.score }, 'BM25 comparison');
-          if (result.score > bm25Threshold) {
-            isDuplicate = true;
-            if (result.score > highestSimilarity) {
-              highestSimilarity = result.score;
-              mostSimilarFact = result.entry;
-            }
-          }
-        }
-      }
-
-      // If exact duplicate but new fact is more detailed, update
-      if (isDuplicate && mostSimilarFact) {
-        if (fact.content.length > mostSimilarFact.content.length * 1.2) {
-          // New fact is significantly more detailed - update
-          this.memoryStore.update(mostSimilarFact.id, {
-            content: fact.content,
-            timestamp: new Date(),
-            embedding: fact.embedding,
-          });
-          this.logger.debug(
-            { old: mostSimilarFact.content, new: fact.content },
-            'Updated fact with more specific info'
-          );
-          return 'updated';
-        }
-
-        this.logger.info(
-          { fact: fact.content, similarity: highestSimilarity.toFixed(3), mostSimilar: mostSimilarFact?.content },
-          'Skipping duplicate fact'
-        );
-        return 'duplicate';
-      }
-
-      // Use LLM-based relationship classifier if available
-      if (this.relationshipClassifier) {
-        // Get all existing facts for this user to compare against
-        const allUserFacts = this.memoryStore.searchByType('fact')
-          .filter(f => f.metadata?.userId === userId || f.metadata?.subject === fact.subject);
-
-        if (allUserFacts.length > 0) {
-          // Convert to classifier format
-          const existingFactsForClassifier: ExistingFact[] = allUserFacts.map(f => ({
-            id: f.id,
-            content: f.content,
-            subject: (f.metadata?.subject as string) || 'user',
-            category: (f.metadata?.category as string) || 'general',
-          }));
-
-          try {
-            const classification = await this.relationshipClassifier.classify(
-              { content: fact.content, subject: fact.subject, category: fact.category },
-              existingFactsForClassifier
-            );
-
-            this.logger.debug(
-              { fact: fact.content, classification: classification.classification, reason: classification.reason },
-              'LLM relationship classification'
-            );
-
-            if (classification.classification === 'UPDATES' && classification.targetId) {
-              // Update the existing fact
-              const targetFact = this.memoryStore.get(classification.targetId);
-              if (targetFact) {
-                this.memoryStore.update(classification.targetId, {
-                  content: fact.content,
-                  timestamp: new Date(),
-                  embedding: fact.embedding,
-                  metadata: {
-                    ...targetFact.metadata,
-                    previousContent: targetFact.content,
-                    updatedAt: new Date().toISOString(),
-                  },
-                });
-                this.logger.info(
-                  { old: targetFact.content, new: fact.content, reason: classification.reason },
-                  'Updated fact via LLM classification'
-                );
-                return 'updated';
-              }
-            }
-            // For EXTENDS and NEW, we store as new (EXTENDS creates a link, handled by graph)
-            // Classification result is logged for debugging
-          } catch (classifyError) {
-            this.logger.warn(
-              { error: (classifyError as Error).message },
-              'LLM classification failed, storing as new fact'
-            );
-          }
-        }
-      }
-
-      // Store new fact - use ScallopMemory if available
-      // For third-party facts, include the subject name in the content for searchability
-      // e.g., "Works at Google" with subject "Bob" becomes "Bob works at Google"
-      let searchableContent = fact.content;
-      if (fact.subject !== 'user') {
-        // Prepend subject name if not already present in content
-        if (!fact.content.toLowerCase().includes(fact.subject.toLowerCase())) {
-          searchableContent = `${fact.subject} ${fact.content.toLowerCase()}`;
-        }
-      }
-
-      if (this.scallopStore) {
-        // Map fact category to ScallopMemory category
-        const scallopCategory = this.mapToScallopCategory(fact.category);
-        // Identity facts (personal, relationship, location) get higher importance to resist decay
-        const isIdentityFact = fact.category === 'relationship' || fact.category === 'personal' || fact.category === 'location';
-        const newMemory = await this.scallopStore.add({
-          userId,
-          content: searchableContent,
-          category: scallopCategory,
-          importance: isIdentityFact ? 8 : 5,
-          confidence: 0.8,
-          metadata: {
-            subject: fact.subject,
-            originalCategory: fact.category,
-            extractedBy: 'llm',
-          },
-        });
-        this.logger.debug({ fact: searchableContent, subject: fact.subject, store: 'scallop' }, 'Stored new fact in ScallopMemory');
-      } else {
-        // Legacy storage
-        this.memoryStore.add({
-          content: searchableContent,
-          type: 'fact',
-          sessionId: userId,  // Use userId as sessionId for facts
-          timestamp: new Date(),
-          metadata: {
-            subject: fact.subject,
-            category: fact.category,
-            userId,
-            extractedBy: 'llm',
-          },
-          tags: [fact.category, fact.subject === 'user' ? 'about-user' : `about-${fact.subject}`],
-          embedding: fact.embedding,
-        });
-        this.logger.debug({ fact: searchableContent, subject: fact.subject }, 'Stored new fact');
-      }
-      return 'stored';
-    } catch (error) {
-      this.logger.error({ error: (error as Error).message, fact: fact.content }, 'Failed to process fact');
-      return 'error';
     }
   }
 

@@ -26,10 +26,8 @@ import { createSkillExecutor, type SkillExecutor } from '../skills/executor.js';
 import { Router } from '../routing/router.js';
 import { CostTracker } from '../routing/cost.js';
 import {
-  MemoryStore,
   HotCollector,
   BackgroundGardener,
-  HybridSearch,
   OllamaEmbedder,
   LLMFactExtractor,
   ScallopMemoryStore,
@@ -55,11 +53,9 @@ export class Gateway {
   private skillExecutor: SkillExecutor | null = null;
   private router: Router | null = null;
   private costTracker: CostTracker | null = null;
-  private memoryStore: MemoryStore | null = null;
   private scallopMemoryStore: ScallopMemoryStore | null = null;
   private hotCollector: HotCollector | null = null;
   private backgroundGardener: BackgroundGardener | null = null;
-  private hybridSearch: HybridSearch | null = null;
   private factExtractor: LLMFactExtractor | null = null;
   private contextManager: ContextManager | null = null;
   private mediaProcessor: MediaProcessor | null = null;
@@ -95,14 +91,6 @@ export class Gateway {
     this.router = new Router({});
     this.registerProvidersWithRouter();
 
-    // Initialize cost tracker
-    this.costTracker = new CostTracker({
-      dailyBudget: this.config.cost.dailyBudget,
-      monthlyBudget: this.config.cost.monthlyBudget,
-      warningThreshold: this.config.cost.warningThreshold,
-    });
-    this.logger.debug('Cost tracker initialized');
-
     // Use OllamaEmbedder for semantic search if Ollama is configured
     let embedder: EmbeddingProvider | undefined;
     const ollamaConfig = this.config.providers.ollama;
@@ -123,52 +111,30 @@ export class Gateway {
     });
     this.logger.info({ dbPath, count: this.scallopMemoryStore.getCount() }, 'ScallopMemory initialized');
 
+    // Initialize cost tracker (with SQLite persistence)
+    this.costTracker = new CostTracker({
+      dailyBudget: this.config.cost.dailyBudget,
+      monthlyBudget: this.config.cost.monthlyBudget,
+      warningThreshold: this.config.cost.warningThreshold,
+      db: this.scallopMemoryStore.getDatabase(),
+    });
+    this.logger.debug('Cost tracker initialized');
+
     // Backfill default user profile from existing facts (one-time, idempotent)
     const backfillResult = this.scallopMemoryStore.backfillDefaultProfile();
     if (backfillResult.fieldsPopulated > 0) {
       this.logger.info({ fieldsPopulated: backfillResult.fieldsPopulated }, 'Default user profile backfilled');
     }
 
-    // Legacy MemoryStore/HybridSearch kept for backward compat (HotCollector, fact extractor dedup)
-    const memoryFilePath = this.config.memory.persist
-      ? path.join(this.config.agent.workspace, this.config.memory.filePath)
-      : undefined;
-    this.memoryStore = new MemoryStore({ filePath: memoryFilePath });
-    if (memoryFilePath) {
-      await this.memoryStore.load();
-    }
-    this.hotCollector = new HotCollector({ store: this.memoryStore, scallopStore: this.scallopMemoryStore });
-
-    this.hybridSearch = new HybridSearch({
-      store: this.memoryStore,
-      embedder,
-    });
+    // Hot collector buffers messages and flushes to ScallopStore
+    this.hotCollector = new HotCollector({ scallopStore: this.scallopMemoryStore });
 
     // Background gardener processes ScallopMemory decay
     this.backgroundGardener = new BackgroundGardener({
-      store: this.memoryStore,
+      scallopStore: this.scallopMemoryStore,
       logger: this.logger,
       interval: 60000, // 1 minute
-      scallopStore: this.scallopMemoryStore,
     });
-
-    // Auto-migrate: if JSONL exists and SQLite is empty, migrate
-    if (memoryFilePath && this.memoryStore.size() > 0 && this.scallopMemoryStore.getCount() === 0) {
-      this.logger.info({ jsonlCount: this.memoryStore.size() }, 'Migrating JSONL memories to SQLite...');
-      try {
-        const { migrateJsonlToSqlite } = await import('../memory/migrate.js');
-        const result = await migrateJsonlToSqlite({
-          jsonlPath: memoryFilePath,
-          dbPath,
-        });
-        this.logger.info(
-          { migrated: result.memoriesImported, skipped: result.memoriesSkipped, errors: result.errors },
-          'JSONL → SQLite migration complete'
-        );
-      } catch (err) {
-        this.logger.error({ error: (err as Error).message }, 'JSONL → SQLite migration failed');
-      }
-    }
 
     // Initialize LLM-based fact extractor
     // Use a chat-capable provider (not Ollama which may only have embedding models)
@@ -177,15 +143,13 @@ export class Gateway {
     const factExtractionProvider = availableProviders.find(p => p.name !== 'ollama')
       || this.providerRegistry.getDefaultProvider();
 
-    if (factExtractionProvider && this.memoryStore && this.hybridSearch) {
+    if (factExtractionProvider && this.scallopMemoryStore) {
       this.factExtractor = new LLMFactExtractor({
         provider: factExtractionProvider,
-        memoryStore: this.memoryStore,
-        hybridSearch: this.hybridSearch,
+        scallopStore: this.scallopMemoryStore,
         logger: this.logger,
         embedder,
         deduplicationThreshold: 0.95, // Higher threshold - only skip true duplicates
-        scallopStore: this.scallopMemoryStore ?? undefined,
       });
       this.logger.debug({ provider: factExtractionProvider.name }, 'LLM fact extractor initialized');
     }
@@ -236,10 +200,9 @@ export class Gateway {
       'Native skills registered'
     );
 
-    // Initialize session manager
-    const sessionsDir = path.join(this.config.agent.workspace, 'sessions');
-    this.sessionManager = new SessionManager(sessionsDir);
-    this.logger.debug({ sessionsDir }, 'Session manager initialized');
+    // Initialize session manager (uses SQLite)
+    this.sessionManager = new SessionManager(this.scallopMemoryStore!.getDatabase());
+    this.logger.debug('Session manager initialized (SQLite)');
 
     // Initialize agent
     const provider = this.providerRegistry.getDefaultProvider();
@@ -255,7 +218,6 @@ export class Gateway {
       router: this.router,
       costTracker: this.costTracker,
       hotCollector: this.hotCollector,
-      hybridSearch: this.hybridSearch || undefined,
       scallopStore: this.scallopMemoryStore || undefined,
       factExtractor: this.factExtractor || undefined,
       contextManager: this.contextManager,
@@ -389,6 +351,7 @@ export class Gateway {
         sessionManager: this.sessionManager!,
         logger: this.logger,
         workspacePath: this.config.agent.workspace,
+        db: this.scallopMemoryStore!.getDatabase(),
         allowedUsers: this.config.channels.telegram.allowedUsers,
         enableVoiceReply: this.config.channels.telegram.enableVoiceReply,
         voiceManager: this.voiceManager || undefined, // Share voice manager
@@ -412,6 +375,7 @@ export class Gateway {
         agent: this.agent!,
         sessionManager: this.sessionManager!,
         logger: this.logger,
+        costTracker: this.costTracker || undefined,
       });
       await this.apiChannel.start();
 
@@ -682,7 +646,6 @@ export class Gateway {
 
     // memory_get skill (inlined — no tool dependency)
     const scallopStore = this.scallopMemoryStore;
-    const memoryStore = this.memoryStore;
     const logger = this.logger;
     const memoryGetSkill = defineSkill('memory_get', 'Retrieve specific memories by ID, session, type, or recency.')
       .userInvocable(false)
@@ -703,79 +666,45 @@ export class Gateway {
         const recent = ctx.args.recent as number | undefined;
 
         try {
-          // Prefer ScallopStore (SQLite)
-          if (scallopStore) {
-            const mapCategory = (t?: string) => {
-              if (!t) return undefined;
-              const map: Record<string, string> = { fact: 'fact', preference: 'preference', context: 'event', summary: 'insight' };
-              return map[t] as 'fact' | 'preference' | 'event' | 'insight' | undefined;
-            };
-
-            let entries: any[] = [];
-            if (id) {
-              const entry = scallopStore.get(id);
-              if (!entry) return { success: false, output: '', error: `Memory not found with ID: ${id}` };
-              entries = [entry];
-            } else if (sessionId) {
-              entries = scallopStore.getByUser(sessionId, { category: mapCategory(type), limit: 100 });
-            } else if (recent) {
-              entries = scallopStore.getByUser('', { category: mapCategory(type), limit: Math.min(recent, 100) });
-            } else if (type) {
-              entries = scallopStore.getByUser('', { category: mapCategory(type), limit: 50 });
-            } else {
-              entries = scallopStore.getByUser('', { limit: 10 });
-            }
-
-            logger.debug({ id, sessionId, type, recent, count: entries.length, backend: 'scallop' }, 'Memory get completed');
-
-            if (entries.length === 0) return { success: true, output: 'No memories found matching the criteria.' };
-            const format = (mem: any) => [
-              `ID: ${mem.id}`, `Category: ${mem.category}`, `Content: ${mem.content}`,
-              `Timestamp: ${new Date(mem.documentDate).toISOString()}`,
-              `Prominence: ${mem.prominence.toFixed(2)}`,
-              ...(mem.userId ? [`User: ${mem.userId}`] : []),
-              ...(mem.metadata?.subject ? [`Subject: ${mem.metadata.subject}`] : []),
-            ].join('\n');
-
-            if (entries.length === 1) return { success: true, output: format(entries[0]) };
-            const formatted = entries.map((e, i) => `--- Memory ${i + 1} ---\n${format(e)}`);
-            return { success: true, output: `Found ${entries.length} memories:\n\n${formatted.join('\n\n')}` };
+          if (!scallopStore) {
+            return { success: false, output: '', error: 'No memory store available' };
           }
 
-          // Fallback to legacy MemoryStore
-          if (memoryStore) {
-            let entries: any[] = [];
-            if (id) {
-              const entry = memoryStore.get(id);
-              if (!entry) return { success: false, output: '', error: `Memory not found with ID: ${id}` };
-              entries = [entry];
-            } else if (sessionId) {
-              entries = memoryStore.getBySession(sessionId);
-              if (type) entries = entries.filter((e: any) => e.type === type);
-            } else if (recent) {
-              entries = memoryStore.getRecent(Math.min(recent, 100));
-              if (type) entries = entries.filter((e: any) => e.type === type);
-            } else if (type) {
-              entries = memoryStore.searchByType(type as any);
-            } else {
-              entries = memoryStore.getRecent(10);
-            }
+          const mapCategory = (t?: string) => {
+            if (!t) return undefined;
+            const map: Record<string, string> = { fact: 'fact', preference: 'preference', context: 'event', summary: 'insight' };
+            return map[t] as 'fact' | 'preference' | 'event' | 'insight' | undefined;
+          };
 
-            logger.debug({ id, sessionId, type, recent, count: entries.length, backend: 'legacy' }, 'Memory get completed');
-
-            if (entries.length === 0) return { success: true, output: 'No memories found matching the criteria.' };
-            const format = (e: any) => [
-              `ID: ${e.id}`, `Type: ${e.type}`, `Content: ${e.content}`,
-              `Timestamp: ${e.timestamp.toISOString()}`, `Session: ${e.sessionId}`,
-              ...(e.tags?.length ? [`Tags: ${e.tags.join(', ')}`] : []),
-            ].join('\n');
-
-            if (entries.length === 1) return { success: true, output: format(entries[0]) };
-            const formatted = entries.map((e: any, i: number) => `--- Memory ${i + 1} ---\n${format(e)}`);
-            return { success: true, output: `Found ${entries.length} memories:\n\n${formatted.join('\n\n')}` };
+          let entries: any[] = [];
+          if (id) {
+            const entry = scallopStore.get(id);
+            if (!entry) return { success: false, output: '', error: `Memory not found with ID: ${id}` };
+            entries = [entry];
+          } else if (sessionId) {
+            entries = scallopStore.getByUser(sessionId, { category: mapCategory(type), limit: 100 });
+          } else if (recent) {
+            entries = scallopStore.getByUser('', { category: mapCategory(type), limit: Math.min(recent, 100) });
+          } else if (type) {
+            entries = scallopStore.getByUser('', { category: mapCategory(type), limit: 50 });
+          } else {
+            entries = scallopStore.getByUser('', { limit: 10 });
           }
 
-          return { success: false, output: '', error: 'No memory store available' };
+          logger.debug({ id, sessionId, type, recent, count: entries.length }, 'Memory get completed');
+
+          if (entries.length === 0) return { success: true, output: 'No memories found matching the criteria.' };
+          const format = (mem: any) => [
+            `ID: ${mem.id}`, `Category: ${mem.category}`, `Content: ${mem.content}`,
+            `Timestamp: ${new Date(mem.documentDate).toISOString()}`,
+            `Prominence: ${mem.prominence.toFixed(2)}`,
+            ...(mem.userId ? [`User: ${mem.userId}`] : []),
+            ...(mem.metadata?.subject ? [`Subject: ${mem.metadata.subject}`] : []),
+          ].join('\n');
+
+          if (entries.length === 1) return { success: true, output: format(entries[0]) };
+          const formatted = entries.map((e: any, i: number) => `--- Memory ${i + 1} ---\n${format(e)}`);
+          return { success: true, output: `Found ${entries.length} memories:\n\n${formatted.join('\n\n')}` };
         } catch (error) {
           return { success: false, output: '', error: `Memory get failed: ${(error as Error).message}` };
         }

@@ -6,7 +6,7 @@
  */
 
 import * as fs from 'fs/promises';
-import type { MemoryEntry, MemoryType } from './memory.js';
+import type { MemoryEntry, MemoryType } from './legacy-types.js';
 import { ScallopDatabase, type MemoryCategory, type ScallopMemoryType } from './db.js';
 
 /**

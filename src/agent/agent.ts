@@ -14,7 +14,7 @@ import type { SkillRegistry } from '../skills/registry.js';
 import type { SkillExecutor } from '../skills/executor.js';
 import type { Router } from '../routing/router.js';
 import type { CostTracker } from '../routing/cost.js';
-import type { HotCollector, HybridSearch } from '../memory/memory.js';
+import type { HotCollector } from '../memory/memory.js';
 import type { LLMFactExtractor } from '../memory/fact-extractor.js';
 import type { ScallopMemoryStore } from '../memory/scallop-store.js';
 import type { ContextManager } from '../routing/context.js';
@@ -30,7 +30,6 @@ export interface AgentOptions {
   router?: Router;
   costTracker?: CostTracker;
   hotCollector?: HotCollector;
-  hybridSearch?: HybridSearch;
   scallopStore?: ScallopMemoryStore;
   factExtractor?: LLMFactExtractor;
   contextManager?: ContextManager;
@@ -140,7 +139,6 @@ export class Agent {
   private router: Router | null;
   private costTracker: CostTracker | null;
   private hotCollector: HotCollector | null;
-  private hybridSearch: HybridSearch | null;
   private scallopStore: ScallopMemoryStore | null;
   private factExtractor: LLMFactExtractor | null;
   private contextManager: ContextManager | null;
@@ -162,7 +160,6 @@ export class Agent {
     this.router = options.router || null;
     this.costTracker = options.costTracker || null;
     this.hotCollector = options.hotCollector || null;
-    this.hybridSearch = options.hybridSearch || null;
     this.scallopStore = options.scallopStore || null;
     this.factExtractor = options.factExtractor || null;
     this.contextManager = options.contextManager || null;
@@ -565,10 +562,10 @@ ALWAYS use **send_file** after creating any file (PDFs, images, documents, scrip
       // SOUL.md not found, that's fine
     }
 
-    // Add memory context — prefer ScallopMemoryStore (SQLite), fallback to legacy HybridSearch
+    // Add memory context from ScallopMemoryStore (SQLite)
     let memoryStats = { factsFound: 0, conversationsFound: 0 };
     let memoryItems: { type: 'fact' | 'conversation'; content: string; subject?: string }[] = [];
-    if (this.scallopStore || this.hybridSearch) {
+    if (this.scallopStore) {
       const { context: memoryContext, stats, items } = await this.buildMemoryContext(userMessage, sessionId);
       memoryStats = stats;
       memoryItems = items;
@@ -582,189 +579,94 @@ ALWAYS use **send_file** after creating any file (PDFs, images, documents, scrip
   }
 
   /**
-   * Build memory context for system prompt
-   * Prefers ScallopMemoryStore (SQLite) when available, falls back to legacy HybridSearch
+   * Build memory context for system prompt using ScallopMemoryStore (SQLite)
    */
-  private async buildMemoryContext(userMessage: string, sessionId: string): Promise<{
+  private async buildMemoryContext(userMessage: string, _sessionId: string): Promise<{
     context: string;
     stats: { factsFound: number; conversationsFound: number };
     items: { type: 'fact' | 'conversation'; content: string; subject?: string }[];
   }> {
     const MAX_MEMORY_CHARS = 2000;
-    const MAX_CONVERSATION_MESSAGES = 6;
     let context = '';
     const items: { type: 'fact' | 'conversation'; content: string; subject?: string }[] = [];
 
+    if (!this.scallopStore) {
+      return { context: '', stats: { factsFound: 0, conversationsFound: 0 }, items: [] };
+    }
+
     try {
-      // === ScallopMemoryStore path (preferred) ===
-      if (this.scallopStore) {
-        // Tier 1: Ambient profiles — always injected, never searched, never decays
-        const profileManager = this.scallopStore.getProfileManager();
+      // Tier 1: Ambient profiles — always injected, never searched, never decays
+      const profileManager = this.scallopStore.getProfileManager();
 
-        // Agent identity profile
-        const agentProfile = profileManager.getStaticProfile('agent');
-        if (Object.keys(agentProfile).length > 0) {
-          let agentText = '';
-          for (const [key, value] of Object.entries(agentProfile)) {
-            agentText += `- ${key}: ${value}\n`;
-          }
-          context += `\n\n## YOUR IDENTITY\nThis is who you are. Embody this personality in all responses:\n${agentText}`;
+      // Agent identity profile
+      const agentProfile = profileManager.getStaticProfile('agent');
+      if (Object.keys(agentProfile).length > 0) {
+        let agentText = '';
+        for (const [key, value] of Object.entries(agentProfile)) {
+          agentText += `- ${key}: ${value}\n`;
         }
-
-        // User profile
-        const staticProfile = profileManager.getStaticProfile('default');
-        if (Object.keys(staticProfile).length > 0) {
-          let profileText = '';
-          for (const [key, value] of Object.entries(staticProfile)) {
-            profileText += `- ${key}: ${value}\n`;
-          }
-          context += `\n\n## USER PROFILE\nUse this automatically for all relevant queries (weather → use location, time → use timezone, etc.):\n${profileText}`;
-        }
-
-        // Tier 2: Query-relevant facts via search
-        // Phase 1: Get key user facts (high prominence, no query needed)
-        const userFacts = this.scallopStore.getByUser('default', {
-          minProminence: 0.3,
-          isLatest: true,
-          limit: 20,
-        });
-
-        // Phase 2: Get query-relevant facts via hybrid search
-        const relevantResults = await this.scallopStore.search(userMessage, {
-          userId: 'default',
-          minProminence: 0.1,
-          limit: 10,
-        });
-
-        // Combine, deduplicating by ID
-        const seenIds = new Set<string>();
-        const allFactTexts: { content: string; subject?: string }[] = [];
-
-        for (const fact of userFacts) {
-          if (!seenIds.has(fact.id)) {
-            seenIds.add(fact.id);
-            const subject = fact.metadata?.subject as string | undefined;
-            allFactTexts.push({ content: fact.content, subject });
-          }
-        }
-        for (const result of relevantResults) {
-          if (!seenIds.has(result.memory.id)) {
-            seenIds.add(result.memory.id);
-            const subject = result.memory.metadata?.subject as string | undefined;
-            allFactTexts.push({ content: result.memory.content, subject });
-          }
-        }
-
-        if (allFactTexts.length > 0) {
-          let memoriesText = '';
-          let charCount = 0;
-
-          for (const fact of allFactTexts) {
-            const subjectPrefix = fact.subject && fact.subject !== 'user' ? `[About ${fact.subject}] ` : '';
-            const memoryLine = `- ${subjectPrefix}${fact.content}\n`;
-            if (charCount + memoryLine.length > MAX_MEMORY_CHARS) break;
-            memoriesText += memoryLine;
-            charCount += memoryLine.length;
-
-            items.push({
-              type: 'fact',
-              content: fact.content,
-              subject: fact.subject !== 'user' ? fact.subject : undefined,
-            });
-          }
-
-          if (memoriesText) {
-            context += `\n\n## MEMORIES FROM THE PAST\nThese are facts you've learned about the user and people they've mentioned:\n${memoriesText}`;
-          }
-        }
-
-        // Conversation context from legacy HybridSearch (still uses JSONL for raw conversation)
-        if (this.hybridSearch) {
-          const conversationMemories = this.hybridSearch.search(userMessage, {
-            limit: MAX_CONVERSATION_MESSAGES * 2,
-            sessionId,
-            recencyBoost: true,
-            minScore: 0.05,
-          });
-
-          const recentConversations = conversationMemories
-            .filter((r) => (r.entry.type === 'raw' || r.entry.type === 'context') && r.entry.tags?.includes('conversation'))
-            .slice(0, MAX_CONVERSATION_MESSAGES);
-
-          if (recentConversations.length > 0) {
-            let conversationText = '';
-            for (const result of recentConversations) {
-              const source = result.entry.metadata?.source || 'unknown';
-              const role = source === 'user' ? 'User' : source === 'assistant' ? 'Assistant' : source;
-              const content = result.entry.content.length > 200
-                ? result.entry.content.substring(0, 200) + '...'
-                : result.entry.content;
-              conversationText += `${role}: ${content}\n`;
-              items.push({ type: 'conversation', content: `${role}: ${content}` });
-            }
-            if (conversationText) {
-              context += `\n\n## CONVERSATIONS FROM THE PAST\nRelevant past exchanges:\n${conversationText}`;
-            }
-          }
-        }
-
-        return {
-          context,
-          stats: { factsFound: items.filter((i) => i.type === 'fact').length, conversationsFound: items.filter((i) => i.type === 'conversation').length },
-          items,
-        };
+        context += `\n\n## YOUR IDENTITY\nThis is who you are. Embody this personality in all responses:\n${agentText}`;
       }
 
-      // === Legacy HybridSearch path (fallback) ===
-      if (!this.hybridSearch) return { context: '', stats: { factsFound: 0, conversationsFound: 0 }, items: [] };
+      // User profile
+      const staticProfile = profileManager.getStaticProfile('default');
+      if (Object.keys(staticProfile).length > 0) {
+        let profileText = '';
+        for (const [key, value] of Object.entries(staticProfile)) {
+          profileText += `- ${key}: ${value}\n`;
+        }
+        context += `\n\n## USER PROFILE\nUse this automatically for all relevant queries (weather → use location, time → use timezone, etc.):\n${profileText}`;
+      }
 
-      const userFacts = this.hybridSearch.search('', {
+      // Tier 2: Query-relevant facts via search
+      // Phase 1: Get key user facts (high prominence, no query needed)
+      const userFacts = this.scallopStore.getByUser('default', {
+        minProminence: 0.3,
+        isLatest: true,
         limit: 20,
-        type: 'fact',
-        subject: 'user',
-        recencyBoost: true,
-        minScore: 0,
       });
 
-      const relevantFacts = this.hybridSearch.search(userMessage, {
+      // Phase 2: Get query-relevant facts via hybrid search
+      const relevantResults = await this.scallopStore.search(userMessage, {
+        userId: 'default',
+        minProminence: 0.1,
         limit: 10,
-        type: 'fact',
-        recencyBoost: true,
-        minScore: 0.1,
-        userSubjectBoost: 2.0,
       });
 
+      // Combine, deduplicating by ID
       const seenIds = new Set<string>();
-      const allFacts: typeof userFacts = [];
+      const allFactTexts: { content: string; subject?: string }[] = [];
 
       for (const fact of userFacts) {
-        if (!seenIds.has(fact.entry.id)) {
-          seenIds.add(fact.entry.id);
-          allFacts.push(fact);
+        if (!seenIds.has(fact.id)) {
+          seenIds.add(fact.id);
+          const subject = fact.metadata?.subject as string | undefined;
+          allFactTexts.push({ content: fact.content, subject });
         }
       }
-      for (const fact of relevantFacts) {
-        if (!seenIds.has(fact.entry.id)) {
-          seenIds.add(fact.entry.id);
-          allFacts.push(fact);
+      for (const result of relevantResults) {
+        if (!seenIds.has(result.memory.id)) {
+          seenIds.add(result.memory.id);
+          const subject = result.memory.metadata?.subject as string | undefined;
+          allFactTexts.push({ content: result.memory.content, subject });
         }
       }
 
-      if (allFacts.length > 0) {
+      if (allFactTexts.length > 0) {
         let memoriesText = '';
         let charCount = 0;
 
-        for (const result of allFacts) {
-          const subject = result.entry.metadata?.subject as string | undefined;
-          const subjectPrefix = subject && subject !== 'user' ? `[About ${subject}] ` : '';
-          const memoryLine = `- ${subjectPrefix}${result.entry.content}\n`;
+        for (const fact of allFactTexts) {
+          const subjectPrefix = fact.subject && fact.subject !== 'user' ? `[About ${fact.subject}] ` : '';
+          const memoryLine = `- ${subjectPrefix}${fact.content}\n`;
           if (charCount + memoryLine.length > MAX_MEMORY_CHARS) break;
           memoriesText += memoryLine;
           charCount += memoryLine.length;
+
           items.push({
             type: 'fact',
-            content: result.entry.content,
-            subject: subject !== 'user' ? subject : undefined,
+            content: fact.content,
+            subject: fact.subject !== 'user' ? fact.subject : undefined,
           });
         }
 
@@ -773,45 +675,11 @@ ALWAYS use **send_file** after creating any file (PDFs, images, documents, scrip
         }
       }
 
-      const conversationMemories = this.hybridSearch.search(userMessage, {
-        limit: MAX_CONVERSATION_MESSAGES * 2,
-        sessionId,
-        recencyBoost: true,
-        minScore: 0.05,
-      });
-
-      const recentConversations = conversationMemories
-        .filter((r) => (r.entry.type === 'raw' || r.entry.type === 'context') && r.entry.tags?.includes('conversation'))
-        .slice(0, MAX_CONVERSATION_MESSAGES);
-
-      if (recentConversations.length > 0) {
-        let conversationText = '';
-
-        for (const result of recentConversations) {
-          const source = result.entry.metadata?.source || 'unknown';
-          const role = source === 'user' ? 'User' : source === 'assistant' ? 'Assistant' : source;
-          const content = result.entry.content.length > 200
-            ? result.entry.content.substring(0, 200) + '...'
-            : result.entry.content;
-          conversationText += `${role}: ${content}\n`;
-          items.push({ type: 'conversation', content: `${role}: ${content}` });
-        }
-
-        if (conversationText) {
-          context += `\n\n## CONVERSATIONS FROM THE PAST\nRelevant past exchanges:\n${conversationText}`;
-        }
-      }
-
-      const stats = { factsFound: allFacts.length, conversationsFound: recentConversations.length };
-
-      if (context) {
-        this.logger.debug(
-          { userFactCount: userFacts.length, relevantFactCount: relevantFacts.length, totalFacts: allFacts.length },
-          'Memory context added to prompt'
-        );
-      }
-
-      return { context, stats, items };
+      return {
+        context,
+        stats: { factsFound: items.filter((i) => i.type === 'fact').length, conversationsFound: 0 },
+        items,
+      };
     } catch (error) {
       this.logger.warn({ error: (error as Error).message }, 'Failed to build memory context');
       return { context: '', stats: { factsFound: 0, conversationsFound: 0 }, items: [] };

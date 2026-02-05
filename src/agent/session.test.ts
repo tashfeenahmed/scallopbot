@@ -1,24 +1,31 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
+import * as fs from 'fs';
 import type { Message } from '../providers/types.js';
+import { ScallopDatabase } from '../memory/db.js';
 
 describe('SessionManager', () => {
-  let testDir: string;
+  let dbPath: string;
+  let db: ScallopDatabase;
 
-  beforeEach(async () => {
-    testDir = await fs.mkdtemp(path.join(os.tmpdir(), 'scallopbot-session-test-'));
+  beforeEach(() => {
+    dbPath = path.join(os.tmpdir(), `scallopbot-session-test-${Date.now()}.db`);
+    db = new ScallopDatabase(dbPath);
   });
 
-  afterEach(async () => {
-    await fs.rm(testDir, { recursive: true, force: true });
+  afterEach(() => {
+    db.close();
+    // Clean up SQLite files
+    for (const suffix of ['', '-shm', '-wal']) {
+      try { fs.unlinkSync(dbPath + suffix); } catch { /* ignore */ }
+    }
   });
 
   describe('createSession', () => {
     it('should create a new session with unique ID', async () => {
       const { SessionManager } = await import('./session.js');
-      const manager = new SessionManager(testDir);
+      const manager = new SessionManager(db);
 
       const session = await manager.createSession();
 
@@ -30,29 +37,29 @@ describe('SessionManager', () => {
 
     it('should create session with metadata', async () => {
       const { SessionManager } = await import('./session.js');
-      const manager = new SessionManager(testDir);
+      const manager = new SessionManager(db);
 
       const session = await manager.createSession({ userId: 'user123' });
 
       expect(session.metadata?.userId).toBe('user123');
     });
 
-    it('should create JSONL file for new session', async () => {
+    it('should persist session to SQLite', async () => {
       const { SessionManager } = await import('./session.js');
-      const manager = new SessionManager(testDir);
+      const manager = new SessionManager(db);
 
       const session = await manager.createSession();
-      const filePath = path.join(testDir, `${session.id}.jsonl`);
+      const row = db.getSession(session.id);
 
-      const exists = await fs.access(filePath).then(() => true).catch(() => false);
-      expect(exists).toBe(true);
+      expect(row).toBeDefined();
+      expect(row!.id).toBe(session.id);
     });
   });
 
   describe('addMessage', () => {
     it('should add message to session', async () => {
       const { SessionManager } = await import('./session.js');
-      const manager = new SessionManager(testDir);
+      const manager = new SessionManager(db);
 
       const session = await manager.createSession();
       const message: Message = { role: 'user', content: 'Hello' };
@@ -64,26 +71,24 @@ describe('SessionManager', () => {
       expect(loaded?.messages[0].content).toBe('Hello');
     });
 
-    it('should append to JSONL file', async () => {
+    it('should store messages in SQLite', async () => {
       const { SessionManager } = await import('./session.js');
-      const manager = new SessionManager(testDir);
+      const manager = new SessionManager(db);
 
       const session = await manager.createSession();
 
       await manager.addMessage(session.id, { role: 'user', content: 'First' });
       await manager.addMessage(session.id, { role: 'assistant', content: 'Second' });
 
-      const filePath = path.join(testDir, `${session.id}.jsonl`);
-      const content = await fs.readFile(filePath, 'utf-8');
-      const lines = content.trim().split('\n');
-
-      // First line is session metadata, then messages
-      expect(lines.length).toBeGreaterThanOrEqual(3);
+      const rows = db.getSessionMessages(session.id);
+      expect(rows).toHaveLength(2);
+      expect(rows[0].content).toBe('First');
+      expect(rows[1].content).toBe('Second');
     });
 
     it('should throw error for non-existent session', async () => {
       const { SessionManager } = await import('./session.js');
-      const manager = new SessionManager(testDir);
+      const manager = new SessionManager(db);
 
       await expect(
         manager.addMessage('nonexistent', { role: 'user', content: 'test' })
@@ -94,7 +99,7 @@ describe('SessionManager', () => {
   describe('getSession', () => {
     it('should retrieve existing session', async () => {
       const { SessionManager } = await import('./session.js');
-      const manager = new SessionManager(testDir);
+      const manager = new SessionManager(db);
 
       const created = await manager.createSession();
       await manager.addMessage(created.id, { role: 'user', content: 'Test' });
@@ -108,7 +113,7 @@ describe('SessionManager', () => {
 
     it('should return undefined for non-existent session', async () => {
       const { SessionManager } = await import('./session.js');
-      const manager = new SessionManager(testDir);
+      const manager = new SessionManager(db);
 
       const session = await manager.getSession('nonexistent');
 
@@ -119,12 +124,12 @@ describe('SessionManager', () => {
       const { SessionManager } = await import('./session.js');
 
       // First manager instance
-      const manager1 = new SessionManager(testDir);
+      const manager1 = new SessionManager(db);
       const session = await manager1.createSession();
       await manager1.addMessage(session.id, { role: 'user', content: 'Before restart' });
 
-      // Simulate restart with new manager instance
-      const manager2 = new SessionManager(testDir);
+      // Simulate restart with new manager instance (same db)
+      const manager2 = new SessionManager(db);
       const loaded = await manager2.getSession(session.id);
 
       expect(loaded?.messages).toHaveLength(1);
@@ -133,22 +138,20 @@ describe('SessionManager', () => {
   });
 
   describe('deleteSession', () => {
-    it('should delete session and its file', async () => {
+    it('should delete session from SQLite', async () => {
       const { SessionManager } = await import('./session.js');
-      const manager = new SessionManager(testDir);
+      const manager = new SessionManager(db);
 
       const session = await manager.createSession();
-      const filePath = path.join(testDir, `${session.id}.jsonl`);
-
       await manager.deleteSession(session.id);
 
-      const exists = await fs.access(filePath).then(() => true).catch(() => false);
-      expect(exists).toBe(false);
+      const row = db.getSession(session.id);
+      expect(row).toBeNull();
     });
 
     it('should return true when session is deleted', async () => {
       const { SessionManager } = await import('./session.js');
-      const manager = new SessionManager(testDir);
+      const manager = new SessionManager(db);
 
       const session = await manager.createSession();
       const result = await manager.deleteSession(session.id);
@@ -158,7 +161,7 @@ describe('SessionManager', () => {
 
     it('should return false for non-existent session', async () => {
       const { SessionManager } = await import('./session.js');
-      const manager = new SessionManager(testDir);
+      const manager = new SessionManager(db);
 
       const result = await manager.deleteSession('nonexistent');
 
@@ -169,7 +172,7 @@ describe('SessionManager', () => {
   describe('listSessions', () => {
     it('should list all sessions', async () => {
       const { SessionManager } = await import('./session.js');
-      const manager = new SessionManager(testDir);
+      const manager = new SessionManager(db);
 
       await manager.createSession();
       await manager.createSession();
@@ -182,7 +185,7 @@ describe('SessionManager', () => {
 
     it('should return empty array when no sessions', async () => {
       const { SessionManager } = await import('./session.js');
-      const manager = new SessionManager(testDir);
+      const manager = new SessionManager(db);
 
       const sessions = await manager.listSessions();
 
@@ -193,7 +196,7 @@ describe('SessionManager', () => {
   describe('updateMetadata', () => {
     it('should update session metadata', async () => {
       const { SessionManager } = await import('./session.js');
-      const manager = new SessionManager(testDir);
+      const manager = new SessionManager(db);
 
       const session = await manager.createSession();
       await manager.updateMetadata(session.id, { lastTool: 'bash' });
@@ -206,7 +209,7 @@ describe('SessionManager', () => {
   describe('token tracking', () => {
     it('should track token usage', async () => {
       const { SessionManager } = await import('./session.js');
-      const manager = new SessionManager(testDir);
+      const manager = new SessionManager(db);
 
       const session = await manager.createSession();
       await manager.recordTokenUsage(session.id, { inputTokens: 100, outputTokens: 50 });
@@ -218,7 +221,7 @@ describe('SessionManager', () => {
 
     it('should accumulate token usage', async () => {
       const { SessionManager } = await import('./session.js');
-      const manager = new SessionManager(testDir);
+      const manager = new SessionManager(db);
 
       const session = await manager.createSession();
       await manager.recordTokenUsage(session.id, { inputTokens: 100, outputTokens: 50 });

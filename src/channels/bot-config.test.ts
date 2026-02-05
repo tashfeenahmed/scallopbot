@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import * as fs from 'fs/promises';
+import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import {
@@ -8,22 +8,28 @@ import {
   AVAILABLE_MODELS,
   type UserBotConfig,
 } from './bot-config.js';
+import { ScallopDatabase } from '../memory/db.js';
 
 describe('BotConfigManager', () => {
-  let testDir: string;
+  let dbPath: string;
+  let db: ScallopDatabase;
   let manager: BotConfigManager;
 
-  beforeEach(async () => {
-    testDir = await fs.mkdtemp(path.join(os.tmpdir(), 'bot-config-test-'));
-    manager = new BotConfigManager(testDir);
+  beforeEach(() => {
+    dbPath = path.join(os.tmpdir(), `bot-config-test-${Date.now()}.db`);
+    db = new ScallopDatabase(dbPath);
+    manager = new BotConfigManager(db);
   });
 
-  afterEach(async () => {
-    await fs.rm(testDir, { recursive: true, force: true });
+  afterEach(() => {
+    db.close();
+    for (const suffix of ['', '-shm', '-wal']) {
+      try { fs.unlinkSync(dbPath + suffix); } catch { /* ignore */ }
+    }
   });
 
   describe('load', () => {
-    it('should create empty store if no config file exists', async () => {
+    it('should return default config when no data exists', async () => {
       await manager.load();
 
       const config = manager.getUserConfig('user123');
@@ -31,25 +37,16 @@ describe('BotConfigManager', () => {
       expect(config.onboardingComplete).toBe(false);
     });
 
-    it('should load existing config from disk', async () => {
-      const existingConfig = {
-        version: 1,
-        users: {
-          user456: {
-            botName: 'Jarvis',
-            personalityId: 'professional',
-            modelId: 'claude-sonnet-4-5-20250929',
-            onboardingComplete: true,
-            updatedAt: '2025-01-01T00:00:00Z',
-            createdAt: '2025-01-01T00:00:00Z',
-          },
-        },
-      };
-
-      await fs.writeFile(
-        path.join(testDir, 'bot-config.json'),
-        JSON.stringify(existingConfig)
-      );
+    it('should read existing config from SQLite', async () => {
+      // Insert directly into db
+      db.upsertBotConfig('user456', {
+        botName: 'Jarvis',
+        personalityId: 'professional',
+        modelId: 'claude-sonnet-4-5-20250929',
+        onboardingComplete: true,
+        createdAt: '2025-01-01T00:00:00Z',
+        updatedAt: '2025-01-01T00:00:00Z',
+      });
 
       await manager.load();
 
@@ -72,13 +69,14 @@ describe('BotConfigManager', () => {
       expect(config.onboardingStep).toBe('welcome');
     });
 
-    it('should return cached config for existing user', async () => {
+    it('should return same config for existing user', async () => {
       await manager.load();
 
       const config1 = manager.getUserConfig('user123');
       const config2 = manager.getUserConfig('user123');
 
-      expect(config1).toBe(config2);
+      expect(config1.botName).toBe(config2.botName);
+      expect(config1.personalityId).toBe(config2.personalityId);
     });
   });
 
@@ -250,8 +248,8 @@ describe('BotConfigManager', () => {
     });
   });
 
-  describe('saveNow', () => {
-    it('should persist config to disk immediately', async () => {
+  describe('persistence', () => {
+    it('should persist config across manager instances', async () => {
       await manager.load();
 
       await manager.updateUserConfig('user123', {
@@ -259,17 +257,12 @@ describe('BotConfigManager', () => {
         onboardingComplete: true,
       });
 
-      await manager.saveNow();
+      // New manager instance on same db
+      const manager2 = new BotConfigManager(db);
+      const config = manager2.getUserConfig('user123');
 
-      // Read the file directly
-      const data = await fs.readFile(
-        path.join(testDir, 'bot-config.json'),
-        'utf-8'
-      );
-      const saved = JSON.parse(data);
-
-      expect(saved.users.user123.botName).toBe('TestBot');
-      expect(saved.users.user123.onboardingComplete).toBe(true);
+      expect(config.botName).toBe('TestBot');
+      expect(config.onboardingComplete).toBe(true);
     });
   });
 });

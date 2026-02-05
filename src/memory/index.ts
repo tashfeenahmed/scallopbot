@@ -1,23 +1,31 @@
+// Legacy types
 export {
-  MemoryStore,
-  HotCollector,
-  BackgroundGardener,
-  HybridSearch,
-  extractFacts,
-  summarizeMemories,
-  calculateBM25Score,
   type MemoryEntry,
   type MemoryType,
   type PartialMemoryEntry,
-  type MemoryStoreOptions,
+} from './legacy-types.js';
+
+// BM25 scoring
+export {
+  calculateBM25Score,
+  buildDocFreqMap,
+  type BM25Options,
+} from './bm25.js';
+
+// Rule-based fact extraction
+export {
+  extractFacts,
+  summarizeMemories,
+  type ExtractedFact,
+} from './extract-facts.js';
+
+// Memory system (HotCollector, BackgroundGardener)
+export {
+  HotCollector,
+  BackgroundGardener,
   type CollectOptions,
   type HotCollectorOptions,
   type BackgroundGardenerOptions,
-  type BM25Options,
-  type SearchResult,
-  type SearchOptions,
-  type HybridSearchOptions,
-  type ExtractedFact,
 } from './memory.js';
 
 // Embeddings
