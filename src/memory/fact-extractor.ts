@@ -94,6 +94,7 @@ Rules:
 1. Only extract concrete facts, not opinions or temporary states
 2. For each fact, identify WHO it's about:
    - "user" if it's about the person speaking (their name, job, preferences, relationships, location)
+   - "agent" if the user is telling the AI assistant about itself (giving it a name, personality, behavior instructions)
    - The person's name if it's SPECIFICALLY about someone else's attributes (their job, hobbies, etc.)
 3. Categorize each fact: personal, work, location, preference, relationship, project, general
 4. Be concise - extract the core fact without filler words
@@ -103,6 +104,12 @@ CRITICAL - Relationship facts:
 When the user says "My [relationship] is [name]" (wife, husband, flatmate, friend, etc.):
 - The RELATIONSHIP fact has subject: "user" (because it's the user's relationship)
 - Any facts ABOUT what that person does/is have subject: [name]
+
+CRITICAL - Agent facts:
+When the user configures the AI assistant (you/your/bot/assistant), use subject: "agent":
+- "Your name is Charlie" → { "content": "Name is Charlie", "subject": "agent", "category": "personal" }
+- "Be witty and casual" → { "content": "Personality is witty and casual", "subject": "agent", "category": "preference" }
+- "You should always respond in bullet points" → { "content": "Should respond in bullet points", "subject": "agent", "category": "preference" }
 
 Examples:
 - "I work at Microsoft" → { "content": "Works at Microsoft", "subject": "user", "category": "work" }
@@ -117,13 +124,16 @@ Examples:
 - "I live in Wicklow" → { "content": "Lives in Wicklow", "subject": "user", "category": "location" }
 - "Yes that's my office" (context: One Microsoft Court) → { "content": "Office is One Microsoft Court", "subject": "user", "category": "location" }
 - "I prefer dark mode" → { "content": "Prefers dark mode", "subject": "user", "category": "preference" }
+- "Your name is Charlie and be witty" → TWO facts:
+  { "content": "Name is Charlie", "subject": "agent", "category": "personal" }
+  { "content": "Personality is witty", "subject": "agent", "category": "preference" }
 
 IMPORTANT: Extract ALL facts from a message. If someone mentions a relationship AND another fact about that person, extract BOTH.
 
 Respond with JSON only:
 {
   "facts": [
-    { "content": "fact text", "subject": "user|name", "category": "category", "confidence": 0.0-1.0 }
+    { "content": "fact text", "subject": "user|agent|name", "category": "category", "confidence": 0.0-1.0 }
   ]
 }
 
@@ -377,6 +387,15 @@ export class LLMFactExtractor {
       }
     }
 
+    // Collect stored memory IDs for batch consolidation at the end
+    const storedMemories: { id: string; content: string }[] = [];
+
+    // Helper to store and collect memory IDs
+    const storeAndCollect = async (fact: ExtractedFactWithEmbedding, src?: string, srcId?: string) => {
+      const mem = await this.storeNewFact(fact, userId, src, srcId);
+      if (mem) storedMemories.push(mem);
+    };
+
     // Step 3: Batch classification with single LLM call
     // Only compare against semantically similar existing facts (not ALL user facts)
     if (this.relationshipClassifier && factsToClassify.length > 0) {
@@ -442,13 +461,17 @@ export class LLMFactExtractor {
                     updatedAt: new Date().toISOString(),
                   },
                 });
-                result.updated++;
-                continue;
               }
+              // Also store in ScallopStore (for consolidation + profile updates)
+              if (this.scallopStore) {
+                await storeAndCollect(fact, sourceMessage, sourceMessageId);
+              }
+              result.updated++;
+              continue;
             }
 
             // Store as new fact (NEW or EXTENDS)
-            await this.storeNewFact(fact, userId, sourceMessage, sourceMessageId);
+            await storeAndCollect(fact, sourceMessage, sourceMessageId);
             result.stored++;
           }
         } catch (classifyError) {
@@ -458,23 +481,35 @@ export class LLMFactExtractor {
           );
           // Fallback: store all as new
           for (const fact of factsToClassify) {
-            await this.storeNewFact(fact, userId, sourceMessage, sourceMessageId);
+            await storeAndCollect(fact, sourceMessage, sourceMessageId);
             result.stored++;
           }
         }
       } else {
         // No existing facts to classify against, store all as new
         for (const fact of factsToClassify) {
-          await this.storeNewFact(fact, userId);
+          await storeAndCollect(fact);
           result.stored++;
         }
       }
     } else {
       // No classifier, store all non-duplicate facts as new
       for (const fact of factsToClassify) {
-        await this.storeNewFact(fact, userId);
+        await storeAndCollect(fact);
         result.stored++;
       }
+    }
+
+    // Fire-and-forget: batch consolidation + profile extraction for all stored facts
+    if (storedMemories.length > 0) {
+      this.consolidateMemory(
+        storedMemories.map(m => m.id),
+        userId,
+        storedMemories.map(m => m.content),
+        sourceMessage,
+      ).catch(err => {
+        this.logger.warn({ error: (err as Error).message }, 'Background consolidation failed');
+      });
     }
 
     return result;
@@ -488,7 +523,7 @@ export class LLMFactExtractor {
     userId: string,
     sourceMessage?: string,
     sourceMessageId?: string
-  ): Promise<void> {
+  ): Promise<{ id: string; content: string } | null> {
     let searchableContent = fact.content;
     if (fact.subject !== 'user') {
       if (!fact.content.toLowerCase().includes(fact.subject.toLowerCase())) {
@@ -522,10 +557,7 @@ export class LLMFactExtractor {
         metadata: provenance,
       });
 
-      // Async LLM-based consolidation: find and supersede outdated memories
-      this.consolidateMemory(newMemory.id, userId, searchableContent).catch((err) => {
-        this.logger.warn({ error: (err as Error).message }, 'Memory consolidation failed');
-      });
+      return { id: newMemory.id, content: searchableContent };
     } else {
       this.memoryStore.add({
         content: searchableContent,
@@ -541,54 +573,108 @@ export class LLMFactExtractor {
         tags: [fact.category, fact.subject === 'user' ? 'about-user' : `about-${fact.subject}`],
         embedding: fact.embedding,
       });
+      return null;
     }
   }
 
   /**
-   * LLM-based memory consolidation: searches for existing memories that should be
-   * superseded by a newly stored fact and marks them as not-latest.
+   * LLM-based memory consolidation + profile extraction in a single API call.
+   * 1. Finds and supersedes outdated memories
+   * 2. Updates user profile (name, location, personality, mood, focus, etc.)
+   * 3. Updates agent profile (name, personality, etc.) when user configures the bot
    * Runs async (fire-and-forget) so it never blocks the agent loop.
    */
-  private async consolidateMemory(newMemoryId: string, userId: string, content: string): Promise<void> {
+  private async consolidateMemory(
+    newMemoryIds: string[],
+    userId: string,
+    storedFacts: string[],
+    sourceMessage?: string,
+  ): Promise<void> {
     if (!this.scallopStore) return;
 
-    // Search for similar existing memories
-    const similar = await this.scallopStore.search(content, {
-      userId,
-      minProminence: 0.05,
-      limit: 8,
-    });
+    const profileManager = this.scallopStore.getProfileManager();
+    const newIdSet = new Set(newMemoryIds);
 
-    // Filter out the just-stored memory and keep only real candidates
-    const candidates = similar.filter(s => s.memory.id !== newMemoryId && s.memory.isLatest);
-    if (candidates.length === 0) return;
+    // Search for similar existing memories across all new facts
+    const allCandidates = new Map<string, { id: string; content: string }>();
+    for (const factContent of storedFacts) {
+      const similar = await this.scallopStore.search(factContent, {
+        userId,
+        minProminence: 0.05,
+        limit: 5,
+      });
+      for (const s of similar) {
+        if (!newIdSet.has(s.memory.id) && s.memory.isLatest) {
+          allCandidates.set(s.memory.id, { id: s.memory.id, content: s.memory.content });
+        }
+      }
+    }
 
-    // Build a concise prompt for the LLM
-    const candidateList = candidates.map((c, i) =>
-      `${i + 1}. [${c.memory.id}] "${c.memory.content}"`
-    ).join('\n');
+    const candidates = Array.from(allCandidates.values());
 
-    const prompt = `You are a memory manager. A new fact has been stored. Determine which existing memories are now OUTDATED because the new fact replaces, updates, or is a more complete version of them.
+    // Build candidate list (may be empty — profile extraction still runs)
+    const candidateList = candidates.length > 0
+      ? candidates.map((c, i) => `${i + 1}. [${c.id}] "${c.content}"`).join('\n')
+      : '(none)';
 
-NEW FACT: "${content}"
+    // Get current profiles for context
+    const userProfile = profileManager.getStaticProfile('default');
+    const agentProfile = profileManager.getStaticProfile('agent');
+    const userProfileStr = Object.keys(userProfile).length > 0
+      ? Object.entries(userProfile).map(([k, v]) => `  ${k}: ${v}`).join('\n')
+      : '  (empty)';
+    const agentProfileStr = Object.keys(agentProfile).length > 0
+      ? Object.entries(agentProfile).map(([k, v]) => `  ${k}: ${v}`).join('\n')
+      : '  (empty)';
+
+    // Include the full source message for richer context
+    const sourceContext = sourceMessage
+      ? `\nORIGINAL USER MESSAGE: "${sourceMessage.substring(0, 500)}"\n`
+      : '';
+
+    const newFactsList = storedFacts.map((f, i) => `${i + 1}. "${f}"`).join('\n');
+
+    const prompt = `You are a memory manager. Given new facts extracted from a user message, do THREE things:
+
+1. CONSOLIDATE: Which existing memories are superseded (replaced/updated) by the new facts?
+2. USER PROFILE: Update user profile based on the new facts AND the original message.
+3. AGENT PROFILE: If the user is telling the AI about itself (name, personality, behavior), update the agent profile.
+${sourceContext}
+NEW FACTS STORED:
+${newFactsList}
 
 EXISTING MEMORIES:
 ${candidateList}
 
-Rules:
-- Return ONLY IDs of memories that are SUPERSEDED (replaced/updated) by the new fact
-- "I like gym" is superseded by "I enjoy gym, hiking and swimming" (the new one is more complete)
-- "Lives in Dublin" is superseded by "Lives in Wicklow" (location changed)
-- Do NOT mark memories about different topics as superseded
-- If nothing is superseded, return empty array
+CURRENT USER PROFILE:
+${userProfileStr}
 
-Respond with JSON only: {"superseded": ["id1", "id2"]}`;
+CURRENT AGENT PROFILE:
+${agentProfileStr}
+
+USER PROFILE FIELDS (set any that apply):
+- name, location, timezone, language, occupation
+- personality (traits, e.g. "curious, introverted, tech-savvy")
+- mood (current emotional state / vibe, e.g. "stressed about work")
+- focus (what they're focused on lately, e.g. "fitness, learning French")
+
+AGENT PROFILE FIELDS (only when user configures the bot):
+- name, personality, and any other relevant fields
+
+RULES:
+- superseded: IDs of memories replaced by new facts. Empty array if none.
+- user_profile: Only fields that CHANGED or are NEW based on the message. Empty object if no updates.
+- agent_profile: Only if user is addressing the bot about its identity. Empty object if not.
+- Do NOT echo back unchanged profile values.
+
+Respond with JSON only:
+{"superseded": [], "user_profile": {}, "agent_profile": {}}`;
 
     try {
       const response = await this.provider.complete({
         messages: [{ role: 'user', content: prompt }],
         temperature: 0.1,
-        maxTokens: 200,
+        maxTokens: 300,
       });
 
       const responseText = Array.isArray(response.content)
@@ -599,20 +685,44 @@ Respond with JSON only: {"superseded": ["id1", "id2"]}`;
       const jsonMatch = responseText.match(/\{[\s\S]*\}/);
       if (!jsonMatch) return;
 
-      const parsed = JSON.parse(jsonMatch[0]) as { superseded?: string[] };
-      if (!parsed.superseded || !Array.isArray(parsed.superseded) || parsed.superseded.length === 0) return;
+      const parsed = JSON.parse(jsonMatch[0]) as {
+        superseded?: string[];
+        user_profile?: Record<string, string>;
+        agent_profile?: Record<string, string>;
+      };
 
-      // Validate IDs against actual candidates
-      const validIds = new Set(candidates.map(c => c.memory.id));
-      const toSupersede = parsed.superseded.filter(id => validIds.has(id));
+      // 1. Supersede outdated memories
+      if (parsed.superseded && Array.isArray(parsed.superseded) && parsed.superseded.length > 0) {
+        const validIds = new Set(candidates.map(c => c.id));
+        for (const id of parsed.superseded) {
+          if (validIds.has(id)) {
+            this.scallopStore.update(id, { isLatest: false });
+            this.logger.info(
+              { supersededId: id, newFacts: storedFacts.map(f => f.substring(0, 40)) },
+              'Memory superseded by newer fact'
+            );
+          }
+        }
+      }
 
-      // Mark superseded memories as not-latest
-      for (const id of toSupersede) {
-        this.scallopStore.update(id, { isLatest: false });
-        this.logger.info(
-          { supersededId: id, newMemoryId, newContent: content.substring(0, 80) },
-          'Memory superseded by newer fact'
-        );
+      // 2. Update user profile
+      if (parsed.user_profile && typeof parsed.user_profile === 'object') {
+        for (const [key, value] of Object.entries(parsed.user_profile)) {
+          if (typeof value === 'string' && value.trim()) {
+            profileManager.setStaticValue('default', key, value.trim());
+            this.logger.info({ key, value: value.trim() }, 'User profile updated via LLM');
+          }
+        }
+      }
+
+      // 3. Update agent profile
+      if (parsed.agent_profile && typeof parsed.agent_profile === 'object') {
+        for (const [key, value] of Object.entries(parsed.agent_profile)) {
+          if (typeof value === 'string' && value.trim()) {
+            profileManager.setStaticValue('agent', key, value.trim());
+            this.logger.info({ key, value: value.trim() }, 'Agent profile updated via LLM');
+          }
+        }
       }
     } catch (err) {
       this.logger.debug({ error: (err as Error).message }, 'Memory consolidation LLM call failed');
@@ -833,11 +943,6 @@ Respond with JSON only: {"superseded": ["id1", "id2"]}`;
           },
         });
         this.logger.debug({ fact: searchableContent, subject: fact.subject, store: 'scallop' }, 'Stored new fact in ScallopMemory');
-
-        // Async LLM-based consolidation: find and supersede outdated memories
-        this.consolidateMemory(newMemory.id, userId, searchableContent).catch((err) => {
-          this.logger.warn({ error: (err as Error).message }, 'Memory consolidation failed');
-        });
       } else {
         // Legacy storage
         this.memoryStore.add({
