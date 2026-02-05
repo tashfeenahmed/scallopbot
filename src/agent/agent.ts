@@ -443,7 +443,7 @@ export class Agent {
       // Execute tools and gather results
       this.logger.info({ toolCount: toolUses.length, tools: toolUses.map(t => t.name) }, 'Executing tools');
       const userId = currentSession?.metadata?.userId;
-      const toolResults = await this.executeTools(toolUses, sessionId, userId, onProgress);
+      const toolResults = await this.executeTools(toolUses, sessionId, userId, onProgress, shouldStop);
       this.logger.info({
         resultCount: toolResults.length,
         results: toolResults.map(r => ({
@@ -459,6 +459,13 @@ export class Agent {
         content: toolResults,
       });
       this.logger.info({ iteration: iterations }, 'Tool results added to session, continuing loop');
+
+      // Check if user requested stop after tool execution (don't wait for next iteration's LLM call)
+      if (shouldStop && shouldStop()) {
+        this.logger.info({ sessionId, iteration: iterations }, 'User requested stop after tool execution');
+        finalResponse = 'Stopped by user request.';
+        break;
+      }
 
       // If this is the last iteration, add a warning
       if (iterations >= this.maxIterations) {
@@ -992,11 +999,34 @@ ALWAYS use **send_file** after creating any file (PDFs, images, documents, scrip
     toolUses: ToolUseContent[],
     sessionId: string,
     userId?: string,
-    onProgress?: ProgressCallback
+    onProgress?: ProgressCallback,
+    shouldStop?: ShouldStopCallback
   ): Promise<ContentBlock[]> {
     const results: ContentBlock[] = [];
 
     for (const toolUse of toolUses) {
+      // Check if user requested stop between tool calls
+      if (shouldStop && shouldStop()) {
+        this.logger.info({ remainingTools: toolUses.length - results.length }, 'User requested stop during tool execution');
+        results.push({
+          type: 'tool_result',
+          tool_use_id: toolUse.id,
+          content: 'Execution stopped by user request.',
+          is_error: true,
+        });
+        // Skip remaining tool calls
+        for (const remaining of toolUses.slice(results.length)) {
+          if (remaining.id !== toolUse.id) {
+            results.push({
+              type: 'tool_result',
+              tool_use_id: remaining.id,
+              content: 'Execution stopped by user request.',
+              is_error: true,
+            });
+          }
+        }
+        break;
+      }
       // Try skill first (skills are now the primary execution path)
       const skill = this.skillRegistry?.getSkill(toolUse.name);
 
