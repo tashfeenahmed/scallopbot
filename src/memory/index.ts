@@ -69,6 +69,9 @@ export {
   type UserProfileEntry,
   type DynamicProfile,
   type BehavioralPatterns,
+  type ProactiveTriggerEntry,
+  type ProactiveTriggerType,
+  type ProactiveTriggerStatus,
 } from './db.js';
 
 // Decay Engine

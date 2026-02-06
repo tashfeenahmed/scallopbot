@@ -37,6 +37,7 @@ import { ContextManager } from '../routing/context.js';
 import { MediaProcessor } from '../media/index.js';
 import { VoiceManager } from '../voice/index.js';
 import { type TriggerSource, type TriggerSourceRegistry, parseUserIdPrefix } from '../triggers/index.js';
+import { TriggerEvaluator } from '../proactive/index.js';
 
 export interface GatewayOptions {
   config: Config;
@@ -64,6 +65,7 @@ export class Gateway {
   private telegramChannel: TelegramChannel | null = null;
   private apiChannel: ApiChannel | null = null;
   private reminderMonitorInterval: ReturnType<typeof setInterval> | null = null;
+  private triggerEvaluator: TriggerEvaluator | null = null;
 
   /** Registry of active trigger sources for multi-channel message dispatch */
   private triggerSources: TriggerSourceRegistry = new Map();
@@ -229,6 +231,24 @@ export class Gateway {
     });
     this.logger.debug('Agent initialized');
 
+    // Initialize proactive trigger evaluator
+    if (factExtractionProvider && this.scallopMemoryStore) {
+      this.triggerEvaluator = new TriggerEvaluator({
+        db: this.scallopMemoryStore.getDatabase(),
+        memoryStore: this.scallopMemoryStore,
+        provider: factExtractionProvider,
+        logger: this.logger,
+        interval: 5 * 60 * 1000, // Check every 5 minutes
+        onSendMessage: async (userId: string, message: string) => {
+          return this.handleProactiveMessage(userId, message);
+        },
+        onAgentProcess: async (userId: string, message: string) => {
+          return this.handleProactiveAgentProcess(userId, message);
+        },
+      });
+      this.logger.debug('Proactive trigger evaluator initialized');
+    }
+
     this.isInitialized = true;
     this.logger.info('Gateway initialized successfully');
   }
@@ -386,6 +406,11 @@ export class Gateway {
       }
     }
 
+    // Start proactive trigger evaluator (after trigger sources are registered)
+    if (this.triggerEvaluator) {
+      this.triggerEvaluator.start();
+    }
+
     this.isRunning = true;
     this.logger.info('Gateway started');
   }
@@ -443,6 +468,11 @@ export class Gateway {
     if (this.reminderMonitorInterval) {
       clearInterval(this.reminderMonitorInterval);
       this.reminderMonitorInterval = null;
+    }
+
+    // Stop proactive trigger evaluator
+    if (this.triggerEvaluator) {
+      this.triggerEvaluator.stop();
     }
 
     // Clear trigger sources before stopping channels
@@ -744,6 +774,61 @@ export class Gateway {
 
     // No trigger sources available
     return { source: null, rawUserId };
+  }
+
+  /**
+   * Handle sending a proactive message to a user
+   * Used by TriggerEvaluator for agent-initiated messages
+   */
+  private async handleProactiveMessage(userId: string, message: string): Promise<boolean> {
+    this.logger.debug({ userId, messageLength: message.length }, 'Sending proactive message');
+
+    const { source: triggerSource, rawUserId } = this.resolveTriggerSource(userId);
+
+    if (!triggerSource) {
+      this.logger.warn({ userId }, 'No trigger source available for proactive message');
+      return false;
+    }
+
+    try {
+      await triggerSource.sendMessage(rawUserId, message);
+      return true;
+    } catch (error) {
+      this.logger.error({ userId, error: (error as Error).message }, 'Failed to send proactive message');
+      return false;
+    }
+  }
+
+  /**
+   * Handle processing a proactive trigger through the agent
+   * Used for actionable triggers that may need the agent to perform tasks
+   */
+  private async handleProactiveAgentProcess(userId: string, message: string): Promise<string | null> {
+    if (!this.agent || !this.sessionManager) {
+      return null;
+    }
+
+    this.logger.debug({ userId }, 'Processing proactive trigger through agent');
+
+    try {
+      // Create a new session for this proactive message
+      const session = await this.sessionManager.createSession({ userId, source: 'proactive' });
+
+      // Process through the agent
+      const result = await this.agent.processMessage(
+        session.id,
+        `[PROACTIVE CHECK - Context for you to check in on]: ${message}`,
+        undefined,
+        async (_update) => {
+          // Don't surface thinking to users for proactive messages
+        }
+      );
+
+      return result.response || null;
+    } catch (error) {
+      this.logger.error({ userId, error: (error as Error).message }, 'Failed to process proactive trigger through agent');
+      return null;
+    }
   }
 
   /**

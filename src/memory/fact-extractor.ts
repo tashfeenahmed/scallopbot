@@ -741,12 +741,13 @@ export class LLMFactExtractor {
 
     const newFactsList = storedFacts.map((f, i) => `${i + 1}. "${f}"`).join('\n');
 
-    const prompt = `You are a memory manager. Given new facts extracted from a user message, do FOUR things:
+    const prompt = `You are a memory manager. Given new facts extracted from a user message, do FIVE things:
 
 1. CONSOLIDATE: Which existing memories are superseded (replaced/updated) by the new facts?
 2. USER PROFILE: Update user profile based on the new facts AND the original message.
 3. AGENT PROFILE: If the user is telling the AI about itself (name, personality, behavior), update the agent profile.
 4. PREFERENCES LEARNED: Extract preference patterns from the message (especially from corrections or comparisons).
+5. PROACTIVE TRIGGERS: Extract time-sensitive items that warrant proactive follow-up.
 ${sourceContext}
 NEW FACTS STORED:
 ${newFactsList}
@@ -775,21 +776,43 @@ PREFERENCES LEARNED:
 - Format: { "domain": "category", "prefers": "X", "over": "Y", "strength": 0.5-1.0 }
 - Domains: communication, technology, lifestyle, work, food, entertainment, etc.
 
+PROACTIVE TRIGGERS (for agent-initiated follow-ups):
+Look for time-sensitive items in the ORIGINAL USER MESSAGE:
+- Upcoming events: "meeting tomorrow", "dentist next week", "flight on Friday"
+- Commitments: "I'll finish the report", "planning to start gym", "need to call mom"
+- Goals: "trying to lose weight", "learning Spanish", "saving for vacation"
+- Deadlines: "due Friday", "need to submit by EOD", "expires next month"
+
+Format: {
+  "type": "event_prep" | "commitment_check" | "goal_checkin" | "follow_up",
+  "description": "Brief description of what to follow up on",
+  "trigger_time": "ISO datetime OR relative like '+2h', '+1d', '+1w'",
+  "context": "Context for generating the proactive message"
+}
+
+Trigger time guidelines:
+- event_prep: 2 hours before the event (for same-day) or morning of (for future days)
+- commitment_check: Next day or after stated deadline
+- goal_checkin: 1 week for short-term, 2 weeks for long-term goals
+- follow_up: Based on context, usually next day
+
 RULES:
 - superseded: IDs of memories replaced by new facts. Empty array if none.
 - user_profile: Only fields that CHANGED or are NEW based on the message. Empty object if no updates.
 - agent_profile: Only if user is addressing the bot about its identity. Empty object if not.
 - preferences_learned: Array of preference objects. Empty array if no clear preferences.
+- proactive_triggers: Array of trigger objects. Empty array if nothing time-sensitive.
 - Do NOT echo back unchanged profile values.
+- Only create triggers for EXPLICIT time-sensitive items, not vague statements.
 
 Respond with JSON only:
-{"superseded": [], "user_profile": {}, "agent_profile": {}, "preferences_learned": []}`;
+{"superseded": [], "user_profile": {}, "agent_profile": {}, "preferences_learned": [], "proactive_triggers": []}`;
 
     try {
       const response = await this.provider.complete({
         messages: [{ role: 'user', content: prompt }],
         temperature: 0.1,
-        maxTokens: 300,
+        maxTokens: 500, // Increased for proactive triggers
       });
 
       const responseText = Array.isArray(response.content)
@@ -809,6 +832,12 @@ Respond with JSON only:
           prefers: string;
           over: string;
           strength?: number;
+        }>;
+        proactive_triggers?: Array<{
+          type: 'event_prep' | 'commitment_check' | 'goal_checkin' | 'follow_up';
+          description: string;
+          trigger_time: string;
+          context: string;
         }>;
       };
 
@@ -889,9 +918,98 @@ Respond with JSON only:
           }
         }
       }
+
+      // 5. Store proactive triggers
+      if (parsed.proactive_triggers && Array.isArray(parsed.proactive_triggers) && parsed.proactive_triggers.length > 0) {
+        const db = this.scallopStore.getDatabase();
+        for (const trigger of parsed.proactive_triggers) {
+          if (trigger.description && trigger.trigger_time && trigger.context) {
+            // Parse trigger time (ISO or relative)
+            const triggerAt = this.parseTriggerTime(trigger.trigger_time);
+            if (!triggerAt) {
+              this.logger.debug({ trigger_time: trigger.trigger_time }, 'Invalid trigger time, skipping');
+              continue;
+            }
+
+            // Check for duplicate triggers
+            if (db.hasSimilarPendingTrigger(userId, trigger.description)) {
+              this.logger.debug({ description: trigger.description }, 'Similar trigger already exists, skipping');
+              continue;
+            }
+
+            // Store the trigger
+            db.addProactiveTrigger({
+              userId,
+              type: trigger.type || 'follow_up',
+              description: trigger.description,
+              context: trigger.context,
+              triggerAt,
+              status: 'pending',
+              sourceMemoryId: newMemoryIds[0] || null,
+            });
+            this.logger.info(
+              { type: trigger.type, description: trigger.description, triggerAt: new Date(triggerAt).toISOString() },
+              'Proactive trigger created'
+            );
+          }
+        }
+      }
     } catch (err) {
       this.logger.debug({ error: (err as Error).message }, 'Memory consolidation LLM call failed');
     }
+  }
+
+  /**
+   * Parse trigger time from ISO or relative format
+   * Supports: ISO datetime, '+2h', '+1d', '+1w', 'tomorrow 9am', etc.
+   */
+  private parseTriggerTime(timeStr: string): number | null {
+    const now = Date.now();
+
+    // Try ISO format first
+    const isoDate = new Date(timeStr);
+    if (!isNaN(isoDate.getTime())) {
+      return isoDate.getTime();
+    }
+
+    // Relative time patterns
+    const relativeMatch = timeStr.match(/^\+(\d+)(h|d|w|m)$/i);
+    if (relativeMatch) {
+      const [, amount, unit] = relativeMatch;
+      const value = parseInt(amount, 10);
+      switch (unit.toLowerCase()) {
+        case 'h':
+          return now + value * 60 * 60 * 1000;
+        case 'd':
+          return now + value * 24 * 60 * 60 * 1000;
+        case 'w':
+          return now + value * 7 * 24 * 60 * 60 * 1000;
+        case 'm':
+          return now + value * 30 * 24 * 60 * 60 * 1000; // Approximate month
+      }
+    }
+
+    // Try natural language parsing for common patterns
+    const lowerStr = timeStr.toLowerCase();
+    if (lowerStr.includes('tomorrow')) {
+      const tomorrow = new Date(now);
+      tomorrow.setDate(tomorrow.getDate() + 1);
+      // Default to 9am if no time specified
+      const timeMatch = timeStr.match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i);
+      if (timeMatch) {
+        let hour = parseInt(timeMatch[1], 10);
+        const minute = timeMatch[2] ? parseInt(timeMatch[2], 10) : 0;
+        const ampm = timeMatch[3]?.toLowerCase();
+        if (ampm === 'pm' && hour < 12) hour += 12;
+        if (ampm === 'am' && hour === 12) hour = 0;
+        tomorrow.setHours(hour, minute, 0, 0);
+      } else {
+        tomorrow.setHours(9, 0, 0, 0);
+      }
+      return tomorrow.getTime();
+    }
+
+    return null;
   }
 
   /**
