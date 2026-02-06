@@ -50,3 +50,7 @@ hetzner-server.pub
 hetzner-server-rsa
 hetzner-server-rsa.pub
 DEPLOYMENT.md
+*.db
+*.db-shm
+*.db-wal
+test-vision*.ts
