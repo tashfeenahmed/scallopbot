@@ -54,3 +54,4 @@ DEPLOYMENT.md
 *.db-shm
 *.db-wal
 test-vision*.ts
+test-vision*.ts
