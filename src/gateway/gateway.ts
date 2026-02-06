@@ -328,7 +328,7 @@ export class Gateway {
       const moonshot = new MoonshotProvider({
         apiKey: moonshotConfig.apiKey,
         model: moonshotConfig.model,
-      });
+      }, this.logger);
       this.providerRegistry.registerProvider(moonshot);
       this.logger.debug({ provider: 'moonshot', model: moonshotConfig.model }, 'Provider registered');
     }
