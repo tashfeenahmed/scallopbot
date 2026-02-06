@@ -120,7 +120,7 @@ interface WsAttachment {
  * WebSocket message types
  */
 interface WsMessage {
-  type: 'chat' | 'ping';
+  type: 'chat' | 'ping' | 'stop';
   sessionId?: string;
   message?: string;
   /** Optional image/file attachments */
@@ -167,6 +167,8 @@ export class ApiChannel implements Channel, TriggerSource {
   private userSessions: Map<string, string> = new Map();
   /** Track WebSocket clients by userId for trigger support */
   private clientsByUser: Map<string, Set<WebSocket>> = new Map();
+  /** Track stop requests by clientId */
+  private stopRequests: Set<string> = new Set();
 
   constructor(config: ApiChannelConfig) {
     this.config = {
@@ -809,6 +811,11 @@ export class ApiChannel implements Channel, TriggerSource {
         this.sendWsMessage(ws, { type: 'pong' });
         break;
 
+      case 'stop':
+        this.stopRequests.add(clientId);
+        this.logger.debug({ clientId }, 'Stop requested');
+        break;
+
       case 'chat':
         if (!message.message) {
           this.sendWsMessage(ws, { type: 'error', error: 'Message is required' });
@@ -878,12 +885,23 @@ export class ApiChannel implements Channel, TriggerSource {
             this.logger.debug({ count: attachments.length }, 'Processing WebSocket attachments');
           }
 
+          // Clear any previous stop request for this client
+          this.stopRequests.delete(clientId);
+
+          // Should stop callback checks if user requested stop
+          const shouldStop = () => this.stopRequests.has(clientId);
+
           const result = await this.config.agent.processMessage(
             sessionId,
             message.message,
             attachments,
-            onProgress
+            onProgress,
+            shouldStop
           );
+
+          // Clear stop request after completion
+          this.stopRequests.delete(clientId);
+
           this.sendWsMessage(ws, { type: 'response', sessionId, content: result.response });
         } catch (error) {
           const err = error as Error;

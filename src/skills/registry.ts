@@ -124,19 +124,22 @@ export class SkillRegistry {
     return this.state.availableSkills.filter(
       (skill) =>
         skill.hasScripts &&
-        skill.frontmatter['disable-model-invocation'] !== true
+        skill.frontmatter['disable-model-invocation'] !== true &&
+        skill.frontmatter['user-invocable'] !== false
     );
   }
 
   /**
-   * Get documentation skills (provide context but no scripts)
-   * These are typically OpenClaw-style skills that guide the LLM
+   * Get documentation skills (provide guidance but aren't invoked as tools)
+   * Includes:
+   * - Skills without scripts (pure documentation)
+   * - Skills with user-invocable: false (documentation-only mode, use via bash)
    */
   getDocumentationSkills(): Skill[] {
     return this.state.availableSkills.filter(
       (skill) =>
-        !skill.hasScripts &&
-        skill.frontmatter['disable-model-invocation'] !== true
+        !skill.hasScripts ||
+        skill.frontmatter['user-invocable'] === false
     );
   }
 

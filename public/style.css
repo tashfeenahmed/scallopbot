@@ -673,6 +673,18 @@ html, body {
   margin-left: 2px;
 }
 
+.send-btn.stop-mode {
+  background-color: #e74c3c;
+}
+
+.send-btn.stop-mode:hover:not(:disabled) {
+  background-color: #c0392b;
+}
+
+.send-btn .stop-icon {
+  margin-left: 0;
+}
+
 /* Scrollbar */
 .chat-container::-webkit-scrollbar {
   width: 6px;

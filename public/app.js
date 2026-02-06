@@ -56,8 +56,13 @@
     statusIndicator.textContent = statusText[status] || status;
 
     const isConnected = status === 'connected';
-    messageInput.disabled = !isConnected || isWaitingForResponse;
-    sendBtn.disabled = !isConnected || isWaitingForResponse;
+    // Only disable input when disconnected, not when waiting for response
+    messageInput.disabled = !isConnected;
+    sendBtn.disabled = !isConnected;
+
+    if (isConnected && !isWaitingForResponse) {
+      setButtonMode('send');
+    }
   }
 
   /**
@@ -363,8 +368,8 @@
       case 'response':
         hideTypingIndicator();
         isWaitingForResponse = false;
-        messageInput.disabled = false;
         sendBtn.disabled = false;
+        setButtonMode('send');
         if (data.content) {
           addMessage(data.content, 'assistant', true);
         }
@@ -430,8 +435,8 @@
       case 'error':
         hideTypingIndicator();
         isWaitingForResponse = false;
-        messageInput.disabled = false;
         sendBtn.disabled = false;
+        setButtonMode('send');
         addMessage(data.error || 'An error occurred', 'error');
         messageInput.focus();
         break;
@@ -442,6 +447,35 @@
 
       default:
         console.log('Unknown message type:', data.type);
+    }
+  }
+
+  /**
+   * Toggle send/stop button appearance
+   */
+  function setButtonMode(mode) {
+    const sendIcon = sendBtn.querySelector('.send-icon');
+    const stopIcon = sendBtn.querySelector('.stop-icon');
+    if (mode === 'stop') {
+      sendIcon.style.display = 'none';
+      stopIcon.style.display = 'block';
+      sendBtn.classList.add('stop-mode');
+      sendBtn.title = 'Stop generation';
+    } else {
+      sendIcon.style.display = 'block';
+      stopIcon.style.display = 'none';
+      sendBtn.classList.remove('stop-mode');
+      sendBtn.title = 'Send message';
+    }
+  }
+
+  /**
+   * Send stop request to server
+   */
+  function sendStopRequest() {
+    if (ws && ws.readyState === WebSocket.OPEN && isWaitingForResponse) {
+      ws.send(JSON.stringify({ type: 'stop' }));
+      addMessage('Stopping...', 'system');
     }
   }
 
@@ -464,8 +498,13 @@
     // Show typing indicator
     showTypingIndicator();
     isWaitingForResponse = true;
-    messageInput.disabled = true;
-    sendBtn.disabled = true;
+    // Don't disable input - allow user to type next message
+    // messageInput.disabled = true;
+    sendBtn.disabled = false;
+    setButtonMode('stop');
+
+    // Focus back on input
+    messageInput.focus();
 
     // Send to server
     ws.send(JSON.stringify({
@@ -479,6 +518,13 @@
    */
   chatForm.addEventListener('submit', function(e) {
     e.preventDefault();
+
+    // If waiting for response, treat as stop request
+    if (isWaitingForResponse) {
+      sendStopRequest();
+      return;
+    }
+
     const message = messageInput.value.trim();
     if (message) {
       sendMessage(message);
