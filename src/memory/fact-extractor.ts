@@ -333,7 +333,12 @@ export class LLMFactExtractor {
   ): Promise<void> {
     if (!this.scallopStore) return;
 
+    const now = new Date();
+    const currentDate = now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+
     const prompt = `You are a proactive trigger extractor. Analyze this message for time-sensitive items that warrant follow-up.
+
+CURRENT DATE: ${currentDate}
 
 MESSAGE (from ${source}):
 "${message}"
@@ -856,7 +861,13 @@ Respond with JSON only:
 
     const newFactsList = storedFacts.map((f, i) => `${i + 1}. "${f}"`).join('\n');
 
-    const prompt = `You are a memory manager. Given new facts extracted from a user message, do FIVE things:
+    // Include current date for accurate trigger time calculation
+    const now = new Date();
+    const currentDate = now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+
+    const prompt = `You are a memory manager. Given new facts extracted from a user message, do FIVE things.
+
+CURRENT DATE: ${currentDate}
 
 1. CONSOLIDATE: Which existing memories are superseded (replaced/updated) by the new facts?
 2. USER PROFILE: Update user profile based on the new facts AND the original message.
