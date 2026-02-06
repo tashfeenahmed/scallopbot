@@ -1,7 +1,14 @@
 /**
  * Proactive messaging system
  *
- * Enables agent-initiated messages based on triggers extracted from conversations.
+ * Unified scheduler handles both user-set reminders and agent-set triggers.
+ * - User reminders (source='user'): Direct message delivery
+ * - Agent triggers (source='agent'): LLM-generated contextual messages
  */
 
-export { TriggerEvaluator, type TriggerEvaluatorOptions, type ProactiveMessageHandler, type AgentProcessHandler } from './trigger-evaluator.js';
+export {
+  UnifiedScheduler,
+  type UnifiedSchedulerOptions,
+  type MessageHandler,
+  type AgentProcessHandler,
+} from './scheduler.js';
