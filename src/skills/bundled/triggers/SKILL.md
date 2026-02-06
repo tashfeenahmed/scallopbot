@@ -1,8 +1,8 @@
 ---
 name: triggers
-description: List and manage proactive triggers (automatic follow-ups extracted from conversations)
+description: View and cancel proactive triggers - these are AUTOMATIC follow-ups extracted from conversations about events, trips, and commitments (different from user-set reminders)
 user-invocable: true
-triggers: [triggers, proactive, follow-ups, followups]
+triggers: [triggers, proactive, follow-ups]
 scripts:
   run: "scripts/run.ts"
 inputSchema:
