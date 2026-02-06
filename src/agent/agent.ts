@@ -21,6 +21,7 @@ import type { ContextManager } from '../routing/context.js';
 import type { MediaProcessor } from '../media/index.js';
 import type { Attachment } from '../channels/types.js';
 import { analyzeComplexity } from '../routing/complexity.js';
+import type { GoalService } from '../goals/index.js';
 
 export interface AgentOptions {
   provider: LLMProvider;
@@ -34,6 +35,7 @@ export interface AgentOptions {
   factExtractor?: LLMFactExtractor;
   contextManager?: ContextManager;
   mediaProcessor?: MediaProcessor;
+  goalService?: GoalService;
   workspace: string;
   logger: Logger;
   maxIterations: number;
@@ -143,6 +145,7 @@ export class Agent {
   private factExtractor: LLMFactExtractor | null;
   private contextManager: ContextManager | null;
   private mediaProcessor: MediaProcessor | null;
+  private goalService: GoalService | null;
   private workspace: string;
   private logger: Logger;
   private maxIterations: number;
@@ -164,6 +167,7 @@ export class Agent {
     this.factExtractor = options.factExtractor || null;
     this.contextManager = options.contextManager || null;
     this.mediaProcessor = options.mediaProcessor || null;
+    this.goalService = options.goalService || null;
     this.workspace = options.workspace;
     this.logger = options.logger;
     this.maxIterations = options.maxIterations;
@@ -574,6 +578,19 @@ ALWAYS use **send_file** after creating any file (PDFs, images, documents, scrip
       if (memoryContext) {
         prompt += memoryContext;
         this.logger.debug({ memoryContextLength: memoryContext.length, preview: memoryContext.substring(0, 300) }, 'Memory context added to prompt');
+      }
+    }
+
+    // Add goal context (query-relevant)
+    if (this.goalService) {
+      try {
+        const goalContext = await this.goalService.getGoalContext('default', userMessage);
+        if (goalContext) {
+          prompt += goalContext;
+          this.logger.debug({ goalContextLength: goalContext.length }, 'Goal context added to prompt');
+        }
+      } catch (error) {
+        this.logger.warn({ error: (error as Error).message }, 'Failed to build goal context');
       }
     }
 

@@ -9,6 +9,7 @@ import type { Logger } from 'pino';
 import type { ScallopDatabase, ProactiveTriggerEntry } from '../memory/db.js';
 import type { LLMProvider, ContentBlock } from '../providers/types.js';
 import type { ScallopMemoryStore } from '../memory/scallop-store.js';
+import type { GoalService } from '../goals/index.js';
 
 /**
  * Handler for sending proactive messages
@@ -38,6 +39,8 @@ export interface TriggerEvaluatorOptions {
   provider: LLMProvider;
   /** Logger instance */
   logger: Logger;
+  /** Goal service for goal check-in context (optional) */
+  goalService?: GoalService;
   /** Check interval in milliseconds (default: 5 minutes) */
   interval?: number;
   /** Maximum age for expired triggers in milliseconds (default: 24 hours) */
@@ -56,6 +59,7 @@ export class TriggerEvaluator {
   private memoryStore: ScallopMemoryStore;
   private provider: LLMProvider;
   private logger: Logger;
+  private goalService?: GoalService;
   private interval: number;
   private maxTriggerAge: number;
   private onSendMessage: ProactiveMessageHandler;
@@ -69,6 +73,7 @@ export class TriggerEvaluator {
     this.memoryStore = options.memoryStore;
     this.provider = options.provider;
     this.logger = options.logger.child({ component: 'trigger-evaluator' });
+    this.goalService = options.goalService;
     this.interval = options.interval ?? 5 * 60 * 1000; // 5 minutes
     this.maxTriggerAge = options.maxTriggerAge ?? 24 * 60 * 60 * 1000; // 24 hours
     this.onSendMessage = options.onSendMessage;
@@ -184,6 +189,19 @@ export class TriggerEvaluator {
       { triggerId: trigger.id, userId: trigger.userId, type: trigger.type },
       'Proactive trigger fired'
     );
+
+    // Reschedule goal check-ins
+    if (trigger.type === 'goal_checkin' && this.goalService) {
+      try {
+        const context = JSON.parse(trigger.context);
+        if (context.goalId) {
+          await this.goalService.rescheduleCheckin(context.goalId);
+          this.logger.debug({ goalId: context.goalId }, 'Goal check-in rescheduled');
+        }
+      } catch {
+        // Context parsing failed, skip rescheduling
+      }
+    }
   }
 
   /**
@@ -204,6 +222,43 @@ export class TriggerEvaluator {
       // Memory search is optional
     }
 
+    // Get goal progress context for goal_checkin triggers
+    let goalContext = '';
+    if (trigger.type === 'goal_checkin' && this.goalService) {
+      try {
+        const triggerContext = JSON.parse(trigger.context);
+        if (triggerContext.goalId) {
+          const tree = await this.goalService.getGoalHierarchy(triggerContext.goalId);
+          if (tree) {
+            goalContext = `\nGOAL PROGRESS:\n`;
+            goalContext += `- Goal: ${tree.goal.content}\n`;
+            goalContext += `- Overall progress: ${tree.totalProgress}%\n`;
+
+            const activeMilestones = tree.milestones.filter(m => m.milestone.metadata.status === 'active');
+            const completedMilestones = tree.milestones.filter(m => m.milestone.metadata.status === 'completed');
+
+            goalContext += `- Milestones: ${completedMilestones.length}/${tree.milestones.length} completed\n`;
+
+            if (activeMilestones.length > 0) {
+              goalContext += `- Currently working on: ${activeMilestones.map(m => m.milestone.content).join(', ')}\n`;
+            }
+
+            // Find pending tasks
+            const pendingTasks = tree.milestones
+              .flatMap(m => m.tasks)
+              .filter(t => t.metadata.status !== 'completed')
+              .slice(0, 3);
+
+            if (pendingTasks.length > 0) {
+              goalContext += `- Next tasks: ${pendingTasks.map(t => t.content).join(', ')}\n`;
+            }
+          }
+        }
+      } catch {
+        // Goal context is optional
+      }
+    }
+
     const triggerTypeDescriptions: Record<string, string> = {
       event_prep: 'preparing the user for an upcoming event',
       commitment_check: 'checking in on a commitment the user made',
@@ -217,7 +272,7 @@ TRIGGER CONTEXT:
 - Type: ${trigger.type}
 - Description: ${trigger.description}
 - Original context: ${trigger.context}
-
+${goalContext}
 ${memoryContext ? `RELEVANT MEMORIES:\n${memoryContext}\n` : ''}
 GUIDELINES:
 - Be conversational and warm, not robotic
@@ -225,7 +280,7 @@ GUIDELINES:
 - Make it feel natural, like a helpful friend checking in
 - For event_prep: Offer to help prepare or remind of details
 - For commitment_check: Gently check progress, don't be pushy
-- For goal_checkin: Be encouraging, celebrate small wins
+- For goal_checkin: Be encouraging, celebrate small wins, mention specific progress
 - For follow_up: Reference the original context naturally
 - Don't use emojis unless appropriate for the context
 - Start directly with the message, no greeting needed

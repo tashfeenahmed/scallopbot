@@ -38,6 +38,7 @@ import { MediaProcessor } from '../media/index.js';
 import { VoiceManager } from '../voice/index.js';
 import { type TriggerSource, type TriggerSourceRegistry, parseUserIdPrefix } from '../triggers/index.js';
 import { TriggerEvaluator } from '../proactive/index.js';
+import { GoalService } from '../goals/index.js';
 
 export interface GatewayOptions {
   config: Config;
@@ -58,6 +59,7 @@ export class Gateway {
   private hotCollector: HotCollector | null = null;
   private backgroundGardener: BackgroundGardener | null = null;
   private factExtractor: LLMFactExtractor | null = null;
+  private goalService: GoalService | null = null;
   private contextManager: ContextManager | null = null;
   private mediaProcessor: MediaProcessor | null = null;
   private voiceManager: VoiceManager | null = null;
@@ -130,6 +132,13 @@ export class Gateway {
 
     // Hot collector buffers messages and flushes to ScallopStore
     this.hotCollector = new HotCollector({ scallopStore: this.scallopMemoryStore });
+
+    // Goal service for hierarchical goal tracking
+    this.goalService = new GoalService({
+      db: this.scallopMemoryStore.getDatabase(),
+      logger: this.logger,
+    });
+    this.logger.debug('Goal service initialized');
 
     // Background gardener processes ScallopMemory decay
     this.backgroundGardener = new BackgroundGardener({
@@ -222,6 +231,7 @@ export class Gateway {
       hotCollector: this.hotCollector,
       scallopStore: this.scallopMemoryStore || undefined,
       factExtractor: this.factExtractor || undefined,
+      goalService: this.goalService || undefined,
       contextManager: this.contextManager,
       mediaProcessor: this.mediaProcessor,
       workspace: this.config.agent.workspace,
@@ -238,6 +248,7 @@ export class Gateway {
         memoryStore: this.scallopMemoryStore,
         provider: factExtractionProvider,
         logger: this.logger,
+        goalService: this.goalService || undefined,
         interval: 5 * 60 * 1000, // Check every 5 minutes
         onSendMessage: async (userId: string, message: string) => {
           return this.handleProactiveMessage(userId, message);
