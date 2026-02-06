@@ -209,7 +209,7 @@ export class MoonshotProvider implements LLMProvider {
           } as OpenAI.ChatCompletionMessageParam);
         }
       } else {
-        // Handle content blocks (tool results, etc.)
+        // Handle content blocks (tool results, images, etc.)
         const toolResults = msg.content.filter((c): c is ToolResultContent => c.type === 'tool_result');
         if (toolResults.length > 0 && msg.role === 'user') {
           for (const toolResult of toolResults) {
@@ -225,11 +225,14 @@ export class MoonshotProvider implements LLMProvider {
             });
           }
         } else {
-          // Text and tool_use content
+          // Text, images, and tool_use content
           const textContent = msg.content
             .filter((c) => c.type === 'text')
             .map((c) => (c as { type: 'text'; text: string }).text)
             .join('\n');
+
+          // Extract image blocks (Claude format) and convert to OpenAI format
+          const imageBlocks = msg.content.filter((c) => c.type === 'image');
 
           const toolCalls = msg.content
             .filter((c) => c.type === 'tool_use')
@@ -267,10 +270,55 @@ export class MoonshotProvider implements LLMProvider {
             };
             messages.push(assistantMsg);
           } else {
-            messages.push({
-              role: 'user',
-              content: textContent,
-            });
+            // User message - may include images
+            if (imageBlocks.length > 0) {
+              // Build multimodal content array for OpenAI vision API
+              const contentParts: OpenAI.ChatCompletionContentPart[] = [];
+
+              // Add images first
+              for (const img of imageBlocks) {
+                const imageBlock = img as {
+                  type: 'image';
+                  source: {
+                    type: 'base64' | 'url';
+                    media_type: string;
+                    data?: string;
+                    url?: string;
+                  };
+                };
+
+                if (imageBlock.source.type === 'base64' && imageBlock.source.data) {
+                  // Convert to data URL format for OpenAI
+                  const dataUrl = `data:${imageBlock.source.media_type};base64,${imageBlock.source.data}`;
+                  contentParts.push({
+                    type: 'image_url',
+                    image_url: { url: dataUrl },
+                  });
+                } else if (imageBlock.source.type === 'url' && imageBlock.source.url) {
+                  contentParts.push({
+                    type: 'image_url',
+                    image_url: { url: imageBlock.source.url },
+                  });
+                }
+              }
+
+              // Add text content
+              if (textContent) {
+                contentParts.push({ type: 'text', text: textContent });
+              }
+
+              messages.push({
+                role: 'user',
+                content: contentParts,
+              });
+
+              this.logger?.debug({ imageCount: imageBlocks.length }, 'Added images to message');
+            } else {
+              messages.push({
+                role: 'user',
+                content: textContent,
+              });
+            }
           }
         }
       }
