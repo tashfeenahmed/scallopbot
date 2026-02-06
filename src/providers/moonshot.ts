@@ -392,11 +392,25 @@ export class MoonshotProvider implements LLMProvider {
     if (choice.message.tool_calls) {
       for (const toolCall of choice.message.tool_calls) {
         if ('function' in toolCall && toolCall.function) {
+          let parsedInput: Record<string, unknown> = {};
+          try {
+            parsedInput = JSON.parse(toolCall.function.arguments);
+          } catch (parseError) {
+            // API returned malformed/truncated JSON - log and use empty input
+            this.logger?.warn(
+              {
+                toolName: toolCall.function.name,
+                arguments: toolCall.function.arguments?.slice(0, 200),
+                error: (parseError as Error).message,
+              },
+              'Failed to parse tool call arguments, using empty input'
+            );
+          }
           content.push({
             type: 'tool_use',
             id: toolCall.id,
             name: toolCall.function.name,
-            input: JSON.parse(toolCall.function.arguments),
+            input: parsedInput,
           });
         }
       }

@@ -981,7 +981,7 @@ ALWAYS use **send_file** after creating any file (PDFs, images, documents, scrip
             resultOutput = result.output || '';
             resultContent = result.success
               ? (result.output || 'Success')
-              : `Error: ${result.error}`;
+              : `Error: ${result.error || result.output || 'Command failed with no error output'}`;
           }
 
           results.push({
