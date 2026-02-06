@@ -1,0 +1,164 @@
+#!/usr/bin/env node
+/**
+ * web-search CLI - Search the web using Brave Search API
+ *
+ * Usage:
+ *   web-search "query"
+ *   web-search --count 10 "query"
+ *   web-search --fresh pd "AI news"    # pd=day, pw=week, pm=month, py=year
+ *   web-search --json "query"          # Output raw JSON
+ */
+
+const BRAVE_API_URL = 'https://api.search.brave.com/res/v1/web/search';
+const DEFAULT_COUNT = 5;
+const MAX_COUNT = 20;
+
+function printUsage() {
+  console.log(`Usage: web-search [options] "query"
+
+Search the web using Brave Search API.
+
+Options:
+  --count, -n <num>    Number of results (default: 5, max: 20)
+  --fresh <period>     Filter by recency: pd=day, pw=week, pm=month, py=year
+  --json               Output raw JSON instead of formatted text
+  --help, -h           Show this help
+
+Examples:
+  web-search "TypeScript tutorial"
+  web-search -n 10 "React hooks"
+  web-search --fresh pd "AI news today"
+  web-search --json "Node.js best practices"
+
+Environment:
+  BRAVE_SEARCH_API_KEY  Required. Get from https://api.search.brave.com/
+`);
+}
+
+function parseArgs() {
+  const args = process.argv.slice(2);
+
+  if (args.length === 0 || args.includes('--help') || args.includes('-h')) {
+    printUsage();
+    process.exit(args.length === 0 ? 1 : 0);
+  }
+
+  let count = DEFAULT_COUNT;
+  let freshness = undefined;
+  let json = false;
+  let query = '';
+
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+
+    if (arg === '--count' || arg === '-n') {
+      count = Math.min(parseInt(args[++i], 10) || DEFAULT_COUNT, MAX_COUNT);
+    } else if (arg === '--fresh') {
+      freshness = args[++i];
+    } else if (arg === '--json') {
+      json = true;
+    } else if (!arg.startsWith('-')) {
+      query = arg;
+    }
+  }
+
+  if (!query) {
+    console.error('Error: Query is required');
+    process.exit(1);
+  }
+
+  return { query, count, freshness, json };
+}
+
+function formatResults(results, query) {
+  if (results.length === 0) {
+    return `No results found for: "${query}"`;
+  }
+
+  const formatted = results.map((r, i) => {
+    const age = r.age ? ` (${r.age})` : '';
+    return `${i + 1}. ${r.title}${age}\n   ${r.url}\n   ${r.description}`;
+  }).join('\n\n');
+
+  return `Search results for "${query}":\n\n${formatted}`;
+}
+
+async function search(opts) {
+  const apiKey = process.env.BRAVE_SEARCH_API_KEY;
+  if (!apiKey) {
+    console.error('Error: BRAVE_SEARCH_API_KEY environment variable not set');
+    console.error('Get your API key from: https://api.search.brave.com/');
+    process.exit(1);
+  }
+
+  const params = new URLSearchParams({
+    q: opts.query,
+    count: opts.count.toString(),
+    text_decorations: 'false',
+    search_lang: 'en',
+    country: 'us',
+  });
+
+  if (opts.freshness) {
+    params.append('freshness', opts.freshness);
+  }
+
+  try {
+    const response = await fetch(`${BRAVE_API_URL}?${params}`, {
+      method: 'GET',
+      headers: {
+        'Accept': 'application/json',
+        'Accept-Encoding': 'gzip',
+        'X-Subscription-Token': apiKey,
+      },
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error(`Error: Search API returned ${response.status}`);
+      console.error(errorText.substring(0, 200));
+      process.exit(1);
+    }
+
+    const data = await response.json();
+
+    if (opts.json) {
+      console.log(JSON.stringify(data, null, 2));
+      return;
+    }
+
+    // Combine web and news results
+    const results = [];
+
+    if (data.web?.results) {
+      for (const r of data.web.results) {
+        results.push({
+          title: r.title,
+          url: r.url,
+          description: r.description,
+          age: r.age,
+        });
+      }
+    }
+
+    if (data.news?.results) {
+      for (const r of data.news.results) {
+        results.push({
+          title: `[NEWS] ${r.title}`,
+          url: r.url,
+          description: r.description,
+          age: r.age,
+        });
+      }
+    }
+
+    const limited = results.slice(0, opts.count);
+    console.log(formatResults(limited, opts.query));
+  } catch (error) {
+    console.error(`Error: ${error.message}`);
+    process.exit(1);
+  }
+}
+
+const opts = parseArgs();
+search(opts);

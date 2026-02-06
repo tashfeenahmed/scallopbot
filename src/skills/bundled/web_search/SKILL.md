@@ -1,134 +1,108 @@
 ---
 name: web_search
-description: Search the web using Brave Search API
-user-invocable: true
-triggers: [search, web, google, lookup, find information]
-scripts:
-  run: "scripts/run.ts"
-inputSchema:
-  type: object
-  properties:
-    query:
-      type: string
-      description: "The search query"
-    count:
-      type: number
-      description: "Number of results to return (default: 5, max: 20)"
-    freshness:
-      type: string
-      enum: [pd, pw, pm, py]
-      description: "Filter by recency: pd=past day, pw=past week, pm=past month, py=past year"
-  required: [query]
+description: Search the web using web-search CLI - fast results from Brave Search API
+user-invocable: false
+triggers: [search, web, google, lookup, find information, research]
 metadata:
   openclaw:
     emoji: "\U0001F50D"
     requires:
+      bins: [web-search]
       env: [BRAVE_SEARCH_API_KEY]
 ---
 
-# Web Search Skill
+# Web Search Skill (web-search CLI)
 
-Search the web for information using the Brave Search API. This is the preferred method for web searches - fast, reliable, and no CAPTCHAs.
+**IMPORTANT: There is NO "web_search" tool. Use the `bash` tool to run web-search CLI commands.**
+
+Use the `web-search` CLI via the `bash` tool for all web searches. Fast, reliable results from Brave Search API.
+
+Example: `bash("web-search 'TypeScript tutorial'")`
+
+## Quick Reference
+
+```bash
+# Basic search
+web-search "your query here"
+
+# Get more results (default: 5, max: 20)
+web-search -n 10 "React hooks tutorial"
+
+# Filter by recency
+web-search --fresh pd "AI news"     # pd=past day
+web-search --fresh pw "tech news"   # pw=past week
+web-search --fresh pm "releases"    # pm=past month
+web-search --fresh py "annual"      # py=past year
+
+# Raw JSON output (for parsing)
+web-search --json "query"
+
+# Combine options
+web-search -n 10 --fresh pd "breaking news"
+```
 
 ## When to Use
 
-Use the web search skill for:
-
+Use web-search for:
 - **Current events**: News, sports scores, recent developments
 - **Research**: Looking up people, companies, products, technologies
 - **Documentation**: Finding tutorials, API docs, code examples
 - **Fact-checking**: Verifying information, getting authoritative sources
 - **General knowledge**: Any question about the real world
 
-## Input Format
-
-The skill accepts JSON arguments via the `SKILL_ARGS` environment variable:
-
-```json
-{
-  "query": "TypeScript tutorial 2024",
-  "count": 5,
-  "freshness": "pm"
-}
-```
-
-### Parameters
-
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `query` | string | Yes | - | The search query |
-| `count` | number | No | 5 | Number of results to return (max: 20) |
-| `freshness` | string | No | - | Filter by recency: pd=past day, pw=past week, pm=past month, py=past year |
-
 ## Output Format
 
-The skill returns JSON to stdout:
-
-```json
-{
-  "success": true,
-  "output": "Search results for \"TypeScript tutorial\":\n\n1. Learn TypeScript (2 days ago)\n   https://example.com\n   A comprehensive guide...",
-  "exitCode": 0
-}
+Results are formatted as:
 ```
+Search results for "query":
 
-### Response Fields
+1. Title (age)
+   https://example.com/url
+   Description of the result...
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `success` | boolean | True if search completed successfully |
-| `output` | string | Formatted search results or error message |
-| `error` | string | Error description if search failed |
-| `exitCode` | number | 0 for success, 1 for error |
-
-## Result Format
-
-Each search result is formatted as:
-
-```
-N. Title (age)
-   URL
-   Description
+2. Another Title (2 days ago)
+   https://example.com/another
+   Another description...
 ```
 
 News results are prefixed with `[NEWS]` in the title.
 
-## Environment Requirements
-
-- **BRAVE_SEARCH_API_KEY**: Required. Obtain from https://api.search.brave.com/
-
 ## Examples
 
-### Basic search
-
-```json
-{ "query": "React hooks tutorial" }
+### Research a topic
+```bash
+web-search "how to implement OAuth 2.0"
 ```
 
-### Get more results
-
-```json
-{
-  "query": "Node.js best practices",
-  "count": 10
-}
+### Get recent news
+```bash
+web-search --fresh pd -n 10 "technology news today"
 ```
 
-### Recent results only
-
-```json
-{
-  "query": "AI news",
-  "freshness": "pd"
-}
+### Find documentation
+```bash
+web-search "Prisma schema relations documentation"
 ```
 
-### Documentation lookup
-
-```json
-{
-  "query": "Prisma schema relations",
-  "count": 5,
-  "freshness": "py"
-}
+### Fact check something
+```bash
+web-search "population of Tokyo 2024"
 ```
+
+### Get raw data for processing
+```bash
+web-search --json "weather API providers" | jq '.web.results[0]'
+```
+
+## Tips
+
+1. **Use quotes** around multi-word queries
+2. **Use --fresh pd** for breaking news or recent events
+3. **Increase count** with -n for research tasks
+4. **Use --json** when you need to parse results programmatically
+5. **Be specific** in queries for better results
+
+## Environment
+
+Requires `BRAVE_SEARCH_API_KEY` environment variable.
+Get your API key from: https://api.search.brave.com/
