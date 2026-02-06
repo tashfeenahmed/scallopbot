@@ -104,6 +104,7 @@ export class TelegramChannel {
   private voiceAvailable = false;
   private enableVoiceReply: boolean;
   private workspacePath: string;
+  private db: ScallopDatabase;
 
   constructor(options: TelegramChannelOptions) {
     this.bot = new Bot(options.botToken);
@@ -115,6 +116,7 @@ export class TelegramChannel {
     this.allowedUsers = new Set(options.allowedUsers || []);
     this.enableVoiceReply = options.enableVoiceReply ?? false;
     this.voiceManager = options.voiceManager || null;
+    this.db = options.db;
 
     this.setupHandlers();
     this.initVoice();
@@ -253,6 +255,19 @@ export class TelegramChannel {
       this.stopRequests.add(userId);
       await ctx.reply('Stopping current task...');
       this.logger.info({ userId }, 'Stop requested by user');
+    });
+
+    // /usage command - show token usage and costs
+    this.bot.command('usage', async (ctx) => {
+      const userId = ctx.from?.id.toString();
+      if (!userId) return;
+
+      if (!this.isUserAllowed(userId)) {
+        await this.sendUnauthorized(ctx);
+        return;
+      }
+
+      await this.handleUsage(ctx);
     });
 
     // Handle regular messages
@@ -396,6 +411,7 @@ export class TelegramChannel {
       '<b>Commands:</b>\n' +
       '/start - Welcome message\n' +
       '/help - Show this help\n' +
+      '/usage - View token usage and costs\n' +
       '/settings - View your configuration\n' +
       '/setup - Reconfigure the bot\n' +
       '/new - Start new conversation history\n\n' +
@@ -408,6 +424,76 @@ export class TelegramChannel {
       'Just send me a message and I\'ll do my best to help!',
       { parse_mode: 'HTML' }
     );
+  }
+
+  /**
+   * Handle /usage command - show token usage and costs
+   */
+  private async handleUsage(ctx: Context): Promise<void> {
+    const now = Date.now();
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+    const monthStart = new Date();
+    monthStart.setDate(1);
+    monthStart.setHours(0, 0, 0, 0);
+
+    // Get all usage records
+    const allRecords = this.db.getCostUsageSince(0);
+    const todayRecords = allRecords.filter(r => r.timestamp >= todayStart.getTime());
+    const monthRecords = allRecords.filter(r => r.timestamp >= monthStart.getTime());
+
+    // Calculate totals
+    const todayTokens = todayRecords.reduce((sum, r) => sum + r.inputTokens + r.outputTokens, 0);
+    const todayCost = todayRecords.reduce((sum, r) => sum + r.cost, 0);
+    const monthTokens = monthRecords.reduce((sum, r) => sum + r.inputTokens + r.outputTokens, 0);
+    const monthCost = monthRecords.reduce((sum, r) => sum + r.cost, 0);
+    const totalTokens = allRecords.reduce((sum, r) => sum + r.inputTokens + r.outputTokens, 0);
+    const totalCost = allRecords.reduce((sum, r) => sum + r.cost, 0);
+
+    // Get model breakdown for this month
+    const modelUsage = new Map<string, { tokens: number; cost: number }>();
+    for (const r of monthRecords) {
+      const existing = modelUsage.get(r.model) || { tokens: 0, cost: 0 };
+      existing.tokens += r.inputTokens + r.outputTokens;
+      existing.cost += r.cost;
+      modelUsage.set(r.model, existing);
+    }
+
+    // Format model breakdown
+    let modelBreakdown = '';
+    const sortedModels = [...modelUsage.entries()].sort((a, b) => b[1].cost - a[1].cost);
+    for (const [model, usage] of sortedModels.slice(0, 5)) {
+      const shortName = model.length > 20 ? model.substring(0, 18) + '..' : model;
+      modelBreakdown += `  ${shortName}: ${this.formatTokens(usage.tokens)} ($${usage.cost.toFixed(4)})\n`;
+    }
+
+    const message =
+      `<b>Usage Statistics</b>\n\n` +
+      `<b>Today:</b>\n` +
+      `  Tokens: ${this.formatTokens(todayTokens)}\n` +
+      `  Cost: $${todayCost.toFixed(4)}\n\n` +
+      `<b>This Month:</b>\n` +
+      `  Tokens: ${this.formatTokens(monthTokens)}\n` +
+      `  Cost: $${monthCost.toFixed(4)}\n\n` +
+      `<b>All Time:</b>\n` +
+      `  Tokens: ${this.formatTokens(totalTokens)}\n` +
+      `  Cost: $${totalCost.toFixed(4)}\n` +
+      `  Requests: ${allRecords.length.toLocaleString()}\n\n` +
+      (modelBreakdown ? `<b>This Month by Model:</b>\n${modelBreakdown}` : '');
+
+    await ctx.reply(message, { parse_mode: 'HTML' });
+  }
+
+  /**
+   * Format token count with K/M suffix
+   */
+  private formatTokens(tokens: number): string {
+    if (tokens >= 1_000_000) {
+      return (tokens / 1_000_000).toFixed(2) + 'M';
+    } else if (tokens >= 1_000) {
+      return (tokens / 1_000).toFixed(1) + 'K';
+    }
+    return tokens.toString();
   }
 
   /**
@@ -952,6 +1038,7 @@ export class TelegramChannel {
     // Note: /start is intentionally omitted - it still works but doesn't clutter the menu
     await this.bot.api.setMyCommands([
       { command: 'help', description: 'Show available commands' },
+      { command: 'usage', description: 'View token usage and costs' },
       { command: 'stop', description: 'Stop current task' },
       { command: 'settings', description: 'View your current settings' },
       { command: 'setup', description: 'Reconfigure bot (name, personality, model)' },
