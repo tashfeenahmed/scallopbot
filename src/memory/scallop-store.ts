@@ -54,6 +54,8 @@ export interface AddMemoryOptions {
   sourceChunk?: string;
   eventDate?: number;
   metadata?: Record<string, unknown>;
+  /** Source of the memory: user message or assistant response */
+  source?: 'user' | 'assistant';
   /** Automatically detect relations with existing memories */
   detectRelations?: boolean;
 }
@@ -126,6 +128,7 @@ export class ScallopMemoryStore {
       confidence = 0.8,
       sourceChunk,
       metadata,
+      source = 'user',
       detectRelations = true,
     } = options;
 
@@ -152,6 +155,7 @@ export class ScallopMemoryStore {
       importance,
       confidence,
       isLatest: true,
+      source,
       documentDate: Date.now(),
       eventDate,
       prominence: 1.0,

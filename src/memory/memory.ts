@@ -83,12 +83,16 @@ export class HotCollector {
     if (!buffer || buffer.length === 0) return;
 
     for (const entry of buffer) {
+      // Extract source from metadata (user or assistant)
+      const source = (entry.metadata?.source as 'user' | 'assistant') || 'user';
+
       this.scallopStore.add({
         userId: sessionId,
         content: entry.content,
         category: 'event',
         importance: 3,
         confidence: 1.0,
+        source,
         metadata: {
           ...entry.metadata,
           type: entry.type,
