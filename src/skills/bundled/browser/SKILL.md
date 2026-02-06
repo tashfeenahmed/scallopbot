@@ -1,6 +1,6 @@
 ---
 name: browser
-description: Browse websites using agent-browser CLI - navigate, interact, extract content
+description: "Browse websites via bash. Workflow: 1) agent-browser open <url>, 2) agent-browser get text body (read page), 3) agent-browser snapshot -i (see interactive elements), 4) agent-browser click/fill @ref (interact). Always extract content after opening."
 user-invocable: false
 disable-model-invocation: true
 triggers: [browse, web, website, page, scrape, click, navigate, screenshot]
@@ -12,8 +12,6 @@ metadata:
 ---
 
 # Browser Skill (agent-browser CLI)
-
-**IMPORTANT: There is NO "browser" tool. Use the `bash` tool to run agent-browser CLI commands.**
 
 Use the `agent-browser` CLI via the `bash` tool for all web automation. This is a powerful headless browser optimized for AI agents.
 

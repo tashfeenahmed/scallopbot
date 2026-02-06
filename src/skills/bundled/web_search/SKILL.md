@@ -1,6 +1,6 @@
 ---
 name: web_search
-description: Search the web using web-search CLI - fast results from Brave Search API
+description: "Search the web for current info. Use bash: web-search 'query'. Options: -n 10 (more results), --fresh pd (past day). Use for news, sports, research, fact-checking."
 user-invocable: false
 disable-model-invocation: true
 triggers: [search, web, google, lookup, find information, research]
@@ -13,8 +13,6 @@ metadata:
 ---
 
 # Web Search Skill (web-search CLI)
-
-**IMPORTANT: There is NO "web_search" tool. Use the `bash` tool to run web-search CLI commands.**
 
 Use the `web-search` CLI via the `bash` tool for all web searches. Fast, reliable results from Brave Search API.
 

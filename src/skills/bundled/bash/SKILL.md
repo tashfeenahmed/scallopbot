@@ -1,6 +1,6 @@
 ---
 name: bash
-description: Execute shell commands in the workspace directory
+description: "Execute shell commands. Use for: running web-search and agent-browser CLIs, installing packages, running scripts (python3, node), system commands. This is your gateway to web search, browsing, and code execution."
 user-invocable: false
 triggers: [command, shell, terminal, execute, run, bash]
 scripts:

@@ -124,8 +124,7 @@ export class SkillRegistry {
     return this.state.availableSkills.filter(
       (skill) =>
         skill.hasScripts &&
-        skill.frontmatter['disable-model-invocation'] !== true &&
-        skill.frontmatter['user-invocable'] !== false
+        skill.frontmatter['disable-model-invocation'] !== true
     );
   }
 
@@ -139,7 +138,7 @@ export class SkillRegistry {
     return this.state.availableSkills.filter(
       (skill) =>
         !skill.hasScripts ||
-        skill.frontmatter['user-invocable'] === false
+        skill.frontmatter['disable-model-invocation'] === true
     );
   }
 
@@ -303,27 +302,17 @@ export class SkillRegistry {
       if (executableSkills.length > 0) {
         lines.push('');
       }
-      lines.push('# Skill Guides');
+      lines.push('# Bash-Based Skills');
       lines.push('');
       lines.push(
-        'These skills provide detailed guidance for specific tasks. ' +
-          'IMPORTANT: If exactly one skill clearly applies to the task, you MUST first use read_file ' +
-          'to load the full SKILL.md from the path shown, then follow its instructions. ' +
-          'Never attempt to use a skill without reading it first.'
+        'These skills are invoked via the bash tool. The description shows usage. For advanced options, read the SKILL.md at the path shown.'
       );
-      lines.push('');
-      lines.push('<available_skills>');
 
       for (const skill of documentationSkills) {
         const emoji = skill.frontmatter.metadata?.openclaw?.emoji || '';
-        lines.push('');
-        lines.push(`${skill.name}${emoji ? ` ${emoji}` : ''}`);
-        lines.push(skill.description);
-        lines.push(skill.path);
+        lines.push(`- **${skill.name}**${emoji ? ` ${emoji}` : ''}: ${skill.description}`);
+        lines.push(`  Docs: ${skill.path}`);
       }
-
-      lines.push('');
-      lines.push('</available_skills>');
     }
 
     return lines.join('\n');
