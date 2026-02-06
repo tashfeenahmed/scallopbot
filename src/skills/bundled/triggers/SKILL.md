@@ -18,7 +18,7 @@ inputSchema:
   required: [action]
 metadata:
   openclaw:
-    emoji: "\u{1F514}"
+    emoji: "\U0001F514"
     requires:
       bins: []
 ---
