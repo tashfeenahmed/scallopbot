@@ -271,6 +271,15 @@ export class LLMFactExtractor {
       result.factsDeleted = processResults.deleted;
       result.duplicatesSkipped = processResults.duplicates;
 
+      // If no facts were stored, still extract triggers from the source message
+      // This handles temporal events like "I have a dentist appointment tomorrow"
+      // which don't produce static facts but should create proactive triggers
+      if (result.factsStored === 0 && message) {
+        this.extractTriggersFromMessage(message, userId, 'user').catch(err => {
+          this.logger.debug({ error: (err as Error).message }, 'Background trigger extraction failed');
+        });
+      }
+
       this.logger.info(
         {
           stored: result.factsStored,
@@ -309,6 +318,112 @@ export class LLMFactExtractor {
       return result;
     } finally {
       this.processingQueue.delete(key);
+    }
+  }
+
+  /**
+   * Extract proactive triggers from a message (user or assistant)
+   * This is a lighter-weight extraction focused only on time-sensitive events.
+   * Called for both user messages (when no facts found) and assistant messages.
+   */
+  async extractTriggersFromMessage(
+    message: string,
+    userId: string,
+    source: 'user' | 'assistant' = 'user'
+  ): Promise<void> {
+    if (!this.scallopStore) return;
+
+    const prompt = `You are a proactive trigger extractor. Analyze this message for time-sensitive items that warrant follow-up.
+
+MESSAGE (from ${source}):
+"${message}"
+
+EXTRACT PROACTIVE TRIGGERS for:
+- Upcoming events: "meeting tomorrow", "dentist next week", "flight on Friday"
+- Commitments: "I'll finish the report", "planning to start gym", "need to call mom"
+- Goals: "trying to lose weight", "learning Spanish", "saving for vacation"
+- Deadlines: "due Friday", "need to submit by EOD", "expires next month"
+- Appointments: "dentist at 2pm", "doctor appointment", "scheduled for 3pm"
+
+${source === 'assistant' ? `Note: This is from the AI assistant. Extract triggers for events/commitments the assistant mentioned or confirmed.` : ''}
+
+Format each trigger as:
+{
+  "type": "event_prep" | "commitment_check" | "goal_checkin" | "follow_up",
+  "description": "Brief description of what to follow up on",
+  "trigger_time": "ISO datetime OR relative like '+2h', '+1d', '+1w'",
+  "context": "Context for generating the proactive message"
+}
+
+Trigger time guidelines:
+- event_prep: 2 hours before the event (for same-day) or morning of (for future days)
+- commitment_check: Next day or after stated deadline
+- goal_checkin: 1 week for short-term, 2 weeks for long-term goals
+- follow_up: Based on context, usually next day
+
+RULES:
+- Only create triggers for EXPLICIT time-sensitive items, not vague statements
+- Return empty array if nothing time-sensitive found
+
+Respond with JSON only:
+{"proactive_triggers": []}`;
+
+    try {
+      const response = await this.provider.complete({
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0.1,
+        maxTokens: 400,
+      });
+
+      const responseText = Array.isArray(response.content)
+        ? response.content.map(block => 'text' in block ? block.text : '').join('')
+        : String(response.content);
+
+      const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) return;
+
+      const parsed = JSON.parse(jsonMatch[0]) as {
+        proactive_triggers?: Array<{
+          type: 'event_prep' | 'commitment_check' | 'goal_checkin' | 'follow_up';
+          description: string;
+          trigger_time: string;
+          context: string;
+        }>;
+      };
+
+      if (parsed.proactive_triggers && Array.isArray(parsed.proactive_triggers) && parsed.proactive_triggers.length > 0) {
+        const db = this.scallopStore.getDatabase();
+        for (const trigger of parsed.proactive_triggers) {
+          if (trigger.description && trigger.trigger_time && trigger.context) {
+            const triggerAt = this.parseTriggerTime(trigger.trigger_time);
+            if (!triggerAt) {
+              this.logger.debug({ trigger_time: trigger.trigger_time }, 'Invalid trigger time, skipping');
+              continue;
+            }
+
+            if (db.hasSimilarPendingTrigger(userId, trigger.description)) {
+              this.logger.debug({ description: trigger.description }, 'Similar trigger already exists, skipping');
+              continue;
+            }
+
+            db.addProactiveTrigger({
+              userId,
+              type: trigger.type || 'follow_up',
+              description: trigger.description,
+              context: trigger.context,
+              triggerAt,
+              status: 'pending',
+              sourceMemoryId: null,
+            });
+            this.logger.info(
+              { type: trigger.type, description: trigger.description, source, triggerAt: new Date(triggerAt).toISOString() },
+              'Proactive trigger created from message'
+            );
+          }
+        }
+      }
+    } catch (err) {
+      this.logger.debug({ error: (err as Error).message }, 'Trigger extraction failed');
     }
   }
 
@@ -961,7 +1076,7 @@ Respond with JSON only:
 
   /**
    * Parse trigger time from ISO or relative format
-   * Supports: ISO datetime, '+2h', '+1d', '+1w', 'tomorrow 9am', etc.
+   * Supports: ISO datetime, '+2h', '+1d', '+1w', 'tomorrow 9am', '+1d morning', 'Monday 10:00', etc.
    */
   private parseTriggerTime(timeStr: string): number | null {
     const now = Date.now();
@@ -972,7 +1087,9 @@ Respond with JSON only:
       return isoDate.getTime();
     }
 
-    // Relative time patterns
+    const lowerStr = timeStr.toLowerCase();
+
+    // Relative time patterns: +1d, +2h, +1w, +1m
     const relativeMatch = timeStr.match(/^\+(\d+)(h|d|w|m)$/i);
     if (relativeMatch) {
       const [, amount, unit] = relativeMatch;
@@ -989,26 +1106,97 @@ Respond with JSON only:
       }
     }
 
-    // Try natural language parsing for common patterns
-    const lowerStr = timeStr.toLowerCase();
+    // Relative time with time of day: +1d morning, +2d evening, +1d 9am
+    const relativeWithTimeMatch = timeStr.match(/^\+(\d+)(d|w)\s+(.+)$/i);
+    if (relativeWithTimeMatch) {
+      const [, amount, unit, timeOfDay] = relativeWithTimeMatch;
+      const value = parseInt(amount, 10);
+      const daysToAdd = unit.toLowerCase() === 'w' ? value * 7 : value;
+
+      const targetDate = new Date(now);
+      targetDate.setDate(targetDate.getDate() + daysToAdd);
+
+      // Parse time of day
+      const timeOfDayLower = timeOfDay.toLowerCase().trim();
+      if (timeOfDayLower === 'morning') {
+        targetDate.setHours(9, 0, 0, 0);
+      } else if (timeOfDayLower === 'afternoon') {
+        targetDate.setHours(14, 0, 0, 0);
+      } else if (timeOfDayLower === 'evening') {
+        targetDate.setHours(18, 0, 0, 0);
+      } else if (timeOfDayLower === 'night') {
+        targetDate.setHours(20, 0, 0, 0);
+      } else {
+        // Try parsing as specific time (9am, 10:30, etc.)
+        const specificTime = this.parseTimeOfDay(timeOfDay);
+        if (specificTime) {
+          targetDate.setHours(specificTime.hour, specificTime.minute, 0, 0);
+        } else {
+          targetDate.setHours(9, 0, 0, 0); // Default to morning
+        }
+      }
+
+      return targetDate.getTime();
+    }
+
+    // Day of week patterns: Monday, next Tuesday, etc.
+    const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+    for (let i = 0; i < dayNames.length; i++) {
+      if (lowerStr.includes(dayNames[i])) {
+        const targetDate = new Date(now);
+        const currentDay = targetDate.getDay();
+        let daysUntil = i - currentDay;
+        if (daysUntil <= 0) daysUntil += 7; // Next occurrence
+
+        targetDate.setDate(targetDate.getDate() + daysUntil);
+
+        // Try to parse time from the string
+        const specificTime = this.parseTimeOfDay(timeStr);
+        if (specificTime) {
+          targetDate.setHours(specificTime.hour, specificTime.minute, 0, 0);
+        } else {
+          targetDate.setHours(9, 0, 0, 0); // Default to 9am
+        }
+
+        return targetDate.getTime();
+      }
+    }
+
+    // Tomorrow patterns
     if (lowerStr.includes('tomorrow')) {
       const tomorrow = new Date(now);
       tomorrow.setDate(tomorrow.getDate() + 1);
-      // Default to 9am if no time specified
-      const timeMatch = timeStr.match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i);
-      if (timeMatch) {
-        let hour = parseInt(timeMatch[1], 10);
-        const minute = timeMatch[2] ? parseInt(timeMatch[2], 10) : 0;
-        const ampm = timeMatch[3]?.toLowerCase();
-        if (ampm === 'pm' && hour < 12) hour += 12;
-        if (ampm === 'am' && hour === 12) hour = 0;
-        tomorrow.setHours(hour, minute, 0, 0);
+      const specificTime = this.parseTimeOfDay(timeStr);
+      if (specificTime) {
+        tomorrow.setHours(specificTime.hour, specificTime.minute, 0, 0);
       } else {
         tomorrow.setHours(9, 0, 0, 0);
       }
       return tomorrow.getTime();
     }
 
+    return null;
+  }
+
+  /**
+   * Parse time of day from string (e.g., "9am", "14:30", "2:30pm")
+   */
+  private parseTimeOfDay(str: string): { hour: number; minute: number } | null {
+    // Match patterns like "9am", "9:30am", "14:00", "2:30pm"
+    const timeMatch = str.match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i);
+    if (timeMatch) {
+      let hour = parseInt(timeMatch[1], 10);
+      const minute = timeMatch[2] ? parseInt(timeMatch[2], 10) : 0;
+      const ampm = timeMatch[3]?.toLowerCase();
+
+      if (ampm === 'pm' && hour < 12) hour += 12;
+      if (ampm === 'am' && hour === 12) hour = 0;
+
+      // Validate hour
+      if (hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59) {
+        return { hour, minute };
+      }
+    }
     return null;
   }
 

@@ -510,6 +510,15 @@ export class Agent {
       this.logger.debug({ sessionId }, 'Memories flushed to store');
     }
 
+    // Extract proactive triggers from assistant response (async, non-blocking)
+    // This catches events mentioned BY the AI (e.g., "I'll remind you about your meeting Friday")
+    if (this.factExtractor && finalResponse) {
+      const userId = 'default'; // Single-user agent
+      this.factExtractor.extractTriggersFromMessage(finalResponse, userId, 'assistant').catch((error) => {
+        this.logger.warn({ error: (error as Error).message }, 'Async trigger extraction from assistant failed');
+      });
+    }
+
     this.logger.info(
       { sessionId, iterations, inputTokens: totalInputTokens, outputTokens: totalOutputTokens, provider: activeProvider.name },
       'Message processed'

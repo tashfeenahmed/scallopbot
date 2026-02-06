@@ -51,6 +51,9 @@ export interface ScallopMemoryEntry {
   confidence: number; // 0.0-1.0
   isLatest: boolean;
 
+  // Source attribution (defaults to 'user' if not specified)
+  source?: 'user' | 'assistant';
+
   // Temporal grounding
   documentDate: number; // epoch ms - when recorded
   eventDate: number | null; // epoch ms - when event occurs
@@ -244,6 +247,9 @@ export class ScallopDatabase {
         confidence REAL DEFAULT 0.8,
         is_latest INTEGER DEFAULT 1,
 
+        -- Source attribution (user or assistant)
+        source TEXT DEFAULT 'user',
+
         -- Temporal grounding
         document_date INTEGER NOT NULL,
         event_date INTEGER,
@@ -387,6 +393,26 @@ export class ScallopDatabase {
       CREATE INDEX IF NOT EXISTS idx_triggers_trigger_at ON proactive_triggers(trigger_at);
       CREATE INDEX IF NOT EXISTS idx_triggers_pending ON proactive_triggers(status, trigger_at) WHERE status = 'pending';
     `);
+
+    // Migration: Add source column to existing databases
+    this.migrateAddSourceColumn();
+  }
+
+  /**
+   * Add source column to memories table if it doesn't exist (migration for existing DBs)
+   */
+  private migrateAddSourceColumn(): void {
+    try {
+      // Check if column exists
+      const tableInfo = this.db.prepare("PRAGMA table_info(memories)").all() as Array<{ name: string }>;
+      const hasSourceColumn = tableInfo.some(col => col.name === 'source');
+
+      if (!hasSourceColumn) {
+        this.db.exec("ALTER TABLE memories ADD COLUMN source TEXT DEFAULT 'user'");
+      }
+    } catch {
+      // Column might already exist or table might not exist yet
+    }
   }
 
   // ============ Memory CRUD Operations ============
@@ -401,11 +427,11 @@ export class ScallopDatabase {
     const stmt = this.db.prepare(`
       INSERT INTO memories (
         id, user_id, content, category, memory_type, importance, confidence, is_latest,
-        document_date, event_date, prominence, last_accessed, access_count,
+        source, document_date, event_date, prominence, last_accessed, access_count,
         source_chunk, embedding, metadata, created_at, updated_at
       ) VALUES (
         ?, ?, ?, ?, ?, ?, ?, ?,
-        ?, ?, ?, ?, ?,
+        ?, ?, ?, ?, ?, ?,
         ?, ?, ?, ?, ?
       )
     `);
@@ -419,6 +445,7 @@ export class ScallopDatabase {
       memory.importance,
       memory.confidence,
       memory.isLatest ? 1 : 0,
+      memory.source || 'user',
       memory.documentDate,
       memory.eventDate,
       memory.prominence,
@@ -1121,17 +1148,56 @@ export class ScallopDatabase {
 
   /**
    * Check if a similar trigger already exists (to avoid duplicates)
+   * Uses fuzzy matching - checks for significant word overlap
    */
-  hasSimilarPendingTrigger(userId: string, description: string, withinMs: number = 60 * 60 * 1000): boolean {
+  hasSimilarPendingTrigger(userId: string, description: string, withinMs: number = 24 * 60 * 60 * 1000): boolean {
     const now = Date.now();
+
+    // Get all pending triggers within the time window
     const stmt = this.db.prepare(`
-      SELECT COUNT(*) as count FROM proactive_triggers
+      SELECT description FROM proactive_triggers
       WHERE user_id = ? AND status = 'pending'
-        AND description = ?
         AND trigger_at BETWEEN ? AND ?
     `);
-    const row = stmt.get(userId, description, now - withinMs, now + withinMs) as { count: number };
-    return row.count > 0;
+    const rows = stmt.all(userId, now - withinMs, now + withinMs * 7) as Array<{ description: string }>;
+
+    if (rows.length === 0) return false;
+
+    // Normalize and extract significant words from new description
+    const normalizeText = (text: string): Set<string> => {
+      const stopWords = new Set(['the', 'a', 'an', 'at', 'on', 'in', 'to', 'for', 'of', 'and', 'is', 'my', 'me', 'i']);
+      return new Set(
+        text.toLowerCase()
+          .replace(/[^\w\s]/g, '')
+          .split(/\s+/)
+          .filter(word => word.length > 2 && !stopWords.has(word))
+      );
+    };
+
+    const newWords = normalizeText(description);
+    if (newWords.size === 0) return false;
+
+    // Check each existing trigger for similarity
+    for (const row of rows) {
+      const existingWords = normalizeText(row.description);
+      if (existingWords.size === 0) continue;
+
+      // Count overlapping words
+      let overlap = 0;
+      for (const word of newWords) {
+        if (existingWords.has(word)) overlap++;
+      }
+
+      // Consider similar if >50% of words overlap (in either direction)
+      const similarityNew = overlap / newWords.size;
+      const similarityExisting = overlap / existingWords.size;
+
+      if (similarityNew >= 0.5 || similarityExisting >= 0.5) {
+        return true;
+      }
+    }
+
+    return false;
   }
 
   // ============ Utility Methods ============
@@ -1188,6 +1254,7 @@ export class ScallopDatabase {
       importance: row.importance as number,
       confidence: row.confidence as number,
       isLatest: (row.is_latest as number) === 1,
+      source: (row.source as 'user' | 'assistant') || 'user',
       documentDate: row.document_date as number,
       eventDate: row.event_date as number | null,
       prominence: row.prominence as number,
