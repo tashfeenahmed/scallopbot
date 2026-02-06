@@ -627,7 +627,7 @@ New content.
       const prompt = registry.generateSkillPrompt();
 
       // Documentation skills use lazy-loading - path included, not full content
-      expect(prompt).toContain('available_skills');
+      expect(prompt).toContain('Bash-Based Skills');
       expect(prompt).toContain('available-skill');
       expect(prompt).toContain('SKILL.md'); // Path to the skill file
       expect(prompt).not.toContain('Available skill content'); // Content NOT included

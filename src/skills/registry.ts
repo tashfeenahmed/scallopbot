@@ -137,8 +137,10 @@ export class SkillRegistry {
   getDocumentationSkills(): Skill[] {
     return this.state.availableSkills.filter(
       (skill) =>
-        !skill.hasScripts ||
-        skill.frontmatter['disable-model-invocation'] === true
+        // Pure documentation skills (no scripts, not hidden)
+        (!skill.hasScripts && skill.frontmatter['disable-model-invocation'] !== true) ||
+        // Bash-based skills shown as documentation (have scripts but not callable as tools)
+        (skill.hasScripts && skill.frontmatter['disable-model-invocation'] === true)
     );
   }
 
