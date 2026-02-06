@@ -1,6 +1,6 @@
 ---
 name: memory_search
-description: Search stored memories using hybrid BM25 + semantic matching
+description: "Search the user's long-term memory for stored facts and past context. Use when the user references something personal, past conversations, or people/projects by name. Do NOT use for current events, news, or real-time info — use bash with web-search for that."
 user-invocable: true
 triggers: [remember, recall, memory, search memories, what do you know]
 scripts:
