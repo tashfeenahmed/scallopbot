@@ -356,19 +356,21 @@ Format each trigger as:
 {
   "type": "event_prep" | "commitment_check" | "goal_checkin" | "follow_up",
   "description": "Brief description of what to follow up on",
-  "trigger_time": "ISO datetime OR relative like '+2h', '+1d', '+1w'",
+  "trigger_time": "MUST include specific time - use ISO datetime with time (e.g., '2026-02-07T09:00:00') OR relative ('+2h', '+1d 9am', 'tomorrow 10:00')",
   "context": "Context for generating the proactive message"
 }
 
 Trigger time guidelines:
-- event_prep: 2 hours before the event (for same-day) or morning of (for future days)
-- commitment_check: Next day or after stated deadline
-- goal_checkin: 1 week for short-term, 2 weeks for long-term goals
-- follow_up: Based on context, usually next day
+- event_prep: 2 hours before the event (for same-day) or morning of (8-9am for future days)
+- commitment_check: Next day morning (9am) or after stated deadline
+- goal_checkin: 1 week for short-term, 2 weeks for long-term goals, at 10am
+- follow_up: Based on context, usually next day at 9am
 
 RULES:
+- CRITICAL: trigger_time MUST include a specific time (hour:minute), not just a date!
+- "TODAY" alone is NOT valid - must be "TODAY 2pm" or similar with time
 - Only create triggers for EXPLICIT time-sensitive items, not vague statements
-- Return empty array if nothing time-sensitive found
+- Return empty array if nothing time-sensitive found or if no specific time can be determined
 
 Respond with JSON only:
 {"proactive_triggers": []}`;
@@ -912,15 +914,15 @@ Look for time-sensitive items in the ORIGINAL USER MESSAGE:
 Format: {
   "type": "event_prep" | "commitment_check" | "goal_checkin" | "follow_up",
   "description": "Brief description of what to follow up on",
-  "trigger_time": "ISO datetime OR relative like '+2h', '+1d', '+1w'",
+  "trigger_time": "MUST include specific time - use ISO datetime with time (e.g., '2026-02-07T09:00:00') OR relative ('+2h', '+1d 9am', 'tomorrow 10:00')",
   "context": "Context for generating the proactive message"
 }
 
 Trigger time guidelines:
-- event_prep: 2 hours before the event (for same-day) or morning of (for future days)
-- commitment_check: Next day or after stated deadline
-- goal_checkin: 1 week for short-term, 2 weeks for long-term goals
-- follow_up: Based on context, usually next day
+- event_prep: 2 hours before the event (for same-day) or morning of (8-9am for future days)
+- commitment_check: Next day morning (9am) or after stated deadline
+- goal_checkin: 1 week for short-term, 2 weeks for long-term goals, at 10am
+- follow_up: Based on context, usually next day at 9am
 
 RULES:
 - superseded: IDs of memories replaced by new facts. Empty array if none.
@@ -930,6 +932,8 @@ RULES:
 - proactive_triggers: Array of trigger objects. Empty array if nothing time-sensitive.
 - Do NOT echo back unchanged profile values.
 - Only create triggers for EXPLICIT time-sensitive items, not vague statements.
+- CRITICAL: trigger_time MUST include a specific time (hour:minute), not just a date!
+- "TODAY" alone is NOT valid - must include time like "TODAY 2pm".
 
 Respond with JSON only:
 {"superseded": [], "user_profile": {}, "agent_profile": {}, "preferences_learned": [], "proactive_triggers": []}`;
@@ -1087,15 +1091,24 @@ Respond with JSON only:
 
   /**
    * Parse trigger time from ISO or relative format
-   * Supports: ISO datetime, '+2h', '+1d', '+1w', 'tomorrow 9am', '+1d morning', 'Monday 10:00', etc.
+   * Supports: ISO datetime with time, '+2h', '+1d', '+1w', 'tomorrow 9am', '+1d morning', 'Monday 10:00', etc.
+   * REJECTS: date-only strings like "2026-02-07" or "TODAY" without time
    */
   private parseTriggerTime(timeStr: string): number | null {
     const now = Date.now();
 
-    // Try ISO format first
-    const isoDate = new Date(timeStr);
-    if (!isNaN(isoDate.getTime())) {
-      return isoDate.getTime();
+    // Reject "TODAY" without specific time
+    if (/^today$/i.test(timeStr.trim())) {
+      return null;
+    }
+
+    // Try ISO format - but ONLY if it includes time component (T or space followed by time)
+    // Reject date-only formats like "2026-02-07"
+    if (/^\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2}/.test(timeStr)) {
+      const isoDate = new Date(timeStr);
+      if (!isNaN(isoDate.getTime())) {
+        return isoDate.getTime();
+      }
     }
 
     const lowerStr = timeStr.toLowerCase();
@@ -1171,6 +1184,21 @@ Respond with JSON only:
 
         return targetDate.getTime();
       }
+    }
+
+    // Today with time pattern (e.g., "today 2pm", "today 14:30")
+    if (lowerStr.includes('today')) {
+      const specificTime = this.parseTimeOfDay(timeStr);
+      if (specificTime) {
+        const today = new Date(now);
+        today.setHours(specificTime.hour, specificTime.minute, 0, 0);
+        // Only valid if the time is in the future
+        if (today.getTime() > now) {
+          return today.getTime();
+        }
+      }
+      // "today" without valid future time - reject
+      return null;
     }
 
     // Tomorrow patterns
