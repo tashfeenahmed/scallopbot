@@ -190,6 +190,7 @@ export type ProactiveTriggerStatus = 'pending' | 'fired' | 'dismissed' | 'expire
 
 /**
  * Proactive trigger entry - for agent-initiated messages
+ * @deprecated Use ScheduledItem instead - this is kept for backward compatibility
  */
 export interface ProactiveTriggerEntry {
   id: string;
@@ -201,6 +202,78 @@ export interface ProactiveTriggerEntry {
   status: ProactiveTriggerStatus;
   sourceMemoryId: string | null; // The memory that created this trigger
   firedAt: number | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+// ============ Unified Scheduled Items (Triggers + Reminders) ============
+
+/**
+ * Source of the scheduled item
+ */
+export type ScheduledItemSource = 'user' | 'agent';
+
+/**
+ * Type of scheduled item
+ */
+export type ScheduledItemType =
+  | 'reminder'         // User-set reminder
+  | 'event_prep'       // Agent: prepare for upcoming event
+  | 'commitment_check' // Agent: check on user's stated intention
+  | 'goal_checkin'     // Agent: check in on long-term goal
+  | 'follow_up';       // Agent: general follow-up
+
+/**
+ * Status of scheduled item
+ */
+export type ScheduledItemStatus = 'pending' | 'fired' | 'dismissed' | 'expired';
+
+/**
+ * Recurring schedule types
+ */
+export type RecurringType = 'daily' | 'weekly' | 'weekdays' | 'weekends';
+
+/**
+ * Recurring schedule configuration
+ */
+export interface RecurringSchedule {
+  type: RecurringType;
+  hour: number;       // 0-23
+  minute: number;     // 0-59
+  dayOfWeek?: number; // 0-6 (Sunday=0) for weekly
+}
+
+/**
+ * Unified scheduled item entry - combines triggers and reminders
+ */
+export interface ScheduledItem {
+  id: string;
+  userId: string;
+  sessionId: string | null;
+
+  // Source distinction
+  source: ScheduledItemSource;  // 'user' (explicit) | 'agent' (implicit)
+
+  // Type/category
+  type: ScheduledItemType;
+
+  // Content
+  message: string;              // The reminder/trigger message
+  context: string | null;       // Additional context (for LLM message gen with agent items)
+
+  // Scheduling
+  triggerAt: number;            // epoch ms
+
+  // Recurring support
+  recurring: RecurringSchedule | null;
+
+  // Status
+  status: ScheduledItemStatus;
+  firedAt: number | null;
+
+  // Metadata
+  sourceMemoryId: string | null; // For agent-created items
+
   createdAt: number;
   updatedAt: number;
 }
@@ -358,7 +431,7 @@ export class ScallopDatabase {
         timestamp INTEGER NOT NULL
       );
 
-      -- Proactive triggers (agent-initiated messages)
+      -- Proactive triggers (agent-initiated messages) - DEPRECATED, use scheduled_items
       CREATE TABLE IF NOT EXISTS proactive_triggers (
         id TEXT PRIMARY KEY,
         user_id TEXT NOT NULL,
@@ -369,6 +442,39 @@ export class ScallopDatabase {
         status TEXT NOT NULL DEFAULT 'pending',
         source_memory_id TEXT,
         fired_at INTEGER,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+
+      -- Unified scheduled items (triggers + reminders)
+      CREATE TABLE IF NOT EXISTS scheduled_items (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        session_id TEXT,
+
+        -- Source distinction
+        source TEXT NOT NULL,              -- 'user' (explicit) | 'agent' (implicit)
+
+        -- Type/category
+        type TEXT NOT NULL,                -- reminder|event_prep|commitment_check|goal_checkin|follow_up
+
+        -- Content
+        message TEXT NOT NULL,             -- The reminder/trigger message
+        context TEXT,                      -- Additional context (for LLM message gen)
+
+        -- Scheduling
+        trigger_at INTEGER NOT NULL,       -- epoch ms
+
+        -- Recurring support (stored as JSON)
+        recurring TEXT,                    -- JSON: {type, hour, minute, dayOfWeek?}
+
+        -- Status
+        status TEXT NOT NULL DEFAULT 'pending',  -- pending|fired|dismissed|expired
+        fired_at INTEGER,
+
+        -- Metadata
+        source_memory_id TEXT,             -- For agent-created items
+
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
       );
@@ -392,6 +498,13 @@ export class ScallopDatabase {
       CREATE INDEX IF NOT EXISTS idx_triggers_status ON proactive_triggers(status);
       CREATE INDEX IF NOT EXISTS idx_triggers_trigger_at ON proactive_triggers(trigger_at);
       CREATE INDEX IF NOT EXISTS idx_triggers_pending ON proactive_triggers(status, trigger_at) WHERE status = 'pending';
+
+      -- Indexes for scheduled_items
+      CREATE INDEX IF NOT EXISTS idx_scheduled_user ON scheduled_items(user_id);
+      CREATE INDEX IF NOT EXISTS idx_scheduled_source ON scheduled_items(source);
+      CREATE INDEX IF NOT EXISTS idx_scheduled_status ON scheduled_items(status);
+      CREATE INDEX IF NOT EXISTS idx_scheduled_trigger_at ON scheduled_items(trigger_at);
+      CREATE INDEX IF NOT EXISTS idx_scheduled_pending ON scheduled_items(status, trigger_at) WHERE status = 'pending';
     `);
 
     // Migration: Add source column to existing databases
@@ -1198,6 +1311,251 @@ export class ScallopDatabase {
     }
 
     return false;
+  }
+
+  // ============ Scheduled Items (Unified Triggers + Reminders) ============
+
+  /**
+   * Add a scheduled item (trigger or reminder)
+   * Status defaults to 'pending' if not specified
+   */
+  addScheduledItem(item: Omit<ScheduledItem, 'id' | 'status' | 'createdAt' | 'updatedAt' | 'firedAt'> & { status?: ScheduledItemStatus }): ScheduledItem {
+    const id = nanoid();
+    const now = Date.now();
+    const status = item.status ?? 'pending';
+
+    const stmt = this.db.prepare(`
+      INSERT INTO scheduled_items (
+        id, user_id, session_id, source, type, message, context,
+        trigger_at, recurring, status, source_memory_id, fired_at,
+        created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    stmt.run(
+      id,
+      item.userId,
+      item.sessionId ?? null,
+      item.source,
+      item.type,
+      item.message,
+      item.context ?? null,
+      item.triggerAt,
+      item.recurring ? JSON.stringify(item.recurring) : null,
+      status,
+      item.sourceMemoryId ?? null,
+      null,
+      now,
+      now
+    );
+
+    return {
+      ...item,
+      id,
+      status,
+      firedAt: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+  }
+
+  /**
+   * Get a scheduled item by ID
+   */
+  getScheduledItem(id: string): ScheduledItem | null {
+    const stmt = this.db.prepare('SELECT * FROM scheduled_items WHERE id = ?');
+    const row = stmt.get(id) as Record<string, unknown> | undefined;
+    return row ? this.rowToScheduledItem(row) : null;
+  }
+
+  /**
+   * Get pending items that are due (trigger_at <= now)
+   */
+  getDueScheduledItems(now: number = Date.now()): ScheduledItem[] {
+    const stmt = this.db.prepare(`
+      SELECT * FROM scheduled_items
+      WHERE status = 'pending' AND trigger_at <= ?
+      ORDER BY trigger_at ASC
+    `);
+    const rows = stmt.all(now) as Record<string, unknown>[];
+    return rows.map(row => this.rowToScheduledItem(row));
+  }
+
+  /**
+   * Get all pending items for a user
+   */
+  getPendingScheduledItemsByUser(userId: string): ScheduledItem[] {
+    const stmt = this.db.prepare(`
+      SELECT * FROM scheduled_items
+      WHERE user_id = ? AND status = 'pending'
+      ORDER BY trigger_at ASC
+    `);
+    const rows = stmt.all(userId) as Record<string, unknown>[];
+    return rows.map(row => this.rowToScheduledItem(row));
+  }
+
+  /**
+   * Get pending items by source (user or agent)
+   */
+  getPendingScheduledItemsBySource(userId: string, source: ScheduledItemSource): ScheduledItem[] {
+    const stmt = this.db.prepare(`
+      SELECT * FROM scheduled_items
+      WHERE user_id = ? AND source = ? AND status = 'pending'
+      ORDER BY trigger_at ASC
+    `);
+    const rows = stmt.all(userId, source) as Record<string, unknown>[];
+    return rows.map(row => this.rowToScheduledItem(row));
+  }
+
+  /**
+   * Mark a scheduled item as fired
+   */
+  markScheduledItemFired(id: string): boolean {
+    const now = Date.now();
+    const stmt = this.db.prepare(`
+      UPDATE scheduled_items
+      SET status = 'fired', fired_at = ?, updated_at = ?
+      WHERE id = ?
+    `);
+    const result = stmt.run(now, now, id);
+    return result.changes > 0;
+  }
+
+  /**
+   * Mark a scheduled item as dismissed
+   */
+  markScheduledItemDismissed(id: string): boolean {
+    const now = Date.now();
+    const stmt = this.db.prepare(`
+      UPDATE scheduled_items
+      SET status = 'dismissed', updated_at = ?
+      WHERE id = ?
+    `);
+    const result = stmt.run(now, id);
+    return result.changes > 0;
+  }
+
+  /**
+   * Update a scheduled item (e.g., reschedule)
+   */
+  updateScheduledItem(id: string, updates: Partial<Pick<ScheduledItem, 'triggerAt' | 'message' | 'status'>>): boolean {
+    const now = Date.now();
+    const sets: string[] = ['updated_at = ?'];
+    const params: unknown[] = [now];
+
+    if (updates.triggerAt !== undefined) {
+      sets.push('trigger_at = ?');
+      params.push(updates.triggerAt);
+    }
+    if (updates.message !== undefined) {
+      sets.push('message = ?');
+      params.push(updates.message);
+    }
+    if (updates.status !== undefined) {
+      sets.push('status = ?');
+      params.push(updates.status);
+    }
+
+    params.push(id);
+    const stmt = this.db.prepare(`UPDATE scheduled_items SET ${sets.join(', ')} WHERE id = ?`);
+    const result = stmt.run(...params);
+    return result.changes > 0;
+  }
+
+  /**
+   * Delete a scheduled item
+   */
+  deleteScheduledItem(id: string): boolean {
+    const stmt = this.db.prepare('DELETE FROM scheduled_items WHERE id = ?');
+    const result = stmt.run(id);
+    return result.changes > 0;
+  }
+
+  /**
+   * Expire old pending items (older than maxAgeMs past their trigger time)
+   */
+  expireOldScheduledItems(maxAgeMs: number = 24 * 60 * 60 * 1000): number {
+    const now = Date.now();
+    const cutoff = now - maxAgeMs;
+    const stmt = this.db.prepare(`
+      UPDATE scheduled_items
+      SET status = 'expired', updated_at = ?
+      WHERE status = 'pending' AND trigger_at < ?
+    `);
+    const result = stmt.run(now, cutoff);
+    return result.changes;
+  }
+
+  /**
+   * Check if a similar pending item already exists (for duplicate detection)
+   */
+  hasSimilarPendingScheduledItem(userId: string, message: string, withinMs: number = 24 * 60 * 60 * 1000): boolean {
+    const now = Date.now();
+
+    // Get all pending items within the time window
+    const stmt = this.db.prepare(`
+      SELECT message FROM scheduled_items
+      WHERE user_id = ? AND status = 'pending'
+        AND trigger_at BETWEEN ? AND ?
+    `);
+    const rows = stmt.all(userId, now - withinMs, now + withinMs * 7) as Array<{ message: string }>;
+
+    if (rows.length === 0) return false;
+
+    // Normalize and extract significant words
+    const normalizeText = (text: string): Set<string> => {
+      const stopWords = new Set(['the', 'a', 'an', 'at', 'on', 'in', 'to', 'for', 'of', 'and', 'is', 'my', 'me', 'i', 'remind', 'reminder']);
+      return new Set(
+        text.toLowerCase()
+          .replace(/[^\w\s]/g, '')
+          .split(/\s+/)
+          .filter(word => word.length > 2 && !stopWords.has(word))
+      );
+    };
+
+    const newWords = normalizeText(message);
+    if (newWords.size === 0) return false;
+
+    for (const row of rows) {
+      const existingWords = normalizeText(row.message);
+      if (existingWords.size === 0) continue;
+
+      let overlap = 0;
+      for (const word of newWords) {
+        if (existingWords.has(word)) overlap++;
+      }
+
+      const similarityNew = overlap / newWords.size;
+      const similarityExisting = overlap / existingWords.size;
+
+      if (similarityNew >= 0.5 || similarityExisting >= 0.5) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  /**
+   * Convert row to ScheduledItem
+   */
+  private rowToScheduledItem(row: Record<string, unknown>): ScheduledItem {
+    return {
+      id: row.id as string,
+      userId: row.user_id as string,
+      sessionId: row.session_id as string | null,
+      source: row.source as ScheduledItemSource,
+      type: row.type as ScheduledItemType,
+      message: row.message as string,
+      context: row.context as string | null,
+      triggerAt: row.trigger_at as number,
+      recurring: row.recurring ? JSON.parse(row.recurring as string) : null,
+      status: row.status as ScheduledItemStatus,
+      firedAt: row.fired_at as number | null,
+      sourceMemoryId: row.source_memory_id as string | null,
+      createdAt: row.created_at as number,
+      updatedAt: row.updated_at as number,
+    };
   }
 
   // ============ Utility Methods ============

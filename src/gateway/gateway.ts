@@ -1,6 +1,4 @@
 import * as path from 'path';
-import * as fs from 'fs';
-import * as os from 'os';
 import type { Logger } from 'pino';
 import type { Config } from '../config/config.js';
 import {
@@ -15,7 +13,6 @@ import {
   type LLMProvider,
 } from '../providers/index.js';
 import { defineSkill } from '../skills/sdk.js';
-import type { Reminder } from '../skills/types.js';
 import { SessionManager } from '../agent/session.js';
 import { Agent } from '../agent/agent.js';
 import { TelegramChannel } from '../channels/telegram.js';
@@ -37,7 +34,7 @@ import { ContextManager } from '../routing/context.js';
 import { MediaProcessor } from '../media/index.js';
 import { VoiceManager } from '../voice/index.js';
 import { type TriggerSource, type TriggerSourceRegistry, parseUserIdPrefix } from '../triggers/index.js';
-import { TriggerEvaluator } from '../proactive/index.js';
+import { UnifiedScheduler } from '../proactive/index.js';
 import { GoalService } from '../goals/index.js';
 
 export interface GatewayOptions {
@@ -66,8 +63,7 @@ export class Gateway {
   private agent: Agent | null = null;
   private telegramChannel: TelegramChannel | null = null;
   private apiChannel: ApiChannel | null = null;
-  private reminderMonitorInterval: ReturnType<typeof setInterval> | null = null;
-  private triggerEvaluator: TriggerEvaluator | null = null;
+  private unifiedScheduler: UnifiedScheduler | null = null;
 
   /** Registry of active trigger sources for multi-channel message dispatch */
   private triggerSources: TriggerSourceRegistry = new Map();
@@ -241,23 +237,23 @@ export class Gateway {
     });
     this.logger.debug('Agent initialized');
 
-    // Initialize proactive trigger evaluator
+    // Initialize unified scheduler (handles both user reminders and agent triggers)
     if (factExtractionProvider && this.scallopMemoryStore) {
-      this.triggerEvaluator = new TriggerEvaluator({
+      this.unifiedScheduler = new UnifiedScheduler({
         db: this.scallopMemoryStore.getDatabase(),
         memoryStore: this.scallopMemoryStore,
         provider: factExtractionProvider,
         logger: this.logger,
         goalService: this.goalService || undefined,
-        interval: 5 * 60 * 1000, // Check every 5 minutes
+        interval: 30 * 1000, // Check every 30 seconds
         onSendMessage: async (userId: string, message: string) => {
           return this.handleProactiveMessage(userId, message);
         },
-        onAgentProcess: async (userId: string, message: string) => {
-          return this.handleProactiveAgentProcess(userId, message);
+        onAgentProcess: async (userId: string, sessionId: string | null, message: string) => {
+          return this.handleScheduledAgentProcess(userId, sessionId, message);
         },
       });
-      this.logger.debug('Proactive trigger evaluator initialized');
+      this.logger.debug('Unified scheduler initialized');
     }
 
     this.isInitialized = true;
@@ -371,9 +367,6 @@ export class Gateway {
       this.backgroundGardener.start();
     }
 
-    // Start reminder file monitor (checks reminders.json every 30 seconds)
-    this.startReminderMonitor();
-
     // Start Telegram channel if enabled
     if (this.config.channels.telegram.enabled && this.config.channels.telegram.botToken) {
       this.telegramChannel = new TelegramChannel({
@@ -417,9 +410,9 @@ export class Gateway {
       }
     }
 
-    // Start proactive trigger evaluator (after trigger sources are registered)
-    if (this.triggerEvaluator) {
-      this.triggerEvaluator.start();
+    // Start unified scheduler (after trigger sources are registered)
+    if (this.unifiedScheduler) {
+      this.unifiedScheduler.start();
     }
 
     this.isRunning = true;
@@ -475,15 +468,9 @@ export class Gateway {
       this.backgroundGardener.stop();
     }
 
-    // Stop reminder monitor
-    if (this.reminderMonitorInterval) {
-      clearInterval(this.reminderMonitorInterval);
-      this.reminderMonitorInterval = null;
-    }
-
-    // Stop proactive trigger evaluator
-    if (this.triggerEvaluator) {
-      this.triggerEvaluator.stop();
+    // Stop unified scheduler
+    if (this.unifiedScheduler) {
+      this.unifiedScheduler.stop();
     }
 
     // Clear trigger sources before stopping channels
@@ -811,90 +798,38 @@ export class Gateway {
   }
 
   /**
-   * Handle processing a proactive trigger through the agent
-   * Used for actionable triggers that may need the agent to perform tasks
+   * Handle processing a scheduled item through the agent
+   * Used for actionable reminders and triggers that may need the agent to perform tasks
    */
-  private async handleProactiveAgentProcess(userId: string, message: string): Promise<string | null> {
+  private async handleScheduledAgentProcess(userId: string, sessionId: string | null, message: string): Promise<string | null> {
     if (!this.agent || !this.sessionManager) {
       return null;
     }
 
-    this.logger.debug({ userId }, 'Processing proactive trigger through agent');
+    this.logger.debug({ userId, sessionId }, 'Processing scheduled item through agent');
 
     try {
-      // Create a new session for this proactive message
-      const session = await this.sessionManager.createSession({ userId, source: 'proactive' });
+      // Use existing session if provided, otherwise create a new one
+      let actualSessionId = sessionId;
+      if (!actualSessionId) {
+        const session = await this.sessionManager.createSession({ userId, source: 'scheduled' });
+        actualSessionId = session.id;
+      }
 
       // Process through the agent
       const result = await this.agent.processMessage(
-        session.id,
-        `[PROACTIVE CHECK - Context for you to check in on]: ${message}`,
+        actualSessionId,
+        message,
         undefined,
         async (_update) => {
-          // Don't surface thinking to users for proactive messages
+          // Don't surface thinking to users for scheduled messages
         }
       );
 
       return result.response || null;
     } catch (error) {
-      this.logger.error({ userId, error: (error as Error).message }, 'Failed to process proactive trigger through agent');
+      this.logger.error({ userId, error: (error as Error).message }, 'Failed to process scheduled item through agent');
       return null;
-    }
-  }
-
-  /**
-   * Handle a triggered reminder by executing it through the agent
-   * If the reminder contains an action (like "check the weather"), the agent will perform it
-   */
-  private async handleReminderTrigger(reminder: Reminder): Promise<void> {
-    this.logger.info({ reminderId: reminder.id, userId: reminder.userId, message: reminder.message }, 'Reminder triggered');
-
-    const { source: triggerSource, rawUserId } = this.resolveTriggerSource(reminder.userId);
-
-    if (!triggerSource) {
-      this.logger.warn({ reminderId: reminder.id }, 'No trigger source available to send reminder');
-      return;
-    }
-
-    this.logger.debug({ reminderId: reminder.id, triggerSource: triggerSource.getName() }, 'Using trigger source for reminder');
-
-    // Check if this is an actionable reminder (contains action words)
-    const actionKeywords = ['check', 'get', 'find', 'search', 'look up', 'tell me', 'show', 'fetch', 'run', 'execute', 'do'];
-    const isActionable = actionKeywords.some(keyword =>
-      reminder.message.toLowerCase().includes(keyword)
-    );
-
-    if (isActionable && this.agent) {
-      // Run the reminder message through the agent to execute the action
-      this.logger.info({ reminderId: reminder.id }, 'Executing actionable reminder through agent');
-
-      try {
-        // Process through agent using the existing session
-        // Note: onProgress is empty to avoid sending thinking to Telegram (same as regular messages)
-        const result = await this.agent.processMessage(
-          reminder.sessionId,
-          `[SCHEDULED REMINDER - Execute this task now]: ${reminder.message}`,
-          undefined,
-          async (_update) => {
-            // Thinking stays enabled in the agent but is not surfaced to Telegram users
-          }
-        );
-
-        // Send the agent's response
-        if (result.response) {
-          await triggerSource.sendMessage(rawUserId, result.response);
-        }
-
-        this.logger.debug({ reminderId: reminder.id }, 'Actionable reminder executed');
-      } catch (error) {
-        this.logger.error({ reminderId: reminder.id, error: (error as Error).message }, 'Failed to execute actionable reminder');
-        // Fallback to simple reminder
-        await triggerSource.sendMessage(rawUserId, `**Reminder!**\n\n${reminder.message}`);
-      }
-    } else {
-      // Simple reminder - just send the message
-      await triggerSource.sendMessage(rawUserId, `**Reminder!**\n\n${reminder.message}`);
-      this.logger.debug({ reminderId: reminder.id }, 'Simple reminder sent');
     }
   }
 
@@ -934,187 +869,6 @@ export class Gateway {
     this.logger.warn({ userId }, 'No trigger source available to send message');
     return false;
   }
-
-  /**
-   * Start the reminder file monitor.
-   * Polls ~/.scallopbot/reminders.json every 30 seconds for due reminders.
-   */
-  private startReminderMonitor(): void {
-    // Check immediately on start
-    this.checkFileReminders().catch(err => {
-      this.logger.error({ error: (err as Error).message }, 'Error in initial reminder check');
-    });
-
-    // Then check every 30 seconds
-    this.reminderMonitorInterval = setInterval(() => {
-      this.checkFileReminders().catch(err => {
-        this.logger.error({ error: (err as Error).message }, 'Error in reminder check');
-      });
-    }, 30000);
-
-    this.logger.debug('Reminder file monitor started (30s interval)');
-  }
-
-  /**
-   * Check for due reminders in the reminders.json file and trigger them.
-   * Removes one-time reminders after triggering, reschedules recurring ones.
-   */
-  private async checkFileReminders(): Promise<void> {
-    const remindersPath = path.join(os.homedir(), '.scallopbot', 'reminders.json');
-
-    // Check if file exists
-    if (!fs.existsSync(remindersPath)) {
-      return;
-    }
-
-    let reminders: FileReminder[];
-    try {
-      const data = fs.readFileSync(remindersPath, 'utf-8');
-      reminders = JSON.parse(data);
-    } catch (err) {
-      this.logger.warn({ error: (err as Error).message }, 'Failed to read reminders file');
-      return;
-    }
-
-    if (!Array.isArray(reminders) || reminders.length === 0) {
-      return;
-    }
-
-    const now = Date.now();
-    const dueReminders: FileReminder[] = [];
-    const remainingReminders: FileReminder[] = [];
-
-    for (const reminder of reminders) {
-      const triggerTime = new Date(reminder.triggerAt).getTime();
-
-      if (triggerTime <= now) {
-        dueReminders.push(reminder);
-      } else {
-        remainingReminders.push(reminder);
-      }
-    }
-
-    if (dueReminders.length === 0) {
-      return;
-    }
-
-    this.logger.info({ count: dueReminders.length }, 'Found due reminders');
-
-    // Process due reminders
-    for (const fileReminder of dueReminders) {
-      // Convert to the Reminder type expected by handleReminderTrigger
-      const reminder: Reminder = {
-        id: fileReminder.id,
-        userId: fileReminder.userId,
-        sessionId: fileReminder.sessionId,
-        message: fileReminder.message,
-        triggerAt: new Date(fileReminder.triggerAt),
-        createdAt: new Date(fileReminder.createdAt),
-      };
-
-      try {
-        await this.handleReminderTrigger(reminder);
-      } catch (err) {
-        this.logger.error(
-          { reminderId: reminder.id, error: (err as Error).message },
-          'Failed to trigger reminder'
-        );
-      }
-
-      // If recurring, calculate next occurrence and add back
-      if (fileReminder.recurring) {
-        const nextOccurrence = this.getNextRecurringOccurrence(fileReminder.recurring);
-        if (nextOccurrence) {
-          remainingReminders.push({
-            ...fileReminder,
-            triggerAt: nextOccurrence.toISOString(),
-          });
-          this.logger.debug(
-            { reminderId: fileReminder.id, nextTrigger: nextOccurrence.toISOString() },
-            'Rescheduled recurring reminder'
-          );
-        }
-      }
-    }
-
-    // Write back the remaining reminders
-    try {
-      fs.writeFileSync(remindersPath, JSON.stringify(remainingReminders, null, 2));
-    } catch (err) {
-      this.logger.error({ error: (err as Error).message }, 'Failed to update reminders file');
-    }
-  }
-
-  /**
-   * Calculate the next occurrence for a recurring reminder schedule.
-   */
-  private getNextRecurringOccurrence(schedule: RecurringSchedule): Date | null {
-    const now = new Date();
-    const target = new Date();
-    target.setHours(schedule.time.hour, schedule.time.minute, 0, 0);
-
-    switch (schedule.type) {
-      case 'daily':
-        // Move to tomorrow at the scheduled time
-        target.setDate(target.getDate() + 1);
-        break;
-
-      case 'weekly':
-        if (schedule.dayOfWeek !== undefined) {
-          // Find next occurrence of the day
-          const currentDay = now.getDay();
-          let daysUntil = schedule.dayOfWeek - currentDay;
-          if (daysUntil <= 0) {
-            daysUntil += 7;
-          }
-          target.setDate(target.getDate() + daysUntil);
-        }
-        break;
-
-      case 'weekdays':
-        // Move to next weekday
-        target.setDate(target.getDate() + 1);
-        while (target.getDay() === 0 || target.getDay() === 6) {
-          target.setDate(target.getDate() + 1);
-        }
-        break;
-
-      case 'weekends':
-        // Move to next weekend day
-        target.setDate(target.getDate() + 1);
-        while (target.getDay() !== 0 && target.getDay() !== 6) {
-          target.setDate(target.getDate() + 1);
-        }
-        break;
-
-      default:
-        return null;
-    }
-
-    return target;
-  }
-}
-
-/**
- * Reminder stored in the file (from reminder skill)
- */
-interface FileReminder {
-  id: string;
-  message: string;
-  triggerAt: string; // ISO date string
-  userId: string;
-  sessionId: string;
-  createdAt: string;
-  recurring?: RecurringSchedule;
-}
-
-/**
- * Recurring schedule for reminders
- */
-interface RecurringSchedule {
-  type: 'daily' | 'weekly' | 'weekdays' | 'weekends';
-  time: { hour: number; minute: number };
-  dayOfWeek?: number;
 }
 
 /**

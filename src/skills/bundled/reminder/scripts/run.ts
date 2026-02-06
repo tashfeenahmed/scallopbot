@@ -1,30 +1,40 @@
 /**
  * Reminder Skill Execution Script
  *
- * Manages reminders stored in a JSON file.
- * The gateway monitors this file and triggers reminders at the right time.
+ * Manages reminders stored in SQLite (scheduled_items table).
+ * The unified scheduler handles triggering at the right time.
  */
 
-import * as fs from 'fs';
 import * as path from 'path';
-import { nanoid } from 'nanoid';
 import * as os from 'os';
+import Database from 'better-sqlite3';
+import { nanoid } from 'nanoid';
 
-// Types
-interface Reminder {
-  id: string;
-  message: string;
-  triggerAt: string; // ISO date string
-  userId: string;
-  sessionId: string;
-  createdAt: string;
-  recurring?: RecurringSchedule;
-}
+// Types matching db.ts
+type RecurringType = 'daily' | 'weekly' | 'weekdays' | 'weekends';
 
 interface RecurringSchedule {
-  type: 'daily' | 'weekly' | 'weekdays' | 'weekends';
-  time: { hour: number; minute: number };
+  type: RecurringType;
+  hour: number;
+  minute: number;
   dayOfWeek?: number;
+}
+
+interface ScheduledItem {
+  id: string;
+  userId: string;
+  sessionId: string | null;
+  source: 'user' | 'agent';
+  type: string;
+  message: string;
+  context: string | null;
+  triggerAt: number;
+  recurring: RecurringSchedule | null;
+  status: string;
+  firedAt: number | null;
+  sourceMemoryId: string | null;
+  createdAt: number;
+  updatedAt: number;
 }
 
 interface ReminderArgs {
@@ -41,34 +51,36 @@ interface SkillResult {
   exitCode: number;
 }
 
-// Get reminders file path
-function getRemindersPath(): string {
+// Get database path
+function getDbPath(): string {
   const dataDir = process.env.SCALLOPBOT_DATA_DIR || path.join(os.homedir(), '.scallopbot');
-  return path.join(dataDir, 'reminders.json');
+  return path.join(dataDir, 'memories.db');
 }
 
-// Load reminders from file
-function loadReminders(): Reminder[] {
-  const filePath = getRemindersPath();
-  try {
-    if (fs.existsSync(filePath)) {
-      const data = fs.readFileSync(filePath, 'utf-8');
-      return JSON.parse(data);
-    }
-  } catch {
-    // File doesn't exist or is corrupt
-  }
-  return [];
+// Open database connection
+function openDb(): Database.Database {
+  const dbPath = getDbPath();
+  return new Database(dbPath);
 }
 
-// Save reminders to file
-function saveReminders(reminders: Reminder[]): void {
-  const filePath = getRemindersPath();
-  const dir = path.dirname(filePath);
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
-  }
-  fs.writeFileSync(filePath, JSON.stringify(reminders, null, 2));
+// Convert DB row to ScheduledItem
+function rowToItem(row: Record<string, unknown>): ScheduledItem {
+  return {
+    id: row.id as string,
+    userId: row.user_id as string,
+    sessionId: row.session_id as string | null,
+    source: row.source as 'user' | 'agent',
+    type: row.type as string,
+    message: row.message as string,
+    context: row.context as string | null,
+    triggerAt: row.trigger_at as number,
+    recurring: row.recurring ? JSON.parse(row.recurring as string) : null,
+    status: row.status as string,
+    firedAt: row.fired_at as number | null,
+    sourceMemoryId: row.source_memory_id as string | null,
+    createdAt: row.created_at as number,
+    updatedAt: row.updated_at as number,
+  };
 }
 
 // Output result and exit
@@ -126,7 +138,7 @@ function parseDayOfWeek(input: string): number | null {
 function getNextOccurrence(schedule: RecurringSchedule): Date {
   const now = new Date();
   const target = new Date();
-  target.setHours(schedule.time.hour, schedule.time.minute, 0, 0);
+  target.setHours(schedule.hour, schedule.minute, 0, 0);
 
   switch (schedule.type) {
     case 'daily':
@@ -171,7 +183,7 @@ function parseRecurring(input: string): { schedule: RecurringSchedule; message?:
   if (dailyMatch) {
     const time = parseTime(dailyMatch[1]);
     if (time) {
-      return { schedule: { type: 'daily', time }, message: dailyMatch[2]?.trim() };
+      return { schedule: { type: 'daily', hour: time.hour, minute: time.minute }, message: dailyMatch[2]?.trim() };
     }
   }
 
@@ -181,7 +193,7 @@ function parseRecurring(input: string): { schedule: RecurringSchedule; message?:
     const dayOfWeek = parseDayOfWeek(weeklyMatch[1]);
     const time = parseTime(weeklyMatch[2]);
     if (dayOfWeek !== null && time) {
-      return { schedule: { type: 'weekly', time, dayOfWeek }, message: weeklyMatch[3]?.trim() };
+      return { schedule: { type: 'weekly', hour: time.hour, minute: time.minute, dayOfWeek }, message: weeklyMatch[3]?.trim() };
     }
   }
 
@@ -190,7 +202,7 @@ function parseRecurring(input: string): { schedule: RecurringSchedule; message?:
   if (weekdaysMatch) {
     const time = parseTime(weekdaysMatch[1]);
     if (time) {
-      return { schedule: { type: 'weekdays', time }, message: weekdaysMatch[2]?.trim() };
+      return { schedule: { type: 'weekdays', hour: time.hour, minute: time.minute }, message: weekdaysMatch[2]?.trim() };
     }
   }
 
@@ -199,7 +211,7 @@ function parseRecurring(input: string): { schedule: RecurringSchedule; message?:
   if (weekendsMatch) {
     const time = parseTime(weekendsMatch[1]);
     if (time) {
-      return { schedule: { type: 'weekends', time }, message: weekendsMatch[2]?.trim() };
+      return { schedule: { type: 'weekends', hour: time.hour, minute: time.minute }, message: weekendsMatch[2]?.trim() };
     }
   }
 
@@ -290,19 +302,19 @@ function setReminder(args: ReminderArgs): SkillResult {
     };
   }
 
-  const now = new Date();
-  let triggerAt: Date;
-  let recurring: RecurringSchedule | undefined;
+  const now = Date.now();
+  let triggerAt: number;
+  let recurring: RecurringSchedule | null = null;
   let scheduleDescription: string;
 
   // Try parsing as recurring
   const recurringResult = parseRecurring(args.time);
   if (recurringResult) {
     recurring = recurringResult.schedule;
-    triggerAt = getNextOccurrence(recurring);
+    triggerAt = getNextOccurrence(recurring).getTime();
 
     const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-    const timeFormatted = `${recurring.time.hour % 12 || 12}:${recurring.time.minute.toString().padStart(2, '0')} ${recurring.time.hour >= 12 ? 'PM' : 'AM'}`;
+    const timeFormatted = `${recurring.hour % 12 || 12}:${recurring.minute.toString().padStart(2, '0')} ${recurring.hour >= 12 ? 'PM' : 'AM'}`;
 
     switch (recurring.type) {
       case 'daily':
@@ -322,8 +334,8 @@ function setReminder(args: ReminderArgs): SkillResult {
     // Try absolute time
     const absoluteTime = parseAbsoluteTime(args.time);
     if (absoluteTime) {
-      triggerAt = absoluteTime;
-      scheduleDescription = triggerAt.toLocaleString('en-US', {
+      triggerAt = absoluteTime.getTime();
+      scheduleDescription = absoluteTime.toLocaleString('en-US', {
         weekday: 'short',
         month: 'short',
         day: 'numeric',
@@ -342,27 +354,44 @@ function setReminder(args: ReminderArgs): SkillResult {
           exitCode: 1,
         };
       }
-      triggerAt = new Date(now.getTime() + delayMinutes * 60 * 1000);
+      triggerAt = now + delayMinutes * 60 * 1000;
       scheduleDescription = `in ${delayMinutes} minute${delayMinutes === 1 ? '' : 's'}`;
     }
   }
 
-  const reminder: Reminder = {
-    id: nanoid(8),
-    message: args.message,
-    triggerAt: triggerAt.toISOString(),
-    userId: process.env.SKILL_USER_ID || 'unknown',
-    sessionId: process.env.SKILL_SESSION_ID || 'unknown',
-    createdAt: now.toISOString(),
-    recurring,
-  };
+  const id = nanoid(8);
+  const userId = process.env.SKILL_USER_ID || 'unknown';
+  const sessionId = process.env.SKILL_SESSION_ID || null;
 
-  // Save to file
-  const reminders = loadReminders();
-  reminders.push(reminder);
-  saveReminders(reminders);
+  // Save to SQLite
+  const db = openDb();
+  try {
+    const stmt = db.prepare(`
+      INSERT INTO scheduled_items (
+        id, user_id, session_id, source, type, message, context,
+        trigger_at, recurring, status, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
 
-  const nextTriggerStr = triggerAt.toLocaleString('en-US', {
+    stmt.run(
+      id,
+      userId,
+      sessionId,
+      'user',
+      'reminder',
+      args.message,
+      null,
+      triggerAt,
+      recurring ? JSON.stringify(recurring) : null,
+      'pending',
+      now,
+      now
+    );
+  } finally {
+    db.close();
+  }
+
+  const nextTriggerStr = new Date(triggerAt).toLocaleString('en-US', {
     weekday: 'short',
     month: 'short',
     day: 'numeric',
@@ -375,32 +404,40 @@ function setReminder(args: ReminderArgs): SkillResult {
 
   return {
     success: true,
-    output: `Reminder set${recurringNote}! I'll remind you "${args.message}" ${scheduleDescription}. Next trigger: ${nextTriggerStr}. ID: ${reminder.id}`,
+    output: `Reminder set${recurringNote}! I'll remind you "${args.message}" ${scheduleDescription}. Next trigger: ${nextTriggerStr}. ID: ${id}`,
     exitCode: 0,
   };
 }
 
-// List reminders
+// List reminders (shows both user reminders AND agent triggers)
 function listReminders(): SkillResult {
-  const reminders = loadReminders();
+  const userId = process.env.SKILL_USER_ID || 'unknown';
   const now = Date.now();
 
-  // Filter out past non-recurring reminders
-  const activeReminders = reminders.filter(r => {
-    const triggerTime = new Date(r.triggerAt).getTime();
-    return triggerTime > now || r.recurring;
-  });
+  const db = openDb();
+  let items: ScheduledItem[];
+  try {
+    const stmt = db.prepare(`
+      SELECT * FROM scheduled_items
+      WHERE user_id = ? AND status = 'pending'
+      ORDER BY trigger_at ASC
+    `);
+    const rows = stmt.all(userId) as Record<string, unknown>[];
+    items = rows.map(rowToItem);
+  } finally {
+    db.close();
+  }
 
-  if (activeReminders.length === 0) {
+  if (items.length === 0) {
     return {
       success: true,
-      output: 'No active reminders.',
+      output: 'No active reminders or scheduled items.',
       exitCode: 0,
     };
   }
 
-  const lines = activeReminders.map(r => {
-    const triggerAt = new Date(r.triggerAt);
+  const lines = items.map(item => {
+    const triggerAt = new Date(item.triggerAt);
     const timeStr = triggerAt.toLocaleString('en-US', {
       weekday: 'short',
       month: 'short',
@@ -409,19 +446,24 @@ function listReminders(): SkillResult {
       minute: '2-digit',
       hour12: true,
     });
-    const minsLeft = Math.round((triggerAt.getTime() - now) / 60000);
-    const recurringLabel = r.recurring ? ' [recurring]' : '';
-    return `- [${r.id}]${recurringLabel} "${r.message}" at ${timeStr} (${minsLeft > 0 ? minsLeft + ' min left' : 'due'})`;
+    const minsLeft = Math.round((item.triggerAt - now) / 60000);
+
+    // Labels for source and type
+    const sourceLabel = item.source === 'agent' ? '[auto]' : '';
+    const recurringLabel = item.recurring ? ' [recurring]' : '';
+    const typeLabel = item.type !== 'reminder' ? ` (${item.type})` : '';
+
+    return `- [${item.id}]${sourceLabel}${recurringLabel}${typeLabel} "${item.message}" at ${timeStr} (${minsLeft > 0 ? minsLeft + ' min left' : 'due'})`;
   });
 
   return {
     success: true,
-    output: `Active reminders:\n${lines.join('\n')}`,
+    output: `Scheduled items:\n${lines.join('\n')}`,
     exitCode: 0,
   };
 }
 
-// Cancel a reminder
+// Cancel a reminder (works for both user and agent items)
 function cancelReminder(args: ReminderArgs): SkillResult {
   if (!args.reminder_id) {
     return {
@@ -432,26 +474,43 @@ function cancelReminder(args: ReminderArgs): SkillResult {
     };
   }
 
-  const reminders = loadReminders();
-  const index = reminders.findIndex(r => r.id === args.reminder_id);
+  const userId = process.env.SKILL_USER_ID || 'unknown';
 
-  if (index === -1) {
+  const db = openDb();
+  try {
+    // First check if it exists and belongs to this user
+    const checkStmt = db.prepare(`
+      SELECT id, source, type FROM scheduled_items
+      WHERE id = ? AND user_id = ? AND status = 'pending'
+    `);
+    const item = checkStmt.get(args.reminder_id, userId) as { id: string; source: string; type: string } | undefined;
+
+    if (!item) {
+      return {
+        success: false,
+        output: '',
+        error: `Item ${args.reminder_id} not found. Use action "list" to see active items.`,
+        exitCode: 1,
+      };
+    }
+
+    // Mark as dismissed
+    const updateStmt = db.prepare(`
+      UPDATE scheduled_items
+      SET status = 'dismissed', updated_at = ?
+      WHERE id = ?
+    `);
+    updateStmt.run(Date.now(), args.reminder_id);
+
+    const typeLabel = item.source === 'agent' ? `auto-scheduled ${item.type}` : 'reminder';
     return {
-      success: false,
-      output: '',
-      error: `Reminder ${args.reminder_id} not found. Use action "list" to see active reminders.`,
-      exitCode: 1,
+      success: true,
+      output: `${typeLabel.charAt(0).toUpperCase() + typeLabel.slice(1)} ${args.reminder_id} cancelled.`,
+      exitCode: 0,
     };
+  } finally {
+    db.close();
   }
-
-  reminders.splice(index, 1);
-  saveReminders(reminders);
-
-  return {
-    success: true,
-    output: `Reminder ${args.reminder_id} cancelled.`,
-    exitCode: 0,
-  };
 }
 
 // Main

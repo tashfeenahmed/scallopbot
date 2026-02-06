@@ -408,23 +408,25 @@ Respond with JSON only:
               continue;
             }
 
-            if (db.hasSimilarPendingTrigger(userId, trigger.description)) {
-              this.logger.debug({ description: trigger.description }, 'Similar trigger already exists, skipping');
+            if (db.hasSimilarPendingScheduledItem(userId, trigger.description)) {
+              this.logger.debug({ description: trigger.description }, 'Similar scheduled item already exists, skipping');
               continue;
             }
 
-            db.addProactiveTrigger({
+            db.addScheduledItem({
               userId,
+              sessionId: null,
+              source: 'agent',
               type: trigger.type || 'follow_up',
-              description: trigger.description,
+              message: trigger.description,
               context: trigger.context,
               triggerAt,
-              status: 'pending',
+              recurring: null,
               sourceMemoryId: null,
             });
             this.logger.info(
               { type: trigger.type, description: trigger.description, source, triggerAt: new Date(triggerAt).toISOString() },
-              'Proactive trigger created from message'
+              'Scheduled item created from message'
             );
           }
         }
@@ -1061,25 +1063,27 @@ Respond with JSON only:
               continue;
             }
 
-            // Check for duplicate triggers
-            if (db.hasSimilarPendingTrigger(userId, trigger.description)) {
-              this.logger.debug({ description: trigger.description }, 'Similar trigger already exists, skipping');
+            // Check for duplicate scheduled items
+            if (db.hasSimilarPendingScheduledItem(userId, trigger.description)) {
+              this.logger.debug({ description: trigger.description }, 'Similar scheduled item already exists, skipping');
               continue;
             }
 
-            // Store the trigger
-            db.addProactiveTrigger({
+            // Store the scheduled item
+            db.addScheduledItem({
               userId,
+              sessionId: null,
+              source: 'agent',
               type: trigger.type || 'follow_up',
-              description: trigger.description,
+              message: trigger.description,
               context: trigger.context,
               triggerAt,
-              status: 'pending',
+              recurring: null,
               sourceMemoryId: newMemoryIds[0] || null,
             });
             this.logger.info(
               { type: trigger.type, description: trigger.description, triggerAt: new Date(triggerAt).toISOString() },
-              'Proactive trigger created'
+              'Scheduled item created'
             );
           }
         }
