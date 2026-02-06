@@ -187,6 +187,17 @@ export class MoonshotProvider implements LLMProvider {
   ): OpenAI.ChatCompletionMessageParam[] {
     const messages: OpenAI.ChatCompletionMessageParam[] = [];
 
+    // Debug: Log incoming messages
+    this.logger?.info({
+      messageCount: request.messages.length,
+      messageTypes: request.messages.map(m => ({
+        role: m.role,
+        contentType: typeof m.content,
+        isArray: Array.isArray(m.content),
+        blockTypes: Array.isArray(m.content) ? m.content.map(c => c.type) : null
+      }))
+    }, 'Moonshot formatMessages input');
+
     // Add system message if present
     if (request.system) {
       messages.push({ role: 'system', content: request.system });
