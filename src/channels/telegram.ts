@@ -3,6 +3,7 @@ import type { Logger } from 'pino';
 import type { Agent } from '../agent/agent.js';
 import type { SessionManager } from '../agent/session.js';
 import type { ScallopDatabase } from '../memory/db.js';
+import type { Attachment } from './types.js';
 import { VoiceManager } from '../voice/index.js';
 import { getPendingVoiceAttachments, cleanupVoiceAttachments } from '../voice/attachments.js';
 import {
@@ -105,6 +106,14 @@ export class TelegramChannel {
   private enableVoiceReply: boolean;
   private workspacePath: string;
   private db: ScallopDatabase;
+  // Buffer for collecting media group photos (multiple photos sent at once)
+  private mediaGroupBuffer: Map<string, {
+    photos: Array<{ buffer: Buffer; mimeType: string }>;
+    caption?: string;
+    userId: string;
+    chatId: number;
+    timer: NodeJS.Timeout;
+  }> = new Map();
 
   constructor(options: TelegramChannelOptions) {
     this.bot = new Bot(options.botToken);
@@ -799,20 +808,22 @@ export class TelegramChannel {
 
   /**
    * Handle incoming photo messages
+   * Supports single photos and media groups (multiple photos sent together)
    */
   private async handlePhotoMessage(ctx: Context): Promise<void> {
     const userId = ctx.from?.id.toString();
-    if (!userId) return;
+    const chatId = ctx.chat?.id;
+    if (!userId || !chatId) return;
 
     const photos = ctx.message?.photo;
     if (!photos || photos.length === 0) return;
 
     // Get the largest photo (last in array)
     const photo = photos[photos.length - 1];
+    const mediaGroupId = ctx.message?.media_group_id;
+    const caption = ctx.message?.caption || '';
 
-    this.logger.info({ userId, width: photo.width, height: photo.height }, 'Received photo');
-
-    const typingInterval = this.startTypingIndicator(ctx);
+    this.logger.info({ userId, width: photo.width, height: photo.height, mediaGroupId }, 'Received photo');
 
     try {
       // Download the photo
@@ -825,35 +836,95 @@ export class TelegramChannel {
       }
 
       const photoBuffer = Buffer.from(await response.arrayBuffer());
-
-      // Save to workspace
-      const { mkdir, writeFile } = await import('fs/promises');
-      const { join } = await import('path');
-
-      const receivedDir = join(this.workspacePath, 'received-files');
-      await mkdir(receivedDir, { recursive: true });
-
-      const timestamp = Date.now();
       const ext = file.file_path?.split('.').pop() || 'jpg';
-      const savedPath = join(receivedDir, `${timestamp}_photo.${ext}`);
+      const mimeType = ext === 'png' ? 'image/png' : ext === 'gif' ? 'image/gif' : 'image/jpeg';
 
-      await writeFile(savedPath, photoBuffer);
-      this.logger.debug({ savedPath }, 'Photo saved');
+      // If part of a media group, buffer it
+      if (mediaGroupId) {
+        const existing = this.mediaGroupBuffer.get(mediaGroupId);
+        if (existing) {
+          // Add to existing buffer
+          existing.photos.push({ buffer: photoBuffer, mimeType });
+          if (caption && !existing.caption) {
+            existing.caption = caption;
+          }
+        } else {
+          // Create new buffer with a timer to process after delay
+          const timer = setTimeout(() => {
+            this.processMediaGroup(mediaGroupId, ctx);
+          }, 500); // Wait 500ms for more photos in the group
 
-      // Get caption or generate prompt
-      const caption = ctx.message?.caption || '';
+          this.mediaGroupBuffer.set(mediaGroupId, {
+            photos: [{ buffer: photoBuffer, mimeType }],
+            caption: caption || undefined,
+            userId,
+            chatId,
+            timer,
+          });
+        }
+        return; // Wait for more photos or timer
+      }
+
+      // Single photo - process immediately
+      await this.processPhotos(ctx, userId, [{ buffer: photoBuffer, mimeType }], caption);
+
+    } catch (error) {
+      this.logger.error({ userId, error: (error as Error).message }, 'Failed to process photo');
+      await ctx.reply('Sorry, I had trouble processing that photo. Please try again.');
+    }
+  }
+
+  /**
+   * Process a media group (multiple photos sent together)
+   */
+  private async processMediaGroup(mediaGroupId: string, ctx: Context): Promise<void> {
+    const group = this.mediaGroupBuffer.get(mediaGroupId);
+    if (!group) return;
+
+    // Clean up
+    clearTimeout(group.timer);
+    this.mediaGroupBuffer.delete(mediaGroupId);
+
+    this.logger.info({ mediaGroupId, photoCount: group.photos.length }, 'Processing media group');
+
+    await this.processPhotos(ctx, group.userId, group.photos, group.caption);
+  }
+
+  /**
+   * Process one or more photos and send to agent
+   */
+  private async processPhotos(
+    ctx: Context,
+    userId: string,
+    photos: Array<{ buffer: Buffer; mimeType: string }>,
+    caption?: string
+  ): Promise<void> {
+    const typingInterval = this.startTypingIndicator(ctx);
+
+    try {
+      // Create attachments for all photos
+      const attachments: Attachment[] = photos.map((photo, index) => ({
+        type: 'image' as const,
+        data: photo.buffer,
+        mimeType: photo.mimeType,
+        filename: `photo_${index + 1}.${photo.mimeType.split('/')[1] || 'jpg'}`,
+        size: photo.buffer.length,
+      }));
+
+      // Build prompt
+      const photoCount = photos.length;
+      const photoWord = photoCount === 1 ? 'photo' : `${photoCount} photos`;
       const prompt = caption
-        ? `The user sent a photo. Caption: "${caption}"\n\nPhoto saved at: ${savedPath}`
-        : `The user sent a photo.\n\nPhoto saved at: ${savedPath}\n\nDescribe what you see in this image.`;
+        ? `The user sent ${photoWord}. Caption: "${caption}"`
+        : `The user sent ${photoWord}. Describe what you see.`;
 
-      // Process through agent
+      // Process through agent WITH attachments
       const sessionId = await this.getOrCreateSession(userId);
 
-      // Thinking stays enabled in the agent but is not surfaced to Telegram users
       const onProgress = async (_update: { type: string; message: string }) => {};
-
       const shouldStop = () => this.stopRequests.has(userId);
-      const result = await this.agent.processMessage(sessionId, prompt, undefined, onProgress, shouldStop);
+
+      const result = await this.agent.processMessage(sessionId, prompt, attachments, onProgress, shouldStop);
       this.stopRequests.delete(userId);
 
       clearInterval(typingInterval);
@@ -869,10 +940,10 @@ export class TelegramChannel {
         }
       }
 
-      this.logger.info({ userId }, 'Processed photo message');
+      this.logger.info({ userId, photoCount }, 'Processed photo message with vision');
     } catch (error) {
       clearInterval(typingInterval);
-      this.logger.error({ userId, error: (error as Error).message }, 'Failed to process photo');
+      this.logger.error({ userId, error: (error as Error).message }, 'Failed to process photos');
       await ctx.reply('Sorry, I had trouble processing that photo. Please try again.');
     }
   }
