@@ -2,6 +2,7 @@
 name: web_search
 description: Search the web using web-search CLI - fast results from Brave Search API
 user-invocable: false
+disable-model-invocation: true
 triggers: [search, web, google, lookup, find information, research]
 metadata:
   openclaw:

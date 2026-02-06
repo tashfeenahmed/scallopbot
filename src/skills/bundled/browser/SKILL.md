@@ -2,6 +2,7 @@
 name: browser
 description: Browse websites using agent-browser CLI - navigate, interact, extract content
 user-invocable: false
+disable-model-invocation: true
 triggers: [browse, web, website, page, scrape, click, navigate, screenshot]
 metadata:
   openclaw:
