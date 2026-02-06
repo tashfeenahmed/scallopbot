@@ -118,13 +118,15 @@ export class MoonshotProvider implements LLMProvider {
 
     const messages = this.formatMessages(request, enableThinking);
 
-    // Temperature rules for Kimi K2 models:
-    // - Thinking disabled (instant mode): MUST be exactly 0.6
-    // - Thinking enabled: MUST be exactly 1.0
-    // We override any requested temperature to comply with API constraints
+    // Temperature and top_p rules for Kimi K2 models:
+    // - Thinking mode: temperature=1.0, top_p=0.95
+    // - Instant mode: temperature=0.6, top_p=0.95
+    // We override any requested values to comply with API constraints
     let temperature: number | undefined;
+    let topP: number | undefined;
     if (isKimiK2) {
       temperature = enableThinking ? 1.0 : 0.6;
+      topP = 0.95;
     } else {
       temperature = request.temperature;
     }
@@ -134,6 +136,7 @@ export class MoonshotProvider implements LLMProvider {
       messages,
       max_tokens: request.maxTokens || DEFAULT_MAX_TOKENS,
       temperature,
+      ...(topP !== undefined && { top_p: topP }),
       ...(request.stopSequences && { stop: request.stopSequences }),
       ...(request.tools && { tools: this.formatTools(request.tools) }),
       // Only disable thinking if NOT enabling it (for Kimi K2 models)
@@ -279,14 +282,19 @@ export class MoonshotProvider implements LLMProvider {
               .map((c) => (c as { type: 'thinking'; thinking: string }).thinking);
             const reasoningContent = thinkingBlocks.length > 0 ? thinkingBlocks.join('\n') : undefined;
 
+            // Build assistant message - always include content field (empty string if no text)
+            // When thinking is enabled, reasoning_content MUST be present on ALL assistant messages
             const assistantMsg: OpenAI.ChatCompletionAssistantMessageParam & { reasoning_content?: string } = {
               role: 'assistant',
-              ...(textContent ? { content: textContent } : {}),
+              content: textContent || '', // Always set content, even if empty
               ...(toolCalls.length > 0 && { tool_calls: toolCalls }),
-              // When thinking is enabled, ALL assistant messages must include reasoning_content.
-              // Use preserved content from previous response, or a minimal placeholder.
-              ...(enableThinking && { reasoning_content: reasoningContent || '.' }),
             };
+
+            // Add reasoning_content when thinking is enabled (required by Kimi K2 API)
+            if (enableThinking) {
+              assistantMsg.reasoning_content = reasoningContent || '.';
+            }
+
             messages.push(assistantMsg);
           } else {
             // User message - may include images
