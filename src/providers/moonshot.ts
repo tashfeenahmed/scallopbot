@@ -234,6 +234,14 @@ export class MoonshotProvider implements LLMProvider {
           // Extract image blocks (Claude format) and convert to OpenAI format
           const imageBlocks = msg.content.filter((c) => c.type === 'image');
 
+          // Debug: Log all content block types
+          if (msg.role === 'user') {
+            this.logger?.info({
+              blockTypes: msg.content.map(c => c.type),
+              imageCount: imageBlocks.length
+            }, 'User message content blocks');
+          }
+
           const toolCalls = msg.content
             .filter((c) => c.type === 'tool_use')
             .map((c) => {
