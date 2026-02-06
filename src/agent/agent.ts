@@ -528,8 +528,10 @@ export class Agent {
   }> {
     let prompt = this.baseSystemPrompt;
 
-    // Add date and workspace context
-    prompt += `\n\nToday's date: ${new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}`;
+    // Add date, time, and workspace context
+    const now = new Date();
+    prompt += `\n\nCurrent date and time: ${now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })} at ${now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true })}`;
+    prompt += `\nTimezone: ${Intl.DateTimeFormat().resolvedOptions().timeZone}`;
     prompt += `\nWorkspace: ${this.workspace}`;
 
     // Add channel context from session metadata
