@@ -25,7 +25,7 @@ import * as path from 'path';
 import type { Logger } from 'pino';
 import type { Agent } from '../agent/agent.js';
 import type { SessionManager } from '../agent/session.js';
-import type { Channel } from './types.js';
+import type { Channel, Attachment } from './types.js';
 import type { TriggerSource } from '../triggers/types.js';
 import type { CostTracker } from '../routing/cost.js';
 import { nanoid } from 'nanoid';
@@ -104,12 +104,27 @@ interface ChatResponse {
 }
 
 /**
+ * WebSocket attachment format
+ */
+interface WsAttachment {
+  type: 'image' | 'file';
+  /** Base64 encoded data */
+  data: string;
+  /** MIME type (e.g., 'image/jpeg') */
+  mimeType: string;
+  /** Optional filename */
+  filename?: string;
+}
+
+/**
  * WebSocket message types
  */
 interface WsMessage {
   type: 'chat' | 'ping';
   sessionId?: string;
   message?: string;
+  /** Optional image/file attachments */
+  attachments?: WsAttachment[];
 }
 
 interface WsResponse {
@@ -851,10 +866,22 @@ export class ApiChannel implements Channel, TriggerSource {
             }
           };
 
+          // Convert WebSocket attachments to agent Attachment format
+          let attachments: Attachment[] | undefined;
+          if (message.attachments && message.attachments.length > 0) {
+            attachments = message.attachments.map((att) => ({
+              type: att.type === 'image' ? 'image' as const : 'file' as const,
+              data: Buffer.from(att.data, 'base64'),
+              mimeType: att.mimeType,
+              filename: att.filename,
+            }));
+            this.logger.debug({ count: attachments.length }, 'Processing WebSocket attachments');
+          }
+
           const result = await this.config.agent.processMessage(
             sessionId,
             message.message,
-            undefined, // attachments
+            attachments,
             onProgress
           );
           this.sendWsMessage(ws, { type: 'response', sessionId, content: result.response });
