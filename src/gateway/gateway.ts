@@ -280,6 +280,7 @@ export class Gateway {
       const openai = new OpenAIProvider({
         apiKey: openaiConfig.apiKey,
         model: openaiConfig.model,
+        timeout: 60000,
       });
       this.providerRegistry.registerProvider(openai);
       this.logger.debug({ provider: 'openai', model: openaiConfig.model }, 'Provider registered');
@@ -291,6 +292,7 @@ export class Gateway {
       const groq = new GroqProvider({
         apiKey: groqConfig.apiKey,
         model: groqConfig.model,
+        timeout: 60000,
       });
       this.providerRegistry.registerProvider(groq);
       this.logger.debug({ provider: 'groq', model: groqConfig.model }, 'Provider registered');
@@ -313,6 +315,7 @@ export class Gateway {
       const openrouter = new OpenRouterProvider({
         apiKey: openrouterConfig.apiKey,
         model: openrouterConfig.model,
+        timeout: 60000,
       });
       this.providerRegistry.registerProvider(openrouter);
       this.logger.debug({ provider: 'openrouter', model: openrouterConfig.model }, 'Provider registered');
@@ -324,6 +327,7 @@ export class Gateway {
       const moonshot = new MoonshotProvider({
         apiKey: moonshotConfig.apiKey,
         model: moonshotConfig.model,
+        timeout: 60000, // 60 second timeout
       }, this.logger);
       this.providerRegistry.registerProvider(moonshot);
       this.logger.debug({ provider: 'moonshot', model: moonshotConfig.model }, 'Provider registered');
@@ -335,6 +339,7 @@ export class Gateway {
       const xai = new XAIProvider({
         apiKey: xaiConfig.apiKey,
         model: xaiConfig.model,
+        timeout: 60000,
       });
       this.providerRegistry.registerProvider(xai);
       this.logger.debug({ provider: 'xai', model: xaiConfig.model }, 'Provider registered');
