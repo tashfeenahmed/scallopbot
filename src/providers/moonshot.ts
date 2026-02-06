@@ -294,7 +294,12 @@ export class MoonshotProvider implements LLMProvider {
               // Build multimodal content array for OpenAI vision API
               const contentParts: OpenAI.ChatCompletionContentPart[] = [];
 
-              // Add images first
+              // Add text content FIRST so model knows what to look for
+              if (textContent) {
+                contentParts.push({ type: 'text', text: textContent });
+              }
+
+              // Then add images
               for (const img of imageBlocks) {
                 const imageBlock = img as {
                   type: 'image';
@@ -307,12 +312,16 @@ export class MoonshotProvider implements LLMProvider {
                 };
 
                 if (imageBlock.source.type === 'base64' && imageBlock.source.data) {
-                  // Convert to data URL format for OpenAI
+                  // Convert to data URL format for OpenAI vision API
                   const dataUrl = `data:${imageBlock.source.media_type};base64,${imageBlock.source.data}`;
                   contentParts.push({
                     type: 'image_url',
                     image_url: { url: dataUrl },
                   });
+                  this.logger?.debug({
+                    mediaType: imageBlock.source.media_type,
+                    dataLength: imageBlock.source.data.length,
+                  }, 'Adding base64 image to message');
                 } else if (imageBlock.source.type === 'url' && imageBlock.source.url) {
                   contentParts.push({
                     type: 'image_url',
@@ -321,17 +330,12 @@ export class MoonshotProvider implements LLMProvider {
                 }
               }
 
-              // Add text content
-              if (textContent) {
-                contentParts.push({ type: 'text', text: textContent });
-              }
-
               messages.push({
                 role: 'user',
                 content: contentParts,
               });
 
-              this.logger?.debug({ imageCount: imageBlocks.length }, 'Added images to message');
+              this.logger?.info({ imageCount: imageBlocks.length, totalParts: contentParts.length }, 'Added images to user message');
             } else {
               messages.push({
                 role: 'user',
