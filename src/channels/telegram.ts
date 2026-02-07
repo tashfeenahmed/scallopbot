@@ -730,7 +730,7 @@ export class TelegramChannel {
       clearInterval(typingInterval);
 
       const formattedResponse = formatMarkdownToHtml(result.response);
-      const chunks = splitMessage(formattedResponse);
+      const chunks = splitMessage(formattedResponse).filter(c => c.trim());
 
       for (const chunk of chunks) {
         try {
@@ -809,7 +809,7 @@ export class TelegramChannel {
       clearInterval(typingInterval);
 
       const formattedResponse = formatMarkdownToHtml(result.response);
-      const chunks = splitMessage(formattedResponse);
+      const chunks = splitMessage(formattedResponse).filter(c => c.trim());
 
       for (const chunk of chunks) {
         try {
@@ -951,7 +951,7 @@ export class TelegramChannel {
       clearInterval(typingInterval);
 
       const formattedResponse = formatMarkdownToHtml(result.response);
-      const chunks = splitMessage(formattedResponse);
+      const chunks = splitMessage(formattedResponse).filter(c => c.trim());
 
       for (const chunk of chunks) {
         try {
@@ -1007,7 +1007,7 @@ export class TelegramChannel {
       clearInterval(typingInterval);
 
       const formattedResponse = formatMarkdownToHtml(result.response);
-      const chunks = splitMessage(formattedResponse);
+      const chunks = splitMessage(formattedResponse).filter(c => c.trim());
 
       for (const chunk of chunks) {
         try {
