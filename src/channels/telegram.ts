@@ -1094,7 +1094,12 @@ export class TelegramChannel {
       }
 
       try {
-        await ctx.reply(text, { disable_notification: true });
+        // Escape HTML entities and wrap in <code> block for monospace rendering
+        const escaped = text
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;');
+        await ctx.reply(`<code>${escaped}</code>`, { parse_mode: 'HTML', disable_notification: true });
       } catch {
         // Silently ignore send failures for debug messages
       }
