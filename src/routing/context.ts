@@ -203,7 +203,7 @@ export class ContextManager {
   private deduplicator: ToolOutputDeduplicator;
 
   constructor(options: ContextManagerOptions) {
-    this.hotWindowSize = options.hotWindowSize ?? 5;
+    this.hotWindowSize = options.hotWindowSize ?? 50;
     this.maxContextTokens = options.maxContextTokens ?? 128000;
     this.compressionThreshold = options.compressionThreshold ?? 0.7;
     this.maxToolOutputBytes = options.maxToolOutputBytes ?? 30000;

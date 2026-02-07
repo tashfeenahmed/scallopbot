@@ -107,7 +107,7 @@ const costSchema = z.object({
 
 // Context management configuration schema (M2: Sliding Window)
 const contextSchema = z.object({
-  hotWindowSize: z.number().int().positive().default(5),
+  hotWindowSize: z.number().int().positive().default(50),
   maxContextTokens: z.number().int().positive().default(128000),
   compressionThreshold: z.number().min(0).max(1).default(0.7),
   maxToolOutputBytes: z.number().int().positive().default(30000),
@@ -147,7 +147,7 @@ export const configSchema = z.object({
   logging: loggingSchema.default({ level: 'info' }),
   routing: routingSchema.default({ providerOrder: ['anthropic', 'openai', 'groq', 'ollama'], enableComplexityAnalysis: true }),
   cost: costSchema.default({ warningThreshold: 0.75 }),
-  context: contextSchema.default({ hotWindowSize: 5, maxContextTokens: 128000, compressionThreshold: 0.7, maxToolOutputBytes: 30000 }),
+  context: contextSchema.default({ hotWindowSize: 50, maxContextTokens: 128000, compressionThreshold: 0.7, maxToolOutputBytes: 30000 }),
   memory: memorySchema.default({ filePath: 'memories.jsonl', persist: true, useScallopMemory: true, dbPath: 'memories.db' }),
   gateway: gatewaySchema.default({ port: 3000, host: '127.0.0.1' }),
   tailscale: tailscaleSchema.default({ mode: 'off', resetOnExit: true }),
@@ -259,7 +259,7 @@ export function loadConfig(): Config {
         : 0.75,
     },
     context: {
-      hotWindowSize: process.env.HOT_WINDOW_SIZE ? parseInt(process.env.HOT_WINDOW_SIZE, 10) : 5,
+      hotWindowSize: process.env.HOT_WINDOW_SIZE ? parseInt(process.env.HOT_WINDOW_SIZE, 10) : 50,
       maxContextTokens: process.env.MAX_CONTEXT_TOKENS ? parseInt(process.env.MAX_CONTEXT_TOKENS, 10) : 128000,
       compressionThreshold: process.env.COMPRESSION_THRESHOLD ? parseFloat(process.env.COMPRESSION_THRESHOLD) : 0.7,
       maxToolOutputBytes: process.env.MAX_TOOL_OUTPUT_BYTES ? parseInt(process.env.MAX_TOOL_OUTPUT_BYTES, 10) : 30000,
