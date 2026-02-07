@@ -42,6 +42,7 @@ interface ReminderArgs {
   time?: string;
   message?: string;
   reminder_id?: string;
+  recurring?: RecurringSchedule;
 }
 
 interface SkillResult {
@@ -282,17 +283,21 @@ function parseDelay(input: string): number | null {
   return null;
 }
 
+// Format recurring schedule for display
+function formatRecurringDescription(recurring: RecurringSchedule): string {
+  const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  const timeFormatted = `${recurring.hour % 12 || 12}:${recurring.minute.toString().padStart(2, '0')} ${recurring.hour >= 12 ? 'PM' : 'AM'}`;
+
+  switch (recurring.type) {
+    case 'daily': return `every day at ${timeFormatted}`;
+    case 'weekly': return `every ${dayNames[recurring.dayOfWeek!]} at ${timeFormatted}`;
+    case 'weekdays': return `weekdays at ${timeFormatted}`;
+    case 'weekends': return `weekends at ${timeFormatted}`;
+  }
+}
+
 // Set a reminder
 function setReminder(args: ReminderArgs): SkillResult {
-  if (!args.time) {
-    return {
-      success: false,
-      output: '',
-      error: 'Missing required parameter: time',
-      exitCode: 1,
-    };
-  }
-
   if (!args.message) {
     return {
       success: false,
@@ -302,61 +307,67 @@ function setReminder(args: ReminderArgs): SkillResult {
     };
   }
 
+  if (!args.time && !args.recurring) {
+    return {
+      success: false,
+      output: '',
+      error: 'Missing required parameter: time or recurring',
+      exitCode: 1,
+    };
+  }
+
   const now = Date.now();
   let triggerAt: number;
   let recurring: RecurringSchedule | null = null;
   let scheduleDescription: string;
 
-  // Try parsing as recurring
-  const recurringResult = parseRecurring(args.time);
-  if (recurringResult) {
-    recurring = recurringResult.schedule;
+  // Structured recurring object (preferred)
+  if (args.recurring && typeof args.recurring === 'object' && args.recurring.type && typeof args.recurring.hour === 'number') {
+    recurring = args.recurring;
     triggerAt = getNextOccurrence(recurring).getTime();
-
-    const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-    const timeFormatted = `${recurring.hour % 12 || 12}:${recurring.minute.toString().padStart(2, '0')} ${recurring.hour >= 12 ? 'PM' : 'AM'}`;
-
-    switch (recurring.type) {
-      case 'daily':
-        scheduleDescription = `every day at ${timeFormatted}`;
-        break;
-      case 'weekly':
-        scheduleDescription = `every ${dayNames[recurring.dayOfWeek!]} at ${timeFormatted}`;
-        break;
-      case 'weekdays':
-        scheduleDescription = `weekdays at ${timeFormatted}`;
-        break;
-      case 'weekends':
-        scheduleDescription = `weekends at ${timeFormatted}`;
-        break;
+    scheduleDescription = formatRecurringDescription(recurring);
+  } else if (args.time) {
+    // Legacy: try parsing time string as recurring
+    const recurringResult = parseRecurring(args.time);
+    if (recurringResult) {
+      recurring = recurringResult.schedule;
+      triggerAt = getNextOccurrence(recurring).getTime();
+      scheduleDescription = formatRecurringDescription(recurring);
+    } else {
+      // Try absolute time
+      const absoluteTime = parseAbsoluteTime(args.time);
+      if (absoluteTime) {
+        triggerAt = absoluteTime.getTime();
+        scheduleDescription = absoluteTime.toLocaleString('en-US', {
+          weekday: 'short',
+          month: 'short',
+          day: 'numeric',
+          hour: '2-digit',
+          minute: '2-digit',
+          hour12: true,
+        });
+      } else {
+        // Try delay
+        const delayMinutes = parseDelay(args.time);
+        if (delayMinutes === null || delayMinutes <= 0) {
+          return {
+            success: false,
+            output: '',
+            error: `Could not parse time: "${args.time}". Try: "5 minutes", "at 10am", "tomorrow at 9am"`,
+            exitCode: 1,
+          };
+        }
+        triggerAt = now + delayMinutes * 60 * 1000;
+        scheduleDescription = `in ${delayMinutes} minute${delayMinutes === 1 ? '' : 's'}`;
+      }
     }
   } else {
-    // Try absolute time
-    const absoluteTime = parseAbsoluteTime(args.time);
-    if (absoluteTime) {
-      triggerAt = absoluteTime.getTime();
-      scheduleDescription = absoluteTime.toLocaleString('en-US', {
-        weekday: 'short',
-        month: 'short',
-        day: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-        hour12: true,
-      });
-    } else {
-      // Try delay
-      const delayMinutes = parseDelay(args.time);
-      if (delayMinutes === null || delayMinutes <= 0) {
-        return {
-          success: false,
-          output: '',
-          error: `Could not parse time: "${args.time}". Try: "5 minutes", "at 10am", "tomorrow at 9am", "every day at 10am"`,
-          exitCode: 1,
-        };
-      }
-      triggerAt = now + delayMinutes * 60 * 1000;
-      scheduleDescription = `in ${delayMinutes} minute${delayMinutes === 1 ? '' : 's'}`;
-    }
+    return {
+      success: false,
+      output: '',
+      error: 'Invalid recurring format. Expected: { type, hour, minute }',
+      exitCode: 1,
+    };
   }
 
   const id = nanoid(8);
