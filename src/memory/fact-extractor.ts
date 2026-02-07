@@ -1140,18 +1140,27 @@ Respond with JSON only:
       minute = mins;
     }
 
-    // Daily
-    if (lower === 'daily' || lower === 'every day') {
+    // Strip time suffix for matching (e.g., "daily at 8pm" → "daily")
+    const basePattern = lower.replace(/\s+at\s+\d{1,2}(:\d{2})?\s*(am|pm)?/i, '').trim();
+
+    // Daily: "daily", "every day", "every morning", "every evening", "every night"
+    if (basePattern === 'daily' || basePattern === 'every day' || basePattern === 'every morning' || basePattern === 'every evening' || basePattern === 'every night') {
+      // Default times for morning/evening/night if no explicit time was given
+      if (!timeMatch) {
+        if (basePattern === 'every morning') { hour = 9; minute = 0; }
+        else if (basePattern === 'every evening') { hour = 18; minute = 0; }
+        else if (basePattern === 'every night') { hour = 21; minute = 0; }
+      }
       return { type: 'daily', hour, minute };
     }
 
-    // Weekdays
-    if (lower === 'every weekday' || lower === 'weekdays' || lower.includes('monday to friday') || lower.includes('monday through friday')) {
+    // Weekdays: "every weekday", "weekdays", "monday to friday", "monday through friday"
+    if (basePattern === 'every weekday' || basePattern === 'weekdays' || basePattern.includes('monday to friday') || basePattern.includes('monday through friday')) {
       return { type: 'weekdays', hour, minute };
     }
 
-    // Weekends
-    if (lower === 'every weekend' || lower === 'weekends') {
+    // Weekends: "every weekend", "weekends"
+    if (basePattern === 'every weekend' || basePattern === 'weekends') {
       return { type: 'weekends', hour, minute };
     }
 
@@ -1164,7 +1173,7 @@ Respond with JSON only:
     }
 
     // Generic "weekly" without day
-    if (lower === 'weekly' || lower === 'every week') {
+    if (basePattern === 'weekly' || basePattern === 'every week') {
       return { type: 'weekly', hour, minute, dayOfWeek: triggerDate.getDay() };
     }
 
