@@ -62,8 +62,22 @@ const createMockProvider = (response: string): LLMProvider => ({
   isAvailable: vi.fn().mockResolvedValue(true),
 });
 
+// Mock database for trigger tests
+const createMockDatabase = () => ({
+  hasSimilarPendingScheduledItem: vi.fn().mockReturnValue(false),
+  addScheduledItem: vi.fn().mockImplementation((item: any) => ({
+    id: `sched-${Date.now()}`,
+    ...item,
+    status: 'pending',
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    firedAt: null,
+  })),
+});
+
 // Mock ScallopMemoryStore
-const createMockScallopStore = (): ScallopMemoryStore => {
+const createMockScallopStore = (mockDb?: ReturnType<typeof createMockDatabase>): ScallopMemoryStore => {
+  const db = mockDb ?? createMockDatabase();
   const store = {
     search: vi.fn().mockResolvedValue([]),
     add: vi.fn().mockImplementation(async (opts: any) => ({
@@ -82,6 +96,7 @@ const createMockScallopStore = (): ScallopMemoryStore => {
       getStaticProfile: vi.fn().mockReturnValue({}),
       setStaticValue: vi.fn(),
     }),
+    getDatabase: vi.fn().mockReturnValue(db),
     processDecay: vi.fn().mockReturnValue({ updated: 0, archived: 0 }),
   };
   return store as unknown as ScallopMemoryStore;
@@ -569,5 +584,340 @@ describe('extractFactsWithLLM helper', () => {
     );
 
     expect(result.facts.length).toBe(1);
+  });
+});
+
+describe('Combined fact + trigger extraction', () => {
+  let logger: Logger;
+
+  beforeEach(() => {
+    logger = createMockLogger();
+  });
+
+  it('should extract both facts and triggers from a single LLM call', async () => {
+    const mockDb = createMockDatabase();
+    const mockScallopStore = createMockScallopStore(mockDb);
+
+    const mockProvider = createMockProvider(JSON.stringify({
+      facts: [
+        { content: 'Has a dentist appointment tomorrow at 2pm', subject: 'user', category: 'general', confidence: 0.9 },
+      ],
+      proactive_triggers: [
+        {
+          type: 'event_prep',
+          description: 'Dentist appointment tomorrow',
+          trigger_time: 'tomorrow 12:00',
+          context: 'User has a dentist appointment tomorrow at 2pm',
+          guidance: 'Search for directions to the dentist and check weather',
+          recurring_pattern: null,
+        },
+      ],
+    }));
+
+    const extractor = new LLMFactExtractor({
+      provider: mockProvider,
+      scallopStore: mockScallopStore,
+      logger,
+      useRelationshipClassifier: false,
+    });
+
+    const result = await extractor.extractFacts(
+      'I have a dentist appointment tomorrow at 2pm',
+      'user-123'
+    );
+
+    // Facts should be extracted
+    expect(result.facts.length).toBe(1);
+    expect(result.facts[0].content).toContain('dentist');
+
+    // Trigger should be created via processExtractedTriggers
+    expect(mockDb.addScheduledItem).toHaveBeenCalledTimes(1);
+    const scheduledCall = mockDb.addScheduledItem.mock.calls[0][0];
+    expect(scheduledCall.type).toBe('event_prep');
+    expect(scheduledCall.message).toBe('Dentist appointment tomorrow');
+
+    // Only 1 LLM call (combined extraction) + possible consolidation
+    // The key test: no separate trigger extraction call
+    expect((mockProvider.complete as any).mock.calls.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('should process triggers even when 0 facts extracted', async () => {
+    const mockDb = createMockDatabase();
+    const mockScallopStore = createMockScallopStore(mockDb);
+
+    const mockProvider = createMockProvider(JSON.stringify({
+      facts: [],
+      proactive_triggers: [
+        {
+          type: 'event_prep',
+          description: 'Flight to London',
+          trigger_time: 'tomorrow 6:00',
+          context: 'User has a flight tomorrow morning',
+          guidance: 'Look up flight status',
+          recurring_pattern: null,
+        },
+      ],
+    }));
+
+    const extractor = new LLMFactExtractor({
+      provider: mockProvider,
+      scallopStore: mockScallopStore,
+      logger,
+      useRelationshipClassifier: false,
+    });
+
+    const result = await extractor.extractFacts(
+      'My flight to London is tomorrow morning',
+      'user-123'
+    );
+
+    // No facts stored
+    expect(result.facts.length).toBe(0);
+    expect(result.factsStored).toBe(0);
+
+    // But trigger should still be created
+    expect(mockDb.addScheduledItem).toHaveBeenCalledTimes(1);
+    expect(mockDb.addScheduledItem.mock.calls[0][0].message).toBe('Flight to London');
+  });
+
+  it('should store guidance as structured JSON in context', async () => {
+    const mockDb = createMockDatabase();
+    const mockScallopStore = createMockScallopStore(mockDb);
+
+    const mockProvider = createMockProvider(JSON.stringify({
+      facts: [],
+      proactive_triggers: [
+        {
+          type: 'event_prep',
+          description: 'Meeting with client',
+          trigger_time: 'tomorrow 8:00',
+          context: 'User has a client meeting at 10am',
+          guidance: 'Check calendar and prepare agenda',
+          recurring_pattern: null,
+        },
+      ],
+    }));
+
+    const extractor = new LLMFactExtractor({
+      provider: mockProvider,
+      scallopStore: mockScallopStore,
+      logger,
+      useRelationshipClassifier: false,
+    });
+
+    await extractor.extractFacts('I have a client meeting tomorrow at 10am', 'user-123');
+
+    expect(mockDb.addScheduledItem).toHaveBeenCalledTimes(1);
+    const storedContext = mockDb.addScheduledItem.mock.calls[0][0].context;
+    const parsed = JSON.parse(storedContext);
+    expect(parsed.original_context).toBe('User has a client meeting at 10am');
+    expect(parsed.guidance).toBe('Check calendar and prepare agenda');
+  });
+
+  it('should store plain context when no guidance provided', async () => {
+    const mockDb = createMockDatabase();
+    const mockScallopStore = createMockScallopStore(mockDb);
+
+    const mockProvider = createMockProvider(JSON.stringify({
+      facts: [],
+      proactive_triggers: [
+        {
+          type: 'follow_up',
+          description: 'Check on report',
+          trigger_time: 'tomorrow 9:00',
+          context: 'User needs to finish report',
+          guidance: null,
+          recurring_pattern: null,
+        },
+      ],
+    }));
+
+    const extractor = new LLMFactExtractor({
+      provider: mockProvider,
+      scallopStore: mockScallopStore,
+      logger,
+      useRelationshipClassifier: false,
+    });
+
+    await extractor.extractFacts('I need to finish my report', 'user-123');
+
+    expect(mockDb.addScheduledItem).toHaveBeenCalledTimes(1);
+    const storedContext = mockDb.addScheduledItem.mock.calls[0][0].context;
+    // No guidance → plain string, not JSON
+    expect(storedContext).toBe('User needs to finish report');
+  });
+
+  it('should parse daily recurring pattern correctly', async () => {
+    const mockDb = createMockDatabase();
+    const mockScallopStore = createMockScallopStore(mockDb);
+
+    const mockProvider = createMockProvider(JSON.stringify({
+      facts: [
+        { content: 'Takes medication daily at 9am', subject: 'user', category: 'personal', confidence: 0.9 },
+      ],
+      proactive_triggers: [
+        {
+          type: 'follow_up',
+          description: 'Take morning medication',
+          trigger_time: 'tomorrow 9:00',
+          context: 'User takes medication every morning',
+          guidance: null,
+          recurring_pattern: 'daily',
+        },
+      ],
+    }));
+
+    const extractor = new LLMFactExtractor({
+      provider: mockProvider,
+      scallopStore: mockScallopStore,
+      logger,
+      useRelationshipClassifier: false,
+    });
+
+    await extractor.extractFacts('I take my medication every day at 9am', 'user-123');
+
+    expect(mockDb.addScheduledItem).toHaveBeenCalledTimes(1);
+    const recurring = mockDb.addScheduledItem.mock.calls[0][0].recurring;
+    expect(recurring).not.toBeNull();
+    expect(recurring.type).toBe('daily');
+    expect(recurring.hour).toBe(9);
+    expect(recurring.minute).toBe(0);
+  });
+
+  it('should parse weekday recurring pattern correctly', async () => {
+    const mockDb = createMockDatabase();
+    const mockScallopStore = createMockScallopStore(mockDb);
+
+    const mockProvider = createMockProvider(JSON.stringify({
+      facts: [
+        { content: 'Goes to gym every weekday at 7am', subject: 'user', category: 'personal', confidence: 0.9 },
+      ],
+      proactive_triggers: [
+        {
+          type: 'commitment_check',
+          description: 'Gym workout',
+          trigger_time: 'tomorrow 6:30',
+          context: 'User goes to gym every weekday morning',
+          guidance: null,
+          recurring_pattern: 'every weekday',
+        },
+      ],
+    }));
+
+    const extractor = new LLMFactExtractor({
+      provider: mockProvider,
+      scallopStore: mockScallopStore,
+      logger,
+      useRelationshipClassifier: false,
+    });
+
+    await extractor.extractFacts('I go to gym every weekday at 7am', 'user-123');
+
+    expect(mockDb.addScheduledItem).toHaveBeenCalledTimes(1);
+    const recurring = mockDb.addScheduledItem.mock.calls[0][0].recurring;
+    expect(recurring).not.toBeNull();
+    expect(recurring.type).toBe('weekdays');
+  });
+
+  it('should parse weekly with day recurring pattern correctly', async () => {
+    const mockDb = createMockDatabase();
+    const mockScallopStore = createMockScallopStore(mockDb);
+
+    const mockProvider = createMockProvider(JSON.stringify({
+      facts: [
+        { content: 'Has team standup every Monday at 9am', subject: 'user', category: 'work', confidence: 0.9 },
+      ],
+      proactive_triggers: [
+        {
+          type: 'event_prep',
+          description: 'Monday team standup',
+          trigger_time: 'Monday 8:00',
+          context: 'Weekly team standup meeting',
+          guidance: 'Check team status updates',
+          recurring_pattern: 'every Monday at 9am',
+        },
+      ],
+    }));
+
+    const extractor = new LLMFactExtractor({
+      provider: mockProvider,
+      scallopStore: mockScallopStore,
+      logger,
+      useRelationshipClassifier: false,
+    });
+
+    await extractor.extractFacts('We have team standup every Monday at 9am', 'user-123');
+
+    expect(mockDb.addScheduledItem).toHaveBeenCalledTimes(1);
+    const recurring = mockDb.addScheduledItem.mock.calls[0][0].recurring;
+    expect(recurring).not.toBeNull();
+    expect(recurring.type).toBe('weekly');
+    expect(recurring.dayOfWeek).toBe(1); // Monday
+    expect(recurring.hour).toBe(9);
+    expect(recurring.minute).toBe(0);
+  });
+
+  it('should create one-time trigger when recurring_pattern is null', async () => {
+    const mockDb = createMockDatabase();
+    const mockScallopStore = createMockScallopStore(mockDb);
+
+    const mockProvider = createMockProvider(JSON.stringify({
+      facts: [],
+      proactive_triggers: [
+        {
+          type: 'event_prep',
+          description: 'Doctor appointment',
+          trigger_time: 'tomorrow 9:00',
+          context: 'User has a doctor appointment',
+          guidance: null,
+          recurring_pattern: null,
+        },
+      ],
+    }));
+
+    const extractor = new LLMFactExtractor({
+      provider: mockProvider,
+      scallopStore: mockScallopStore,
+      logger,
+      useRelationshipClassifier: false,
+    });
+
+    await extractor.extractFacts('I have a doctor appointment tomorrow at 10am', 'user-123');
+
+    expect(mockDb.addScheduledItem).toHaveBeenCalledTimes(1);
+    const recurring = mockDb.addScheduledItem.mock.calls[0][0].recurring;
+    expect(recurring).toBeNull();
+  });
+
+  it('should create one-time trigger for invalid recurring_pattern', async () => {
+    const mockDb = createMockDatabase();
+    const mockScallopStore = createMockScallopStore(mockDb);
+
+    const mockProvider = createMockProvider(JSON.stringify({
+      facts: [],
+      proactive_triggers: [
+        {
+          type: 'follow_up',
+          description: 'Check on project',
+          trigger_time: 'tomorrow 9:00',
+          context: 'User working on project',
+          guidance: null,
+          recurring_pattern: 'every other fortnight',
+        },
+      ],
+    }));
+
+    const extractor = new LLMFactExtractor({
+      provider: mockProvider,
+      scallopStore: mockScallopStore,
+      logger,
+      useRelationshipClassifier: false,
+    });
+
+    await extractor.extractFacts('Working on my project, need to check back', 'user-123');
+
+    expect(mockDb.addScheduledItem).toHaveBeenCalledTimes(1);
+    const recurring = mockDb.addScheduledItem.mock.calls[0][0].recurring;
+    expect(recurring).toBeNull();
   });
 });

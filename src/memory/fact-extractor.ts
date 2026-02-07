@@ -11,9 +11,9 @@ import type { LLMProvider } from '../providers/types.js';
 import type { CostTracker } from '../routing/cost.js';
 import { cosineSimilarity, type EmbeddingProvider } from './embeddings.js';
 import type { ScallopMemoryStore } from './scallop-store.js';
-import type { MemoryCategory } from './db.js';
+import type { MemoryCategory, RecurringSchedule } from './db.js';
 import {
-  RelationshipClassifier,
+  type RelationshipClassifier,
   createRelationshipClassifier,
   type ExistingFact,
 } from './relation-classifier.js';
@@ -99,7 +99,9 @@ export interface LLMFactExtractorOptions {
 /**
  * The prompt used to extract facts from messages
  */
-const FACT_EXTRACTION_PROMPT = `You are a fact extraction system. Extract factual information AND detect memory actions from the user's message.
+const FACT_AND_TRIGGER_EXTRACTION_PROMPT = `You are a fact extraction system. Extract factual information, detect memory actions, AND identify proactive triggers from the user's message.
+
+CURRENT DATE: {{CURRENT_DATE}}
 
 ACTION TYPES:
 - "fact" (default): Store as new knowledge
@@ -150,12 +152,39 @@ Regular fact examples (action defaults to "fact"):
 - "My wife is Hayat" → { "content": "Wife is Hayat", "subject": "user", "category": "relationship" }
 - "I live in Wicklow" → { "content": "Lives in Wicklow", "subject": "user", "category": "location" }
 
+PROACTIVE TRIGGERS (for agent-initiated follow-ups):
+Extract time-sensitive items that warrant proactive follow-up:
+- Upcoming events: "meeting tomorrow", "dentist next week", "flight on Friday"
+- Commitments: "I'll finish the report", "planning to start gym", "need to call mom"
+- Goals: "trying to lose weight", "learning Spanish", "saving for vacation"
+- Deadlines: "due Friday", "need to submit by EOD", "expires next month"
+- Appointments: "dentist at 2pm", "doctor appointment", "scheduled for 3pm"
+
+Format each trigger as:
+{
+  "type": "event_prep" | "commitment_check" | "goal_checkin" | "follow_up",
+  "description": "Brief description of what to follow up on",
+  "trigger_time": "MUST include specific time - use ISO datetime with time (e.g., '2026-02-07T09:00:00') OR relative ('+2h', '+1d 9am', 'tomorrow 10:00')",
+  "context": "Context for generating the proactive message",
+  "guidance": "Specific instructions for the bot on what to do to help the user when the trigger fires (e.g., 'Search for directions and check weather', 'Look up flight status')",
+  "recurring_pattern": "If this is a recurring event, specify the pattern: 'daily', 'every weekday', 'every weekend', 'every Monday', 'every Tuesday at 9am', etc. null if one-time"
+}
+
+Trigger time guidelines:
+- event_prep: 2 hours before the event (for same-day) or morning of (8-9am for future days)
+- commitment_check: Next day morning (9am) or after stated deadline
+- goal_checkin: 1 week for short-term, 2 weeks for long-term goals, at 10am
+- follow_up: Based on context, usually next day at 9am
+
 IMPORTANT: Extract ALL facts from a message. If someone mentions a relationship AND another fact about that person, extract BOTH.
 
 Respond with JSON only:
 {
   "facts": [
     { "content": "fact text", "subject": "user|agent|name", "category": "category", "confidence": 0.0-1.0, "action": "fact|forget|correction|preference_update", "old_value": "optional", "replaces": "optional" }
+  ],
+  "proactive_triggers": [
+    { "type": "event_prep|commitment_check|goal_checkin|follow_up", "description": "text", "trigger_time": "ISO or relative", "context": "text", "guidance": "text or null", "recurring_pattern": "pattern or null" }
   ]
 }
 
@@ -164,7 +193,11 @@ Notes:
 - "old_value" only for corrections
 - "replaces" only for preference_update
 - Set confidence based on how certain the extraction is (0.9+ for explicit statements, 0.6-0.8 for inferred facts)
-- If no facts can be extracted, return: { "facts": [] }`;
+- If no facts can be extracted, return empty facts array
+- If nothing time-sensitive found, return empty proactive_triggers array
+- CRITICAL: trigger_time MUST include a specific time (hour:minute), not just a date!
+- "TODAY" alone is NOT valid - must be "TODAY 2pm" or similar with time
+- Only create triggers for EXPLICIT time-sensitive items, not vague statements`;
 
 /**
  * LLM-based fact extractor with semantic deduplication
@@ -225,14 +258,16 @@ export class LLMFactExtractor {
     };
 
     try {
-      // Build prompt with optional context
-      let prompt = FACT_EXTRACTION_PROMPT + '\n\n';
+      // Build prompt with current date injected and optional context
+      const now = new Date();
+      const currentDate = now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+      let prompt = FACT_AND_TRIGGER_EXTRACTION_PROMPT.replace('{{CURRENT_DATE}}', currentDate) + '\n\n';
       if (context) {
         prompt += `Context from previous messages:\n${context}\n\n`;
       }
-      prompt += `User message:\n${message}\n\nExtract facts (JSON only):`;
+      prompt += `User message:\n${message}\n\nExtract facts and triggers (JSON only):`;
 
-      // Call LLM to extract facts
+      // Call LLM to extract facts and triggers
       const response = await this.provider.complete({
         messages: [{ role: 'user', content: prompt }],
       });
@@ -244,6 +279,10 @@ export class LLMFactExtractor {
       const parsed = this.parseResponse(responseText);
       if (!parsed.facts || !Array.isArray(parsed.facts)) {
         this.logger.debug({ response: response.content }, 'No facts extracted');
+        // Still process triggers even when no facts found
+        if (parsed.proactive_triggers && Array.isArray(parsed.proactive_triggers) && parsed.proactive_triggers.length > 0) {
+          this.processExtractedTriggers(parsed.proactive_triggers, userId);
+        }
         return result;
       }
 
@@ -270,21 +309,17 @@ export class LLMFactExtractor {
         'Facts extracted from message'
       );
 
+      // Process triggers from combined extraction (fire-and-forget)
+      if (parsed.proactive_triggers && Array.isArray(parsed.proactive_triggers) && parsed.proactive_triggers.length > 0) {
+        this.processExtractedTriggers(parsed.proactive_triggers, userId);
+      }
+
       // Process facts with batch classification for efficiency
       const processResults = await this.processFactsBatch(result.facts, userId, message, sourceMessageId);
       result.factsStored = processResults.stored;
       result.factsUpdated = processResults.updated;
       result.factsDeleted = processResults.deleted;
       result.duplicatesSkipped = processResults.duplicates;
-
-      // If no facts were stored, still extract triggers from the source message
-      // This handles temporal events like "I have a dentist appointment tomorrow"
-      // which don't produce static facts but should create proactive triggers
-      if (result.factsStored === 0 && message) {
-        this.extractTriggersFromMessage(message, userId, 'user').catch(err => {
-          this.logger.debug({ error: (err as Error).message }, 'Background trigger extraction failed');
-        });
-      }
 
       this.logger.info(
         {
@@ -328,9 +363,9 @@ export class LLMFactExtractor {
   }
 
   /**
-   * Extract proactive triggers from a message (user or assistant)
-   * This is a lighter-weight extraction focused only on time-sensitive events.
-   * Called for both user messages (when no facts found) and assistant messages.
+   * Extract proactive triggers from a message (assistant messages only).
+   * User message triggers are now extracted via the combined fact+trigger prompt in extractFacts().
+   * This method is kept for assistant message extraction (called from agent.ts).
    */
   async extractTriggersFromMessage(
     message: string,
@@ -363,7 +398,9 @@ Format each trigger as:
   "type": "event_prep" | "commitment_check" | "goal_checkin" | "follow_up",
   "description": "Brief description of what to follow up on",
   "trigger_time": "MUST include specific time - use ISO datetime with time (e.g., '2026-02-07T09:00:00') OR relative ('+2h', '+1d 9am', 'tomorrow 10:00')",
-  "context": "Context for generating the proactive message"
+  "context": "Context for generating the proactive message",
+  "guidance": "Specific instructions for the bot on what to do to help the user when the trigger fires (e.g., 'Search for directions and check weather', 'Look up flight status'). null if none.",
+  "recurring_pattern": "If this is a recurring event, specify the pattern: 'daily', 'every weekday', 'every weekend', 'every Monday', 'every Tuesday at 9am', etc. null if one-time"
 }
 
 Trigger time guidelines:
@@ -401,41 +438,13 @@ Respond with JSON only:
           description: string;
           trigger_time: string;
           context: string;
+          guidance?: string | null;
+          recurring_pattern?: string | null;
         }>;
       };
 
       if (parsed.proactive_triggers && Array.isArray(parsed.proactive_triggers) && parsed.proactive_triggers.length > 0) {
-        const db = this.scallopStore.getDatabase();
-        for (const trigger of parsed.proactive_triggers) {
-          if (trigger.description && trigger.trigger_time && trigger.context) {
-            const triggerAt = this.parseTriggerTime(trigger.trigger_time);
-            if (!triggerAt) {
-              this.logger.debug({ trigger_time: trigger.trigger_time }, 'Invalid trigger time, skipping');
-              continue;
-            }
-
-            if (db.hasSimilarPendingScheduledItem(userId, trigger.description)) {
-              this.logger.debug({ description: trigger.description }, 'Similar scheduled item already exists, skipping');
-              continue;
-            }
-
-            db.addScheduledItem({
-              userId,
-              sessionId: null,
-              source: 'agent',
-              type: trigger.type || 'follow_up',
-              message: trigger.description,
-              context: trigger.context,
-              triggerAt,
-              recurring: null,
-              sourceMemoryId: null,
-            });
-            this.logger.info(
-              { type: trigger.type, description: trigger.description, source, triggerAt: new Date(triggerAt).toISOString() },
-              'Scheduled item created from message'
-            );
-          }
-        }
+        this.processExtractedTriggers(parsed.proactive_triggers, userId);
       }
     } catch (err) {
       this.logger.debug({ error: (err as Error).message }, 'Trigger extraction failed');
@@ -871,19 +880,12 @@ Respond with JSON only:
 
     const newFactsList = storedFacts.map((f, i) => `${i + 1}. "${f}"`).join('\n');
 
-    // Include current date for accurate trigger time calculation
-    const now = new Date();
-    const currentDate = now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
-
-    const prompt = `You are a memory manager. Given new facts extracted from a user message, do FIVE things.
-
-CURRENT DATE: ${currentDate}
+    const prompt = `You are a memory manager. Given new facts extracted from a user message, do FOUR things.
 
 1. CONSOLIDATE: Which existing memories are superseded (replaced/updated) by the new facts?
 2. USER PROFILE: Update user profile based on the new facts AND the original message.
 3. AGENT PROFILE: If the user is telling the AI about itself (name, personality, behavior), update the agent profile.
 4. PREFERENCES LEARNED: Extract preference patterns from the message (especially from corrections or comparisons).
-5. PROACTIVE TRIGGERS: Extract time-sensitive items that warrant proactive follow-up.
 ${sourceContext}
 NEW FACTS STORED:
 ${newFactsList}
@@ -912,45 +914,21 @@ PREFERENCES LEARNED:
 - Format: { "domain": "category", "prefers": "X", "over": "Y", "strength": 0.5-1.0 }
 - Domains: communication, technology, lifestyle, work, food, entertainment, etc.
 
-PROACTIVE TRIGGERS (for agent-initiated follow-ups):
-Look for time-sensitive items in the ORIGINAL USER MESSAGE:
-- Upcoming events: "meeting tomorrow", "dentist next week", "flight on Friday"
-- Commitments: "I'll finish the report", "planning to start gym", "need to call mom"
-- Goals: "trying to lose weight", "learning Spanish", "saving for vacation"
-- Deadlines: "due Friday", "need to submit by EOD", "expires next month"
-
-Format: {
-  "type": "event_prep" | "commitment_check" | "goal_checkin" | "follow_up",
-  "description": "Brief description of what to follow up on",
-  "trigger_time": "MUST include specific time - use ISO datetime with time (e.g., '2026-02-07T09:00:00') OR relative ('+2h', '+1d 9am', 'tomorrow 10:00')",
-  "context": "Context for generating the proactive message"
-}
-
-Trigger time guidelines:
-- event_prep: 2 hours before the event (for same-day) or morning of (8-9am for future days)
-- commitment_check: Next day morning (9am) or after stated deadline
-- goal_checkin: 1 week for short-term, 2 weeks for long-term goals, at 10am
-- follow_up: Based on context, usually next day at 9am
-
 RULES:
 - superseded: IDs of memories replaced by new facts. Empty array if none.
 - user_profile: Only fields that CHANGED or are NEW based on the message. Empty object if no updates.
 - agent_profile: Only if user is addressing the bot about its identity. Empty object if not.
 - preferences_learned: Array of preference objects. Empty array if no clear preferences.
-- proactive_triggers: Array of trigger objects. Empty array if nothing time-sensitive.
 - Do NOT echo back unchanged profile values.
-- Only create triggers for EXPLICIT time-sensitive items, not vague statements.
-- CRITICAL: trigger_time MUST include a specific time (hour:minute), not just a date!
-- "TODAY" alone is NOT valid - must include time like "TODAY 2pm".
 
 Respond with JSON only:
-{"superseded": [], "user_profile": {}, "agent_profile": {}, "preferences_learned": [], "proactive_triggers": []}`;
+{"superseded": [], "user_profile": {}, "agent_profile": {}, "preferences_learned": []}`;
 
     try {
       const response = await this.provider.complete({
         messages: [{ role: 'user', content: prompt }],
         temperature: 0.1,
-        maxTokens: 500, // Increased for proactive triggers
+        maxTokens: 400,
       });
 
       const responseText = Array.isArray(response.content)
@@ -970,12 +948,6 @@ Respond with JSON only:
           prefers: string;
           over: string;
           strength?: number;
-        }>;
-        proactive_triggers?: Array<{
-          type: 'event_prep' | 'commitment_check' | 'goal_checkin' | 'follow_up';
-          description: string;
-          trigger_time: string;
-          context: string;
         }>;
       };
 
@@ -1057,46 +1029,140 @@ Respond with JSON only:
         }
       }
 
-      // 5. Store proactive triggers
-      if (parsed.proactive_triggers && Array.isArray(parsed.proactive_triggers) && parsed.proactive_triggers.length > 0) {
-        const db = this.scallopStore.getDatabase();
-        for (const trigger of parsed.proactive_triggers) {
-          if (trigger.description && trigger.trigger_time && trigger.context) {
-            // Parse trigger time (ISO or relative)
-            const triggerAt = this.parseTriggerTime(trigger.trigger_time);
-            if (!triggerAt) {
-              this.logger.debug({ trigger_time: trigger.trigger_time }, 'Invalid trigger time, skipping');
-              continue;
-            }
-
-            // Check for duplicate scheduled items
-            if (db.hasSimilarPendingScheduledItem(userId, trigger.description)) {
-              this.logger.debug({ description: trigger.description }, 'Similar scheduled item already exists, skipping');
-              continue;
-            }
-
-            // Store the scheduled item
-            db.addScheduledItem({
-              userId,
-              sessionId: null,
-              source: 'agent',
-              type: trigger.type || 'follow_up',
-              message: trigger.description,
-              context: trigger.context,
-              triggerAt,
-              recurring: null,
-              sourceMemoryId: newMemoryIds[0] || null,
-            });
-            this.logger.info(
-              { type: trigger.type, description: trigger.description, triggerAt: new Date(triggerAt).toISOString() },
-              'Scheduled item created'
-            );
-          }
-        }
-      }
     } catch (err) {
       this.logger.debug({ error: (err as Error).message }, 'Memory consolidation LLM call failed');
     }
+  }
+
+  /**
+   * Process extracted triggers: store as scheduled items with guidance and recurring support.
+   * Called from extractFacts() (user messages) and extractTriggersFromMessage() (assistant messages).
+   */
+  private processExtractedTriggers(
+    triggers: Array<{
+      type: 'event_prep' | 'commitment_check' | 'goal_checkin' | 'follow_up';
+      description: string;
+      trigger_time: string;
+      context: string;
+      guidance?: string | null;
+      recurring_pattern?: string | null;
+    }>,
+    userId: string,
+    sourceMemoryId?: string | null,
+  ): void {
+    if (!this.scallopStore || triggers.length === 0) return;
+
+    const db = this.scallopStore.getDatabase();
+    for (const trigger of triggers) {
+      if (!trigger.description || !trigger.trigger_time || !trigger.context) continue;
+
+      const triggerAt = this.parseTriggerTime(trigger.trigger_time);
+      if (!triggerAt) {
+        this.logger.debug({ trigger_time: trigger.trigger_time }, 'Invalid trigger time, skipping');
+        continue;
+      }
+
+      if (db.hasSimilarPendingScheduledItem(userId, trigger.description)) {
+        this.logger.debug({ description: trigger.description }, 'Similar scheduled item already exists, skipping');
+        continue;
+      }
+
+      // Build context: store guidance as structured JSON alongside original context
+      let storedContext: string;
+      if (trigger.guidance) {
+        storedContext = JSON.stringify({
+          original_context: trigger.context,
+          guidance: trigger.guidance,
+        });
+      } else {
+        storedContext = trigger.context;
+      }
+
+      // Parse recurring pattern
+      const recurring = this.parseRecurringPattern(trigger.recurring_pattern ?? null, triggerAt);
+
+      db.addScheduledItem({
+        userId,
+        sessionId: null,
+        source: 'agent',
+        type: trigger.type || 'follow_up',
+        message: trigger.description,
+        context: storedContext,
+        triggerAt,
+        recurring,
+        sourceMemoryId: sourceMemoryId ?? null,
+      });
+      this.logger.info(
+        {
+          type: trigger.type,
+          description: trigger.description,
+          triggerAt: new Date(triggerAt).toISOString(),
+          hasGuidance: !!trigger.guidance,
+          recurring: recurring?.type ?? null,
+        },
+        'Scheduled item created from extraction'
+      );
+    }
+  }
+
+  /**
+   * Parse a recurring pattern string from LLM output into a RecurringSchedule.
+   * Supports: "daily", "every weekday", "every weekend", "every Monday", "every Tuesday at 9am", etc.
+   * Returns null for one-time triggers or unrecognized patterns.
+   */
+  private parseRecurringPattern(pattern: string | null, triggerAtMs: number): RecurringSchedule | null {
+    if (!pattern) return null;
+
+    const lower = pattern.toLowerCase().trim();
+    if (!lower || lower === 'null' || lower === 'none' || lower === 'one-time') return null;
+
+    // Extract time from the trigger timestamp as default hour/minute
+    const triggerDate = new Date(triggerAtMs);
+    const defaultHour = triggerDate.getHours();
+    const defaultMinute = triggerDate.getMinutes();
+
+    // Try to extract explicit time from pattern (e.g., "every Monday at 9am")
+    const timeMatch = lower.match(/at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i);
+    let hour = defaultHour;
+    let minute = defaultMinute;
+    if (timeMatch) {
+      hour = parseInt(timeMatch[1], 10);
+      const mins = timeMatch[2] ? parseInt(timeMatch[2], 10) : 0;
+      const ampm = timeMatch[3]?.toLowerCase();
+      if (ampm === 'pm' && hour < 12) hour += 12;
+      if (ampm === 'am' && hour === 12) hour = 0;
+      minute = mins;
+    }
+
+    // Daily
+    if (lower === 'daily' || lower === 'every day') {
+      return { type: 'daily', hour, minute };
+    }
+
+    // Weekdays
+    if (lower === 'every weekday' || lower === 'weekdays' || lower.includes('monday to friday') || lower.includes('monday through friday')) {
+      return { type: 'weekdays', hour, minute };
+    }
+
+    // Weekends
+    if (lower === 'every weekend' || lower === 'weekends') {
+      return { type: 'weekends', hour, minute };
+    }
+
+    // Weekly with specific day: "every Monday", "every Tuesday at 9am", "weekly on Wednesday"
+    const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+    for (let i = 0; i < dayNames.length; i++) {
+      if (lower.includes(dayNames[i])) {
+        return { type: 'weekly', hour, minute, dayOfWeek: i };
+      }
+    }
+
+    // Generic "weekly" without day
+    if (lower === 'weekly' || lower === 'every week') {
+      return { type: 'weekly', hour, minute, dayOfWeek: triggerDate.getDay() };
+    }
+
+    return null;
   }
 
   /**
@@ -1274,7 +1340,17 @@ Respond with JSON only:
   /**
    * Parse LLM response, handling potential JSON issues
    */
-  private parseResponse(content: string): { facts: ExtractedFactWithEmbedding[] } {
+  private parseResponse(content: string): {
+    facts: ExtractedFactWithEmbedding[];
+    proactive_triggers?: Array<{
+      type: 'event_prep' | 'commitment_check' | 'goal_checkin' | 'follow_up';
+      description: string;
+      trigger_time: string;
+      context: string;
+      guidance?: string | null;
+      recurring_pattern?: string | null;
+    }>;
+  } {
     try {
       // Try to extract JSON from response
       const jsonMatch = content.match(/\{[\s\S]*\}/);
@@ -1304,7 +1380,9 @@ export async function extractFactsWithLLM(
   message: string,
   context?: string
 ): Promise<{ facts: ExtractedFactWithEmbedding[] }> {
-  let prompt = FACT_EXTRACTION_PROMPT + '\n\n';
+  const now = new Date();
+  const currentDate = now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+  let prompt = FACT_AND_TRIGGER_EXTRACTION_PROMPT.replace('{{CURRENT_DATE}}', currentDate) + '\n\n';
   if (context) {
     prompt += `Context from previous messages:\n${context}\n\n`;
   }
