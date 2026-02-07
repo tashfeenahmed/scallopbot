@@ -430,13 +430,33 @@ export class UnifiedScheduler {
       follow_up: 'following up on something the user mentioned',
     };
 
+    // Parse context: may be structured JSON with guidance, or a plain string
+    let originalContext = item.context || 'None';
+    let guidance = '';
+    if (item.context) {
+      try {
+        const parsedContext = JSON.parse(item.context) as {
+          original_context?: string;
+          guidance?: string;
+        };
+        if (parsedContext.original_context) {
+          originalContext = parsedContext.original_context;
+        }
+        if (parsedContext.guidance) {
+          guidance = parsedContext.guidance;
+        }
+      } catch {
+        // Not JSON — use as plain string (backward compatible)
+      }
+    }
+
     const prompt = `You are a proactive personal assistant. Generate a brief, friendly message for ${triggerTypeDescriptions[item.type] || 'following up'}.
 
 TRIGGER CONTEXT:
 - Type: ${item.type}
 - Description: ${item.message}
-- Original context: ${item.context || 'None'}
-${goalContext}
+- Original context: ${originalContext}
+${guidance ? `- Guidance (what to do): ${guidance}\n` : ''}${goalContext}
 ${memoryContext ? `RELEVANT MEMORIES:\n${memoryContext}\n` : ''}
 GUIDELINES:
 - Be conversational and warm, not robotic
@@ -446,7 +466,7 @@ GUIDELINES:
 - For commitment_check: Gently check progress, don't be pushy
 - For goal_checkin: Be encouraging, celebrate small wins, mention specific progress
 - For follow_up: Reference the original context naturally
-- Don't use emojis unless appropriate for the context
+${guidance ? '- Follow the guidance instructions to help the user proactively\n' : ''}- Don't use emojis unless appropriate for the context
 - Start directly with the message, no greeting needed
 
 Generate the proactive message:`;
