@@ -1,6 +1,6 @@
 import { Bot, Context, InputFile } from 'grammy';
 import type { Logger } from 'pino';
-import type { Agent } from '../agent/agent.js';
+import type { Agent, ProgressCallback } from '../agent/agent.js';
 import type { SessionManager } from '../agent/session.js';
 import type { ScallopDatabase } from '../memory/db.js';
 import type { Attachment } from './types.js';
@@ -101,6 +101,7 @@ export class TelegramChannel {
   public userSessions: Map<string, string> = new Map();
   private isRunning = false;
   private stopRequests: Set<string> = new Set(); // Track users who want to stop processing
+  private verboseUsers: Set<string> = new Set(); // Track users who want debug output
   private voiceManager: VoiceManager | null = null;
   private voiceAvailable = false;
   private enableVoiceReply: boolean;
@@ -266,6 +267,25 @@ export class TelegramChannel {
       this.logger.info({ userId }, 'Stop requested by user');
     });
 
+    // /verbose command - toggle debug output
+    this.bot.command('verbose', async (ctx) => {
+      const userId = ctx.from?.id.toString();
+      if (!userId) return;
+
+      if (!this.isUserAllowed(userId)) {
+        await this.sendUnauthorized(ctx);
+        return;
+      }
+
+      if (this.verboseUsers.has(userId)) {
+        this.verboseUsers.delete(userId);
+        await ctx.reply('Verbose mode OFF');
+      } else {
+        this.verboseUsers.add(userId);
+        await ctx.reply('Verbose mode ON — you\'ll see memory lookups, tool calls, and thinking.');
+      }
+    });
+
     // /usage command - show token usage and costs
     this.bot.command('usage', async (ctx) => {
       const userId = ctx.from?.id.toString();
@@ -423,7 +443,8 @@ export class TelegramChannel {
       '/usage - View token usage and costs\n' +
       '/settings - View your configuration\n' +
       '/setup - Reconfigure the bot\n' +
-      '/new - Start new conversation history\n\n' +
+      '/new - Start new conversation history\n' +
+      '/verbose - Toggle debug output\n\n' +
       '<b>What I can do:</b>\n' +
       '- Read and write files on the server\n' +
       '- Execute shell commands\n' +
@@ -700,7 +721,7 @@ export class TelegramChannel {
       const sessionId = await this.getOrCreateSession(userId);
 
       // Thinking stays enabled in the agent but is not surfaced to Telegram users
-      const onProgress = async (_update: { type: string; message: string }) => {};
+      const onProgress = this.buildOnProgress(userId, ctx);
 
       const shouldStop = () => this.stopRequests.has(userId);
       const result = await this.agent.processMessage(sessionId, transcription.text, undefined, onProgress, shouldStop);
@@ -779,7 +800,7 @@ export class TelegramChannel {
       const sessionId = await this.getOrCreateSession(userId);
 
       // Thinking stays enabled in the agent but is not surfaced to Telegram users
-      const onProgress = async (_update: { type: string; message: string }) => {};
+      const onProgress = this.buildOnProgress(userId, ctx);
 
       const shouldStop = () => this.stopRequests.has(userId);
       const result = await this.agent.processMessage(sessionId, prompt, undefined, onProgress, shouldStop);
@@ -921,7 +942,7 @@ export class TelegramChannel {
       // Process through agent WITH attachments
       const sessionId = await this.getOrCreateSession(userId);
 
-      const onProgress = async (_update: { type: string; message: string }) => {};
+      const onProgress = this.buildOnProgress(userId, ctx);
       const shouldStop = () => this.stopRequests.has(userId);
 
       const result = await this.agent.processMessage(sessionId, prompt, attachments, onProgress, shouldStop);
@@ -973,7 +994,7 @@ export class TelegramChannel {
       const sessionId = await this.getOrCreateSession(userId);
 
       // Thinking stays enabled in the agent but is not surfaced to Telegram users
-      const onProgress = async (_update: { type: string; message: string }) => {};
+      const onProgress = this.buildOnProgress(userId, ctx);
 
       // Check if user wants to stop
       const shouldStop = () => this.stopRequests.has(userId);
@@ -1029,6 +1050,55 @@ export class TelegramChannel {
     const sender = isBot ? 'You (assistant)' : (reply.from?.first_name || 'User');
 
     return `[Replying to ${sender}: "${replyText}"]\n\n${messageText}`;
+  }
+
+  /**
+   * Build an onProgress callback for the given user.
+   * When verbose mode is off, returns a no-op. When on, sends formatted debug messages.
+   */
+  private buildOnProgress(userId: string, ctx: Context): ProgressCallback {
+    if (!this.verboseUsers.has(userId)) {
+      return async () => {};
+    }
+
+    return async (update) => {
+      let text = '';
+      const truncate = (s: string, max = 500) => s.length > max ? s.slice(0, max) + '…' : s;
+
+      switch (update.type) {
+        case 'memory': {
+          text = `🧠 Memory: ${update.message}`;
+          if (update.items && update.items.length > 0) {
+            const itemList = update.items
+              .slice(0, 10)
+              .map(i => `  • [${i.type}] ${truncate(i.content, 80)}`)
+              .join('\n');
+            text += '\n' + itemList;
+          }
+          break;
+        }
+        case 'tool_start':
+          text = `🔧 tool:${update.toolName}\n${truncate(update.message)}`;
+          break;
+        case 'tool_complete':
+          text = `✅ tool:${update.toolName}\n${truncate(update.message)}`;
+          break;
+        case 'tool_error':
+          text = `❌ tool:${update.toolName}\n${truncate(update.message)}`;
+          break;
+        case 'thinking':
+          text = `💭 Thinking...\n${truncate(update.message)}`;
+          break;
+        default:
+          return;
+      }
+
+      try {
+        await ctx.reply(text, { disable_notification: true });
+      } catch {
+        // Silently ignore send failures for debug messages
+      }
+    };
   }
 
   private startTypingIndicator(ctx: Context): NodeJS.Timeout {
@@ -1114,6 +1184,7 @@ export class TelegramChannel {
       { command: 'settings', description: 'View your current settings' },
       { command: 'setup', description: 'Reconfigure bot (name, personality, model)' },
       { command: 'new', description: 'Start a new conversation' },
+      { command: 'verbose', description: 'Toggle debug output (memory, tools, thinking)' },
     ]);
 
     // bot.start() runs grammy's long-polling loop and NEVER resolves.
