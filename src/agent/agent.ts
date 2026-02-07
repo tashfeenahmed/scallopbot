@@ -644,22 +644,24 @@ ALWAYS use **send_file** after creating any file (PDFs, images, documents, scrip
         limit: 10,
       });
 
-      // Combine, deduplicating by ID
+      // Combine: query-relevant results first, then fill with ambient facts
       const seenIds = new Set<string>();
       const allFactTexts: { content: string; subject?: string }[] = [];
 
-      for (const fact of userFacts) {
-        if (!seenIds.has(fact.id)) {
-          seenIds.add(fact.id);
-          const subject = fact.metadata?.subject as string | undefined;
-          allFactTexts.push({ content: fact.content, subject });
-        }
-      }
+      // Phase 2 results first — these are query-relevant and should take priority
       for (const result of relevantResults) {
         if (!seenIds.has(result.memory.id)) {
           seenIds.add(result.memory.id);
           const subject = result.memory.metadata?.subject as string | undefined;
           allFactTexts.push({ content: result.memory.content, subject });
+        }
+      }
+      // Then fill remaining space with ambient high-prominence facts
+      for (const fact of userFacts) {
+        if (!seenIds.has(fact.id)) {
+          seenIds.add(fact.id);
+          const subject = fact.metadata?.subject as string | undefined;
+          allFactTexts.push({ content: fact.content, subject });
         }
       }
 
@@ -960,11 +962,24 @@ ALWAYS use **send_file** after creating any file (PDFs, images, documents, scrip
               userId,
               sessionId,
             });
+            // Parse skill JSON output to extract clean result text
+            // Skills output JSON like {"success":true,"output":"...","error":"...","exitCode":0}
+            let skillOutput = result.output || '';
+            let skillError = result.error || '';
+            try {
+              const parsed = JSON.parse(skillOutput);
+              if (parsed && typeof parsed === 'object') {
+                skillOutput = parsed.output || parsed.error || skillOutput;
+                if (parsed.error) skillError = parsed.error;
+              }
+            } catch {
+              // Not JSON, use raw output
+            }
             resultSuccess = result.success;
-            resultOutput = result.output || '';
+            resultOutput = skillOutput;
             resultContent = result.success
-              ? (result.output || 'Success')
-              : `Error: ${result.error || result.output || 'Command failed with no error output'}`;
+              ? (skillOutput || 'Success')
+              : `Error: ${skillError || skillOutput || 'Command failed with no error output'}`;
           }
 
           results.push({
