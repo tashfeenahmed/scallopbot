@@ -18,7 +18,7 @@ export interface BM25Options {
 export function buildDocFreqMap(documents: string[]): Map<string, number> {
   const docFreq = new Map<string, number>();
   for (const doc of documents) {
-    const uniqueTerms = new Set(doc.toLowerCase().split(/\s+/));
+    const uniqueTerms = new Set(doc.toLowerCase().replace(/[^\w\s]/g, ' ').split(/\s+/).filter(t => t.length > 0));
     for (const term of uniqueTerms) {
       docFreq.set(term, (docFreq.get(term) || 0) + 1);
     }
@@ -37,8 +37,8 @@ export function calculateBM25Score(
   const k1 = options.k1 ?? 1.2;
   const b = options.b ?? 0.75;
 
-  const queryTerms = query.toLowerCase().split(/\s+/);
-  const docTerms = document.toLowerCase().split(/\s+/);
+  const queryTerms = query.toLowerCase().replace(/[^\w\s]/g, ' ').split(/\s+/).filter(t => t.length > 0);
+  const docTerms = document.toLowerCase().replace(/[^\w\s]/g, ' ').split(/\s+/).filter(t => t.length > 0);
   const docLength = docTerms.length;
 
   // Calculate term frequencies
