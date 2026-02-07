@@ -8,6 +8,7 @@
 
 import type { Logger } from 'pino';
 import type { LLMProvider } from '../providers/types.js';
+import type { CostTracker } from '../routing/cost.js';
 import { cosineSimilarity, type EmbeddingProvider } from './embeddings.js';
 import type { ScallopMemoryStore } from './scallop-store.js';
 import type { MemoryCategory } from './db.js';
@@ -85,6 +86,8 @@ export interface LLMFactExtractorOptions {
   scallopStore: ScallopMemoryStore;
   logger: Logger;
   embedder?: EmbeddingProvider;
+  /** Cost tracker for recording LLM usage from background extraction */
+  costTracker?: CostTracker;
   /** Similarity threshold for deduplication (0-1, default 0.95) */
   deduplicationThreshold?: number;
   /** Whether to use LLM for relationship classification (recommended) */
@@ -177,7 +180,10 @@ export class LLMFactExtractor {
   private resourceLimits: Required<ResourceLimits>;
 
   constructor(options: LLMFactExtractorOptions) {
-    this.provider = options.provider;
+    // Wrap provider with cost tracking if available
+    this.provider = options.costTracker
+      ? options.costTracker.wrapProvider(options.provider, 'fact-extractor')
+      : options.provider;
     this.scallopStore = options.scallopStore;
     this.logger = options.logger.child({ component: 'fact-extractor' });
     this.embedder = options.embedder;
@@ -191,9 +197,9 @@ export class LLMFactExtractor {
       disableClassificationOnLowMemory: options.resourceLimits?.disableClassificationOnLowMemory ?? false,
     };
 
-    // Use LLM-based relationship classifier by default
+    // Use LLM-based relationship classifier by default (uses the same wrapped provider)
     if (options.useRelationshipClassifier !== false) {
-      this.relationshipClassifier = createRelationshipClassifier(options.provider, {
+      this.relationshipClassifier = createRelationshipClassifier(this.provider, {
         maxBatchSize: this.resourceLimits.maxClassificationBatchSize,
       });
       this.logger.debug('LLM relationship classifier enabled with batch classification');

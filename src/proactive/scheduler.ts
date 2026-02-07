@@ -17,6 +17,7 @@ import type {
   RecurringSchedule,
 } from '../memory/db.js';
 import type { LLMProvider, ContentBlock } from '../providers/types.js';
+import type { CostTracker } from '../routing/cost.js';
 import type { ScallopMemoryStore } from '../memory/scallop-store.js';
 import type { GoalService } from '../goals/index.js';
 
@@ -46,6 +47,8 @@ export interface UnifiedSchedulerOptions {
   provider: LLMProvider;
   /** Logger instance */
   logger: Logger;
+  /** Cost tracker for recording LLM usage from scheduled messages */
+  costTracker?: CostTracker;
   /** Goal service for goal check-in context (optional) */
   goalService?: GoalService;
   /** Check interval in milliseconds (default: 30 seconds) */
@@ -95,7 +98,10 @@ export class UnifiedScheduler {
   constructor(options: UnifiedSchedulerOptions) {
     this.db = options.db;
     this.memoryStore = options.memoryStore;
-    this.provider = options.provider;
+    // Wrap provider with cost tracking if available
+    this.provider = options.costTracker
+      ? options.costTracker.wrapProvider(options.provider, 'scheduler')
+      : options.provider;
     this.logger = options.logger.child({ component: 'unified-scheduler' });
     this.goalService = options.goalService;
     this.interval = options.interval ?? 30 * 1000; // 30 seconds

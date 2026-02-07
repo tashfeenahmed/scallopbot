@@ -6,7 +6,8 @@
   "type": "module",
   "scripts": {
     "clean": "rm -rf dist",
-    "build": "rm -rf dist && tsc && node -e \"const fs=require('fs'),p=require('path');fs.readdirSync('src/skills/bundled').forEach(d=>{const s=p.join('src/skills/bundled',d,'SKILL.md'),t=p.join('dist/skills/bundled',d);if(fs.existsSync(s)){fs.mkdirSync(t,{recursive:true});fs.copyFileSync(s,p.join(t,'SKILL.md'))}})\"",
+    "build:web": "cd web && npm install && npm run build",
+    "build": "npm run build:web && rm -rf dist && tsc && node -e \"const fs=require('fs'),p=require('path');fs.readdirSync('src/skills/bundled').forEach(d=>{const s=p.join('src/skills/bundled',d,'SKILL.md'),t=p.join('dist/skills/bundled',d);if(fs.existsSync(s)){fs.mkdirSync(t,{recursive:true});fs.copyFileSync(s,p.join(t,'SKILL.md'))}})\"",
     "start": "node dist/cli.js start",
     "dev": "tsx watch src/index.ts",
     "test": "vitest",
