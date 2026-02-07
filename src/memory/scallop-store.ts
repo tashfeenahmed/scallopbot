@@ -272,18 +272,20 @@ export class ScallopMemoryStore {
       documentDateRange,
     } = options;
 
-    // Get candidate memories - warn if userId is omitted (potential cross-user leak)
+    // Get candidate memories - use a large pool so BM25 can find keyword matches
+    // even when they're not the highest-prominence memories
+    const candidateLimit = Math.max(limit * 5, 200);
     let candidates: ScallopMemoryEntry[];
     if (userId) {
       candidates = this.db.getMemoriesByUser(userId, {
         category,
         minProminence,
         isLatest,
-        limit: limit * 5, // Get more candidates for filtering
+        limit: candidateLimit,
       });
     } else {
       this.logger.warn('Search called without userId - searching ALL users. This may leak memories across users in multi-user deployments.');
-      candidates = this.db.getAllMemories({ minProminence, limit: limit * 5 });
+      candidates = this.db.getAllMemories({ minProminence, limit: candidateLimit });
     }
 
     // Apply date filters
@@ -351,8 +353,9 @@ export class ScallopMemoryStore {
         }
       }
 
-      // Combine scores (weighted)
-      score = keywordScore * 0.4 + semanticScore * 0.4 + memory.prominence * 0.2;
+      // Combine scores: prominence is a tiebreaker, not a baseline
+      const relevanceScore = keywordScore * 0.4 + semanticScore * 0.4;
+      score = relevanceScore > 0 ? relevanceScore + memory.prominence * 0.2 : 0;
 
       // Boost for exact matches
       if (memory.content.toLowerCase().includes(queryLower)) {

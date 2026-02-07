@@ -2,7 +2,7 @@
  * Memory Search Skill Execution Script
  *
  * Opens the SQLite memories database directly (safe in WAL mode)
- * and searches using BM25 keyword scoring.
+ * and searches using hybrid BM25 keyword + TF-IDF semantic scoring.
  */
 
 import * as path from 'path';
@@ -11,6 +11,7 @@ import {
   type ScallopMemoryEntry,
 } from '../../../../memory/db.js';
 import { calculateBM25Score, buildDocFreqMap, type BM25Options } from '../../../../memory/bm25.js';
+import { TFIDFEmbedder, cosineSimilarity } from '../../../../memory/embeddings.js';
 
 // Types
 interface MemorySearchArgs {
@@ -95,7 +96,7 @@ function parseArgs(): MemorySearchArgs {
 }
 
 /**
- * Score and rank memories using BM25
+ * Score and rank memories using hybrid BM25 + TF-IDF semantic search
  */
 function searchMemories(
   memories: ScallopMemoryEntry[],
@@ -115,17 +116,29 @@ function searchMemories(
     docFreq,
   };
 
+  // Build TF-IDF embedder trained on candidate corpus for semantic matching
+  const embedder = new TFIDFEmbedder();
+  embedder.addDocuments(contentTexts);
+  const queryEmbedding = embedder.embedSync(query);
+
   const results: { memory: ScallopMemoryEntry; score: number }[] = [];
 
   for (const memory of memories) {
-    const score = calculateBM25Score(query, memory.content, bm25Options);
+    const keywordScore = calculateBM25Score(query, memory.content, bm25Options);
+
+    // Semantic score via TF-IDF cosine similarity
+    const memEmbedding = embedder.embedSync(memory.content);
+    const semanticScore = cosineSimilarity(queryEmbedding, memEmbedding);
+
+    // Combined: only count if there's actual relevance
+    const relevanceScore = keywordScore * 0.5 + semanticScore * 0.5;
 
     // Boost for exact substring match
     const boostedScore = memory.content.toLowerCase().includes(query.toLowerCase())
-      ? score * 1.5
-      : score;
+      ? relevanceScore * 1.5
+      : relevanceScore;
 
-    if (boostedScore > 0.01) {
+    if (boostedScore > 0.05) {
       results.push({ memory, score: boostedScore });
     }
   }
