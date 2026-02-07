@@ -7,6 +7,7 @@
 
 import * as path from 'path';
 import * as os from 'os';
+import * as fs from 'fs';
 import Database from 'better-sqlite3';
 import { nanoid } from 'nanoid';
 
@@ -52,8 +53,22 @@ interface SkillResult {
   exitCode: number;
 }
 
-// Get database path
+// Get database path - check workspace first (where the main bot stores it),
+// then fall back to data dir
 function getDbPath(): string {
+  const possiblePaths = [
+    process.env.SKILL_WORKSPACE ? path.join(process.env.SKILL_WORKSPACE, 'memories.db') : null,
+    path.join(process.cwd(), 'memories.db'),
+    path.join(process.env.SCALLOPBOT_DATA_DIR || path.join(os.homedir(), '.scallopbot'), 'memories.db'),
+  ];
+
+  for (const p of possiblePaths) {
+    if (p && fs.existsSync(p)) {
+      return p;
+    }
+  }
+
+  // Default fallback (will create if needed)
   const dataDir = process.env.SCALLOPBOT_DATA_DIR || path.join(os.homedir(), '.scallopbot');
   return path.join(dataDir, 'memories.db');
 }
