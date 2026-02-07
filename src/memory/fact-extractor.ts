@@ -102,6 +102,7 @@ export interface LLMFactExtractorOptions {
 const FACT_AND_TRIGGER_EXTRACTION_PROMPT = `You are a fact extraction system. Extract factual information, detect memory actions, AND identify proactive triggers from the user's message.
 
 CURRENT DATE: {{CURRENT_DATE}}
+CURRENT TIME: {{CURRENT_TIME}}
 
 ACTION TYPES:
 - "fact" (default): Store as new knowledge
@@ -261,7 +262,8 @@ export class LLMFactExtractor {
       // Build prompt with current date injected and optional context
       const now = new Date();
       const currentDate = now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
-      let prompt = FACT_AND_TRIGGER_EXTRACTION_PROMPT.replace('{{CURRENT_DATE}}', currentDate) + '\n\n';
+      const currentTime = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
+      let prompt = FACT_AND_TRIGGER_EXTRACTION_PROMPT.replace('{{CURRENT_DATE}}', currentDate).replace('{{CURRENT_TIME}}', currentTime) + '\n\n';
       if (context) {
         prompt += `Context from previous messages:\n${context}\n\n`;
       }
@@ -376,10 +378,12 @@ export class LLMFactExtractor {
 
     const now = new Date();
     const currentDate = now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+    const currentTime = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
 
     const prompt = `You are a proactive trigger extractor. Analyze this message for time-sensitive items that warrant follow-up.
 
 CURRENT DATE: ${currentDate}
+CURRENT TIME: ${currentTime}
 
 MESSAGE (from ${source}):
 "${message}"
@@ -1382,7 +1386,8 @@ export async function extractFactsWithLLM(
 ): Promise<{ facts: ExtractedFactWithEmbedding[] }> {
   const now = new Date();
   const currentDate = now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
-  let prompt = FACT_AND_TRIGGER_EXTRACTION_PROMPT.replace('{{CURRENT_DATE}}', currentDate) + '\n\n';
+  const currentTime = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
+  let prompt = FACT_AND_TRIGGER_EXTRACTION_PROMPT.replace('{{CURRENT_DATE}}', currentDate).replace('{{CURRENT_TIME}}', currentTime) + '\n\n';
   if (context) {
     prompt += `Context from previous messages:\n${context}\n\n`;
   }

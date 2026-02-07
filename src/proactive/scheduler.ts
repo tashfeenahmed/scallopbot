@@ -450,7 +450,14 @@ export class UnifiedScheduler {
       }
     }
 
+    const now = new Date();
+    const currentDate = now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+    const currentTime = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
+
     const prompt = `You are a proactive personal assistant. Generate a brief, friendly message for ${triggerTypeDescriptions[item.type] || 'following up'}.
+
+CURRENT DATE: ${currentDate}
+CURRENT TIME: ${currentTime}
 
 TRIGGER CONTEXT:
 - Type: ${item.type}
