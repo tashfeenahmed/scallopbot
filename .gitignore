@@ -55,3 +55,6 @@ DEPLOYMENT.md
 *.db-wal
 test-vision*.ts
 test-vision*.ts
+
+# Web UI
+web/node_modules/

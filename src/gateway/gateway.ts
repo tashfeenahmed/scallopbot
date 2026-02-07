@@ -156,6 +156,7 @@ export class Gateway {
         scallopStore: this.scallopMemoryStore,
         logger: this.logger,
         embedder,
+        costTracker: this.costTracker || undefined,
         deduplicationThreshold: 0.95, // Higher threshold - only skip true duplicates
       });
       this.logger.debug({ provider: factExtractionProvider.name }, 'LLM fact extractor initialized');
@@ -244,6 +245,7 @@ export class Gateway {
         memoryStore: this.scallopMemoryStore,
         provider: factExtractionProvider,
         logger: this.logger,
+        costTracker: this.costTracker || undefined,
         goalService: this.goalService || undefined,
         interval: 30 * 1000, // Check every 30 seconds
         onSendMessage: async (userId: string, message: string) => {

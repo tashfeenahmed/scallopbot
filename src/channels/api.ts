@@ -400,6 +400,16 @@ export class ApiChannel implements Channel, TriggerSource {
       }
 
       if (!stats || !stats.isFile()) {
+        // SPA fallback: serve index.html for non-file paths
+        if (!path.extname(urlPath)) {
+          const indexPath = path.join(this.config.staticDir!, 'index.html');
+          const indexStats = await stat(indexPath).catch(() => null);
+          if (indexStats?.isFile()) {
+            res.writeHead(200, { 'Content-Type': 'text/html' });
+            createReadStream(indexPath).pipe(res);
+            return true;
+          }
+        }
         return false;
       }
 

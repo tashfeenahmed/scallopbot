@@ -6,6 +6,7 @@ import {
   UsageRecord,
   BudgetStatus,
 } from './cost.js';
+import type { LLMProvider, CompletionRequest, CompletionResponse } from '../providers/types.js';
 
 describe('CostTracker', () => {
   let tracker: CostTracker;
@@ -63,6 +64,49 @@ describe('CostTracker', () => {
       const pricing = tracker.getModelPricing('unknown-model');
       expect(pricing.inputPerMillion).toBe(0);
       expect(pricing.outputPerMillion).toBe(0);
+    });
+
+    it('should log a warning for unknown models', () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      tracker.getModelPricing('totally-unknown-model');
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('totally-unknown-model')
+      );
+      warnSpy.mockRestore();
+    });
+
+    it('should have pricing for xAI Grok models', () => {
+      const grok4 = tracker.getModelPricing('grok-4');
+      expect(grok4.inputPerMillion).toBe(3);
+      expect(grok4.outputPerMillion).toBe(15);
+
+      const grok3 = tracker.getModelPricing('grok-3');
+      expect(grok3.inputPerMillion).toBe(3);
+      expect(grok3.outputPerMillion).toBe(15);
+
+      const grok2 = tracker.getModelPricing('grok-2');
+      expect(grok2.inputPerMillion).toBe(2);
+      expect(grok2.outputPerMillion).toBe(10);
+    });
+
+    it('should have pricing for newer Anthropic models', () => {
+      const sonnet45 = tracker.getModelPricing('claude-sonnet-4-5-20250929');
+      expect(sonnet45.inputPerMillion).toBe(3);
+      expect(sonnet45.outputPerMillion).toBe(15);
+
+      const opus4 = tracker.getModelPricing('claude-opus-4-20250514');
+      expect(opus4.inputPerMillion).toBe(15);
+      expect(opus4.outputPerMillion).toBe(75);
+    });
+
+    it('should have pricing for OpenRouter models', () => {
+      const orSonnet = tracker.getModelPricing('anthropic/claude-3.5-sonnet');
+      expect(orSonnet.inputPerMillion).toBe(6);
+      expect(orSonnet.outputPerMillion).toBe(30);
+
+      const orSonnet45 = tracker.getModelPricing('anthropic/claude-sonnet-4.5');
+      expect(orSonnet45.inputPerMillion).toBe(3);
+      expect(orSonnet45.outputPerMillion).toBe(15);
     });
   });
 
@@ -475,6 +519,92 @@ describe('CostTracker', () => {
       const result = tracker.canMakeRequest();
       expect(result.allowed).toBe(false);
       expect(result.reason?.toLowerCase()).toContain('monthly');
+    });
+  });
+
+  describe('wrapProvider', () => {
+    function createMockProvider(name: string, model: string): LLMProvider {
+      return {
+        name,
+        isAvailable: () => true,
+        complete: vi.fn().mockResolvedValue({
+          content: [{ type: 'text', text: 'response' }],
+          stopReason: 'end_turn',
+          usage: { inputTokens: 500, outputTokens: 200 },
+          model,
+        } as CompletionResponse),
+      };
+    }
+
+    beforeEach(() => {
+      tracker = new CostTracker({});
+    });
+
+    it('should record usage automatically on each complete() call', async () => {
+      const mock = createMockProvider('anthropic', 'claude-sonnet-4-20250514');
+      const wrapped = tracker.wrapProvider(mock, 'test-session');
+
+      await wrapped.complete({ messages: [{ role: 'user', content: 'hello' }] });
+
+      const history = tracker.getUsageHistory();
+      expect(history).toHaveLength(1);
+      expect(history[0].model).toBe('claude-sonnet-4-20250514');
+      expect(history[0].provider).toBe('anthropic');
+      expect(history[0].sessionId).toBe('test-session');
+      expect(history[0].inputTokens).toBe(500);
+      expect(history[0].outputTokens).toBe(200);
+      expect(history[0].cost).toBeGreaterThan(0);
+    });
+
+    it('should return the original response unchanged', async () => {
+      const mock = createMockProvider('anthropic', 'claude-sonnet-4-20250514');
+      const wrapped = tracker.wrapProvider(mock, 'test-session');
+
+      const response = await wrapped.complete({ messages: [{ role: 'user', content: 'hello' }] });
+
+      expect(response.content).toEqual([{ type: 'text', text: 'response' }]);
+      expect(response.model).toBe('claude-sonnet-4-20250514');
+      expect(response.usage.inputTokens).toBe(500);
+    });
+
+    it('should preserve provider name and isAvailable', () => {
+      const mock = createMockProvider('xai', 'grok-4');
+      const wrapped = tracker.wrapProvider(mock, 'test-session');
+
+      expect(wrapped.name).toBe('xai');
+      expect(wrapped.isAvailable()).toBe(true);
+    });
+
+    it('should record per-call usage with correct model (fixes fallback misattribution)', async () => {
+      const provider1 = createMockProvider('groq', 'llama-3.3-70b-versatile');
+      const provider2 = createMockProvider('anthropic', 'claude-sonnet-4-20250514');
+
+      const wrapped1 = tracker.wrapProvider(provider1, 'session-1');
+      const wrapped2 = tracker.wrapProvider(provider2, 'session-1');
+
+      // Simulate: first call on groq, then fallback to anthropic
+      await wrapped1.complete({ messages: [{ role: 'user', content: 'hi' }] });
+      await wrapped2.complete({ messages: [{ role: 'user', content: 'hi' }] });
+
+      const history = tracker.getUsageHistory();
+      expect(history).toHaveLength(2);
+      expect(history[0].model).toBe('llama-3.3-70b-versatile');
+      expect(history[0].provider).toBe('groq');
+      expect(history[1].model).toBe('claude-sonnet-4-20250514');
+      expect(history[1].provider).toBe('anthropic');
+
+      // Groq should be cheaper than Anthropic
+      expect(history[0].cost).toBeLessThan(history[1].cost);
+    });
+
+    it('should use "unknown" sessionId when none provided', async () => {
+      const mock = createMockProvider('anthropic', 'claude-sonnet-4-20250514');
+      const wrapped = tracker.wrapProvider(mock);
+
+      await wrapped.complete({ messages: [{ role: 'user', content: 'hello' }] });
+
+      const history = tracker.getUsageHistory();
+      expect(history[0].sessionId).toBe('unknown');
     });
   });
 });

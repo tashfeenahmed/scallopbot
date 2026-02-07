@@ -284,12 +284,16 @@ export class Agent {
       ? this.skillRegistry.getToolDefinitions()
       : [];
 
+    // Wrap provider with cost tracker so each LLM call records its own usage
+    if (this.costTracker) {
+      activeProvider = this.costTracker.wrapProvider(activeProvider, sessionId);
+    }
+
     // Track usage across iterations
     let totalInputTokens = 0;
     let totalOutputTokens = 0;
     let iterations = 0;
     let finalResponse = '';
-    let lastModel = '';
 
     // Agent loop
     while (iterations < this.maxIterations) {
@@ -349,8 +353,6 @@ export class Agent {
         }, 'LLM call failed after recovery attempts');
         throw error;
       }
-      lastModel = response.model;
-
       // Track token usage
       totalInputTokens += response.usage.inputTokens;
       totalOutputTokens += response.usage.outputTokens;
@@ -462,15 +464,8 @@ export class Agent {
     const tokenUsage = { inputTokens: totalInputTokens, outputTokens: totalOutputTokens };
     await this.sessionManager.recordTokenUsage(sessionId, tokenUsage);
 
-    // Record usage in cost tracker
-    if (this.costTracker && lastModel) {
-      this.costTracker.recordUsage({
-        model: lastModel,
-        inputTokens: totalInputTokens,
-        outputTokens: totalOutputTokens,
-        provider: activeProvider.name,
-        sessionId,
-      });
+    // Log cost summary (recording now happens per-call via wrapProvider)
+    if (this.costTracker) {
       const budget = this.costTracker.getBudgetStatus();
       this.logger.debug(
         { dailySpend: budget.dailySpend.toFixed(4), monthlySpend: budget.monthlySpend.toFixed(4) },

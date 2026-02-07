@@ -5,6 +5,7 @@
  */
 
 import type { ScallopDatabase } from '../memory/db.js';
+import type { LLMProvider } from '../providers/types.js';
 
 export interface ModelPricing {
   inputPerMillion: number;
@@ -57,6 +58,8 @@ export interface RequestCheck {
 const DEFAULT_PRICING: Record<string, ModelPricing> = {
   // Anthropic
   'claude-sonnet-4-20250514': { inputPerMillion: 3, outputPerMillion: 15 },
+  'claude-sonnet-4-5-20250929': { inputPerMillion: 3, outputPerMillion: 15 },
+  'claude-opus-4-20250514': { inputPerMillion: 15, outputPerMillion: 75 },
   'claude-3-5-sonnet-20241022': { inputPerMillion: 3, outputPerMillion: 15 },
   'claude-3-opus-20240229': { inputPerMillion: 15, outputPerMillion: 75 },
   'claude-3-haiku-20240307': { inputPerMillion: 0.25, outputPerMillion: 1.25 },
@@ -65,6 +68,11 @@ const DEFAULT_PRICING: Record<string, ModelPricing> = {
   'gpt-4o': { inputPerMillion: 2.5, outputPerMillion: 10 },
   'gpt-4o-mini': { inputPerMillion: 0.15, outputPerMillion: 0.6 },
   'gpt-4-turbo': { inputPerMillion: 10, outputPerMillion: 30 },
+
+  // xAI (Grok)
+  'grok-4': { inputPerMillion: 3, outputPerMillion: 15 },
+  'grok-3': { inputPerMillion: 3, outputPerMillion: 15 },
+  'grok-2': { inputPerMillion: 2, outputPerMillion: 10 },
 
   // Groq (Llama models)
   'llama-3.3-70b-versatile': { inputPerMillion: 0.59, outputPerMillion: 0.79 },
@@ -79,6 +87,10 @@ const DEFAULT_PRICING: Record<string, ModelPricing> = {
   'moonshot-v1-128k': { inputPerMillion: 0.6, outputPerMillion: 2.5 },
   'moonshot-v1-32k': { inputPerMillion: 0.6, outputPerMillion: 2.5 },
   'moonshot-v1-8k': { inputPerMillion: 0.6, outputPerMillion: 2.5 },
+
+  // OpenRouter
+  'anthropic/claude-3.5-sonnet': { inputPerMillion: 6, outputPerMillion: 30 },
+  'anthropic/claude-sonnet-4.5': { inputPerMillion: 3, outputPerMillion: 15 },
 
   // Free/Local
   'llama3.2': { inputPerMillion: 0, outputPerMillion: 0 },
@@ -135,7 +147,8 @@ export class CostTracker {
       return DEFAULT_PRICING[model];
     }
 
-    // Unknown model - return zero pricing
+    // Unknown model - log warning and return zero pricing
+    console.warn(`[CostTracker] Unknown model "${model}" - cost will be $0`);
     return { inputPerMillion: 0, outputPerMillion: 0 };
   }
 
@@ -266,6 +279,30 @@ export class CostTracker {
     }
 
     return records;
+  }
+
+  /**
+   * Wrap an LLM provider so every complete() call automatically records usage.
+   * Returns a proxy provider that behaves identically but tracks cost.
+   */
+  wrapProvider(provider: LLMProvider, sessionId?: string): LLMProvider {
+    const tracker = this;
+    return {
+      name: provider.name,
+      isAvailable: () => provider.isAvailable(),
+      stream: provider.stream?.bind(provider),
+      async complete(request) {
+        const response = await provider.complete(request);
+        tracker.recordUsage({
+          model: response.model,
+          inputTokens: response.usage.inputTokens,
+          outputTokens: response.usage.outputTokens,
+          provider: provider.name,
+          sessionId: sessionId ?? 'unknown',
+        });
+        return response;
+      },
+    };
   }
 
   canMakeRequest(): RequestCheck {
