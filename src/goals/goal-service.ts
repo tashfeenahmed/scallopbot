@@ -609,26 +609,28 @@ export class GoalService {
       return;
     }
 
-    const description = `Goal check-in: ${goal.content}`;
+    const message = `Goal check-in: ${goal.content}`;
 
-    // Check for existing similar trigger
-    if (this.db.hasSimilarPendingTrigger(goal.userId, description)) {
+    // Check for existing similar scheduled item
+    if (this.db.hasSimilarPendingScheduledItem(goal.userId, message)) {
       return;
     }
 
     const triggerAt = calculateNextCheckin(frequency);
 
-    this.db.addProactiveTrigger({
+    this.db.addScheduledItem({
       userId: goal.userId,
+      sessionId: null,
+      source: 'agent',
       type: 'goal_checkin',
-      description,
+      message,
       context: JSON.stringify({
         goalId,
         goalTitle: goal.content,
         progress: goal.metadata.progress ?? 0,
       }),
       triggerAt,
-      status: 'pending',
+      recurring: null,
       sourceMemoryId: goalId,
     });
 

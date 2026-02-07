@@ -191,13 +191,13 @@ function scheduleCheckin(db: Database.Database, goal: GoalItem): void {
     return;
   }
 
-  const description = `Goal check-in: ${goal.content}`;
+  const message = `Goal check-in: ${goal.content}`;
 
-  // Check for existing trigger
+  // Check for existing scheduled item
   const existing = db.prepare(`
-    SELECT COUNT(*) as count FROM proactive_triggers
-    WHERE user_id = ? AND status = 'pending' AND description = ?
-  `).get(goal.userId, description) as { count: number };
+    SELECT COUNT(*) as count FROM scheduled_items
+    WHERE user_id = ? AND status = 'pending' AND message = ?
+  `).get(goal.userId, message) as { count: number };
 
   if (existing.count > 0) return;
 
@@ -223,15 +223,18 @@ function scheduleCheckin(db: Database.Database, goal: GoalItem): void {
   }
 
   db.prepare(`
-    INSERT INTO proactive_triggers (id, user_id, type, description, context, trigger_at, status, source_memory_id, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO scheduled_items (id, user_id, session_id, source, type, message, context, trigger_at, recurring, status, source_memory_id, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     nanoid(),
     goal.userId,
+    null,
+    'agent',
     'goal_checkin',
-    description,
+    message,
     JSON.stringify({ goalId: goal.id, goalTitle: goal.content, progress: goal.metadata.progress ?? 0 }),
     triggerAt,
+    null,
     'pending',
     goal.id,
     now,
