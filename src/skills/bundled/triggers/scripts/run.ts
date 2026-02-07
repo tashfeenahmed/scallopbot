@@ -12,10 +12,13 @@ import * as fs from 'fs';
 interface TriggerEntry {
   id: string;
   user_id: string;
+  session_id: string | null;
+  source: string;
   type: string;
-  description: string;
-  context: string;
+  message: string;
+  context: string | null;
   trigger_at: number;
+  recurring: string | null;
   status: string;
   source_memory_id: string | null;
   created_at: number;
@@ -72,7 +75,7 @@ function formatTriggerTime(timestamp: number): string {
 
 function listTriggers(db: Database.Database): string {
   const stmt = db.prepare(`
-    SELECT * FROM proactive_triggers
+    SELECT * FROM scheduled_items
     WHERE status = 'pending'
     ORDER BY trigger_at ASC
   `);
@@ -80,19 +83,20 @@ function listTriggers(db: Database.Database): string {
   const triggers = stmt.all() as TriggerEntry[];
 
   if (triggers.length === 0) {
-    return 'No pending proactive triggers.\n\nProactive triggers are automatically created when you mention events, commitments, or goals in conversation.';
+    return 'No pending scheduled items.\n\nScheduled items are created when you set reminders or mention events, commitments, or goals in conversation.';
   }
 
-  const lines = ['**Pending proactive triggers:**\n'];
+  const lines = ['**Pending scheduled items:**\n'];
 
   for (const trigger of triggers) {
     const timeStr = formatTriggerTime(trigger.trigger_at);
     const shortId = trigger.id.substring(0, 8);
-    lines.push(`- [${shortId}] **${trigger.description}** (${trigger.type})`);
+    const sourceTag = trigger.source === 'user' ? 'reminder' : trigger.type;
+    lines.push(`- [${shortId}] **${trigger.message}** (${sourceTag})`);
     lines.push(`  Triggers: ${timeStr}`);
   }
 
-  lines.push(`\n*To cancel a trigger, use: cancel with trigger_id*`);
+  lines.push(`\n*To cancel an item, use: cancel with trigger_id*`);
 
   return lines.join('\n');
 }
@@ -100,7 +104,7 @@ function listTriggers(db: Database.Database): string {
 function cancelTrigger(db: Database.Database, triggerId: string): string {
   // Support partial ID matching
   const stmt = db.prepare(`
-    SELECT * FROM proactive_triggers
+    SELECT * FROM scheduled_items
     WHERE id LIKE ? AND status = 'pending'
     LIMIT 1
   `);
@@ -111,28 +115,28 @@ function cancelTrigger(db: Database.Database, triggerId: string): string {
     return `No pending trigger found matching ID "${triggerId}".`;
   }
 
-  const deleteStmt = db.prepare('DELETE FROM proactive_triggers WHERE id = ?');
+  const deleteStmt = db.prepare('DELETE FROM scheduled_items WHERE id = ?');
   const result = deleteStmt.run(trigger.id);
 
   if (result.changes > 0) {
-    return `Cancelled trigger: "${trigger.description}"`;
+    return `Cancelled: "${trigger.message}"`;
   } else {
     return `Failed to cancel trigger "${triggerId}".`;
   }
 }
 
 function cancelAllTriggers(db: Database.Database): string {
-  const countStmt = db.prepare(`SELECT COUNT(*) as count FROM proactive_triggers WHERE status = 'pending'`);
+  const countStmt = db.prepare(`SELECT COUNT(*) as count FROM scheduled_items WHERE status = 'pending'`);
   const { count } = countStmt.get() as { count: number };
 
   if (count === 0) {
-    return 'No pending triggers to cancel.';
+    return 'No pending items to cancel.';
   }
 
-  const deleteStmt = db.prepare(`DELETE FROM proactive_triggers WHERE status = 'pending'`);
+  const deleteStmt = db.prepare(`DELETE FROM scheduled_items WHERE status = 'pending'`);
   const result = deleteStmt.run();
 
-  return `Cancelled ${result.changes} pending trigger(s).`;
+  return `Cancelled ${result.changes} pending item(s).`;
 }
 
 async function main() {

@@ -174,38 +174,6 @@ export interface CostUsageRow {
   timestamp: number;
 }
 
-/**
- * Proactive trigger types
- */
-export type ProactiveTriggerType =
-  | 'event_prep'      // Prepare for upcoming event (meeting, appointment)
-  | 'commitment_check' // Check on user's stated intention
-  | 'goal_checkin'     // Check in on long-term goal
-  | 'follow_up';       // General follow-up
-
-/**
- * Proactive trigger status
- */
-export type ProactiveTriggerStatus = 'pending' | 'fired' | 'dismissed' | 'expired';
-
-/**
- * Proactive trigger entry - for agent-initiated messages
- * @deprecated Use ScheduledItem instead - this is kept for backward compatibility
- */
-export interface ProactiveTriggerEntry {
-  id: string;
-  userId: string;
-  type: ProactiveTriggerType;
-  description: string;
-  context: string;
-  triggerAt: number; // epoch ms
-  status: ProactiveTriggerStatus;
-  sourceMemoryId: string | null; // The memory that created this trigger
-  firedAt: number | null;
-  createdAt: number;
-  updatedAt: number;
-}
-
 // ============ Unified Scheduled Items (Triggers + Reminders) ============
 
 /**
@@ -431,21 +399,6 @@ export class ScallopDatabase {
         timestamp INTEGER NOT NULL
       );
 
-      -- Proactive triggers (agent-initiated messages) - DEPRECATED, use scheduled_items
-      CREATE TABLE IF NOT EXISTS proactive_triggers (
-        id TEXT PRIMARY KEY,
-        user_id TEXT NOT NULL,
-        type TEXT NOT NULL,
-        description TEXT NOT NULL,
-        context TEXT NOT NULL,
-        trigger_at INTEGER NOT NULL,
-        status TEXT NOT NULL DEFAULT 'pending',
-        source_memory_id TEXT,
-        fired_at INTEGER,
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL
-      );
-
       -- Unified scheduled items (triggers + reminders)
       CREATE TABLE IF NOT EXISTS scheduled_items (
         id TEXT PRIMARY KEY,
@@ -494,10 +447,6 @@ export class ScallopDatabase {
       CREATE INDEX IF NOT EXISTS idx_relations_source ON memory_relations(source_id);
       CREATE INDEX IF NOT EXISTS idx_relations_target ON memory_relations(target_id);
       CREATE INDEX IF NOT EXISTS idx_relations_type ON memory_relations(relation_type);
-      CREATE INDEX IF NOT EXISTS idx_triggers_user ON proactive_triggers(user_id);
-      CREATE INDEX IF NOT EXISTS idx_triggers_status ON proactive_triggers(status);
-      CREATE INDEX IF NOT EXISTS idx_triggers_trigger_at ON proactive_triggers(trigger_at);
-      CREATE INDEX IF NOT EXISTS idx_triggers_pending ON proactive_triggers(status, trigger_at) WHERE status = 'pending';
 
       -- Indexes for scheduled_items
       CREATE INDEX IF NOT EXISTS idx_scheduled_user ON scheduled_items(user_id);
@@ -1143,176 +1092,6 @@ export class ScallopDatabase {
     return rows.map(row => this.rowToCostUsage(row));
   }
 
-  // ============ Proactive Trigger Operations ============
-
-  /**
-   * Add a proactive trigger
-   */
-  addProactiveTrigger(trigger: Omit<ProactiveTriggerEntry, 'id' | 'createdAt' | 'updatedAt' | 'firedAt'>): ProactiveTriggerEntry {
-    const id = nanoid();
-    const now = Date.now();
-
-    const stmt = this.db.prepare(`
-      INSERT INTO proactive_triggers (
-        id, user_id, type, description, context, trigger_at, status, source_memory_id, fired_at, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-
-    stmt.run(
-      id,
-      trigger.userId,
-      trigger.type,
-      trigger.description,
-      trigger.context,
-      trigger.triggerAt,
-      trigger.status,
-      trigger.sourceMemoryId ?? null,
-      null,
-      now,
-      now
-    );
-
-    return {
-      ...trigger,
-      id,
-      firedAt: null,
-      createdAt: now,
-      updatedAt: now,
-    };
-  }
-
-  /**
-   * Get pending triggers that are due (trigger_at <= now)
-   */
-  getDueTriggers(now: number = Date.now()): ProactiveTriggerEntry[] {
-    const stmt = this.db.prepare(`
-      SELECT * FROM proactive_triggers
-      WHERE status = 'pending' AND trigger_at <= ?
-      ORDER BY trigger_at ASC
-    `);
-    const rows = stmt.all(now) as Record<string, unknown>[];
-    return rows.map(row => this.rowToProactiveTrigger(row));
-  }
-
-  /**
-   * Get all pending triggers for a user
-   */
-  getPendingTriggersByUser(userId: string): ProactiveTriggerEntry[] {
-    const stmt = this.db.prepare(`
-      SELECT * FROM proactive_triggers
-      WHERE user_id = ? AND status = 'pending'
-      ORDER BY trigger_at ASC
-    `);
-    const rows = stmt.all(userId) as Record<string, unknown>[];
-    return rows.map(row => this.rowToProactiveTrigger(row));
-  }
-
-  /**
-   * Mark a trigger as fired
-   */
-  markTriggerFired(id: string): boolean {
-    const now = Date.now();
-    const stmt = this.db.prepare(`
-      UPDATE proactive_triggers
-      SET status = 'fired', fired_at = ?, updated_at = ?
-      WHERE id = ?
-    `);
-    const result = stmt.run(now, now, id);
-    return result.changes > 0;
-  }
-
-  /**
-   * Mark a trigger as dismissed (user ignored or dismissed it)
-   */
-  markTriggerDismissed(id: string): boolean {
-    const now = Date.now();
-    const stmt = this.db.prepare(`
-      UPDATE proactive_triggers
-      SET status = 'dismissed', updated_at = ?
-      WHERE id = ?
-    `);
-    const result = stmt.run(now, id);
-    return result.changes > 0;
-  }
-
-  /**
-   * Mark old pending triggers as expired (e.g., more than 24 hours past their trigger time)
-   */
-  expireOldTriggers(maxAgeMs: number = 24 * 60 * 60 * 1000): number {
-    const now = Date.now();
-    const cutoff = now - maxAgeMs;
-    const stmt = this.db.prepare(`
-      UPDATE proactive_triggers
-      SET status = 'expired', updated_at = ?
-      WHERE status = 'pending' AND trigger_at < ?
-    `);
-    const result = stmt.run(now, cutoff);
-    return result.changes;
-  }
-
-  /**
-   * Delete a trigger
-   */
-  deleteTrigger(id: string): boolean {
-    const stmt = this.db.prepare('DELETE FROM proactive_triggers WHERE id = ?');
-    const result = stmt.run(id);
-    return result.changes > 0;
-  }
-
-  /**
-   * Check if a similar trigger already exists (to avoid duplicates)
-   * Uses fuzzy matching - checks for significant word overlap
-   */
-  hasSimilarPendingTrigger(userId: string, description: string, withinMs: number = 24 * 60 * 60 * 1000): boolean {
-    const now = Date.now();
-
-    // Get all pending triggers within the time window
-    const stmt = this.db.prepare(`
-      SELECT description FROM proactive_triggers
-      WHERE user_id = ? AND status = 'pending'
-        AND trigger_at BETWEEN ? AND ?
-    `);
-    const rows = stmt.all(userId, now - withinMs, now + withinMs * 7) as Array<{ description: string }>;
-
-    if (rows.length === 0) return false;
-
-    // Normalize and extract significant words from new description
-    const normalizeText = (text: string): Set<string> => {
-      const stopWords = new Set(['the', 'a', 'an', 'at', 'on', 'in', 'to', 'for', 'of', 'and', 'is', 'my', 'me', 'i']);
-      return new Set(
-        text.toLowerCase()
-          .replace(/[^\w\s]/g, '')
-          .split(/\s+/)
-          .filter(word => word.length > 2 && !stopWords.has(word))
-      );
-    };
-
-    const newWords = normalizeText(description);
-    if (newWords.size === 0) return false;
-
-    // Check each existing trigger for similarity
-    for (const row of rows) {
-      const existingWords = normalizeText(row.description);
-      if (existingWords.size === 0) continue;
-
-      // Count overlapping words
-      let overlap = 0;
-      for (const word of newWords) {
-        if (existingWords.has(word)) overlap++;
-      }
-
-      // Consider similar if >50% of words overlap (in either direction)
-      const similarityNew = overlap / newWords.size;
-      const similarityExisting = overlap / existingWords.size;
-
-      if (similarityNew >= 0.5 || similarityExisting >= 0.5) {
-        return true;
-      }
-    }
-
-    return false;
-  }
-
   // ============ Scheduled Items (Unified Triggers + Reminders) ============
 
   /**
@@ -1716,21 +1495,6 @@ export class ScallopDatabase {
     };
   }
 
-  private rowToProactiveTrigger(row: Record<string, unknown>): ProactiveTriggerEntry {
-    return {
-      id: row.id as string,
-      userId: row.user_id as string,
-      type: row.type as ProactiveTriggerType,
-      description: row.description as string,
-      context: row.context as string,
-      triggerAt: row.trigger_at as number,
-      status: row.status as ProactiveTriggerStatus,
-      sourceMemoryId: row.source_memory_id as string | null,
-      firedAt: row.fired_at as number | null,
-      createdAt: row.created_at as number,
-      updatedAt: row.updated_at as number,
-    };
-  }
 }
 
 /**
