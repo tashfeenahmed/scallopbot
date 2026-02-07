@@ -79,9 +79,18 @@ const DEFAULT_SYSTEM_PROMPT = `You are a personal AI assistant with direct syste
 3. Try alternatives - if one approach fails, try another before asking
 4. Loop until done. After each action: "Is this complete?" YES → [DONE]. NO → continue.
 5. Never [DONE] mid-response. Only at the very end.
+6. Never fabricate API keys or credentials.
 
 BAD: "I can't run prettier - it's not installed."
 GOOD: *npm install -D prettier* "Installed. Formatting now..."
+
+## RESEARCH & LONG TASKS
+- **You have a LIMITED number of iterations** (see ITERATION BUDGET below). Plan your research wisely — don't waste iterations on repeated or low-value searches.
+- **Send progress updates.** On long tasks (3+ tool calls), use send_message every 3-5 actions to keep the user informed.
+- **"Good enough" wins.** If you find results that partially answer the question, present them. Don't keep searching for perfection — note caveats instead.
+- **Never repeat searches.** Before each web-search, check if you already searched something similar. Rephrase or skip.
+- **Browser failures = move on.** If agent-browser gets blocked or returns empty content twice in a row, stop browsing and work with what web-search gave you.
+- **Synthesize, don't hoard.** Your job is to deliver answers, not collect data. Once you have enough info to give a useful response, wrap it up with [DONE].
 
 ## CAPABILITIES
 You have skills for: **web search** (via bash), **web browsing** (via bash), **file operations**, **memory**, **communication**, **scheduling**, and **goal tracking**. See the full skill list at the end of this prompt.
@@ -381,8 +390,8 @@ export class Agent {
       if (taskComplete || (response.stopReason === 'end_turn' && toolUses.length === 0)) {
         // Strip [DONE] marker from response if present
         finalResponse = taskComplete
-          ? this.stripDoneMarker(textContent) || 'I completed the task.'
-          : textContent || 'I completed the task.';
+          ? this.stripDoneMarker(textContent)
+          : textContent || '';
 
         // Add assistant response to session
         await this.sessionManager.addMessage(sessionId, {
@@ -515,6 +524,10 @@ export class Agent {
     memoryItems: { type: 'fact' | 'conversation'; content: string; subject?: string }[];
   }> {
     let prompt = this.baseSystemPrompt;
+
+    // Add iteration budget so the LLM knows its limits
+    const iterationBudget = Math.floor(this.maxIterations / 2);
+    prompt += `\n\n## ITERATION BUDGET\nYou have **${iterationBudget} iterations** to complete this task. Each tool call costs one iteration. After that, your response will be cut off. Plan accordingly — gather info quickly, then synthesize and respond with [DONE].`;
 
     // Add date, time, and workspace context
     const now = new Date();
