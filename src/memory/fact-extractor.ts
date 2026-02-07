@@ -198,7 +198,8 @@ Notes:
 - If nothing time-sensitive found, return empty proactive_triggers array
 - CRITICAL: trigger_time MUST include a specific time (hour:minute), not just a date!
 - "TODAY" alone is NOT valid - must be "TODAY 2pm" or similar with time
-- Only create triggers for EXPLICIT time-sensitive items, not vague statements`;
+- Only create triggers for EXPLICIT time-sensitive items, not vague statements
+- CRITICAL: If the user says "daily", "every day", "every morning", "every weekday", "every Monday", etc., you MUST set recurring_pattern accordingly (e.g., "daily", "every weekday", "every Monday at 9am"). Do NOT leave recurring_pattern as null for recurring requests!`;
 
 /**
  * LLM-based fact extractor with semantic deduplication
@@ -417,6 +418,7 @@ RULES:
 - CRITICAL: trigger_time MUST include a specific time (hour:minute), not just a date!
 - "TODAY" alone is NOT valid - must be "TODAY 2pm" or similar with time
 - Only create triggers for EXPLICIT time-sensitive items, not vague statements
+- CRITICAL: If the message mentions "daily", "every day", "every morning", "every weekday", "every Monday", etc., you MUST set recurring_pattern accordingly (e.g., "daily", "every weekday", "every Monday at 9am"). Do NOT leave recurring_pattern as null for recurring requests!
 - Return empty array if nothing time-sensitive found or if no specific time can be determined
 
 Respond with JSON only:
