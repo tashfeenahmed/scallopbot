@@ -168,8 +168,16 @@ Format each trigger as:
   "trigger_time": "MUST include specific time - use ISO datetime with time (e.g., '2026-02-07T09:00:00') OR relative ('+2h', '+1d 9am', 'tomorrow 10:00')",
   "context": "Context for generating the proactive message",
   "guidance": "Specific instructions for the bot on what to do to help the user when the trigger fires (e.g., 'Search for directions and check weather', 'Look up flight status')",
-  "recurring_pattern": "If this is a recurring event, specify the pattern: 'daily', 'every weekday', 'every weekend', 'every Monday', 'every Tuesday at 9am', etc. null if one-time"
+  "recurring": "null if one-time, OR an object: { \"type\": \"daily\" | \"weekly\" | \"weekdays\" | \"weekends\", \"hour\": 0-23, \"minute\": 0-59, \"dayOfWeek\": 0-6 (Sunday=0, only for weekly) }"
 }
+
+RECURRING RULES:
+- If the user says "daily", "every day", "every morning", "every evening", etc. → set recurring with type "daily"
+- If the user says "every weekday", "monday to friday" → type "weekdays"
+- If the user says "every weekend" → type "weekends"
+- If the user says "every Monday", "every Tuesday", etc. → type "weekly" with the correct dayOfWeek
+- ALWAYS set hour and minute in the recurring object to match the intended time (24h format)
+- Do NOT leave recurring as null when the user explicitly asks for a repeating schedule!
 
 Trigger time guidelines:
 - event_prep: 2 hours before the event (for same-day) or morning of (8-9am for future days)
@@ -185,7 +193,7 @@ Respond with JSON only:
     { "content": "fact text", "subject": "user|agent|name", "category": "category", "confidence": 0.0-1.0, "action": "fact|forget|correction|preference_update", "old_value": "optional", "replaces": "optional" }
   ],
   "proactive_triggers": [
-    { "type": "event_prep|commitment_check|goal_checkin|follow_up", "description": "text", "trigger_time": "ISO or relative", "context": "text", "guidance": "text or null", "recurring_pattern": "pattern or null" }
+    { "type": "event_prep|commitment_check|goal_checkin|follow_up", "description": "text", "trigger_time": "ISO or relative", "context": "text", "guidance": "text or null", "recurring": "null or {type, hour, minute, dayOfWeek?}" }
   ]
 }
 
@@ -198,8 +206,7 @@ Notes:
 - If nothing time-sensitive found, return empty proactive_triggers array
 - CRITICAL: trigger_time MUST include a specific time (hour:minute), not just a date!
 - "TODAY" alone is NOT valid - must be "TODAY 2pm" or similar with time
-- Only create triggers for EXPLICIT time-sensitive items, not vague statements
-- CRITICAL: If the user says "daily", "every day", "every morning", "every weekday", "every Monday", etc., you MUST set recurring_pattern accordingly (e.g., "daily", "every weekday", "every Monday at 9am"). Do NOT leave recurring_pattern as null for recurring requests!`;
+- Only create triggers for EXPLICIT time-sensitive items, not vague statements`;
 
 /**
  * LLM-based fact extractor with semantic deduplication
@@ -405,7 +412,7 @@ Format each trigger as:
   "trigger_time": "MUST include specific time - use ISO datetime with time (e.g., '2026-02-07T09:00:00') OR relative ('+2h', '+1d 9am', 'tomorrow 10:00')",
   "context": "Context for generating the proactive message",
   "guidance": "Specific instructions for the bot on what to do to help the user when the trigger fires (e.g., 'Search for directions and check weather', 'Look up flight status'). null if none.",
-  "recurring_pattern": "If this is a recurring event, specify the pattern: 'daily', 'every weekday', 'every weekend', 'every Monday', 'every Tuesday at 9am', etc. null if one-time"
+  "recurring": "null if one-time, OR an object: { \"type\": \"daily\" | \"weekly\" | \"weekdays\" | \"weekends\", \"hour\": 0-23, \"minute\": 0-59, \"dayOfWeek\": 0-6 (Sunday=0, only for weekly) }"
 }
 
 Trigger time guidelines:
@@ -418,7 +425,7 @@ RULES:
 - CRITICAL: trigger_time MUST include a specific time (hour:minute), not just a date!
 - "TODAY" alone is NOT valid - must be "TODAY 2pm" or similar with time
 - Only create triggers for EXPLICIT time-sensitive items, not vague statements
-- CRITICAL: If the message mentions "daily", "every day", "every morning", "every weekday", "every Monday", etc., you MUST set recurring_pattern accordingly (e.g., "daily", "every weekday", "every Monday at 9am"). Do NOT leave recurring_pattern as null for recurring requests!
+- If recurring, set the recurring object with the correct type, hour, and minute. Do NOT leave it null for repeating events.
 - Return empty array if nothing time-sensitive found or if no specific time can be determined
 
 Respond with JSON only:
@@ -445,7 +452,7 @@ Respond with JSON only:
           trigger_time: string;
           context: string;
           guidance?: string | null;
-          recurring_pattern?: string | null;
+          recurring?: RecurringSchedule | null;
         }>;
       };
 
@@ -1051,7 +1058,8 @@ Respond with JSON only:
       trigger_time: string;
       context: string;
       guidance?: string | null;
-      recurring_pattern?: string | null;
+      recurring?: RecurringSchedule | null;
+      recurring_pattern?: string | null; // legacy fallback
     }>,
     userId: string,
     sourceMemoryId?: string | null,
@@ -1084,8 +1092,12 @@ Respond with JSON only:
         storedContext = trigger.context;
       }
 
-      // Parse recurring pattern
-      const recurring = this.parseRecurringPattern(trigger.recurring_pattern ?? null, triggerAt);
+      // Use recurring schedule directly from LLM structured output
+      // Validate it has required fields; fall back to null if malformed
+      let recurring: RecurringSchedule | null = null;
+      if (trigger.recurring && typeof trigger.recurring === 'object' && trigger.recurring.type && typeof trigger.recurring.hour === 'number') {
+        recurring = trigger.recurring;
+      }
 
       db.addScheduledItem({
         userId,
@@ -1109,75 +1121,6 @@ Respond with JSON only:
         'Scheduled item created from extraction'
       );
     }
-  }
-
-  /**
-   * Parse a recurring pattern string from LLM output into a RecurringSchedule.
-   * Supports: "daily", "every weekday", "every weekend", "every Monday", "every Tuesday at 9am", etc.
-   * Returns null for one-time triggers or unrecognized patterns.
-   */
-  private parseRecurringPattern(pattern: string | null, triggerAtMs: number): RecurringSchedule | null {
-    if (!pattern) return null;
-
-    const lower = pattern.toLowerCase().trim();
-    if (!lower || lower === 'null' || lower === 'none' || lower === 'one-time') return null;
-
-    // Extract time from the trigger timestamp as default hour/minute
-    const triggerDate = new Date(triggerAtMs);
-    const defaultHour = triggerDate.getHours();
-    const defaultMinute = triggerDate.getMinutes();
-
-    // Try to extract explicit time from pattern (e.g., "every Monday at 9am")
-    const timeMatch = lower.match(/at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i);
-    let hour = defaultHour;
-    let minute = defaultMinute;
-    if (timeMatch) {
-      hour = parseInt(timeMatch[1], 10);
-      const mins = timeMatch[2] ? parseInt(timeMatch[2], 10) : 0;
-      const ampm = timeMatch[3]?.toLowerCase();
-      if (ampm === 'pm' && hour < 12) hour += 12;
-      if (ampm === 'am' && hour === 12) hour = 0;
-      minute = mins;
-    }
-
-    // Strip time suffix for matching (e.g., "daily at 8pm" → "daily")
-    const basePattern = lower.replace(/\s+at\s+\d{1,2}(:\d{2})?\s*(am|pm)?/i, '').trim();
-
-    // Daily: "daily", "every day", "every morning", "every evening", "every night"
-    if (basePattern === 'daily' || basePattern === 'every day' || basePattern === 'every morning' || basePattern === 'every evening' || basePattern === 'every night') {
-      // Default times for morning/evening/night if no explicit time was given
-      if (!timeMatch) {
-        if (basePattern === 'every morning') { hour = 9; minute = 0; }
-        else if (basePattern === 'every evening') { hour = 18; minute = 0; }
-        else if (basePattern === 'every night') { hour = 21; minute = 0; }
-      }
-      return { type: 'daily', hour, minute };
-    }
-
-    // Weekdays: "every weekday", "weekdays", "monday to friday", "monday through friday"
-    if (basePattern === 'every weekday' || basePattern === 'weekdays' || basePattern.includes('monday to friday') || basePattern.includes('monday through friday')) {
-      return { type: 'weekdays', hour, minute };
-    }
-
-    // Weekends: "every weekend", "weekends"
-    if (basePattern === 'every weekend' || basePattern === 'weekends') {
-      return { type: 'weekends', hour, minute };
-    }
-
-    // Weekly with specific day: "every Monday", "every Tuesday at 9am", "weekly on Wednesday"
-    const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
-    for (let i = 0; i < dayNames.length; i++) {
-      if (lower.includes(dayNames[i])) {
-        return { type: 'weekly', hour, minute, dayOfWeek: i };
-      }
-    }
-
-    // Generic "weekly" without day
-    if (basePattern === 'weekly' || basePattern === 'every week') {
-      return { type: 'weekly', hour, minute, dayOfWeek: triggerDate.getDay() };
-    }
-
-    return null;
   }
 
   /**
@@ -1363,7 +1306,8 @@ Respond with JSON only:
       trigger_time: string;
       context: string;
       guidance?: string | null;
-      recurring_pattern?: string | null;
+      recurring?: RecurringSchedule | null;
+      recurring_pattern?: string | null; // legacy fallback
     }>;
   } {
     try {
