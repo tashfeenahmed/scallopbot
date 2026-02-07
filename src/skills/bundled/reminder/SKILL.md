@@ -14,10 +14,26 @@ inputSchema:
       description: "Action to perform: set a new reminder, list active reminders, or cancel one"
     time:
       type: string
-      description: "When to trigger (for 'set'). Examples: '5 minutes', 'at 10am', 'tomorrow at 9am', 'every day at 10am'"
+      description: "When to trigger (for 'set', one-time only). Examples: '5 minutes', 'at 10am', 'tomorrow at 9am'"
     message:
       type: string
       description: "The reminder message (for 'set')"
+    recurring:
+      type: object
+      description: "For recurring reminders (for 'set'). If set, 'time' is ignored."
+      properties:
+        type:
+          type: string
+          enum: [daily, weekly, weekdays, weekends]
+        hour:
+          type: integer
+          description: "Hour in 24h format (0-23)"
+        minute:
+          type: integer
+          description: "Minute (0-59)"
+        dayOfWeek:
+          type: integer
+          description: "Day of week (0=Sunday, 6=Saturday). Only for type 'weekly'."
     reminder_id:
       type: string
       description: "Reminder ID to cancel (for 'cancel')"
@@ -73,10 +89,11 @@ The skill accepts JSON arguments via the `SKILL_ARGS` environment variable:
 - `at 10am`, `at 3:30pm`, `at 14:00`
 - `tomorrow at 9am`, `tomorrow at 3pm`
 
-**Recurring:**
-- `every day at 10am`, `daily at 9:30am`
-- `every Monday at 9am`, `every friday at 3pm`
-- `weekdays at 8am`, `weekends at 10am`
+**Recurring (use the `recurring` object instead of `time`):**
+- `{ "type": "daily", "hour": 10, "minute": 0 }`
+- `{ "type": "weekly", "hour": 9, "minute": 0, "dayOfWeek": 1 }` (Monday)
+- `{ "type": "weekdays", "hour": 8, "minute": 0 }`
+- `{ "type": "weekends", "hour": 10, "minute": 0 }`
 
 ## Output Format
 
@@ -115,7 +132,7 @@ The skill accepts JSON arguments via the `SKILL_ARGS` environment variable:
 ```json
 {
   "action": "set",
-  "time": "every day at 10am",
+  "recurring": { "type": "daily", "hour": 10, "minute": 0 },
   "message": "Stand up and stretch"
 }
 ```
