@@ -516,6 +516,10 @@ export class ContextManager {
   }
 
   buildContextMessages(messages: Message[]): Message[] {
+    // Reset per-call state so cross-session data doesn't bleed through
+    this.deduplicator.clear();
+    this.truncatedOutputs.clear();
+
     const processed = this.processMessages(messages);
 
     if (!processed.warmSummary) {

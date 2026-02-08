@@ -20,9 +20,21 @@ export interface Session {
 export class SessionManager {
   private db: ScallopDatabase;
   private cache: Map<string, Session> = new Map();
+  private static readonly MAX_CACHE_SIZE = 20;
 
   constructor(db: ScallopDatabase) {
     this.db = db;
+  }
+
+  /**
+   * Evict the least-recently-used cache entry when at capacity.
+   * Map iteration order is insertion order; oldest entry is first.
+   */
+  private evictIfNeeded(): void {
+    while (this.cache.size >= SessionManager.MAX_CACHE_SIZE) {
+      const oldest = this.cache.keys().next().value;
+      if (oldest !== undefined) this.cache.delete(oldest);
+    }
   }
 
   async createSession(metadata?: SessionMetadata): Promise<Session> {
@@ -40,6 +52,7 @@ export class SessionManager {
       tokenUsage: { inputTokens: 0, outputTokens: 0 },
     };
 
+    this.evictIfNeeded();
     this.cache.set(id, session);
     return session;
   }
@@ -64,7 +77,11 @@ export class SessionManager {
 
   async getSession(sessionId: string): Promise<Session | undefined> {
     if (this.cache.has(sessionId)) {
-      return this.cache.get(sessionId);
+      // Promote to end of Map for LRU ordering
+      const cached = this.cache.get(sessionId)!;
+      this.cache.delete(sessionId);
+      this.cache.set(sessionId, cached);
+      return cached;
     }
 
     const row = this.db.getSession(sessionId);
@@ -88,6 +105,7 @@ export class SessionManager {
       },
     };
 
+    this.evictIfNeeded();
     this.cache.set(sessionId, session);
     return session;
   }

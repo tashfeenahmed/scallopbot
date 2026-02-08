@@ -512,6 +512,11 @@ export class Agent {
     );
 
     // Store response per session for context in next fact extraction (for "that's my office" type references)
+    // Cap map size to prevent unbounded growth over long server uptime
+    if (this.lastAssistantResponses.size >= 50) {
+      const oldest = this.lastAssistantResponses.keys().next().value;
+      if (oldest !== undefined) this.lastAssistantResponses.delete(oldest);
+    }
     this.lastAssistantResponses.set(sessionId, finalResponse);
 
     return {
