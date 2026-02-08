@@ -762,7 +762,7 @@ describe('Combined fact + trigger extraction', () => {
           trigger_time: 'tomorrow 9:00',
           context: 'User takes medication every morning',
           guidance: null,
-          recurring_pattern: 'daily',
+          recurring: { type: 'daily', hour: 9, minute: 0 },
         },
       ],
     }));
@@ -799,7 +799,7 @@ describe('Combined fact + trigger extraction', () => {
           trigger_time: 'tomorrow 6:30',
           context: 'User goes to gym every weekday morning',
           guidance: null,
-          recurring_pattern: 'every weekday',
+          recurring: { type: 'weekdays', hour: 7, minute: 0 },
         },
       ],
     }));
@@ -834,7 +834,7 @@ describe('Combined fact + trigger extraction', () => {
           trigger_time: 'Monday 8:00',
           context: 'Weekly team standup meeting',
           guidance: 'Check team status updates',
-          recurring_pattern: 'every Monday at 9am',
+          recurring: { type: 'weekly', hour: 9, minute: 0, dayOfWeek: 1 },
         },
       ],
     }));
