@@ -22,6 +22,7 @@ import type { MediaProcessor } from '../media/index.js';
 import type { Attachment } from '../channels/types.js';
 import { analyzeComplexity } from '../routing/complexity.js';
 import type { GoalService } from '../goals/index.js';
+import type { BotConfigManager } from '../channels/bot-config.js';
 
 export interface AgentOptions {
   provider: LLMProvider;
@@ -36,6 +37,7 @@ export interface AgentOptions {
   contextManager?: ContextManager;
   mediaProcessor?: MediaProcessor;
   goalService?: GoalService;
+  configManager?: BotConfigManager;
   workspace: string;
   logger: Logger;
   maxIterations: number;
@@ -130,6 +132,7 @@ export class Agent {
   private contextManager: ContextManager | null;
   private mediaProcessor: MediaProcessor | null;
   private goalService: GoalService | null;
+  private configManager: BotConfigManager | null;
   private workspace: string;
   private logger: Logger;
   private maxIterations: number;
@@ -152,6 +155,7 @@ export class Agent {
     this.contextManager = options.contextManager || null;
     this.mediaProcessor = options.mediaProcessor || null;
     this.goalService = options.goalService || null;
+    this.configManager = options.configManager || null;
     this.workspace = options.workspace;
     this.logger = options.logger;
     this.maxIterations = options.maxIterations;
@@ -524,14 +528,24 @@ export class Agent {
     const iterationBudget = Math.floor(this.maxIterations / 2);
     prompt += `\n\n## ITERATION BUDGET\nYou have **${iterationBudget} iterations** to complete this task. Each tool call costs one iteration. After that, your response will be cut off. Plan accordingly — gather info quickly, then synthesize and respond with [DONE].`;
 
+    // Resolve user timezone from config
+    const session = await this.sessionManager.getSession(sessionId);
+    const rawUserId = session?.metadata?.userId as string | undefined;
+    let userTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone; // server fallback
+    if (this.configManager && rawUserId) {
+      // Strip channel prefix (e.g. "telegram:12345" → "12345")
+      const cleanUserId = rawUserId.includes(':') ? rawUserId.split(':')[1] : rawUserId;
+      userTimezone = this.configManager.getUserTimezone(cleanUserId);
+    }
+
     // Add date, time, and workspace context
     const now = new Date();
-    prompt += `\n\nCurrent date and time: ${now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })} at ${now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true })}`;
-    prompt += `\nTimezone: ${Intl.DateTimeFormat().resolvedOptions().timeZone}`;
+    const tzOptions = { timeZone: userTimezone };
+    prompt += `\n\nCurrent date and time: ${now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', ...tzOptions })} at ${now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true, ...tzOptions })}`;
+    prompt += `\nTimezone: ${userTimezone}`;
     prompt += `\nWorkspace: ${this.workspace}`;
 
-    // Add channel context from session metadata
-    const session = await this.sessionManager.getSession(sessionId);
+    // Add channel context from session metadata (reuse session fetched above)
     const channelId = session?.metadata?.channelId as string | undefined;
     const channelName = channelId === 'telegram' ? 'Telegram' : channelId === 'api' ? 'the web interface' : channelId || 'unknown';
     prompt += `\n\n## CHANNEL\nYou are chatting with the user via **${channelName}**.`;

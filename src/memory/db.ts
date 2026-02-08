@@ -154,6 +154,7 @@ export interface BotConfigRow {
   personalityId: string;
   customPersonality: string | null;
   modelId: string;
+  timezone: string;
   onboardingComplete: boolean;
   onboardingStep: string | null;
   createdAt: string;
@@ -381,6 +382,7 @@ export class ScallopDatabase {
         personality_id TEXT NOT NULL DEFAULT 'friendly',
         custom_personality TEXT,
         model_id TEXT NOT NULL DEFAULT 'moonshot-v1-128k',
+        timezone TEXT NOT NULL DEFAULT 'UTC',
         onboarding_complete INTEGER NOT NULL DEFAULT 0,
         onboarding_step TEXT DEFAULT 'welcome',
         created_at TEXT NOT NULL,
@@ -458,6 +460,9 @@ export class ScallopDatabase {
 
     // Migration: Add source column to existing databases
     this.migrateAddSourceColumn();
+
+    // Migration: Add timezone column to bot_config
+    this.migrateAddTimezoneColumn();
   }
 
   /**
@@ -471,6 +476,22 @@ export class ScallopDatabase {
 
       if (!hasSourceColumn) {
         this.db.exec("ALTER TABLE memories ADD COLUMN source TEXT DEFAULT 'user'");
+      }
+    } catch {
+      // Column might already exist or table might not exist yet
+    }
+  }
+
+  /**
+   * Add timezone column to bot_config table if it doesn't exist (migration for existing DBs)
+   */
+  private migrateAddTimezoneColumn(): void {
+    try {
+      const tableInfo = this.db.prepare("PRAGMA table_info(bot_config)").all() as Array<{ name: string }>;
+      const hasTimezoneColumn = tableInfo.some(col => col.name === 'timezone');
+
+      if (!hasTimezoneColumn) {
+        this.db.exec("ALTER TABLE bot_config ADD COLUMN timezone TEXT NOT NULL DEFAULT 'UTC'");
       }
     } catch {
       // Column might already exist or table might not exist yet
@@ -1027,6 +1048,7 @@ export class ScallopDatabase {
           personality_id = COALESCE(?, personality_id),
           custom_personality = ?,
           model_id = COALESCE(?, model_id),
+          timezone = COALESCE(?, timezone),
           onboarding_complete = COALESCE(?, onboarding_complete),
           onboarding_step = COALESCE(?, onboarding_step),
           updated_at = ?
@@ -1036,6 +1058,7 @@ export class ScallopDatabase {
         config.personalityId ?? null,
         config.customPersonality !== undefined ? config.customPersonality : existing.customPersonality,
         config.modelId ?? null,
+        config.timezone ?? null,
         config.onboardingComplete !== undefined ? (config.onboardingComplete ? 1 : 0) : null,
         config.onboardingStep ?? null,
         now,
@@ -1045,14 +1068,15 @@ export class ScallopDatabase {
     }
 
     this.db.prepare(`
-      INSERT INTO bot_config (user_id, bot_name, personality_id, custom_personality, model_id, onboarding_complete, onboarding_step, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO bot_config (user_id, bot_name, personality_id, custom_personality, model_id, timezone, onboarding_complete, onboarding_step, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       userId,
       config.botName ?? 'ScallopBot',
       config.personalityId ?? 'friendly',
       config.customPersonality ?? null,
       config.modelId ?? 'moonshot-v1-128k',
+      config.timezone ?? 'UTC',
       config.onboardingComplete ? 1 : 0,
       config.onboardingStep ?? 'welcome',
       config.createdAt ?? now,
@@ -1475,6 +1499,7 @@ export class ScallopDatabase {
       personalityId: row.personality_id as string,
       customPersonality: row.custom_personality as string | null,
       modelId: row.model_id as string,
+      timezone: (row.timezone as string) || 'UTC',
       onboardingComplete: (row.onboarding_complete as number) === 1,
       onboardingStep: row.onboarding_step as string | null,
       createdAt: row.created_at as string,

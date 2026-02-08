@@ -6,11 +6,7 @@ import type { ScallopDatabase } from '../memory/db.js';
 import type { Attachment } from './types.js';
 import { VoiceManager } from '../voice/index.js';
 import { getPendingVoiceAttachments, cleanupVoiceAttachments } from '../voice/attachments.js';
-import {
-  BotConfigManager,
-  DEFAULT_PERSONALITIES,
-  AVAILABLE_MODELS,
-} from './bot-config.js';
+import { BotConfigManager } from './bot-config.js';
 
 const MAX_MESSAGE_LENGTH = 4096;
 const TYPING_INTERVAL = 5000; // 5 seconds
@@ -415,14 +411,15 @@ export class TelegramChannel {
    */
   private async handleSettings(ctx: Context, userId: string): Promise<void> {
     const config = this.configManager.getUserConfig(userId);
-    const personality = this.configManager.getPersonality(config.personalityId);
-    const model = this.configManager.getModel(config.modelId);
+    const personalityPreview = config.customPersonality
+      ? config.customPersonality.substring(0, 100) + (config.customPersonality.length > 100 ? '...' : '')
+      : 'Default';
 
     await ctx.reply(
       '<b>Your Settings</b>\n\n' +
       `<b>Bot Name:</b> ${config.botName}\n` +
-      `<b>Personality:</b> ${personality?.name || config.personalityId}\n` +
-      `<b>Model:</b> ${model?.name || config.modelId}\n\n` +
+      `<b>Personality:</b> ${personalityPreview}\n` +
+      `<b>Timezone:</b> ${config.timezone}\n\n` +
       'Use /setup to reconfigure these settings.',
       { parse_mode: 'HTML' }
     );
@@ -542,14 +539,11 @@ export class TelegramChannel {
       case 'name':
         return await this.handleNameStep(ctx, userId, message);
 
-      case 'personality':
-        return await this.handlePersonalityStep(ctx, userId, message);
-
       case 'custom_personality':
         return await this.handleCustomPersonalityStep(ctx, userId, message);
 
-      case 'model':
-        return await this.handleModelStep(ctx, userId, message);
+      case 'timezone':
+        return await this.handleTimezoneStep(ctx, userId, message);
 
       default:
         return false;
@@ -566,51 +560,18 @@ export class TelegramChannel {
 
     await this.configManager.updateUserConfig(userId, {
       botName,
-      onboardingStep: 'personality',
+      onboardingStep: 'custom_personality',
     });
 
-    // Show personality options
-    let personalityList = `Great! I'm now <b>${botName}</b>.\n\n`;
-    personalityList += "What personality should I have?\n\n";
-
-    DEFAULT_PERSONALITIES.forEach((p, idx) => {
-      personalityList += `<b>${idx + 1}.</b> ${p.name}\n   <i>${p.description}</i>\n\n`;
-    });
-
-    personalityList += `<b>${DEFAULT_PERSONALITIES.length + 1}.</b> Custom\n   <i>Describe your own personality</i>\n\n`;
-    personalityList += "Reply with a number (1-5):";
-
-    await ctx.reply(personalityList, { parse_mode: 'HTML' });
-    return true;
-  }
-
-  private async handlePersonalityStep(ctx: Context, userId: string, message: string): Promise<boolean> {
-    const choice = parseInt(message.trim(), 10);
-
-    if (isNaN(choice) || choice < 1 || choice > DEFAULT_PERSONALITIES.length + 1) {
-      await ctx.reply(`Please enter a number between 1 and ${DEFAULT_PERSONALITIES.length + 1}`);
-      return true;
-    }
-
-    if (choice === DEFAULT_PERSONALITIES.length + 1) {
-      // Custom personality
-      await this.configManager.updateUserConfig(userId, {
-        onboardingStep: 'custom_personality',
-      });
-      await ctx.reply(
-        "Describe the personality you'd like me to have.\n\n" +
-        "For example: \"Be a witty assistant who uses humor. Explain things simply and be encouraging.\""
-      );
-      return true;
-    }
-
-    const personality = DEFAULT_PERSONALITIES[choice - 1];
-    await this.configManager.updateUserConfig(userId, {
-      personalityId: personality.id,
-      onboardingStep: 'model',
-    });
-
-    await this.showModelSelection(ctx, userId, personality.name);
+    await ctx.reply(
+      `Great! I'm now <b>${botName}</b>.\n\n` +
+      "Now describe the personality you'd like me to have. For example:\n\n" +
+      '<i>"Be a witty assistant who uses humor. Explain things simply and be encouraging."</i>\n\n' +
+      '<i>"Be professional and concise. Focus on actionable answers."</i>\n\n' +
+      '<i>"Be a creative and playful assistant. Use casual language."</i>\n\n' +
+      "Write your own personality description:",
+      { parse_mode: 'HTML' }
+    );
     return true;
   }
 
@@ -625,51 +586,53 @@ export class TelegramChannel {
     await this.configManager.updateUserConfig(userId, {
       personalityId: 'custom',
       customPersonality: customPrompt,
-      onboardingStep: 'model',
+      onboardingStep: 'timezone',
     });
 
-    await this.showModelSelection(ctx, userId, 'Custom');
+    await ctx.reply(
+      "Personality set!\n\n" +
+      "What timezone are you in? Please enter an IANA timezone name, for example:\n\n" +
+      "<code>Europe/Dublin</code>\n" +
+      "<code>America/New_York</code>\n" +
+      "<code>Asia/Tokyo</code>\n" +
+      "<code>US/Pacific</code>\n\n" +
+      "This ensures reminders and scheduled messages arrive at the right time.",
+      { parse_mode: 'HTML' }
+    );
     return true;
   }
 
-  private async showModelSelection(ctx: Context, userId: string, personalityName: string): Promise<void> {
-    let modelList = `<b>${personalityName}</b> personality - got it!\n\n`;
-    modelList += "Which AI model should I use?\n\n";
+  private async handleTimezoneStep(ctx: Context, userId: string, message: string): Promise<boolean> {
+    const timezone = message.trim();
 
-    AVAILABLE_MODELS.forEach((m, idx) => {
-      const recommended = idx === 0 ? ' (Recommended)' : '';
-      modelList += `<b>${idx + 1}.</b> ${m.name}${recommended}\n   <i>${m.description}</i>\n\n`;
-    });
-
-    modelList += `Reply with a number (1-${AVAILABLE_MODELS.length}):`;
-
-    await ctx.reply(modelList, { parse_mode: 'HTML' });
-  }
-
-  private async handleModelStep(ctx: Context, userId: string, message: string): Promise<boolean> {
-    const choice = parseInt(message.trim(), 10);
-
-    if (isNaN(choice) || choice < 1 || choice > AVAILABLE_MODELS.length) {
-      await ctx.reply(`Please enter a number between 1 and ${AVAILABLE_MODELS.length}`);
+    // Validate IANA timezone name
+    try {
+      Intl.DateTimeFormat(undefined, { timeZone: timezone });
+    } catch {
+      await ctx.reply(
+        "That doesn't look like a valid timezone. Please enter an IANA timezone name, e.g.:\n\n" +
+        "<code>Europe/Dublin</code>\n" +
+        "<code>America/New_York</code>\n" +
+        "<code>Asia/Tokyo</code>\n" +
+        "<code>US/Pacific</code>\n" +
+        "<code>UTC</code>",
+        { parse_mode: 'HTML' }
+      );
       return true;
     }
 
-    const model = AVAILABLE_MODELS[choice - 1];
     await this.configManager.updateUserConfig(userId, {
-      modelId: model.id,
+      timezone,
       onboardingStep: 'complete',
       onboardingComplete: true,
     });
 
-    // Show completion message
     const config = this.configManager.getUserConfig(userId);
-    const personality = this.configManager.getPersonality(config.personalityId);
 
     await ctx.reply(
       `<b>Setup Complete!</b>\n\n` +
       `I'm now <b>${config.botName}</b>\n` +
-      `Personality: <b>${personality?.name || 'Custom'}</b>\n` +
-      `Model: <b>${model.name}</b>\n\n` +
+      `Timezone: <b>${config.timezone}</b>\n\n` +
       `You can change these anytime with /setup\n\n` +
       `How can I help you today?`,
       { parse_mode: 'HTML' }
@@ -1187,7 +1150,7 @@ export class TelegramChannel {
       { command: 'usage', description: 'View token usage and costs' },
       { command: 'stop', description: 'Stop current task' },
       { command: 'settings', description: 'View your current settings' },
-      { command: 'setup', description: 'Reconfigure bot (name, personality, model)' },
+      { command: 'setup', description: 'Reconfigure bot (name, personality, timezone)' },
       { command: 'new', description: 'Start a new conversation' },
       { command: 'verbose', description: 'Toggle debug output (memory, tools, thinking)' },
     ]);
