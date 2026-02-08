@@ -94,6 +94,8 @@ export interface LLMFactExtractorOptions {
   useRelationshipClassifier?: boolean;
   /** Resource limits for memory-constrained environments */
   resourceLimits?: ResourceLimits;
+  /** Callback to resolve IANA timezone for a user (defaults to server timezone) */
+  getTimezone?: (userId: string) => string;
 }
 
 /**
@@ -220,6 +222,7 @@ export class LLMFactExtractor {
   private relationshipClassifier?: RelationshipClassifier;
   private processingQueue: Map<string, Promise<FactExtractionResult>> = new Map();
   private resourceLimits: Required<ResourceLimits>;
+  private getTimezone: (userId: string) => string;
 
   constructor(options: LLMFactExtractorOptions) {
     // Wrap provider with cost tracking if available
@@ -230,6 +233,7 @@ export class LLMFactExtractor {
     this.logger = options.logger.child({ component: 'fact-extractor' });
     this.embedder = options.embedder;
     this.deduplicationThreshold = options.deduplicationThreshold ?? 0.95;
+    this.getTimezone = options.getTimezone ?? (() => Intl.DateTimeFormat().resolvedOptions().timeZone);
 
     // Set resource limits with defaults suitable for 4GB RAM
     this.resourceLimits = {
@@ -269,8 +273,10 @@ export class LLMFactExtractor {
     try {
       // Build prompt with current date injected and optional context
       const now = new Date();
-      const currentDate = now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
-      const currentTime = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
+      const tz = this.getTimezone(userId);
+      const tzOptions = { timeZone: tz };
+      const currentDate = now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', ...tzOptions });
+      const currentTime = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true, ...tzOptions });
       let prompt = FACT_AND_TRIGGER_EXTRACTION_PROMPT.replace('{{CURRENT_DATE}}', currentDate).replace('{{CURRENT_TIME}}', currentTime) + '\n\n';
       if (context) {
         prompt += `Context from previous messages:\n${context}\n\n`;
@@ -385,8 +391,10 @@ export class LLMFactExtractor {
     if (!this.scallopStore) return;
 
     const now = new Date();
-    const currentDate = now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
-    const currentTime = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
+    const tz = this.getTimezone(userId);
+    const tzOptions = { timeZone: tz };
+    const currentDate = now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', ...tzOptions });
+    const currentTime = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true, ...tzOptions });
 
     const prompt = `You are a proactive trigger extractor. Analyze this message for time-sensitive items that warrant follow-up.
 

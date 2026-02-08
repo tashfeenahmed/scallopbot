@@ -35,6 +35,7 @@ import { MediaProcessor } from '../media/index.js';
 import { VoiceManager } from '../voice/index.js';
 import { type TriggerSource, type TriggerSourceRegistry, parseUserIdPrefix } from '../triggers/index.js';
 import { UnifiedScheduler } from '../proactive/index.js';
+import { BotConfigManager } from '../channels/bot-config.js';
 import { GoalService } from '../goals/index.js';
 
 export interface GatewayOptions {
@@ -60,6 +61,7 @@ export class Gateway {
   private contextManager: ContextManager | null = null;
   private mediaProcessor: MediaProcessor | null = null;
   private voiceManager: VoiceManager | null = null;
+  private configManager: BotConfigManager | null = null;
   private agent: Agent | null = null;
   private telegramChannel: TelegramChannel | null = null;
   private apiChannel: ApiChannel | null = null;
@@ -120,6 +122,9 @@ export class Gateway {
     });
     this.logger.debug('Cost tracker initialized');
 
+    // Initialize config manager early (needed by fact extractor and agent for timezone)
+    this.configManager = new BotConfigManager(this.scallopMemoryStore.getDatabase(), this.logger);
+
     // Backfill default user profile from existing facts (one-time, idempotent)
     const backfillResult = this.scallopMemoryStore.backfillDefaultProfile();
     if (backfillResult.fieldsPopulated > 0) {
@@ -158,6 +163,7 @@ export class Gateway {
         embedder,
         costTracker: this.costTracker || undefined,
         deduplicationThreshold: 0.95, // Higher threshold - only skip true duplicates
+        getTimezone: (userId: string) => this.configManager!.getUserTimezone(userId),
       });
       this.logger.debug({ provider: factExtractionProvider.name }, 'LLM fact extractor initialized');
     }
@@ -190,7 +196,10 @@ export class Gateway {
     );
 
     // Create skill executor for skill-based execution
-    this.skillExecutor = createSkillExecutor(this.logger);
+    this.skillExecutor = createSkillExecutor(
+      this.logger,
+      (userId: string) => this.configManager!.getUserTimezone(userId)
+    );
     this.logger.debug('Skill executor created');
 
     // Initialize voice manager (for voice reply tool)
@@ -229,6 +238,7 @@ export class Gateway {
       scallopStore: this.scallopMemoryStore || undefined,
       factExtractor: this.factExtractor || undefined,
       goalService: this.goalService || undefined,
+      configManager: this.configManager || undefined,
       contextManager: this.contextManager,
       mediaProcessor: this.mediaProcessor,
       workspace: this.config.agent.workspace,
@@ -254,6 +264,7 @@ export class Gateway {
         onAgentProcess: async (userId: string, sessionId: string | null, message: string) => {
           return this.handleScheduledAgentProcess(userId, sessionId, message);
         },
+        getTimezone: (userId: string) => this.configManager!.getUserTimezone(userId),
       });
       this.logger.debug('Unified scheduler initialized');
     }

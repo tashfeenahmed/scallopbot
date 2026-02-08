@@ -59,6 +59,8 @@ export interface UnifiedSchedulerOptions {
   onSendMessage: MessageHandler;
   /** Optional handler to process actionable items through the agent */
   onAgentProcess?: AgentProcessHandler;
+  /** Callback to resolve IANA timezone for a user (defaults to server timezone) */
+  getTimezone?: (userId: string) => string;
 }
 
 /**
@@ -91,6 +93,7 @@ export class UnifiedScheduler {
   private maxItemAge: number;
   private onSendMessage: MessageHandler;
   private onAgentProcess?: AgentProcessHandler;
+  private getTimezone: (userId: string) => string;
 
   private intervalHandle: ReturnType<typeof setInterval> | null = null;
   private isRunning = false;
@@ -108,6 +111,7 @@ export class UnifiedScheduler {
     this.maxItemAge = options.maxItemAge ?? 24 * 60 * 60 * 1000; // 24 hours
     this.onSendMessage = options.onSendMessage;
     this.onAgentProcess = options.onAgentProcess;
+    this.getTimezone = options.getTimezone ?? (() => Intl.DateTimeFormat().resolvedOptions().timeZone);
   }
 
   /**
@@ -268,7 +272,7 @@ export class UnifiedScheduler {
 
     // Handle recurring items
     if (item.recurring) {
-      const nextTriggerAt = this.calculateNextOccurrence(item.recurring);
+      const nextTriggerAt = this.calculateNextOccurrence(item.recurring, item.userId);
       if (nextTriggerAt) {
         // Create a new item for the next occurrence
         this.db.addScheduledItem({
@@ -308,53 +312,83 @@ export class UnifiedScheduler {
   /**
    * Calculate the next occurrence for a recurring schedule
    */
-  private calculateNextOccurrence(schedule: RecurringSchedule): number | null {
+  private calculateNextOccurrence(schedule: RecurringSchedule, userId: string): number | null {
+    const tz = this.getTimezone(userId);
+
+    // Get current date/time components in the user's timezone
     const now = new Date();
-    const target = new Date();
-    target.setHours(schedule.hour, schedule.minute, 0, 0);
+    const formatter = new Intl.DateTimeFormat('en-US', {
+      timeZone: tz,
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+      hour12: false,
+      weekday: 'short',
+    });
+    const parts = formatter.formatToParts(now);
+    const getPart = (type: string) => parts.find(p => p.type === type)?.value || '';
+
+    const userYear = parseInt(getPart('year'), 10);
+    const userMonth = parseInt(getPart('month'), 10) - 1;
+    const userDay = parseInt(getPart('day'), 10);
+    const userHour = parseInt(getPart('hour'), 10);
+    const userMinute = parseInt(getPart('minute'), 10);
+    const dayNames: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+    const userDayOfWeek = dayNames[getPart('weekday')] ?? now.getDay();
+
+    // Helper: build a UTC timestamp for a given date in the user's timezone
+    const toUtc = (y: number, m: number, d: number, h: number, min: number): number => {
+      // Format as ISO-ish string and interpret in the user's timezone
+      const dateStr = `${y}-${String(m + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}T${String(h).padStart(2, '0')}:${String(min).padStart(2, '0')}:00`;
+      // Use a trick: compute the offset between the user's timezone and UTC
+      const utcDate = new Date(dateStr + 'Z');
+      const localStr = utcDate.toLocaleString('en-US', { timeZone: tz });
+      const localDate = new Date(localStr);
+      const offsetMs = localDate.getTime() - utcDate.getTime();
+      return new Date(dateStr + 'Z').getTime() - offsetMs;
+    };
+
+    // Start from "today" in user timezone, at the scheduled time
+    let targetDay = userDay;
+    let targetMonth = userMonth;
+    let targetYear = userYear;
+    const advance = () => {
+      const d = new Date(targetYear, targetMonth, targetDay + 1);
+      targetDay = d.getDate();
+      targetMonth = d.getMonth();
+      targetYear = d.getFullYear();
+    };
+    const getDow = () => new Date(targetYear, targetMonth, targetDay).getDay();
 
     switch (schedule.type) {
       case 'daily':
-        // Move to tomorrow at the scheduled time
-        target.setDate(target.getDate() + 1);
+        advance(); // tomorrow
         break;
 
       case 'weekly':
         if (schedule.dayOfWeek !== undefined) {
-          // Find next occurrence of the day
-          const currentDay = now.getDay();
-          let daysUntil = schedule.dayOfWeek - currentDay;
-          if (daysUntil <= 0) {
-            daysUntil += 7;
-          }
-          target.setDate(target.getDate() + daysUntil);
+          let daysUntil = schedule.dayOfWeek - userDayOfWeek;
+          if (daysUntil <= 0) daysUntil += 7;
+          for (let i = 0; i < daysUntil; i++) advance();
         } else {
-          // No day specified, just add a week
-          target.setDate(target.getDate() + 7);
+          for (let i = 0; i < 7; i++) advance();
         }
         break;
 
       case 'weekdays':
-        // Move to next weekday
-        target.setDate(target.getDate() + 1);
-        while (target.getDay() === 0 || target.getDay() === 6) {
-          target.setDate(target.getDate() + 1);
-        }
+        advance();
+        while (getDow() === 0 || getDow() === 6) advance();
         break;
 
       case 'weekends':
-        // Move to next weekend day
-        target.setDate(target.getDate() + 1);
-        while (target.getDay() !== 0 && target.getDay() !== 6) {
-          target.setDate(target.getDate() + 1);
-        }
+        advance();
+        while (getDow() !== 0 && getDow() !== 6) advance();
         break;
 
       default:
         return null;
     }
 
-    return target.getTime();
+    return toUtc(targetYear, targetMonth, targetDay, schedule.hour, schedule.minute);
   }
 
   /**
@@ -445,8 +479,10 @@ export class UnifiedScheduler {
     }
 
     const now = new Date();
-    const currentDate = now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
-    const currentTime = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
+    const tz = this.getTimezone(item.userId);
+    const tzOptions = { timeZone: tz };
+    const currentDate = now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', ...tzOptions });
+    const currentTime = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true, ...tzOptions });
 
     const prompt = `You are a proactive personal assistant. Generate a brief, friendly message for ${triggerTypeDescriptions[item.type] || 'following up'}.
 
