@@ -494,6 +494,8 @@ export class ContextManager {
             totalChars += JSON.stringify(block.input).length + block.name.length;
           } else if (block.type === 'tool_result') {
             totalChars += block.content.length;
+          } else if (block.type === 'thinking') {
+            totalChars += (block as { thinking: string }).thinking.length;
           }
         }
       }

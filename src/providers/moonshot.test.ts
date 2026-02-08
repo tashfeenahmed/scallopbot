@@ -319,6 +319,119 @@ describe('MoonshotProvider', () => {
       expect(assistantMsg.reasoning_content).toBe('.');
     });
 
+    it('should use higher max_tokens when thinking is enabled', async () => {
+      const { default: OpenAI } = await import('openai');
+      const mockCreate = vi.fn().mockResolvedValue({
+        choices: [{ message: { content: 'Response' }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 10, completion_tokens: 5 },
+        model: 'kimi-k2.5',
+      });
+
+      const mockInstance = new OpenAI({ apiKey: 'test' });
+      (mockInstance.chat.completions.create as unknown) = mockCreate;
+      (provider as unknown as { client: typeof mockInstance }).client = mockInstance;
+
+      await provider.complete({
+        messages: [{ role: 'user', content: 'Complex reasoning task' }],
+        enableThinking: true,
+      });
+
+      // Should use 8192 (THINKING_MAX_TOKENS) instead of 4096
+      expect(mockCreate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          max_tokens: 8192,
+        })
+      );
+    });
+
+    it('should handle thinking + tool calls + tool results multi-turn correctly', async () => {
+      const { default: OpenAI } = await import('openai');
+      const mockCreate = vi.fn().mockResolvedValue({
+        choices: [{
+          message: {
+            reasoning_content: 'Let me search for that info...',
+            content: 'Here are the results.',
+          },
+          finish_reason: 'stop',
+        }],
+        usage: { prompt_tokens: 50, completion_tokens: 30 },
+        model: 'kimi-k2.5',
+      });
+
+      const mockInstance = new OpenAI({ apiKey: 'test' });
+      (mockInstance.chat.completions.create as unknown) = mockCreate;
+      (provider as unknown as { client: typeof mockInstance }).client = mockInstance;
+
+      // Multi-turn conversation: user → assistant (thinking + tool call) → tool result → user
+      await provider.complete({
+        messages: [
+          { role: 'user', content: 'Search for the weather' },
+          {
+            role: 'assistant',
+            content: [
+              { type: 'thinking', thinking: 'I should use the weather tool' },
+              { type: 'text', text: 'Let me check the weather.' },
+              { type: 'tool_use', id: 'call_1', name: 'bash', input: { command: 'weather London' } },
+            ],
+          },
+          {
+            role: 'user',
+            content: [
+              { type: 'tool_result', tool_use_id: 'call_1', content: 'London: 15°C, cloudy' },
+            ],
+          },
+          { role: 'user', content: 'What about tomorrow?' },
+        ],
+        enableThinking: true,
+      });
+
+      const callArgs = mockCreate.mock.calls[0][0];
+
+      // Assistant message should have reasoning_content from thinking block
+      const assistantMsg = callArgs.messages.find((m: { role: string }) => m.role === 'assistant');
+      expect(assistantMsg).toBeDefined();
+      expect(assistantMsg.reasoning_content).toBe('I should use the weather tool');
+      expect(assistantMsg.tool_calls).toBeDefined();
+      expect(assistantMsg.tool_calls).toHaveLength(1);
+      expect(assistantMsg.tool_calls[0].function.name).toBe('bash');
+
+      // Tool result should be present as a 'tool' message
+      const toolMsg = callArgs.messages.find((m: { role: string }) => m.role === 'tool');
+      expect(toolMsg).toBeDefined();
+      expect(toolMsg.tool_call_id).toBe('call_1');
+    });
+
+    it('should extract reasoning_tokens from completion_tokens_details', async () => {
+      const { default: OpenAI } = await import('openai');
+      const mockCreate = vi.fn().mockResolvedValue({
+        choices: [{
+          message: {
+            reasoning_content: 'Thinking deeply...',
+            content: 'The answer.',
+          },
+          finish_reason: 'stop',
+        }],
+        usage: {
+          prompt_tokens: 10,
+          completion_tokens: 50,
+          completion_tokens_details: { reasoning_tokens: 35 },
+        },
+        model: 'kimi-k2.5',
+      });
+
+      const mockInstance = new OpenAI({ apiKey: 'test' });
+      (mockInstance.chat.completions.create as unknown) = mockCreate;
+      (provider as unknown as { client: typeof mockInstance }).client = mockInstance;
+
+      const response = await provider.complete({
+        messages: [{ role: 'user', content: 'Think hard' }],
+        enableThinking: true,
+      });
+
+      expect(response.usage.reasoningTokens).toBe(35);
+      expect(response.usage.outputTokens).toBe(50);
+    });
+
     it('should not enable thinking for non-Kimi models', async () => {
       const nonKimiProvider = new MoonshotProvider({
         apiKey: 'test-key',
