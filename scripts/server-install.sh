@@ -102,7 +102,28 @@ else
   echo "==> Skipping npm install (no package.json in $APP_DIR)"
 fi
 
-# ── 8. Log directory & PM2 startup ──────────────────────────────────
+# ── 8. Symlink skill scripts and binaries to PATH ────────────────────
+echo "==> Linking skill scripts to PATH..."
+SKILL_SCRIPTS="$APP_DIR/src/skills/bundled"
+for script in "$SKILL_SCRIPTS"/*/scripts/*; do
+  [ -x "$script" ] || continue
+  name="$(basename "$script")"
+  ln -sf "$script" "/usr/local/bin/$name"
+  echo "    $name -> $script"
+done
+
+# agent-browser (npm package with platform binary)
+AGENT_BROWSER="$APP_DIR/node_modules/agent-browser/bin/agent-browser-linux-x64"
+if [ -f "$AGENT_BROWSER" ]; then
+  ln -sf "$AGENT_BROWSER" /usr/local/bin/agent-browser
+  echo "    agent-browser -> $AGENT_BROWSER"
+
+  # Install Playwright chromium + system deps for headless browsing
+  echo "==> Installing Playwright chromium..."
+  cd "$APP_DIR" && npx playwright install --with-deps chromium
+fi
+
+# ── 9. Log directory & PM2 startup ──────────────────────────────────
 echo "==> Setting up log directory and PM2 startup..."
 mkdir -p "$LOG_DIR"
 pm2 startup systemd -u root --hp /root 2>/dev/null || true
