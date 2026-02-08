@@ -94,6 +94,12 @@ Use the read_file skill for:
 }
 ```
 
+## Limitations
+
+- **Text only** — this tool reads UTF-8 text files. Binary files (PDF, images, DOCX, ZIP, etc.) will be rejected.
+- To read PDFs, use bash with a proper tool (e.g., `pdftotext`, `python -m pymupdf`, or `mutool draw`).
+- To inspect images, use bash with an appropriate library.
+
 ## Security
 
 - Paths are validated to stay within workspace boundaries

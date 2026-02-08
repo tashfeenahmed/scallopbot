@@ -91,6 +91,12 @@ Use the write_file skill for:
 }
 ```
 
+## Limitations
+
+- **Text only** — this tool writes UTF-8 text. It cannot produce binary files (PDF, images, DOCX, ZIP, etc.). Writing text to a `.pdf` or other binary extension will create a corrupt, unreadable file.
+- To generate PDFs, use bash with a proper tool (e.g., `pandoc`, `wkhtmltopdf`, `groff`, or a Python script with `reportlab`/`fpdf2`).
+- To generate images, use bash with an appropriate library.
+
 ## Security
 
 - Paths are validated to stay within workspace
