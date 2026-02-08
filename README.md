@@ -321,20 +321,44 @@ Discord also supports direct message replies and mention-based chat in channels.
 
 ## Deployment
 
-### PM2 (Recommended)
+### Server Install Script (Recommended)
+
+The install script sets up everything on a fresh Ubuntu 24.04 server — Node.js 22, PM2, Python voice packages (Kokoro TTS + faster-whisper STT), Ollama embeddings, ffmpeg, and sox:
 
 ```bash
-# Copy to server
-rsync -avz --exclude node_modules ./ user@server:/opt/scallopbot/
-
-# On server
+# Clone to server
+git clone https://github.com/tashfeenahmed/scallopbot.git /opt/scallopbot
 cd /opt/scallopbot
-npm install
-npm run build
 
-# Create log directory
-sudo mkdir -p /var/log/scallopbot
+# Run the install script (installs all system + app dependencies)
+bash scripts/server-install.sh
 
+# Configure
+cp .env.example .env
+# Edit .env with your API keys
+
+# Start
+pm2 start ecosystem.config.cjs --env production
+pm2 save
+```
+
+The script is idempotent — safe to run multiple times. It installs:
+
+| Component | What | Why |
+|-----------|------|-----|
+| **Node.js 22** | Runtime | Required |
+| **PM2** | Process manager | Auto-restart, logging, boot persistence |
+| **Python venv** | `~/.scallopbot/venv/` | Voice support (TTS + STT) |
+| **kokoro-onnx** | Local TTS | Free text-to-speech (10 voices) |
+| **faster-whisper** | Local STT | Free speech-to-text (CTranslate2 optimized) |
+| **Kokoro models** | `~/.cache/kokoro/` | 82M param ONNX model + voice embeddings |
+| **Ollama** | Local embedding server | Semantic memory search |
+| **nomic-embed-text** | Embedding model (274MB) | Vector embeddings for memory |
+| **ffmpeg / sox** | Audio tools | Voice format conversion |
+
+### PM2
+
+```bash
 # Start with PM2 (uses ecosystem.config.cjs)
 npx pm2 start ecosystem.config.cjs --env production
 npx pm2 save
@@ -346,15 +370,6 @@ npx pm2 startup  # Enable auto-start on boot
 ### Systemd Service
 
 ```bash
-# Copy to server
-rsync -avz --exclude node_modules ./ user@server:/opt/scallopbot/
-
-# On server
-cd /opt/scallopbot
-npm install
-npm run build
-
-# Create service
 sudo tee /etc/systemd/system/scallopbot.service << EOF
 [Unit]
 Description=ScallopBot AI Assistant
@@ -372,7 +387,6 @@ RestartSec=10
 WantedBy=multi-user.target
 EOF
 
-# Enable and start
 sudo systemctl enable scallopbot
 sudo systemctl start scallopbot
 ```
