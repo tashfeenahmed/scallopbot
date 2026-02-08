@@ -4,8 +4,6 @@ import * as path from 'path';
 import * as os from 'os';
 import {
   BotConfigManager,
-  DEFAULT_PERSONALITIES,
-  AVAILABLE_MODELS,
   type UserBotConfig,
 } from './bot-config.js';
 import { ScallopDatabase } from '../memory/db.js';
@@ -41,8 +39,9 @@ describe('BotConfigManager', () => {
       // Insert directly into db
       db.upsertBotConfig('user456', {
         botName: 'Jarvis',
-        personalityId: 'professional',
+        personalityId: 'custom',
         modelId: 'claude-sonnet-4-5-20250929',
+        timezone: 'Europe/Dublin',
         onboardingComplete: true,
         createdAt: '2025-01-01T00:00:00Z',
         updatedAt: '2025-01-01T00:00:00Z',
@@ -53,6 +52,7 @@ describe('BotConfigManager', () => {
       const config = manager.getUserConfig('user456');
       expect(config.botName).toBe('Jarvis');
       expect(config.onboardingComplete).toBe(true);
+      expect(config.timezone).toBe('Europe/Dublin');
     });
   });
 
@@ -63,8 +63,9 @@ describe('BotConfigManager', () => {
       const config = manager.getUserConfig('newuser');
 
       expect(config.botName).toBe('ScallopBot');
-      expect(config.personalityId).toBe('friendly');
+      expect(config.personalityId).toBe('custom');
       expect(config.modelId).toBe('moonshot-v1-128k');
+      expect(config.timezone).toBe('UTC');
       expect(config.onboardingComplete).toBe(false);
       expect(config.onboardingStep).toBe('welcome');
     });
@@ -86,12 +87,12 @@ describe('BotConfigManager', () => {
 
       await manager.updateUserConfig('user123', {
         botName: 'Friday',
-        onboardingStep: 'personality',
+        onboardingStep: 'custom_personality',
       });
 
       const config = manager.getUserConfig('user123');
       expect(config.botName).toBe('Friday');
-      expect(config.onboardingStep).toBe('personality');
+      expect(config.onboardingStep).toBe('custom_personality');
     });
 
     it('should update updatedAt timestamp', async () => {
@@ -120,6 +121,17 @@ describe('BotConfigManager', () => {
       const after = manager.getUserConfig('user123');
       expect(after.createdAt).toBe(originalCreatedAt);
     });
+
+    it('should update timezone', async () => {
+      await manager.load();
+
+      await manager.updateUserConfig('user123', {
+        timezone: 'America/New_York',
+      });
+
+      const config = manager.getUserConfig('user123');
+      expect(config.timezone).toBe('America/New_York');
+    });
   });
 
   describe('hasCompletedOnboarding', () => {
@@ -138,57 +150,7 @@ describe('BotConfigManager', () => {
     });
   });
 
-  describe('getPersonality', () => {
-    it('should return personality by id', async () => {
-      await manager.load();
-
-      const personality = manager.getPersonality('professional');
-
-      expect(personality).toBeDefined();
-      expect(personality?.name).toBe('Professional & Concise');
-    });
-
-    it('should return undefined for unknown personality', async () => {
-      await manager.load();
-
-      const personality = manager.getPersonality('unknown');
-
-      expect(personality).toBeUndefined();
-    });
-  });
-
-  describe('getModel', () => {
-    it('should return model by id', async () => {
-      await manager.load();
-
-      const model = manager.getModel('claude-sonnet-4-5-20250929');
-
-      expect(model).toBeDefined();
-      expect(model?.name).toBe('Claude Sonnet 4.5');
-    });
-
-    it('should return undefined for unknown model', async () => {
-      await manager.load();
-
-      const model = manager.getModel('unknown-model');
-
-      expect(model).toBeUndefined();
-    });
-  });
-
   describe('getUserSystemPrompt', () => {
-    it('should return personality system prompt', async () => {
-      await manager.load();
-
-      await manager.updateUserConfig('user123', {
-        personalityId: 'technical',
-      });
-
-      const prompt = manager.getUserSystemPrompt('user123');
-
-      expect(prompt).toContain('technical expert');
-    });
-
     it('should return custom personality prompt when set', async () => {
       await manager.load();
 
@@ -202,17 +164,28 @@ describe('BotConfigManager', () => {
       expect(prompt).toBe('Be a pirate captain assistant. Say arrr a lot.');
     });
 
-    it('should fallback to friendly personality for unknown id', async () => {
+    it('should return default personality when no custom set', async () => {
       await manager.load();
-
-      await manager.updateUserConfig('user123', {
-        personalityId: 'unknown-personality',
-      });
 
       const prompt = manager.getUserSystemPrompt('user123');
 
-      // Should get the friendly personality (index 1)
       expect(prompt).toContain('friendly');
+    });
+  });
+
+  describe('getUserTimezone', () => {
+    it('should return UTC by default', async () => {
+      await manager.load();
+
+      expect(manager.getUserTimezone('newuser')).toBe('UTC');
+    });
+
+    it('should return stored timezone', async () => {
+      await manager.load();
+
+      await manager.updateUserConfig('user123', { timezone: 'Asia/Tokyo' });
+
+      expect(manager.getUserTimezone('user123')).toBe('Asia/Tokyo');
     });
   });
 
@@ -222,7 +195,9 @@ describe('BotConfigManager', () => {
 
       await manager.updateUserConfig('user123', {
         botName: 'CustomBot',
-        personalityId: 'technical',
+        personalityId: 'custom',
+        customPersonality: 'Be sassy',
+        timezone: 'Europe/Dublin',
         onboardingComplete: true,
       });
 
@@ -230,7 +205,8 @@ describe('BotConfigManager', () => {
 
       const config = manager.getUserConfig('user123');
       expect(config.botName).toBe('ScallopBot');
-      expect(config.personalityId).toBe('friendly');
+      expect(config.personalityId).toBe('custom');
+      expect(config.timezone).toBe('UTC');
       expect(config.onboardingComplete).toBe(false);
     });
 
@@ -254,6 +230,7 @@ describe('BotConfigManager', () => {
 
       await manager.updateUserConfig('user123', {
         botName: 'TestBot',
+        timezone: 'US/Pacific',
         onboardingComplete: true,
       });
 
@@ -262,42 +239,8 @@ describe('BotConfigManager', () => {
       const config = manager2.getUserConfig('user123');
 
       expect(config.botName).toBe('TestBot');
+      expect(config.timezone).toBe('US/Pacific');
       expect(config.onboardingComplete).toBe(true);
     });
-  });
-});
-
-describe('DEFAULT_PERSONALITIES', () => {
-  it('should have at least 4 personalities', () => {
-    expect(DEFAULT_PERSONALITIES.length).toBeGreaterThanOrEqual(4);
-  });
-
-  it('should have required fields for each personality', () => {
-    for (const personality of DEFAULT_PERSONALITIES) {
-      expect(personality.id).toBeDefined();
-      expect(personality.name).toBeDefined();
-      expect(personality.description).toBeDefined();
-      expect(personality.systemPrompt).toBeDefined();
-    }
-  });
-});
-
-describe('AVAILABLE_MODELS', () => {
-  it('should have at least 4 models', () => {
-    expect(AVAILABLE_MODELS.length).toBeGreaterThanOrEqual(4);
-  });
-
-  it('should have required fields for each model', () => {
-    for (const model of AVAILABLE_MODELS) {
-      expect(model.id).toBeDefined();
-      expect(model.name).toBeDefined();
-      expect(model.provider).toBeDefined();
-      expect(model.description).toBeDefined();
-    }
-  });
-
-  it('should include Moonshot V1 128K as the first (recommended) model', () => {
-    expect(AVAILABLE_MODELS[0].name).toContain('Moonshot');
-    expect(AVAILABLE_MODELS[0].id).toBe('moonshot-v1-128k');
   });
 });

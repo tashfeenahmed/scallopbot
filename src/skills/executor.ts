@@ -19,7 +19,10 @@ const DEFAULT_TIMEOUT_MS = 60000;
  * Skill Executor class for running scripts from skill folders
  */
 export class SkillExecutor {
-  constructor(private logger?: Logger) {}
+  private getTimezone?: (userId: string) => string;
+  constructor(private logger?: Logger, getTimezone?: (userId: string) => string) {
+    this.getTimezone = getTimezone;
+  }
 
   /**
    * Execute a skill script
@@ -186,6 +189,7 @@ export class SkillExecutor {
       SKILL_WORKSPACE: process.env.AGENT_WORKSPACE || process.cwd(),
       ...(request.userId ? { SKILL_USER_ID: request.userId } : {}),
       ...(request.sessionId ? { SKILL_SESSION_ID: request.sessionId } : {}),
+      ...(request.userId && this.getTimezone ? { SKILL_USER_TIMEZONE: this.getTimezone(request.userId) } : {}),
     };
 
     // Working directory: use request.cwd, or skill directory, or process.cwd()
@@ -283,6 +287,6 @@ export class SkillExecutor {
 /**
  * Create a skill executor instance
  */
-export function createSkillExecutor(logger?: Logger): SkillExecutor {
-  return new SkillExecutor(logger);
+export function createSkillExecutor(logger?: Logger, getTimezone?: (userId: string) => string): SkillExecutor {
+  return new SkillExecutor(logger, getTimezone);
 }

@@ -1,102 +1,24 @@
 /**
  * Bot Configuration Storage
  *
- * Stores per-user bot configuration (name, personality, model, etc.)
+ * Stores per-user bot configuration (name, personality, timezone, etc.)
  * Persisted in SQLite for durability across restarts.
  */
 
 import type { Logger } from 'pino';
 import type { ScallopDatabase } from '../memory/db.js';
 
-export interface BotPersonality {
-  id: string;
-  name: string;
-  description: string;
-  systemPrompt: string;
-}
-
-export const DEFAULT_PERSONALITIES: BotPersonality[] = [
-  {
-    id: 'professional',
-    name: 'Professional & Concise',
-    description: 'Direct, efficient responses focused on getting things done',
-    systemPrompt: 'You are a professional assistant. Be concise, direct, and efficient. Focus on actionable answers without unnecessary elaboration.',
-  },
-  {
-    id: 'friendly',
-    name: 'Friendly & Conversational',
-    description: 'Warm, approachable, and engaging communication style',
-    systemPrompt: 'You are a friendly and helpful assistant. Be warm, conversational, and approachable. Use a casual tone while remaining helpful and accurate.',
-  },
-  {
-    id: 'technical',
-    name: 'Technical & Detailed',
-    description: 'In-depth explanations with technical precision',
-    systemPrompt: 'You are a technical expert assistant. Provide detailed, thorough explanations with technical precision. Include relevant context and considerations.',
-  },
-  {
-    id: 'creative',
-    name: 'Creative & Playful',
-    description: 'Imaginative and fun while still being helpful',
-    systemPrompt: 'You are a creative and playful assistant. Be imaginative, use humor when appropriate, and make interactions enjoyable while remaining helpful.',
-  },
-];
-
-export interface ModelOption {
-  id: string;
-  name: string;
-  provider: string;
-  description: string;
-}
-
-export const AVAILABLE_MODELS: ModelOption[] = [
-  {
-    id: 'moonshot-v1-128k',
-    name: 'Moonshot V1 128K',
-    provider: 'moonshot',
-    description: '128K context, tool-capable (Recommended)',
-  },
-  {
-    id: 'claude-sonnet-4-5-20250929',
-    name: 'Claude Sonnet 4.5',
-    provider: 'anthropic',
-    description: 'Fast & capable',
-  },
-  {
-    id: 'claude-opus-4-5-20251101',
-    name: 'Claude Opus 4.5',
-    provider: 'anthropic',
-    description: 'Most powerful, best for complex tasks',
-  },
-  {
-    id: 'grok-4',
-    name: 'Grok 4',
-    provider: 'xai',
-    description: 'Fast reasoning model',
-  },
-  {
-    id: 'gpt-4o',
-    name: 'GPT-4o',
-    provider: 'openai',
-    description: 'OpenAI flagship model',
-  },
-  {
-    id: 'llama-3.3-70b-versatile',
-    name: 'Llama 3.3 70B',
-    provider: 'groq',
-    description: 'Fast open-source via Groq',
-  },
-];
-
 export interface UserBotConfig {
   /** User's chosen name for the bot */
   botName: string;
-  /** Personality ID from DEFAULT_PERSONALITIES */
+  /** Personality ID (kept for backwards compat, always 'custom') */
   personalityId: string;
-  /** Custom personality prompt (if personalityId is 'custom') */
+  /** Custom personality prompt */
   customPersonality?: string;
-  /** Model ID from AVAILABLE_MODELS */
+  /** Model ID (kept for backwards compat) */
   modelId: string;
+  /** User's IANA timezone (e.g. 'Europe/Dublin') */
+  timezone: string;
   /** Whether onboarding has been completed */
   onboardingComplete: boolean;
   /** Current onboarding step (for resuming) */
@@ -110,9 +32,8 @@ export interface UserBotConfig {
 export type OnboardingStep =
   | 'welcome'
   | 'name'
-  | 'personality'
   | 'custom_personality'
-  | 'model'
+  | 'timezone'
   | 'complete';
 
 export interface BotConfigStore {
@@ -124,13 +45,17 @@ export interface BotConfigStore {
 
 const DEFAULT_CONFIG: UserBotConfig = {
   botName: 'ScallopBot',
-  personalityId: 'friendly',
+  personalityId: 'custom',
   modelId: 'moonshot-v1-128k',
+  timezone: 'UTC',
   onboardingComplete: false,
   onboardingStep: 'welcome',
   updatedAt: new Date().toISOString(),
   createdAt: new Date().toISOString(),
 };
+
+const DEFAULT_PERSONALITY_PROMPT =
+  'You are a friendly and helpful assistant. Be warm, conversational, and approachable. Use a casual tone while remaining helpful and accurate.';
 
 export class BotConfigManager {
   private db: ScallopDatabase;
@@ -170,6 +95,7 @@ export class BotConfigManager {
       botName: DEFAULT_CONFIG.botName,
       personalityId: DEFAULT_CONFIG.personalityId,
       modelId: DEFAULT_CONFIG.modelId,
+      timezone: DEFAULT_CONFIG.timezone,
       onboardingComplete: DEFAULT_CONFIG.onboardingComplete,
       onboardingStep: DEFAULT_CONFIG.onboardingStep,
       createdAt: now,
@@ -190,6 +116,7 @@ export class BotConfigManager {
       personalityId: updates.personalityId,
       customPersonality: updates.customPersonality,
       modelId: updates.modelId,
+      timezone: updates.timezone,
       onboardingComplete: updates.onboardingComplete,
       onboardingStep: updates.onboardingStep,
     });
@@ -206,31 +133,19 @@ export class BotConfigManager {
   }
 
   /**
-   * Get personality by ID
-   */
-  getPersonality(personalityId: string): BotPersonality | undefined {
-    return DEFAULT_PERSONALITIES.find(p => p.id === personalityId);
-  }
-
-  /**
-   * Get model by ID
-   */
-  getModel(modelId: string): ModelOption | undefined {
-    return AVAILABLE_MODELS.find(m => m.id === modelId);
-  }
-
-  /**
    * Get the system prompt for a user
    */
   getUserSystemPrompt(userId: string): string {
     const config = this.getUserConfig(userId);
+    return config.customPersonality || DEFAULT_PERSONALITY_PROMPT;
+  }
 
-    if (config.personalityId === 'custom' && config.customPersonality) {
-      return config.customPersonality;
-    }
-
-    const personality = this.getPersonality(config.personalityId);
-    return personality?.systemPrompt || DEFAULT_PERSONALITIES[1].systemPrompt;
+  /**
+   * Get the user's timezone (IANA name)
+   */
+  getUserTimezone(userId: string): string {
+    const config = this.getUserConfig(userId);
+    return config.timezone || 'UTC';
   }
 
   /**
@@ -244,6 +159,7 @@ export class BotConfigManager {
       personalityId: DEFAULT_CONFIG.personalityId,
       customPersonality: undefined,
       modelId: DEFAULT_CONFIG.modelId,
+      timezone: DEFAULT_CONFIG.timezone,
       onboardingComplete: DEFAULT_CONFIG.onboardingComplete,
       onboardingStep: DEFAULT_CONFIG.onboardingStep,
       createdAt: existing?.createdAt ?? now,
@@ -257,6 +173,7 @@ export class BotConfigManager {
       personalityId: row.personalityId,
       customPersonality: row.customPersonality ?? undefined,
       modelId: row.modelId,
+      timezone: row.timezone || 'UTC',
       onboardingComplete: row.onboardingComplete,
       onboardingStep: (row.onboardingStep as OnboardingStep) ?? undefined,
       createdAt: row.createdAt,

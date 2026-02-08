@@ -99,6 +99,9 @@ function rowToItem(row: Record<string, unknown>): ScheduledItem {
   };
 }
 
+// Get the user's timezone from env (set by executor), fallback to UTC
+const USER_TIMEZONE = process.env.SKILL_USER_TIMEZONE || 'UTC';
+
 // Output result and exit
 function outputResult(result: SkillResult): void {
   console.log(JSON.stringify(result));
@@ -150,44 +153,92 @@ function parseDayOfWeek(input: string): number | null {
   return days[input.toLowerCase().trim()] ?? null;
 }
 
-// Calculate next occurrence for recurring schedule
-function getNextOccurrence(schedule: RecurringSchedule): Date {
+// Helper: build a UTC Date for a given date in the user's timezone
+function tzToUtc(y: number, m: number, d: number, h: number, min: number): Date {
+  const dateStr = `${y}-${String(m + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}T${String(h).padStart(2, '0')}:${String(min).padStart(2, '0')}:00`;
+  const utcDate = new Date(dateStr + 'Z');
+  const localStr = utcDate.toLocaleString('en-US', { timeZone: USER_TIMEZONE });
+  const localDate = new Date(localStr);
+  const offsetMs = localDate.getTime() - utcDate.getTime();
+  return new Date(new Date(dateStr + 'Z').getTime() - offsetMs);
+}
+
+// Get current date/time components in user's timezone
+function getUserNowParts() {
   const now = new Date();
-  const target = new Date();
-  target.setHours(schedule.hour, schedule.minute, 0, 0);
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: USER_TIMEZONE,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+    hour12: false, weekday: 'short',
+  });
+  const parts = formatter.formatToParts(now);
+  const getPart = (type: string) => parts.find(p => p.type === type)?.value || '';
+  const dayNames: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+
+  return {
+    year: parseInt(getPart('year'), 10),
+    month: parseInt(getPart('month'), 10) - 1,
+    day: parseInt(getPart('day'), 10),
+    hour: parseInt(getPart('hour'), 10),
+    minute: parseInt(getPart('minute'), 10),
+    dayOfWeek: dayNames[getPart('weekday')] ?? now.getDay(),
+    now,
+  };
+}
+
+// Calculate next occurrence for recurring schedule (timezone-aware)
+function getNextOccurrence(schedule: RecurringSchedule): Date {
+  const userNow = getUserNowParts();
+  let { year, month, day } = userNow;
+  const advance = () => {
+    const d = new Date(year, month, day + 1);
+    day = d.getDate();
+    month = d.getMonth();
+    year = d.getFullYear();
+  };
+  const getDow = () => new Date(year, month, day).getDay();
+
+  // Check if "today at scheduled time" is in the future
+  const todayTarget = tzToUtc(year, month, day, schedule.hour, schedule.minute);
 
   switch (schedule.type) {
     case 'daily':
-      if (target <= now) {
-        target.setDate(target.getDate() + 1);
+      if (todayTarget <= userNow.now) {
+        advance();
       }
       break;
 
     case 'weekly':
       if (schedule.dayOfWeek !== undefined) {
-        const currentDay = now.getDay();
-        let daysUntil = schedule.dayOfWeek - currentDay;
-        if (daysUntil < 0 || (daysUntil === 0 && target <= now)) {
+        let daysUntil = schedule.dayOfWeek - userNow.dayOfWeek;
+        if (daysUntil < 0 || (daysUntil === 0 && todayTarget <= userNow.now)) {
           daysUntil += 7;
         }
-        target.setDate(target.getDate() + daysUntil);
+        for (let i = 0; i < daysUntil; i++) advance();
       }
       break;
 
     case 'weekdays':
-      while (target <= now || target.getDay() === 0 || target.getDay() === 6) {
-        target.setDate(target.getDate() + 1);
+      if (todayTarget <= userNow.now || getDow() === 0 || getDow() === 6) {
+        advance();
+      }
+      while (getDow() === 0 || getDow() === 6) {
+        advance();
       }
       break;
 
     case 'weekends':
-      while (target <= now || (target.getDay() !== 0 && target.getDay() !== 6)) {
-        target.setDate(target.getDate() + 1);
+      if (todayTarget <= userNow.now || (getDow() !== 0 && getDow() !== 6)) {
+        advance();
+      }
+      while (getDow() !== 0 && getDow() !== 6) {
+        advance();
       }
       break;
   }
 
-  return target;
+  return tzToUtc(year, month, day, schedule.hour, schedule.minute);
 }
 
 // Parse recurring schedule
@@ -234,7 +285,7 @@ function parseRecurring(input: string): { schedule: RecurringSchedule; message?:
   return null;
 }
 
-// Parse absolute time
+// Parse absolute time (timezone-aware)
 function parseAbsoluteTime(input: string): Date | null {
   const lower = input.toLowerCase().trim();
 
@@ -243,11 +294,12 @@ function parseAbsoluteTime(input: string): Date | null {
   if (atTimeMatch) {
     const time = parseTime(atTimeMatch[1]);
     if (time) {
-      const now = new Date();
-      const target = new Date();
-      target.setHours(time.hour, time.minute, 0, 0);
-      if (target <= now) {
-        target.setDate(target.getDate() + 1);
+      const userNow = getUserNowParts();
+      let target = tzToUtc(userNow.year, userNow.month, userNow.day, time.hour, time.minute);
+      if (target <= userNow.now) {
+        // Tomorrow
+        const d = new Date(userNow.year, userNow.month, userNow.day + 1);
+        target = tzToUtc(d.getFullYear(), d.getMonth(), d.getDate(), time.hour, time.minute);
       }
       return target;
     }
@@ -258,10 +310,9 @@ function parseAbsoluteTime(input: string): Date | null {
   if (tomorrowMatch) {
     const time = parseTime(tomorrowMatch[1]);
     if (time) {
-      const target = new Date();
-      target.setDate(target.getDate() + 1);
-      target.setHours(time.hour, time.minute, 0, 0);
-      return target;
+      const userNow = getUserNowParts();
+      const d = new Date(userNow.year, userNow.month, userNow.day + 1);
+      return tzToUtc(d.getFullYear(), d.getMonth(), d.getDate(), time.hour, time.minute);
     }
   }
 
@@ -354,6 +405,7 @@ function setReminder(args: ReminderArgs): SkillResult {
       if (absoluteTime) {
         triggerAt = absoluteTime.getTime();
         scheduleDescription = absoluteTime.toLocaleString('en-US', {
+          timeZone: USER_TIMEZONE,
           weekday: 'short',
           month: 'short',
           day: 'numeric',
@@ -418,6 +470,7 @@ function setReminder(args: ReminderArgs): SkillResult {
   }
 
   const nextTriggerStr = new Date(triggerAt).toLocaleString('en-US', {
+    timeZone: USER_TIMEZONE,
     weekday: 'short',
     month: 'short',
     day: 'numeric',
@@ -465,6 +518,7 @@ function listReminders(): SkillResult {
   const lines = items.map(item => {
     const triggerAt = new Date(item.triggerAt);
     const timeStr = triggerAt.toLocaleString('en-US', {
+      timeZone: USER_TIMEZONE,
       weekday: 'short',
       month: 'short',
       day: 'numeric',
