@@ -1275,6 +1275,77 @@ export class ScallopDatabase {
   }
 
   /**
+   * Consolidate duplicate pending scheduled items.
+   * Groups pending items by user, then removes duplicates using word-overlap similarity.
+   * Keeps the earliest-created item in each duplicate group.
+   * Returns the number of duplicates removed.
+   */
+  consolidateDuplicateScheduledItems(): number {
+    const stmt = this.db.prepare(`
+      SELECT id, user_id, message, trigger_at, created_at FROM scheduled_items
+      WHERE status = 'pending'
+      ORDER BY user_id, created_at ASC
+    `);
+    const rows = stmt.all() as Array<{ id: string; user_id: string; message: string; trigger_at: number; created_at: number }>;
+
+    const stopWords = new Set(['the', 'a', 'an', 'at', 'on', 'in', 'to', 'for', 'of', 'and', 'is', 'my', 'me', 'i', 'you', 'your', 'about',
+      'remind', 'reminder', 'remember', 'check', 'follow', 'up', 'user', 'upcoming', 'scheduled']);
+    const normalizeText = (text: string): Set<string> => {
+      return new Set(
+        text.toLowerCase()
+          .replace(/[^\w\s]/g, '')
+          .split(/\s+/)
+          .filter(word => word.length > 2 && !stopWords.has(word))
+      );
+    };
+
+    const isSimilar = (a: Set<string>, b: Set<string>): boolean => {
+      if (a.size === 0 || b.size === 0) return false;
+      let overlap = 0;
+      for (const word of a) {
+        if (b.has(word)) overlap++;
+      }
+      const smaller = Math.min(a.size, b.size);
+      return (overlap / smaller) >= 0.8 || (overlap / a.size) >= 0.4 || (overlap / b.size) >= 0.4;
+    };
+
+    // Group by user
+    const byUser = new Map<string, typeof rows>();
+    for (const row of rows) {
+      const list = byUser.get(row.user_id) || [];
+      list.push(row);
+      byUser.set(row.user_id, list);
+    }
+
+    const toDelete: string[] = [];
+    const deleteStmt = this.db.prepare('DELETE FROM scheduled_items WHERE id = ?');
+
+    for (const items of byUser.values()) {
+      const kept = new Set<number>(); // indices we've already decided to keep
+      for (let i = 0; i < items.length; i++) {
+        if (toDelete.includes(items[i].id)) continue;
+        kept.add(i);
+        const wordsI = normalizeText(items[i].message);
+        for (let j = i + 1; j < items.length; j++) {
+          if (toDelete.includes(items[j].id)) continue;
+          // Only compare items within 7 days of each other
+          if (Math.abs(items[i].trigger_at - items[j].trigger_at) > 7 * 24 * 60 * 60 * 1000) continue;
+          const wordsJ = normalizeText(items[j].message);
+          if (isSimilar(wordsI, wordsJ)) {
+            toDelete.push(items[j].id); // keep earlier (i), remove later (j)
+          }
+        }
+      }
+    }
+
+    for (const id of toDelete) {
+      deleteStmt.run(id);
+    }
+
+    return toDelete.length;
+  }
+
+  /**
    * Expire old pending items (older than maxAgeMs past their trigger time)
    */
   expireOldScheduledItems(maxAgeMs: number = 24 * 60 * 60 * 1000): number {
@@ -1306,8 +1377,9 @@ export class ScallopDatabase {
     if (rows.length === 0) return false;
 
     // Normalize and extract significant words
+    const stopWords = new Set(['the', 'a', 'an', 'at', 'on', 'in', 'to', 'for', 'of', 'and', 'is', 'my', 'me', 'i', 'you', 'your', 'about',
+      'remind', 'reminder', 'remember', 'check', 'follow', 'up', 'user', 'upcoming', 'scheduled']);
     const normalizeText = (text: string): Set<string> => {
-      const stopWords = new Set(['the', 'a', 'an', 'at', 'on', 'in', 'to', 'for', 'of', 'and', 'is', 'my', 'me', 'i', 'remind', 'reminder']);
       return new Set(
         text.toLowerCase()
           .replace(/[^\w\s]/g, '')
@@ -1328,10 +1400,14 @@ export class ScallopDatabase {
         if (existingWords.has(word)) overlap++;
       }
 
+      const smaller = Math.min(newWords.size, existingWords.size);
+      const similaritySmaller = overlap / smaller;
       const similarityNew = overlap / newWords.size;
       const similarityExisting = overlap / existingWords.size;
 
-      if (similarityNew >= 0.5 || similarityExisting >= 0.5) {
+      // Match if: all words in the shorter description overlap,
+      // OR either side has 40%+ overlap (lowered from 50% to catch more dupes)
+      if (similaritySmaller >= 0.8 || similarityNew >= 0.4 || similarityExisting >= 0.4) {
         return true;
       }
     }

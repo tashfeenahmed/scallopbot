@@ -126,6 +126,16 @@ export class UnifiedScheduler {
     this.isRunning = true;
     this.logger.info({ intervalMs: this.interval }, 'Starting UnifiedScheduler');
 
+    // Consolidate duplicate reminders on startup
+    try {
+      const removed = this.db.consolidateDuplicateScheduledItems();
+      if (removed > 0) {
+        this.logger.info({ duplicatesRemoved: removed }, 'Consolidated duplicate scheduled items on startup');
+      }
+    } catch (err) {
+      this.logger.error({ error: (err as Error).message }, 'Failed to consolidate duplicates on startup');
+    }
+
     // Run immediately, then on interval
     this.evaluate().catch(err => {
       this.logger.error({ error: (err as Error).message }, 'Initial scheduler evaluation failed');
