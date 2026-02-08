@@ -97,6 +97,7 @@ export class TelegramChannel {
   public userSessions: Map<string, string> = new Map();
   private isRunning = false;
   private stopRequests: Set<string> = new Set(); // Track users who want to stop processing
+  private activeProcessing: Set<string> = new Set(); // Track users with in-flight agent calls
   private verboseUsers: Set<string> = new Set(); // Track users who want debug output
   private voiceManager: VoiceManager | null = null;
   private voiceAvailable = false;
@@ -259,8 +260,9 @@ export class TelegramChannel {
       }
 
       this.stopRequests.add(userId);
-      await ctx.reply('Stopping current task...');
-      this.logger.info({ userId }, 'Stop requested by user');
+      const wasActive = this.activeProcessing.has(userId);
+      await ctx.reply(wasActive ? 'Stopping current task...' : 'Nothing running right now.');
+      this.logger.info({ userId, wasActive }, 'Stop requested by user');
     });
 
     // /verbose command - toggle debug output
@@ -296,6 +298,8 @@ export class TelegramChannel {
     });
 
     // Handle regular messages
+    // NOTE: Handlers use fire-and-forget (no await) so Grammy's update loop
+    // stays unblocked and can process /stop commands while the agent is running.
     this.bot.on('message:text', async (ctx) => {
       const userId = ctx.from?.id.toString();
       if (!userId) return;
@@ -305,7 +309,9 @@ export class TelegramChannel {
         return;
       }
 
-      await this.handleMessage(ctx);
+      this.handleMessage(ctx).catch((err) => {
+        this.logger.error({ userId, error: (err as Error).message }, 'Unhandled error in message handler');
+      });
     });
 
     // Handle voice messages
@@ -318,7 +324,9 @@ export class TelegramChannel {
         return;
       }
 
-      await this.handleVoiceMessage(ctx);
+      this.handleVoiceMessage(ctx).catch((err) => {
+        this.logger.error({ userId, error: (err as Error).message }, 'Unhandled error in voice handler');
+      });
     });
 
     // Handle audio messages
@@ -331,7 +339,9 @@ export class TelegramChannel {
         return;
       }
 
-      await this.handleVoiceMessage(ctx);
+      this.handleVoiceMessage(ctx).catch((err) => {
+        this.logger.error({ userId, error: (err as Error).message }, 'Unhandled error in audio handler');
+      });
     });
 
     // Handle document/file messages
@@ -344,7 +354,9 @@ export class TelegramChannel {
         return;
       }
 
-      await this.handleDocumentMessage(ctx);
+      this.handleDocumentMessage(ctx).catch((err) => {
+        this.logger.error({ userId, error: (err as Error).message }, 'Unhandled error in document handler');
+      });
     });
 
     // Handle photo messages
@@ -357,7 +369,9 @@ export class TelegramChannel {
         return;
       }
 
-      await this.handlePhotoMessage(ctx);
+      this.handlePhotoMessage(ctx).catch((err) => {
+        this.logger.error({ userId, error: (err as Error).message }, 'Unhandled error in photo handler');
+      });
     });
 
     // Error handler
@@ -653,9 +667,15 @@ export class TelegramChannel {
       return;
     }
 
+    if (this.activeProcessing.has(userId)) {
+      await ctx.reply('Still working on your previous message... Send /stop to cancel it.');
+      return;
+    }
+
     this.logger.info({ userId }, 'Received voice message');
 
     const typingInterval = this.startTypingIndicator(ctx);
+    this.activeProcessing.add(userId);
 
     try {
       const voice = ctx.message?.voice || ctx.message?.audio;
@@ -710,6 +730,8 @@ export class TelegramChannel {
       clearInterval(typingInterval);
       this.logger.error({ userId, error: (error as Error).message }, 'Failed to process voice message');
       await ctx.reply('Sorry, I had trouble processing your voice message. Please try again or send a text message.');
+    } finally {
+      this.activeProcessing.delete(userId);
     }
   }
 
@@ -723,9 +745,15 @@ export class TelegramChannel {
     const document = ctx.message?.document;
     if (!document) return;
 
+    if (this.activeProcessing.has(userId)) {
+      await ctx.reply('Still working on your previous message... Send /stop to cancel it.');
+      return;
+    }
+
     this.logger.info({ userId, fileName: document.file_name, mimeType: document.mime_type }, 'Received document');
 
     const typingInterval = this.startTypingIndicator(ctx);
+    this.activeProcessing.add(userId);
 
     try {
       // Download the file
@@ -787,6 +815,8 @@ export class TelegramChannel {
       clearInterval(typingInterval);
       this.logger.error({ userId, error: (error as Error).message }, 'Failed to process document');
       await ctx.reply('Sorry, I had trouble processing that file. Please try again.');
+    } finally {
+      this.activeProcessing.delete(userId);
     }
   }
 
@@ -883,7 +913,13 @@ export class TelegramChannel {
     photos: Array<{ buffer: Buffer; mimeType: string }>,
     caption?: string
   ): Promise<void> {
+    if (this.activeProcessing.has(userId)) {
+      await ctx.reply('Still working on your previous message... Send /stop to cancel it.');
+      return;
+    }
+
     const typingInterval = this.startTypingIndicator(ctx);
+    this.activeProcessing.add(userId);
 
     try {
       // Create attachments for all photos
@@ -929,6 +965,8 @@ export class TelegramChannel {
       clearInterval(typingInterval);
       this.logger.error({ userId, error: (error as Error).message }, 'Failed to process photos');
       await ctx.reply('Sorry, I had trouble processing that photo. Please try again.');
+    } finally {
+      this.activeProcessing.delete(userId);
     }
   }
 
@@ -946,12 +984,19 @@ export class TelegramChannel {
       return;
     }
 
+    // Reject if already processing for this user (prevents double agent calls)
+    if (this.activeProcessing.has(userId)) {
+      await ctx.reply('Still working on your previous message... Send /stop to cancel it.');
+      return;
+    }
+
     // Extract reply context if user is replying to a previous message
     const fullMessage = this.buildMessageWithReplyContext(ctx, messageText);
 
     this.logger.info({ userId, message: messageText.substring(0, 100), hasReply: fullMessage !== messageText }, 'Received message');
 
     const typingInterval = this.startTypingIndicator(ctx);
+    this.activeProcessing.add(userId);
 
     try {
       const sessionId = await this.getOrCreateSession(userId);
@@ -993,6 +1038,8 @@ export class TelegramChannel {
       const err = error as Error;
       this.logger.error({ userId, error: err.message }, 'Failed to process message');
       await ctx.reply('Sorry, I encountered an error processing your message. Please try again.');
+    } finally {
+      this.activeProcessing.delete(userId);
     }
   }
 
