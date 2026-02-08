@@ -44,6 +44,8 @@ export const MOONSHOT_MODELS = {
 const DEFAULT_MODEL = 'kimi-k2.5';
 const DEFAULT_BASE_URL = 'https://api.moonshot.ai/v1';
 const DEFAULT_MAX_TOKENS = 4096;
+/** Higher token budget for thinking mode — reasoning tokens count against max_tokens */
+const THINKING_MAX_TOKENS = 8192;
 const DEFAULT_MAX_RETRIES = 3;
 const RETRY_STATUS_CODES = [429, 500, 503];
 const RETRY_DELAY_MS = 1000;
@@ -131,10 +133,12 @@ export class MoonshotProvider implements LLMProvider {
       temperature = request.temperature;
     }
 
+    // Use higher token budget for thinking mode since reasoning tokens count against max_tokens
+    const defaultTokens = enableThinking ? THINKING_MAX_TOKENS : DEFAULT_MAX_TOKENS;
     const params: OpenAI.ChatCompletionCreateParams & { thinking?: { type: string } } = {
       model: this.model,
       messages,
-      max_tokens: request.maxTokens || DEFAULT_MAX_TOKENS,
+      max_tokens: request.maxTokens || defaultTokens,
       temperature,
       ...(topP !== undefined && { top_p: topP }),
       ...(request.stopSequences && { stop: request.stopSequences }),
@@ -191,7 +195,7 @@ export class MoonshotProvider implements LLMProvider {
     const messages: OpenAI.ChatCompletionMessageParam[] = [];
 
     // Debug: Log incoming messages
-    this.logger?.info({
+    this.logger?.debug({
       messageCount: request.messages.length,
       messageTypes: request.messages.map(m => ({
         role: m.role,
@@ -210,7 +214,11 @@ export class MoonshotProvider implements LLMProvider {
     for (const msg of request.messages) {
       if (typeof msg.content === 'string') {
         if (msg.role === 'assistant' && enableThinking) {
-          // String-content assistant messages still need reasoning_content when thinking is enabled
+          // Kimi K2 API requires reasoning_content on ALL assistant messages when thinking
+          // is enabled, even if no actual reasoning occurred. A '.' placeholder satisfies
+          // this constraint. Without it, the API returns HTTP 400:
+          // "thinking is enabled but reasoning_content is missing in assistant message"
+          // See: https://platform.moonshot.ai/docs/guide/use-kimi-k2-thinking-model#frequently-asked-questions
           messages.push({
             role: 'assistant',
             content: msg.content,
@@ -250,7 +258,7 @@ export class MoonshotProvider implements LLMProvider {
 
           // Debug: Log all content block types
           if (msg.role === 'user') {
-            this.logger?.info({
+            this.logger?.debug({
               blockTypes: msg.content.map(c => c.type),
               imageCount: imageBlocks.length
             }, 'User message content blocks');
@@ -290,7 +298,9 @@ export class MoonshotProvider implements LLMProvider {
               ...(toolCalls.length > 0 && { tool_calls: toolCalls }),
             };
 
-            // Add reasoning_content when thinking is enabled (required by Kimi K2 API)
+            // Kimi K2 API requires reasoning_content on ALL assistant messages when thinking
+            // is enabled. Use actual reasoning if available, otherwise '.' placeholder.
+            // See: https://platform.moonshot.ai/docs/guide/use-kimi-k2-thinking-model#frequently-asked-questions
             if (enableThinking) {
               assistantMsg.reasoning_content = reasoningContent || '.';
             }
@@ -416,12 +426,19 @@ export class MoonshotProvider implements LLMProvider {
       }
     }
 
+    // Extract reasoning tokens from completion_tokens_details if available
+    const usage = response.usage as typeof response.usage & {
+      completion_tokens_details?: { reasoning_tokens?: number };
+    };
+    const reasoningTokens = usage?.completion_tokens_details?.reasoning_tokens;
+
     return {
       content,
       stopReason: this.mapStopReason(choice.finish_reason),
       usage: {
         inputTokens: response.usage?.prompt_tokens || 0,
         outputTokens: response.usage?.completion_tokens || 0,
+        ...(reasoningTokens !== undefined && { reasoningTokens }),
       },
       model: response.model,
     };

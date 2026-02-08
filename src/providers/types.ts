@@ -74,6 +74,8 @@ export interface CompletionRequest {
 export interface TokenUsage {
   inputTokens: number;
   outputTokens: number;
+  /** Reasoning/thinking tokens consumed (e.g., Kimi K2.5 thinking mode) */
+  reasoningTokens?: number;
 }
 
 // Completion response

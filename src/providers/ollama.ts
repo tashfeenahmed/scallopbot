@@ -133,14 +133,16 @@ export class OllamaProvider implements LLMProvider {
           content: msg.content,
         });
       } else {
+        // Filter out 'thinking' blocks from other providers (e.g., Moonshot)
+        const contentBlocks = msg.content.filter((b) => b.type !== 'thinking');
         // Extract text content
-        const textContent = msg.content
+        const textContent = contentBlocks
           .filter((c) => c.type === 'text')
           .map((c) => (c as { type: 'text'; text: string }).text)
           .join('\n');
 
         // For tool results, include them as user message content
-        const toolResults = msg.content.filter((c) => c.type === 'tool_result');
+        const toolResults = contentBlocks.filter((c) => c.type === 'tool_result');
         if (toolResults.length > 0) {
           const resultText = toolResults
             .map((r) => {
