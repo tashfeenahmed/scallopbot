@@ -253,13 +253,7 @@ export class UnifiedScheduler {
    * Send a formatted message to the user
    */
   private async sendFormattedMessage(item: ScheduledItem, message: string): Promise<void> {
-    if (item.source === 'user') {
-      // User reminders get a "Reminder!" header
-      await this.onSendMessage(item.userId, `**Reminder!**\n\n${message}`);
-    } else {
-      // Agent triggers are sent as-is (they're already contextual)
-      await this.onSendMessage(item.userId, message);
-    }
+    await this.onSendMessage(item.userId, message);
   }
 
   /**
