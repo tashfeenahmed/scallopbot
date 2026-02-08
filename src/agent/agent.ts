@@ -182,6 +182,9 @@ export class Agent {
       throw new Error(`Session not found: ${sessionId}`);
     }
 
+    // Resolve real userId from session metadata (e.g. "telegram:12345"), fall back to "default"
+    const resolvedUserId = (session.metadata?.userId as string) || 'default';
+
     // Check budget before processing
     if (this.costTracker) {
       const budgetCheck = this.costTracker.canMakeRequest();
@@ -259,10 +262,9 @@ export class Agent {
     // Queue LLM-based fact extraction (async, non-blocking)
     // Pass the last assistant response as context for references like "that's my office"
     if (this.factExtractor) {
-      const userId = 'default'; // Single-user agent: all memories under canonical userId
       this.factExtractor.queueForExtraction(
         userMessage,
-        userId,
+        resolvedUserId,
         this.lastAssistantResponses.get(sessionId) || undefined
       ).catch((error) => {
         this.logger.warn({ error: (error as Error).message }, 'Async fact extraction failed');
@@ -270,7 +272,7 @@ export class Agent {
     }
 
     // Build system prompt with memory context
-    const { prompt: systemPrompt, memoryStats, memoryItems } = await this.buildSystemPrompt(userMessage, sessionId);
+    const { prompt: systemPrompt, memoryStats, memoryItems } = await this.buildSystemPrompt(userMessage, sessionId, resolvedUserId);
 
     // Report memory usage if we found any memories
     if (onProgress && (memoryStats.factsFound > 0 || memoryStats.conversationsFound > 0)) {
@@ -500,8 +502,7 @@ export class Agent {
     // Extract proactive triggers from assistant response (async, non-blocking)
     // This catches events mentioned BY the AI (e.g., "I'll remind you about your meeting Friday")
     if (this.factExtractor && finalResponse) {
-      const userId = 'default'; // Single-user agent
-      this.factExtractor.extractTriggersFromMessage(finalResponse, userId, 'assistant').catch((error) => {
+      this.factExtractor.extractTriggersFromMessage(finalResponse, resolvedUserId, 'assistant').catch((error) => {
         this.logger.warn({ error: (error as Error).message }, 'Async trigger extraction from assistant failed');
       });
     }
@@ -526,7 +527,7 @@ export class Agent {
     };
   }
 
-  private async buildSystemPrompt(userMessage: string, sessionId: string): Promise<{
+  private async buildSystemPrompt(userMessage: string, sessionId: string, userId: string = 'default'): Promise<{
     prompt: string;
     memoryStats: { factsFound: number; conversationsFound: number };
     memoryItems: { type: 'fact' | 'conversation'; content: string; subject?: string }[];
@@ -587,7 +588,7 @@ ALWAYS use **send_file** after creating any file (PDFs, images, documents, scrip
     let memoryStats = { factsFound: 0, conversationsFound: 0 };
     let memoryItems: { type: 'fact' | 'conversation'; content: string; subject?: string }[] = [];
     if (this.scallopStore) {
-      const { context: memoryContext, stats, items } = await this.buildMemoryContext(userMessage, sessionId);
+      const { context: memoryContext, stats, items } = await this.buildMemoryContext(userMessage, sessionId, userId);
       memoryStats = stats;
       memoryItems = items;
       if (memoryContext) {
@@ -599,7 +600,7 @@ ALWAYS use **send_file** after creating any file (PDFs, images, documents, scrip
     // Add goal context (query-relevant)
     if (this.goalService) {
       try {
-        const goalContext = await this.goalService.getGoalContext('default', userMessage);
+        const goalContext = await this.goalService.getGoalContext(userId, userMessage);
         if (goalContext) {
           prompt += goalContext;
           this.logger.debug({ goalContextLength: goalContext.length }, 'Goal context added to prompt');
@@ -615,7 +616,7 @@ ALWAYS use **send_file** after creating any file (PDFs, images, documents, scrip
   /**
    * Build memory context for system prompt using ScallopMemoryStore (SQLite)
    */
-  private async buildMemoryContext(userMessage: string, _sessionId: string): Promise<{
+  private async buildMemoryContext(userMessage: string, _sessionId: string, userId: string = 'default'): Promise<{
     context: string;
     stats: { factsFound: number; conversationsFound: number };
     items: { type: 'fact' | 'conversation'; content: string; subject?: string }[];
@@ -654,7 +655,7 @@ ALWAYS use **send_file** after creating any file (PDFs, images, documents, scrip
 
       // Tier 2: Query-relevant facts via search
       // Phase 1: Get key user facts (high prominence, no query needed)
-      const userFacts = this.scallopStore.getByUser('default', {
+      const userFacts = this.scallopStore.getByUser(userId, {
         minProminence: 0.3,
         isLatest: true,
         limit: 20,
@@ -662,7 +663,7 @@ ALWAYS use **send_file** after creating any file (PDFs, images, documents, scrip
 
       // Phase 2: Get query-relevant facts via hybrid search
       const relevantResults = await this.scallopStore.search(userMessage, {
-        userId: 'default',
+        userId,
         minProminence: 0.1,
         limit: 10,
       });
