@@ -3,6 +3,22 @@ name: bash
 description: "Execute shell commands. Use for: running web-search and agent-browser CLIs, installing packages, running scripts (python3, node), system commands. This is your gateway to web search, browsing, and code execution."
 user-invocable: false
 triggers: [command, shell, terminal, execute, run, bash]
+inputSchema:
+  type: object
+  properties:
+    command:
+      type: string
+      description: "The bash command to execute"
+    timeout:
+      type: number
+      description: "Timeout in milliseconds (default: 60000)"
+    cwd:
+      type: string
+      description: "Working directory for execution"
+    max_output:
+      type: number
+      description: "Maximum output size in bytes (default: 30720). Increase when you need to see more output (e.g. long test runs, large search results). Max: 204800."
+  required: [command]
 scripts:
   run: "scripts/run.ts"
 metadata:
@@ -45,6 +61,7 @@ The skill accepts JSON arguments via the `SKILL_ARGS` environment variable:
 | `command` | string | Yes | - | The bash command to execute |
 | `timeout` | number | No | 60000 | Timeout in milliseconds |
 | `cwd` | string | No | workspace | Working directory for execution |
+| `max_output` | number | No | 30720 | Max output bytes. Increase for long test runs or large search results. Max: 204800 |
 
 ## Output Format
 
@@ -64,7 +81,7 @@ The skill returns JSON to stdout:
 | Field | Type | Description |
 |-------|------|-------------|
 | `success` | boolean | True if command exited with code 0 |
-| `output` | string | Captured stdout (truncated at 30KB) |
+| `output` | string | Captured stdout (truncated at max_output limit, default 30KB) |
 | `error` | string | Captured stderr or error message |
 | `exitCode` | number | Process exit code |
 
@@ -74,7 +91,7 @@ The skill returns JSON to stdout:
 2. **Avoid destructive operations**: Always confirm before `rm -rf`, `git reset --hard`, etc.
 3. **Sensitive data**: Don't echo secrets or credentials to output
 4. **Long-running processes**: Use appropriate timeouts; default is 60 seconds
-5. **Resource limits**: Output is truncated at 30KB to prevent memory issues
+5. **Resource limits**: Output is truncated at 30KB by default (adjustable via `max_output`, up to 200KB)
 
 ## Security Features
 

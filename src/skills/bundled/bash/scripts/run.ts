@@ -11,7 +11,8 @@ import * as fs from 'fs';
 
 // Configuration
 const DEFAULT_TIMEOUT = 60000; // 60 seconds
-const MAX_OUTPUT_SIZE = 30 * 1024; // 30KB
+const DEFAULT_OUTPUT_SIZE = 30 * 1024; // 30KB
+const ABSOLUTE_MAX_OUTPUT = 200 * 1024; // 200KB hard ceiling
 
 // Dangerous command patterns (basic protection, not a security sandbox)
 const DANGEROUS_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
@@ -43,6 +44,7 @@ interface BashArgs {
   command: string;
   timeout?: number;
   cwd?: string;
+  max_output: number;
 }
 
 interface BashResult {
@@ -121,7 +123,8 @@ function truncate(str: string, maxSize: number): string {
   if (str.length <= maxSize) {
     return str;
   }
-  return str.substring(0, maxSize) + '\n[Output truncated at 30KB]';
+  const limitKB = Math.round(maxSize / 1024);
+  return str.substring(0, maxSize) + `\n[Output truncated at ${limitKB}KB]`;
 }
 
 /**
@@ -199,11 +202,18 @@ function parseArgs(): BashArgs {
     throw new Error('Path validation failed');
   }
 
+  // Resolve max_output: clamp to [DEFAULT_OUTPUT_SIZE, ABSOLUTE_MAX_OUTPUT]
+  let maxOutput = DEFAULT_OUTPUT_SIZE;
+  if (typeof argsObj.max_output === 'number') {
+    maxOutput = Math.max(DEFAULT_OUTPUT_SIZE, Math.min(argsObj.max_output, ABSOLUTE_MAX_OUTPUT));
+  }
+
   return {
     command: argsObj.command,
     timeout:
       typeof argsObj.timeout === 'number' ? argsObj.timeout : DEFAULT_TIMEOUT,
     cwd: targetCwd,
+    max_output: maxOutput,
   };
 }
 
@@ -249,16 +259,16 @@ async function executeBash(args: BashArgs): Promise<void> {
   // Capture stdout
   proc.stdout?.on('data', (data: Buffer) => {
     stdout += data.toString();
-    if (stdout.length > MAX_OUTPUT_SIZE) {
-      stdout = stdout.substring(0, MAX_OUTPUT_SIZE);
+    if (stdout.length > args.max_output) {
+      stdout = stdout.substring(0, args.max_output);
     }
   });
 
   // Capture stderr
   proc.stderr?.on('data', (data: Buffer) => {
     stderr += data.toString();
-    if (stderr.length > MAX_OUTPUT_SIZE) {
-      stderr = stderr.substring(0, MAX_OUTPUT_SIZE);
+    if (stderr.length > args.max_output) {
+      stderr = stderr.substring(0, args.max_output);
     }
   });
 
@@ -271,7 +281,7 @@ async function executeBash(args: BashArgs): Promise<void> {
     if (killed) {
       outputResult({
         success: false,
-        output: truncate(stdout, MAX_OUTPUT_SIZE),
+        output: truncate(stdout, args.max_output),
         error: `Command killed due to timeout (${args.timeout}ms)`,
         exitCode: 124, // Standard timeout exit code
       });
@@ -283,7 +293,7 @@ async function executeBash(args: BashArgs): Promise<void> {
 
     outputResult({
       success,
-      output: truncate(stdout, MAX_OUTPUT_SIZE),
+      output: truncate(stdout, args.max_output),
       error: stderr || undefined,
       exitCode,
     });

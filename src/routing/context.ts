@@ -374,9 +374,15 @@ export class ContextManager {
           }
         }
 
+        // Determine effective output limit: use per-call max_output if provided
+        let effectiveMaxBytes = this.maxToolOutputBytes;
+        if (toolInfo?.input?.max_output && typeof toolInfo.input.max_output === 'number') {
+          effectiveMaxBytes = Math.min(toolInfo.input.max_output, 200_000);
+        }
+
         const contentBytes = Buffer.byteLength(toolResult.content, 'utf-8');
 
-        if (contentBytes <= this.maxToolOutputBytes) {
+        if (contentBytes <= effectiveMaxBytes) {
           return block;
         }
 
@@ -384,7 +390,7 @@ export class ContextManager {
         const hash = this.hashContent(toolResult.content);
         const truncatedContent = this.truncateContent(
           toolResult.content,
-          this.maxToolOutputBytes
+          effectiveMaxBytes
         );
 
         this.truncatedOutputs.set(hash, {
