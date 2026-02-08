@@ -85,8 +85,10 @@ export class OpenAIProvider implements LLMProvider {
           content: msg.content,
         } as OpenAI.ChatCompletionMessageParam);
       } else {
+        // Filter out 'thinking' blocks from other providers (e.g., Moonshot)
+        const contentBlocks = msg.content.filter((b) => b.type !== 'thinking');
         // Handle content blocks (tool results, etc.)
-        const toolResults = msg.content.filter((c) => c.type === 'tool_result');
+        const toolResults = contentBlocks.filter((c) => c.type === 'tool_result');
         if (toolResults.length > 0 && msg.role === 'user') {
           for (const result of toolResults) {
             if (result.type === 'tool_result') {
@@ -99,12 +101,12 @@ export class OpenAIProvider implements LLMProvider {
           }
         } else {
           // Text and tool_use content
-          const textContent = msg.content
+          const textContent = contentBlocks
             .filter((c) => c.type === 'text')
             .map((c) => (c as { type: 'text'; text: string }).text)
             .join('\n');
 
-          const toolCalls = msg.content
+          const toolCalls = contentBlocks
             .filter((c) => c.type === 'tool_use')
             .map((c) => {
               const toolUse = c as {

@@ -128,7 +128,7 @@ interface WsMessage {
 }
 
 interface WsResponse {
-  type: 'response' | 'chunk' | 'error' | 'pong' | 'trigger' | 'file' | 'skill_start' | 'skill_complete' | 'skill_error' | 'thinking' | 'debug' | 'memory';
+  type: 'response' | 'chunk' | 'error' | 'pong' | 'trigger' | 'file' | 'skill_start' | 'skill_complete' | 'skill_error' | 'thinking' | 'planning' | 'debug' | 'memory';
   sessionId?: string;
   content?: string;
   error?: string;
@@ -862,9 +862,9 @@ export class ApiChannel implements Channel, TriggerSource {
                 skill: update.toolName || 'skill',
                 error: update.message
               });
-            } else if (update.type === 'thinking') {
+            } else if (update.type === 'thinking' || update.type === 'planning') {
               this.sendWsMessage(ws, {
-                type: 'thinking',
+                type: update.type,
                 message: update.message
               });
             } else if (update.type === 'memory') {

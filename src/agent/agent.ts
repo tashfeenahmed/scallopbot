@@ -63,7 +63,7 @@ export type ProgressCallback = (update: ProgressUpdate) => Promise<void>;
 export type ShouldStopCallback = () => boolean;
 
 export interface ProgressUpdate {
-  type: 'thinking' | 'tool_start' | 'tool_complete' | 'tool_error' | 'memory' | 'status';
+  type: 'thinking' | 'planning' | 'tool_start' | 'tool_complete' | 'tool_error' | 'memory' | 'status';
   message: string;
   toolName?: string;
   iteration?: number;
@@ -137,8 +137,8 @@ export class Agent {
   private logger: Logger;
   private maxIterations: number;
   private baseSystemPrompt: string;
-  /** Stores recent assistant response for contextual fact extraction */
-  private lastAssistantResponse: string = '';
+  /** Stores recent assistant response per session for contextual fact extraction */
+  private lastAssistantResponses: Map<string, string> = new Map();
   /** Enable extended thinking for supported providers */
   private enableThinking: boolean;
 
@@ -263,7 +263,7 @@ export class Agent {
       this.factExtractor.queueForExtraction(
         userMessage,
         userId,
-        this.lastAssistantResponse || undefined
+        this.lastAssistantResponses.get(sessionId) || undefined
       ).catch((error) => {
         this.logger.warn({ error: (error as Error).message }, 'Async fact extraction failed');
       });
@@ -329,13 +329,17 @@ export class Agent {
         ? this.contextManager.buildContextMessages(rawMessages)
         : rawMessages;
 
+      // Enable thinking only for providers that support it and for complex queries
+      const providerSupportsThinking = activeProvider.name === 'moonshot';
+      const useThinking = this.enableThinking && providerSupportsThinking && complexity.suggestedModelTier === 'capable';
+
       // Build completion request
       const request: CompletionRequest = {
         messages,
         system: systemPrompt,
         tools: tools.length > 0 ? tools : undefined,
         maxTokens: 4096,
-        enableThinking: this.enableThinking,
+        enableThinking: useThinking,
       };
 
       this.logger.info({ iteration: iterations, messageCount: messages.length, provider: activeProvider.name }, 'Agent iteration starting');
@@ -415,7 +419,7 @@ export class Agent {
         if (cleanedText) {
           try {
             await onProgress({
-              type: 'thinking',
+              type: 'planning',
               message: cleanedText,
               iteration: iterations,
             });
@@ -507,8 +511,8 @@ export class Agent {
       'Message processed'
     );
 
-    // Store response for context in next fact extraction (for "that's my office" type references)
-    this.lastAssistantResponse = finalResponse;
+    // Store response per session for context in next fact extraction (for "that's my office" type references)
+    this.lastAssistantResponses.set(sessionId, finalResponse);
 
     return {
       response: finalResponse,
@@ -751,36 +755,63 @@ ALWAYS use **send_file** after creating any file (PDFs, images, documents, scrip
    * Try to parse a tool call from text content (fallback for models that don't use proper tool_calls)
    */
   private parseToolCallFromText(text: string): ToolUseContent | null {
-    try {
-      // Look for JSON with function/arguments pattern
-      const functionMatch = text.match(/\{\s*"function"\s*:\s*"([^"]+)"\s*,\s*"arguments"\s*:\s*(\{[^}]+\})\s*\}/);
-      if (functionMatch) {
-        const name = functionMatch[1];
-        const input = JSON.parse(functionMatch[2]);
-        return {
-          type: 'tool_use',
-          id: `fallback-${Date.now()}`,
-          name,
-          input,
-        };
-      }
+    // Find JSON objects in text using brace counting (handles nested objects)
+    const jsonObjects = this.extractJsonObjects(text);
 
-      // Look for JSON with name/input pattern
-      const nameMatch = text.match(/\{\s*"name"\s*:\s*"([^"]+)"\s*,\s*"input"\s*:\s*(\{[^}]+\})\s*\}/);
-      if (nameMatch) {
-        const name = nameMatch[1];
-        const input = JSON.parse(nameMatch[2]);
-        return {
-          type: 'tool_use',
-          id: `fallback-${Date.now()}`,
-          name,
-          input,
-        };
+    for (const jsonStr of jsonObjects) {
+      try {
+        const obj = JSON.parse(jsonStr);
+        if (typeof obj !== 'object' || obj === null) continue;
+
+        // Match { function: "...", arguments: {...} }
+        if (typeof obj.function === 'string' && typeof obj.arguments === 'object') {
+          return {
+            type: 'tool_use',
+            id: `fallback-${Date.now()}`,
+            name: obj.function,
+            input: obj.arguments,
+          };
+        }
+
+        // Match { name: "...", input: {...} }
+        if (typeof obj.name === 'string' && typeof obj.input === 'object') {
+          return {
+            type: 'tool_use',
+            id: `fallback-${Date.now()}`,
+            name: obj.name,
+            input: obj.input,
+          };
+        }
+      } catch {
+        // Invalid JSON, try next
       }
-    } catch {
-      // Parsing failed, return null
     }
+
     return null;
+  }
+
+  /**
+   * Extract JSON objects from text using brace counting to handle nested objects
+   */
+  private extractJsonObjects(text: string): string[] {
+    const results: string[] = [];
+    let depth = 0;
+    let start = -1;
+
+    for (let i = 0; i < text.length; i++) {
+      if (text[i] === '{') {
+        if (depth === 0) start = i;
+        depth++;
+      } else if (text[i] === '}') {
+        depth--;
+        if (depth === 0 && start >= 0) {
+          results.push(text.slice(start, i + 1));
+          start = -1;
+        }
+      }
+    }
+
+    return results;
   }
 
   /**
@@ -879,15 +910,26 @@ ALWAYS use **send_file** after creating any file (PDFs, images, documents, scrip
    * Check if error is a context overflow error
    */
   private isContextOverflowError(error: Error & { status?: number }): boolean {
-    const status = error.status;
-    if (status === 400 || status === 413) return true;
-
     const message = error.message.toLowerCase();
-    return message.includes('context') ||
-           message.includes('token') ||
-           message.includes('too long') ||
-           message.includes('maximum') ||
-           message.includes('limit');
+
+    // Match specific context/token overflow phrases, not generic words
+    const contextOverflowPatterns = [
+      'context length',
+      'context window',
+      'token limit',
+      'too many tokens',
+      'maximum context',
+      'input too long',
+      'request too large',
+      'content too large',
+      'prompt is too long',
+      'exceeds.*context',
+      'exceeds.*token',
+    ];
+
+    return contextOverflowPatterns.some(pattern =>
+      pattern.includes('.*') ? new RegExp(pattern).test(message) : message.includes(pattern)
+    );
   }
 
   private async executeTools(

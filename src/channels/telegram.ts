@@ -1052,6 +1052,9 @@ export class TelegramChannel {
         case 'thinking':
           text = `💭 Thinking...\n${truncate(update.message)}`;
           break;
+        case 'planning':
+          text = `📋 Planning...\n${truncate(update.message)}`;
+          break;
         default:
           return;
       }
