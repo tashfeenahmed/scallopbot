@@ -639,6 +639,11 @@ export class CachedEmbedder implements EmbeddingProvider {
     this.dimension = inner.dimension;
   }
 
+  /** Get the underlying embedder (for accessing provider-specific methods like TFIDFEmbedder.addDocuments) */
+  getInner(): EmbeddingProvider {
+    return this.inner;
+  }
+
   isAvailable(): boolean {
     return this.inner.isAvailable();
   }

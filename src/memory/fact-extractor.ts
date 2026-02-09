@@ -730,13 +730,18 @@ Respond with JSON only:
       this.extractionCount++;
       if (this.extractionCount >= LLMFactExtractor.CONSOLIDATION_INTERVAL) {
         this.extractionCount = 0;
-        this.consolidateMemory(
+        // Wrap with a 30s timeout to prevent zombie processes if LLM hangs
+        const consolidationPromise = this.consolidateMemory(
           storedMemories.map(m => m.id),
           userId,
           storedMemories.map(m => m.content),
           sourceMessage,
           Array.from(allCandidateMemoryIds),
-        ).catch(err => {
+        );
+        const timeoutPromise = new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('Consolidation timed out after 30s')), 30_000)
+        );
+        Promise.race([consolidationPromise, timeoutPromise]).catch(err => {
           this.logger.warn({ error: (err as Error).message }, 'Background consolidation failed');
         });
       }
@@ -1461,7 +1466,8 @@ Respond with JSON only:
   }
 
   /**
-   * Parse LLM response, handling potential JSON issues
+   * Parse LLM response, handling potential JSON issues.
+   * Distinguishes between empty responses (normal) and parse failures (warnings).
    */
   private parseResponse(content: string): {
     facts: ExtractedFactWithEmbedding[];
@@ -1475,15 +1481,28 @@ Respond with JSON only:
       recurring_pattern?: string | null; // legacy fallback
     }>;
   } {
-    try {
-      // Try to extract JSON from response
-      const jsonMatch = content.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        return JSON.parse(jsonMatch[0]);
-      }
+    if (!content || content.trim().length === 0) {
+      this.logger.warn('LLM returned empty response during fact extraction');
       return { facts: [] };
-    } catch {
-      this.logger.warn({ content: content.substring(0, 100) }, 'Failed to parse LLM response');
+    }
+
+    // Try to extract JSON from response
+    const jsonMatch = content.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      this.logger.warn(
+        { contentPreview: content.substring(0, 200) },
+        'LLM response contained no JSON object — facts may have been lost'
+      );
+      return { facts: [] };
+    }
+
+    try {
+      return JSON.parse(jsonMatch[0]);
+    } catch (err) {
+      this.logger.error(
+        { error: (err as Error).message, contentPreview: content.substring(0, 200) },
+        'Failed to parse JSON from LLM response — facts were lost'
+      );
       return { facts: [] };
     }
   }
