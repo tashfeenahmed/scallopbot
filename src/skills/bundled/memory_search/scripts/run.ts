@@ -11,7 +11,7 @@ import {
   ScallopDatabase,
   type ScallopMemoryEntry,
 } from '../../../../memory/db.js';
-import { calculateBM25Score, buildDocFreqMap, type BM25Options } from '../../../../memory/bm25.js';
+import { calculateBM25Score, buildDocFreqMap, SEARCH_WEIGHTS, type BM25Options } from '../../../../memory/bm25.js';
 import { TFIDFEmbedder, OllamaEmbedder, cosineSimilarity } from '../../../../memory/embeddings.js';
 
 // Types
@@ -167,13 +167,14 @@ async function searchMemories(
       semanticScore = cosineSimilarity(tfidfQueryEmbedding, memEmbedding);
     }
 
-    // Combined: only count if there's actual relevance
-    const relevanceScore = keywordScore * 0.5 + semanticScore * 0.5;
+    // Combined: use shared weights with prominence factor
+    const relevanceScore = keywordScore * SEARCH_WEIGHTS.keyword + semanticScore * SEARCH_WEIGHTS.semantic;
+    const withProminence = relevanceScore > 0 ? relevanceScore + memory.prominence * SEARCH_WEIGHTS.prominence : 0;
 
     // Boost for exact substring match
     const boostedScore = memory.content.toLowerCase().includes(query.toLowerCase())
-      ? relevanceScore * 1.5
-      : relevanceScore;
+      ? withProminence * 1.5
+      : withProminence;
 
     if (boostedScore > 0.05) {
       results.push({ memory, score: boostedScore });

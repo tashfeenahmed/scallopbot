@@ -588,7 +588,13 @@ ALWAYS use **send_file** after creating any file (PDFs, images, documents, scrip
     stats: { factsFound: number; conversationsFound: number };
     items: { type: 'fact' | 'conversation'; content: string; subject?: string }[];
   }> {
-    const MAX_MEMORY_CHARS = 2000;
+    // Dynamic memory budget: use ~15% of remaining context space
+    // Estimate current prompt size (base prompt + skills + profile ~ 4K chars typical)
+    // 128K tokens ≈ 512K chars; 15% of remaining ≈ up to 16K for memory
+    const estimatedPromptChars = 16000; // conservative base prompt estimate
+    const totalContextChars = 512000; // ~128K tokens
+    const remainingChars = totalContextChars - estimatedPromptChars;
+    const MAX_MEMORY_CHARS = Math.max(2000, Math.min(16000, Math.floor(remainingChars * 0.15)));
     let context = '';
     const items: { type: 'fact' | 'conversation'; content: string; subject?: string }[] = [];
 
@@ -618,6 +624,26 @@ ALWAYS use **send_file** after creating any file (PDFs, images, documents, scrip
           profileText += `- ${key}: ${value}\n`;
         }
         context += `\n\n## USER PROFILE\nUse this automatically for all relevant queries (weather → use location, time → use timezone, etc.):\n${profileText}`;
+      }
+
+      // Behavioral patterns (communication style, expertise)
+      try {
+        const db = this.scallopStore!.getDatabase();
+        const behavioral = db.getBehavioralPatterns('default');
+        if (behavioral) {
+          let behavioralText = '';
+          if (behavioral.communicationStyle) {
+            behavioralText += `- Communication style: ${behavioral.communicationStyle}\n`;
+          }
+          if (behavioral.expertiseAreas && behavioral.expertiseAreas.length > 0) {
+            behavioralText += `- Expertise areas: ${behavioral.expertiseAreas.join(', ')}\n`;
+          }
+          if (behavioralText) {
+            context += `\n\n## USER BEHAVIORAL PATTERNS\n${behavioralText}`;
+          }
+        }
+      } catch {
+        // Behavioral patterns not available, that's fine
       }
 
       // Tier 2: Query-relevant facts via search
@@ -679,9 +705,43 @@ ALWAYS use **send_file** after creating any file (PDFs, images, documents, scrip
         }
       }
 
+      // Tier 3: Session summaries for past-conversation references
+      let conversationsFound = 0;
+      const sessionPatterns = /\b(what did we (discuss|talk about)|last time|yesterday|previous (session|conversation)|before|earlier)\b/i;
+      if (sessionPatterns.test(userMessage)) {
+        try {
+          const sessionResults = await this.scallopStore!.searchSessions(userMessage, {
+            userId,
+            limit: 3,
+          });
+          if (sessionResults.length > 0) {
+            let sessionText = '';
+            for (const result of sessionResults) {
+              const date = new Date(result.summary.createdAt).toLocaleDateString('en-US', {
+                weekday: 'short', month: 'short', day: 'numeric',
+              });
+              const topics = result.summary.topics.length > 0 ? ` [${result.summary.topics.join(', ')}]` : '';
+              const line = `- ${date}${topics}: ${result.summary.summary}\n`;
+              if (sessionText.length + line.length > 2000) break;
+              sessionText += line;
+              conversationsFound++;
+              items.push({
+                type: 'conversation',
+                content: result.summary.summary,
+              });
+            }
+            if (sessionText) {
+              context += `\n\n## PAST CONVERSATIONS\n${sessionText}`;
+            }
+          }
+        } catch (err) {
+          this.logger.debug({ error: (err as Error).message }, 'Session summary search failed');
+        }
+      }
+
       return {
         context,
-        stats: { factsFound: items.filter((i) => i.type === 'fact').length, conversationsFound: 0 },
+        stats: { factsFound: items.filter((i) => i.type === 'fact').length, conversationsFound },
         items,
       };
     } catch (error) {

@@ -591,6 +591,18 @@ Respond with JSON only:
             const similarity = cosineSimilarity(fact.embedding, existing.entry.embedding);
             if (similarity >= this.deduplicationThreshold) {
               isDuplicate = true;
+              // Reinforce the existing memory: bump confidence, prominence, times_confirmed
+              const matchingResult = scallopResults.find(r =>
+                r.memory.embedding && cosineSimilarity(fact.embedding!, r.memory.embedding) >= this.deduplicationThreshold
+              );
+              if (matchingResult) {
+                const db = this.scallopStore.getDatabase();
+                db.reinforceMemory(matchingResult.memory.id);
+                this.logger.debug(
+                  { memoryId: matchingResult.memory.id, content: fact.content },
+                  'Duplicate fact reinforced existing memory'
+                );
+              }
               break;
             }
           }
@@ -728,7 +740,8 @@ Respond with JSON only:
     fact: ExtractedFactWithEmbedding,
     userId: string,
     sourceMessage?: string,
-    sourceMessageId?: string
+    sourceMessageId?: string,
+    learnedFrom: string = 'conversation'
   ): Promise<{ id: string; content: string } | null> {
     let searchableContent = fact.content;
     if (fact.subject !== 'user') {
@@ -759,7 +772,9 @@ Respond with JSON only:
       category: scallopCategory,
       importance: isIdentityFact ? 8 : 5,
       confidence,
+      sourceChunk: sourceMessage ? sourceMessage.substring(0, 500) : undefined,
       metadata: provenance,
+      learnedFrom,
     });
 
     return { id: newMemory.id, content: searchableContent };
@@ -824,20 +839,7 @@ Respond with JSON only:
       minProminence: 0.1,
     });
 
-    // Supersede matching memories
-    let superseded = 0;
-    for (const candidate of candidates) {
-      if (candidate.score > 0.4) {
-        this.scallopStore.update(candidate.memory.id, { isLatest: false });
-        superseded++;
-        this.logger.info(
-          { oldId: candidate.memory.id, oldContent: candidate.memory.content, newContent: correction.content },
-          'Memory superseded by correction'
-        );
-      }
-    }
-
-    // Store the correction as new fact with high confidence
+    // Store the correction as new fact with high confidence first (to get the new ID)
     const newMemory = await this.storeNewFact(
       {
         ...correction,
@@ -845,8 +847,28 @@ Respond with JSON only:
       },
       userId,
       sourceMessage,
-      sourceMessageId
+      sourceMessageId,
+      'correction'
     );
+
+    // Supersede matching memories and set contradiction tracking
+    let superseded = 0;
+    const db = this.scallopStore.getDatabase();
+    for (const candidate of candidates) {
+      if (candidate.score > 0.4) {
+        this.scallopStore.update(candidate.memory.id, { isLatest: false });
+        // Bidirectional contradiction tracking
+        if (newMemory) {
+          db.addContradiction(candidate.memory.id, newMemory.id);
+          db.addContradiction(newMemory.id, candidate.memory.id);
+        }
+        superseded++;
+        this.logger.info(
+          { oldId: candidate.memory.id, oldContent: candidate.memory.content, newContent: correction.content },
+          'Memory superseded by correction'
+        );
+      }
+    }
 
     return { updated: superseded > 0, newMemoryId: newMemory?.id };
   }
@@ -1045,9 +1067,9 @@ Respond with JSON only:
                 domain: pref.domain || 'general',
                 prefers: pref.prefers,
                 over: pref.over,
-                learnedFrom: 'feedback',
                 extractedAt: new Date().toISOString(),
               },
+              learnedFrom: 'inference',
             });
             this.logger.info(
               { prefers: pref.prefers, over: pref.over, domain: pref.domain },

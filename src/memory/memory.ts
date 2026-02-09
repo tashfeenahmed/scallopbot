@@ -1,6 +1,10 @@
 /**
  * Memory System
  * Background gardener for ScallopMemory (SQLite)
+ *
+ * Tiered consolidation:
+ * - Light tick (every 5 min): incremental decay + expire old scheduled items
+ * - Deep tick (every 6 hours): full decay, session summaries, pruning, behavioral inference
  */
 
 import type { Logger } from 'pino';
@@ -12,30 +16,48 @@ export type { MemoryType, MemoryEntry, PartialMemoryEntry } from './legacy-types
 export { calculateBM25Score, buildDocFreqMap, type BM25Options } from './bm25.js';
 
 import type { ScallopMemoryStore } from './scallop-store.js';
+import type { SessionSummarizer } from './session-summary.js';
 
 export interface BackgroundGardenerOptions {
   scallopStore: ScallopMemoryStore;
   logger: Logger;
+  /** Light tick interval in ms (default: 5 minutes) */
   interval?: number;
+  /** Session summarizer for generating summaries before pruning */
+  sessionSummarizer?: SessionSummarizer;
 }
 
 /**
- * Background Gardener - runs periodic decay processing on memories
+ * Background Gardener - runs tiered consolidation on memories
+ *
+ * Light tick (every interval, default 5 min):
+ *   - Incremental decay (bounded set of recently-changed memories)
+ *   - Expire old scheduled items
+ *
+ * Deep tick (every ~6 hours):
+ *   - Full decay scan (all memories)
+ *   - Generate session summaries for old sessions
+ *   - Prune old sessions + archived memories
+ *   - Behavioral pattern inference
  */
 export class BackgroundGardener {
   private scallopStore: ScallopMemoryStore;
   private logger: Logger;
   private interval: number;
+  private sessionSummarizer?: SessionSummarizer;
   private timer: NodeJS.Timeout | null = null;
   private running = false;
   private tickCount = 0;
-  /** Run pruning every ~60 ticks (once per hour at default 60s interval) */
-  private static readonly PRUNE_EVERY = 60;
+
+  /** Deep consolidation runs every DEEP_EVERY light ticks.
+   *  With default 5-min interval: 72 ticks × 5 min = 6 hours */
+  private static readonly DEEP_EVERY = 72;
 
   constructor(options: BackgroundGardenerOptions) {
     this.scallopStore = options.scallopStore;
     this.logger = options.logger.child({ component: 'gardener' });
-    this.interval = options.interval ?? 60000;
+    this.interval = options.interval ?? 5 * 60 * 1000; // 5 minutes default
+    this.sessionSummarizer = options.sessionSummarizer;
   }
 
   start(): void {
@@ -43,10 +65,10 @@ export class BackgroundGardener {
 
     this.running = true;
     this.timer = setInterval(() => {
-      this.processMemories();
+      this.lightTick();
     }, this.interval);
 
-    this.logger.info('Background gardener started');
+    this.logger.info({ intervalMs: this.interval }, 'Background gardener started (tiered consolidation)');
   }
 
   stop(): void {
@@ -61,34 +83,120 @@ export class BackgroundGardener {
     this.logger.info('Background gardener stopped');
   }
 
-  processMemories(): void {
-    this.logger.debug('Processing memories');
+  /**
+   * Light tick: incremental decay + expire scheduled items
+   */
+  lightTick(): void {
+    this.logger.debug('Light tick: incremental decay');
 
     const decayResult = this.scallopStore.processDecay();
     if (decayResult.updated > 0 || decayResult.archived > 0) {
       this.logger.debug(
         { updated: decayResult.updated, archived: decayResult.archived },
-        'ScallopMemory decay processed'
+        'Incremental decay processed'
       );
     }
 
-    // Periodic pruning: old sessions + archived memories
+    // Expire old scheduled items
+    try {
+      const db = this.scallopStore.getDatabase();
+      db.expireOldScheduledItems();
+    } catch (err) {
+      this.logger.warn({ error: (err as Error).message }, 'Expire scheduled items failed');
+    }
+
+    // Check if it's time for a deep tick
     this.tickCount++;
-    if (this.tickCount >= BackgroundGardener.PRUNE_EVERY) {
+    if (this.tickCount >= BackgroundGardener.DEEP_EVERY) {
       this.tickCount = 0;
+      this.deepTick().catch(err => {
+        this.logger.warn({ error: (err as Error).message }, 'Deep tick failed');
+      });
+    }
+  }
+
+  /**
+   * Deep tick: full decay, session summaries, pruning, behavioral inference
+   */
+  async deepTick(): Promise<void> {
+    this.logger.info('Deep tick: full consolidation starting');
+
+    const db = this.scallopStore.getDatabase();
+
+    // 1. Full decay scan (all memories)
+    const fullDecayResult = this.scallopStore.processFullDecay();
+    if (fullDecayResult.updated > 0) {
+      this.logger.info(
+        { updated: fullDecayResult.updated, archived: fullDecayResult.archived },
+        'Full decay processed'
+      );
+    }
+
+    // 2. Generate session summaries for old sessions before pruning
+    if (this.sessionSummarizer) {
       try {
-        const db = this.scallopStore.getDatabase();
-        const sessionsDeleted = db.pruneOldSessions(30);
-        const memoriesDeleted = db.pruneArchivedMemories(0.01);
-        if (sessionsDeleted > 0 || memoriesDeleted > 0) {
-          this.logger.info(
-            { sessionsDeleted, memoriesDeleted },
-            'Periodic pruning complete'
+        const cutoffDays = 30;
+        const cutoff = Date.now() - cutoffDays * 24 * 60 * 60 * 1000;
+        // Find sessions that are about to be pruned
+        const oldSessions = db.raw<{ id: string }>(
+          'SELECT id FROM sessions WHERE updated_at < ? LIMIT 20',
+          [cutoff]
+        );
+        if (oldSessions.length > 0) {
+          const summarized = await this.sessionSummarizer.summarizeBatch(
+            db,
+            oldSessions.map(s => s.id)
           );
+          if (summarized > 0) {
+            this.logger.info({ summarized, total: oldSessions.length }, 'Session summaries generated');
+          }
         }
       } catch (err) {
-        this.logger.warn({ error: (err as Error).message }, 'Pruning failed');
+        this.logger.warn({ error: (err as Error).message }, 'Session summarization failed');
       }
     }
+
+    // 3. Prune old sessions + archived memories
+    try {
+      const sessionsDeleted = db.pruneOldSessions(30);
+      const memoriesDeleted = db.pruneArchivedMemories(0.01);
+      if (sessionsDeleted > 0 || memoriesDeleted > 0) {
+        this.logger.info(
+          { sessionsDeleted, memoriesDeleted },
+          'Deep pruning complete'
+        );
+      }
+    } catch (err) {
+      this.logger.warn({ error: (err as Error).message }, 'Deep pruning failed');
+    }
+
+    // 4. Behavioral pattern inference
+    try {
+      const profileManager = this.scallopStore.getProfileManager();
+      // Get recent session messages for behavioral analysis
+      const recentSessions = db.listSessions(5);
+      const allMessages: Array<{ content: string; timestamp: number }> = [];
+      for (const session of recentSessions) {
+        const messages = db.getSessionMessages(session.id);
+        for (const msg of messages) {
+          if (msg.role === 'user') {
+            allMessages.push({ content: msg.content, timestamp: msg.createdAt });
+          }
+        }
+      }
+      if (allMessages.length > 0) {
+        profileManager.inferBehavioralPatterns('default', allMessages);
+        this.logger.debug({ messageCount: allMessages.length }, 'Behavioral patterns updated');
+      }
+    } catch (err) {
+      this.logger.warn({ error: (err as Error).message }, 'Behavioral inference failed');
+    }
+
+    this.logger.info('Deep tick complete');
+  }
+
+  /** Backward-compatible: processMemories calls lightTick */
+  processMemories(): void {
+    this.lightTick();
   }
 }

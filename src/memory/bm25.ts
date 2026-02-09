@@ -2,6 +2,16 @@
  * BM25 scoring for keyword-based search
  */
 
+/**
+ * Shared search weights used across all hybrid search paths.
+ * keyword + semantic + prominence must sum to 1.0.
+ */
+export const SEARCH_WEIGHTS = {
+  keyword: 0.4,
+  semantic: 0.4,
+  prominence: 0.2,
+} as const;
+
 export interface BM25Options {
   avgDocLength: number;
   docCount: number;

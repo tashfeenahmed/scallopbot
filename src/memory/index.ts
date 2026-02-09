@@ -9,6 +9,7 @@ export {
 export {
   calculateBM25Score,
   buildDocFreqMap,
+  SEARCH_WEIGHTS,
   type BM25Options,
 } from './bm25.js';
 
@@ -24,6 +25,7 @@ export {
   OpenAIEmbedder,
   OllamaEmbedder,
   FallbackEmbedder,
+  CachedEmbedder,
   EmbeddingCache,
   cosineSimilarity,
   euclideanDistance,
@@ -47,6 +49,13 @@ export {
 
 // ============ ScallopMemory System ============
 
+// Session Summarizer
+export {
+  SessionSummarizer,
+  type SessionSummarizerOptions,
+  type SessionSummaryResult,
+} from './session-summary.js';
+
 // SQLite Database Layer
 export {
   ScallopDatabase,
@@ -59,6 +68,7 @@ export {
   type UserProfileEntry,
   type DynamicProfile,
   type BehavioralPatterns,
+  type SessionSummaryRow,
 } from './db.js';
 
 // Decay Engine

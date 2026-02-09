@@ -153,16 +153,46 @@ export class DecayEngine {
   }
 
   /**
-   * Calculate decay for all memories in database
+   * Calculate decay for memories that may have meaningfully changed.
+   * Incremental: only fetches recently updated, recently accessed, or
+   * old enough that decay matters. Limits to 500 per tick.
    */
   calculateAllDecay(db: ScallopDatabase): Array<{ id: string; prominence: number }> {
-    const memories = db.getAllMemories();
+    return this.calculateIncrementalDecay(db);
+  }
+
+  /**
+   * Incremental decay: target memories whose prominence may have changed.
+   * - Recently updated (last 5 minutes)
+   * - Recently accessed (last 5 minutes)
+   * - Older than 1 day with prominence > ARCHIVED threshold
+   * Caps at 500 per tick to bound CPU/IO.
+   */
+  private calculateIncrementalDecay(db: ScallopDatabase): Array<{ id: string; prominence: number }> {
+    const fiveMinAgo = Date.now() - 5 * 60 * 1000;
+    const oneDayAgo = Date.now() - 24 * 60 * 60 * 1000;
+
+    // Fetch candidates: recently touched OR old enough that decay matters
+    const candidates = db.raw<Record<string, unknown>>(
+      `SELECT * FROM memories
+       WHERE memory_type != 'static_profile'
+         AND (
+           updated_at > ?
+           OR last_accessed > ?
+           OR (document_date < ? AND prominence > ?)
+         )
+       ORDER BY prominence DESC
+       LIMIT 500`,
+      [fiveMinAgo, fiveMinAgo, oneDayAgo, PROMINENCE_THRESHOLDS.ARCHIVED]
+    );
+
+    // Convert raw rows to ScallopMemoryEntry objects
     const updates: Array<{ id: string; prominence: number }> = [];
+    for (const row of candidates) {
+      const memory = db.getMemory(row.id as string);
+      if (!memory) continue;
 
-    for (const memory of memories) {
       const newProminence = this.calculateProminence(memory);
-
-      // Only update if changed significantly (avoid unnecessary writes)
       if (Math.abs(memory.prominence - newProminence) > 0.01) {
         updates.push({ id: memory.id, prominence: newProminence });
       }
@@ -172,7 +202,24 @@ export class DecayEngine {
   }
 
   /**
-   * Process decay for all memories (batch update)
+   * Full decay scan (for deep consolidation). Processes ALL non-static memories.
+   */
+  calculateFullDecay(db: ScallopDatabase): Array<{ id: string; prominence: number }> {
+    const memories = db.getAllMemories();
+    const updates: Array<{ id: string; prominence: number }> = [];
+
+    for (const memory of memories) {
+      const newProminence = this.calculateProminence(memory);
+      if (Math.abs(memory.prominence - newProminence) > 0.01) {
+        updates.push({ id: memory.id, prominence: newProminence });
+      }
+    }
+
+    return updates;
+  }
+
+  /**
+   * Process incremental decay (light tick - bounded set of memories)
    */
   processDecay(db: ScallopDatabase): { updated: number; archived: number } {
     const updates = this.calculateAllDecay(db);
@@ -182,6 +229,24 @@ export class DecayEngine {
     }
 
     // Count how many are now below archive threshold
+    const archived = updates.filter((u) => u.prominence < PROMINENCE_THRESHOLDS.DORMANT).length;
+
+    return {
+      updated: updates.length,
+      archived,
+    };
+  }
+
+  /**
+   * Process full decay scan (deep tick - all memories)
+   */
+  processFullDecay(db: ScallopDatabase): { updated: number; archived: number } {
+    const updates = this.calculateFullDecay(db);
+
+    if (updates.length > 0) {
+      db.updateProminences(updates);
+    }
+
     const archived = updates.filter((u) => u.prominence < PROMINENCE_THRESHOLDS.DORMANT).length;
 
     return {
