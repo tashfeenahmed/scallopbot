@@ -21,7 +21,7 @@ import { RelationGraph, type RelationDetectionOptions } from './relations.js';
 import { ProfileManager, type ProfileUpdateOptions } from './profiles.js';
 import { TemporalExtractor, TemporalQuery } from './temporal.js';
 import type { EmbeddingProvider } from './embeddings.js';
-import { cosineSimilarity, CachedEmbedder } from './embeddings.js';
+import { cosineSimilarity, CachedEmbedder, TFIDFEmbedder } from './embeddings.js';
 import { calculateBM25Score, buildDocFreqMap, SEARCH_WEIGHTS, type BM25Options } from './bm25.js';
 
 /**
@@ -118,7 +118,37 @@ export class ScallopMemoryStore {
     this.profileManager = new ProfileManager(this.db, options.profileOptions);
     this.temporalExtractor = new TemporalExtractor();
 
+    // Seed TF-IDF IDF weights from existing memories so search quality is correct.
+    // Without this, all terms get uniform IDF=1.0 (no discrimination power).
+    this.seedTFIDFWeights();
+
     this.logger.info({ dbPath: options.dbPath }, 'ScallopMemoryStore initialized');
+  }
+
+  /**
+   * Seed TF-IDF IDF weights from existing memories.
+   * Finds the TFIDFEmbedder (possibly wrapped in CachedEmbedder) and calls addDocuments
+   * so IDF weights reflect the actual corpus, not uniform defaults.
+   */
+  private seedTFIDFWeights(): void {
+    if (!this.embedder) return;
+
+    // Unwrap CachedEmbedder to find the inner embedder
+    const inner = this.embedder instanceof CachedEmbedder
+      ? this.embedder.getInner()
+      : this.embedder;
+
+    if (!(inner instanceof TFIDFEmbedder)) return;
+
+    try {
+      const memories = this.db.getAllMemories({ minProminence: 0.1, limit: 500 });
+      if (memories.length === 0) return;
+
+      inner.addDocuments(memories.map(m => m.content));
+      this.logger.debug({ docCount: memories.length }, 'Seeded TF-IDF IDF weights from existing memories');
+    } catch (err) {
+      this.logger.warn({ error: (err as Error).message }, 'Failed to seed TF-IDF weights');
+    }
   }
 
   // ============ Memory CRUD ============

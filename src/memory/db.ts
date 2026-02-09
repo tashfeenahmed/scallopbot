@@ -606,76 +606,84 @@ export class ScallopDatabase {
       ).get() as { c: number };
       if (sentinel.c > 0) return;
 
-      // 1. Archive all skill execution outputs (source starts with 'skill:')
-      const skillResult = this.db.prepare(
-        "UPDATE memories SET is_latest = 0, memory_type = 'superseded' WHERE source LIKE 'skill:%' AND is_latest = 1"
-      ).run();
+      // Run entire migration in a transaction so it's all-or-nothing.
+      // If the process crashes mid-migration, the transaction rolls back and
+      // re-run will execute cleanly (no sentinel = migration hasn't happened).
+      const migrate = this.db.transaction(() => {
+        // 1. Archive all skill execution outputs (source starts with 'skill:')
+        const skillResult = this.db.prepare(
+          "UPDATE memories SET is_latest = 0, memory_type = 'superseded' WHERE source LIKE 'skill:%' AND is_latest = 1"
+        ).run();
 
-      // 2. Archive ALL assistant responses — they are bot outputs, not user facts
-      const assistantResult = this.db.prepare(
-        "UPDATE memories SET is_latest = 0, memory_type = 'superseded' WHERE source = 'assistant' AND is_latest = 1"
-      ).run();
+        // 2. Archive ALL assistant responses — they are bot outputs, not user facts
+        const assistantResult = this.db.prepare(
+          "UPDATE memories SET is_latest = 0, memory_type = 'superseded' WHERE source = 'assistant' AND is_latest = 1"
+        ).run();
 
-      // 3. Archive entries that look like proactive check messages or scheduled reminders
-      const proactiveResult = this.db.prepare(
-        "UPDATE memories SET is_latest = 0, memory_type = 'superseded' WHERE (content LIKE '[PROACTIVE CHECK%' OR content LIKE '[SCHEDULED REMINDER%') AND is_latest = 1"
-      ).run();
+        // 3. Archive entries that look like proactive check messages or scheduled reminders
+        const proactiveResult = this.db.prepare(
+          "UPDATE memories SET is_latest = 0, memory_type = 'superseded' WHERE (content LIKE '[PROACTIVE CHECK%' OR content LIKE '[SCHEDULED REMINDER%') AND is_latest = 1"
+        ).run();
 
-      // 4. Archive entries that are clearly user questions, not facts
-      const questionResult = this.db.prepare(
-        "UPDATE memories SET is_latest = 0, memory_type = 'superseded' WHERE source = 'user' AND is_latest = 1 AND (content LIKE 'what %' OR content LIKE 'how %' OR content LIKE 'do %' OR content LIKE 'can %' OR content LIKE 'where %' OR content LIKE 'when %' OR content LIKE 'why %' OR content LIKE 'who %') AND LENGTH(content) < 60"
-      ).run();
+        // 4. Archive entries that are clearly user questions, not facts
+        const questionResult = this.db.prepare(
+          "UPDATE memories SET is_latest = 0, memory_type = 'superseded' WHERE source = 'user' AND is_latest = 1 AND (content LIKE 'what %' OR content LIKE 'how %' OR content LIKE 'do %' OR content LIKE 'can %' OR content LIKE 'where %' OR content LIKE 'when %' OR content LIKE 'why %' OR content LIKE 'who %') AND LENGTH(content) < 60"
+        ).run();
 
-      // 5. Archive any remaining entries with content > 300 chars (never real facts)
-      const longResult = this.db.prepare(
-        "UPDATE memories SET is_latest = 0, memory_type = 'superseded' WHERE LENGTH(content) > 300 AND is_latest = 1"
-      ).run();
+        // 5. Archive any remaining entries with content > 300 chars (never real facts)
+        const longResult = this.db.prepare(
+          "UPDATE memories SET is_latest = 0, memory_type = 'superseded' WHERE LENGTH(content) > 300 AND is_latest = 1"
+        ).run();
 
-      // Insert sentinel so this doesn't re-run
-      this.db.prepare(
-        "INSERT INTO memories (id, user_id, content, category, memory_type, importance, confidence, is_latest, source, document_date, prominence, access_count, created_at, updated_at) VALUES (?, 'default', 'Memory cleanup migration completed', 'fact', 'superseded', 0, 0, 0, '_cleaned_sentinel', ?, 0, 0, ?, ?)"
-      ).run(`_cleanup_${Date.now()}`, Date.now(), Date.now(), Date.now());
+        // Insert sentinel inside the transaction so it commits atomically with updates
+        const now = Date.now();
+        this.db.prepare(
+          "INSERT INTO memories (id, user_id, content, category, memory_type, importance, confidence, is_latest, source, document_date, prominence, access_count, created_at, updated_at) VALUES (?, 'default', 'Memory cleanup migration completed', 'fact', 'superseded', 0, 0, 0, '_cleaned_sentinel', ?, 0, 0, ?, ?)"
+        ).run(`_cleanup_${now}`, now, now, now);
 
+        // Also clean garbage profile values
+        // Remove invalid timezone values (not IANA format)
+        const tzRow = this.db.prepare(
+          "SELECT value FROM user_profiles WHERE user_id = 'default' AND key = 'timezone'"
+        ).get() as { value: string } | undefined;
+        if (tzRow && !tzRow.value.includes('/') && tzRow.value !== 'UTC' && tzRow.value !== 'GMT') {
+          this.db.prepare("DELETE FROM user_profiles WHERE user_id = 'default' AND key = 'timezone'").run();
+          // eslint-disable-next-line no-console
+          console.log(`[memory-cleanup] Removed invalid timezone: "${tzRow.value}"`);
+        }
+
+        // Remove mood values that describe bot behavior
+        const moodRow = this.db.prepare(
+          "SELECT value FROM user_profiles WHERE user_id = 'default' AND key = 'mood'"
+        ).get() as { value: string } | undefined;
+        if (moodRow && /\b(assist|help|check|remind|offer|execute|search|follow-up)\b/i.test(moodRow.value)) {
+          this.db.prepare("DELETE FROM user_profiles WHERE user_id = 'default' AND key = 'mood'").run();
+          // eslint-disable-next-line no-console
+          console.log(`[memory-cleanup] Removed invalid mood: "${moodRow.value}"`);
+        }
+
+        // Trim overly long focus fields (keep max 5 items)
+        const focusRow = this.db.prepare(
+          "SELECT value FROM user_profiles WHERE user_id = 'default' AND key = 'focus'"
+        ).get() as { value: string } | undefined;
+        if (focusRow) {
+          const items = focusRow.value.split(',').map(s => s.trim()).filter(Boolean);
+          if (items.length > 5) {
+            const trimmed = items.slice(0, 5).join(', ');
+            this.db.prepare("UPDATE user_profiles SET value = ? WHERE user_id = 'default' AND key = 'focus'").run(trimmed);
+            // eslint-disable-next-line no-console
+            console.log(`[memory-cleanup] Trimmed focus from ${items.length} to 5 items`);
+          }
+        }
+
+        return { skillResult, assistantResult, proactiveResult, questionResult, longResult };
+      });
+
+      const { skillResult, assistantResult, proactiveResult, questionResult, longResult } = migrate();
       const total = skillResult.changes + assistantResult.changes + proactiveResult.changes + questionResult.changes + longResult.changes;
       if (total > 0) {
-        // Log to stderr since logger may not be available
         // eslint-disable-next-line no-console
         console.log(`[memory-cleanup] Archived ${total} polluted entries: ${skillResult.changes} skill outputs, ${assistantResult.changes} long assistant responses, ${proactiveResult.changes} proactive messages, ${questionResult.changes} questions, ${longResult.changes} oversized entries`);
-      }
-
-      // Also clean garbage profile values
-      // Remove invalid timezone values (not IANA format)
-      const tzRow = this.db.prepare(
-        "SELECT value FROM user_profiles WHERE user_id = 'default' AND key = 'timezone'"
-      ).get() as { value: string } | undefined;
-      if (tzRow && !tzRow.value.includes('/') && tzRow.value !== 'UTC' && tzRow.value !== 'GMT') {
-        this.db.prepare("DELETE FROM user_profiles WHERE user_id = 'default' AND key = 'timezone'").run();
-        // eslint-disable-next-line no-console
-        console.log(`[memory-cleanup] Removed invalid timezone: "${tzRow.value}"`);
-      }
-
-      // Remove mood values that describe bot behavior
-      const moodRow = this.db.prepare(
-        "SELECT value FROM user_profiles WHERE user_id = 'default' AND key = 'mood'"
-      ).get() as { value: string } | undefined;
-      if (moodRow && /\b(assist|help|check|remind|offer|execute|search|follow-up)\b/i.test(moodRow.value)) {
-        this.db.prepare("DELETE FROM user_profiles WHERE user_id = 'default' AND key = 'mood'").run();
-        // eslint-disable-next-line no-console
-        console.log(`[memory-cleanup] Removed invalid mood: "${moodRow.value}"`);
-      }
-
-      // Trim overly long focus fields (keep max 5 items)
-      const focusRow = this.db.prepare(
-        "SELECT value FROM user_profiles WHERE user_id = 'default' AND key = 'focus'"
-      ).get() as { value: string } | undefined;
-      if (focusRow) {
-        const items = focusRow.value.split(',').map(s => s.trim()).filter(Boolean);
-        if (items.length > 5) {
-          const trimmed = items.slice(0, 5).join(', ');
-          this.db.prepare("UPDATE user_profiles SET value = ? WHERE user_id = 'default' AND key = 'focus'").run(trimmed);
-          // eslint-disable-next-line no-console
-          console.log(`[memory-cleanup] Trimmed focus from ${items.length} to 5 items`);
-        }
       }
     } catch {
       // Migration failure is non-fatal
@@ -1513,7 +1521,7 @@ export class ScallopDatabase {
 
   /**
    * Atomically claim due items by selecting them AND marking as 'processing'.
-   * Prevents duplicate processing when scheduler ticks overlap.
+   * Uses a transaction to prevent duplicate processing when scheduler ticks overlap.
    */
   claimDueScheduledItems(now: number = Date.now()): ScheduledItem[] {
     const selectStmt = this.db.prepare(`
@@ -1527,17 +1535,24 @@ export class ScallopDatabase {
       WHERE id = ? AND status = 'pending'
     `);
 
-    const rows = selectStmt.all(now) as Record<string, unknown>[];
-    const claimed: ScheduledItem[] = [];
+    // Wrap in an IMMEDIATE transaction so the SELECT+UPDATE is atomic.
+    // IMMEDIATE acquires a reserved lock upfront, preventing concurrent
+    // transactions from interleaving between our SELECT and UPDATE.
+    const claimTransaction = this.db.transaction(() => {
+      const rows = selectStmt.all(now) as Record<string, unknown>[];
+      const claimed: ScheduledItem[] = [];
 
-    for (const row of rows) {
-      const result = updateStmt.run(now, row.id);
-      if (result.changes > 0) {
-        claimed.push(this.rowToScheduledItem(row));
+      for (const row of rows) {
+        const result = updateStmt.run(now, row.id);
+        if (result.changes > 0) {
+          claimed.push(this.rowToScheduledItem(row));
+        }
       }
-    }
 
-    return claimed;
+      return claimed;
+    });
+
+    return claimTransaction.immediate();
   }
 
   /**
@@ -1813,9 +1828,10 @@ export class ScallopDatabase {
    * Get memory count
    */
   getMemoryCount(userId?: string): number {
+    // Exclude migration sentinel rows from count (they're bookkeeping, not real memories)
     const stmt = userId
-      ? this.db.prepare('SELECT COUNT(*) as count FROM memories WHERE user_id = ?')
-      : this.db.prepare('SELECT COUNT(*) as count FROM memories');
+      ? this.db.prepare("SELECT COUNT(*) as count FROM memories WHERE user_id = ? AND source != '_cleaned_sentinel'")
+      : this.db.prepare("SELECT COUNT(*) as count FROM memories WHERE source != '_cleaned_sentinel'");
     const row = (userId ? stmt.get(userId) : stmt.get()) as { count: number };
     return row.count;
   }
