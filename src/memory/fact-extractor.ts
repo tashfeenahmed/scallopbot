@@ -223,6 +223,9 @@ export class LLMFactExtractor {
   private processingQueue: Map<string, Promise<FactExtractionResult>> = new Map();
   private resourceLimits: Required<ResourceLimits>;
   private getTimezone: (userId: string) => string;
+  /** Counter for throttling consolidateMemory — runs every N extractions */
+  private extractionCount = 0;
+  private static readonly CONSOLIDATION_INTERVAL = 5;
 
   constructor(options: LLMFactExtractorOptions) {
     // Wrap provider with cost tracking if available
@@ -699,16 +702,20 @@ Respond with JSON only:
       }
     }
 
-    // Fire-and-forget: batch consolidation + profile extraction for all stored facts
+    // Throttled fire-and-forget: run consolidation every N extractions to save LLM calls
     if (storedMemories.length > 0) {
-      this.consolidateMemory(
-        storedMemories.map(m => m.id),
-        userId,
-        storedMemories.map(m => m.content),
-        sourceMessage,
-      ).catch(err => {
-        this.logger.warn({ error: (err as Error).message }, 'Background consolidation failed');
-      });
+      this.extractionCount++;
+      if (this.extractionCount >= LLMFactExtractor.CONSOLIDATION_INTERVAL) {
+        this.extractionCount = 0;
+        this.consolidateMemory(
+          storedMemories.map(m => m.id),
+          userId,
+          storedMemories.map(m => m.content),
+          sourceMessage,
+        ).catch(err => {
+          this.logger.warn({ error: (err as Error).message }, 'Background consolidation failed');
+        });
+      }
     }
 
     return result;

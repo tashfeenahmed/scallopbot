@@ -12,19 +12,9 @@ export {
   type BM25Options,
 } from './bm25.js';
 
-// Rule-based fact extraction
+// Memory system (BackgroundGardener)
 export {
-  extractFacts,
-  summarizeMemories,
-  type ExtractedFact,
-} from './extract-facts.js';
-
-// Memory system (HotCollector, BackgroundGardener)
-export {
-  HotCollector,
   BackgroundGardener,
-  type CollectOptions,
-  type HotCollectorOptions,
   type BackgroundGardenerOptions,
 } from './memory.js';
 

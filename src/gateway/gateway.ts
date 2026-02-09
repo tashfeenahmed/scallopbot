@@ -23,7 +23,6 @@ import { createSkillExecutor, type SkillExecutor } from '../skills/executor.js';
 import { Router } from '../routing/router.js';
 import { CostTracker } from '../routing/cost.js';
 import {
-  HotCollector,
   BackgroundGardener,
   OllamaEmbedder,
   LLMFactExtractor,
@@ -54,7 +53,6 @@ export class Gateway {
   private router: Router | null = null;
   private costTracker: CostTracker | null = null;
   private scallopMemoryStore: ScallopMemoryStore | null = null;
-  private hotCollector: HotCollector | null = null;
   private backgroundGardener: BackgroundGardener | null = null;
   private factExtractor: LLMFactExtractor | null = null;
   private goalService: GoalService | null = null;
@@ -130,9 +128,6 @@ export class Gateway {
     if (backfillResult.fieldsPopulated > 0) {
       this.logger.info({ fieldsPopulated: backfillResult.fieldsPopulated }, 'Default user profile backfilled');
     }
-
-    // Hot collector buffers messages and flushes to ScallopStore
-    this.hotCollector = new HotCollector({ scallopStore: this.scallopMemoryStore });
 
     // Goal service for hierarchical goal tracking
     this.goalService = new GoalService({
@@ -234,7 +229,6 @@ export class Gateway {
       skillExecutor: this.skillExecutor,
       router: this.router,
       costTracker: this.costTracker,
-      hotCollector: this.hotCollector,
       scallopStore: this.scallopMemoryStore || undefined,
       factExtractor: this.factExtractor || undefined,
       goalService: this.goalService || undefined,

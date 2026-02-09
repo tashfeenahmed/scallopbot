@@ -1,121 +1,17 @@
 /**
  * Memory System
- * Hot collector and background gardener for ScallopMemory (SQLite)
+ * Background gardener for ScallopMemory (SQLite)
  */
 
 import type { Logger } from 'pino';
-import { nanoid } from 'nanoid';
 
 // Re-export types from legacy-types (needed by migrate.ts)
 export type { MemoryType, MemoryEntry, PartialMemoryEntry } from './legacy-types.js';
-import type { MemoryEntry } from './legacy-types.js';
-
-// Re-export from extract-facts
-export { extractFacts, summarizeMemories, type ExtractedFact } from './extract-facts.js';
 
 // Re-export from bm25
 export { calculateBM25Score, buildDocFreqMap, type BM25Options } from './bm25.js';
 
 import type { ScallopMemoryStore } from './scallop-store.js';
-
-export interface CollectOptions {
-  content: string;
-  sessionId: string;
-  source: string;
-  tags?: string[];
-  metadata?: Record<string, unknown>;
-}
-
-export interface HotCollectorOptions {
-  scallopStore: ScallopMemoryStore;
-  maxBuffer?: number;
-}
-
-/**
- * Hot Collector - buffers messages during conversation and flushes to ScallopStore
- */
-export class HotCollector {
-  private scallopStore: ScallopMemoryStore;
-  private buffers: Map<string, MemoryEntry[]> = new Map();
-  private maxBuffer: number;
-
-  constructor(options: HotCollectorOptions) {
-    this.scallopStore = options.scallopStore;
-    this.maxBuffer = options.maxBuffer ?? 100;
-  }
-
-  collect(options: CollectOptions): MemoryEntry {
-    const entry: MemoryEntry = {
-      id: nanoid(),
-      content: options.content,
-      type: 'raw',
-      timestamp: new Date(),
-      sessionId: options.sessionId,
-      tags: options.tags,
-      metadata: {
-        ...options.metadata,
-        source: options.source,
-      },
-    };
-
-    let buffer = this.buffers.get(options.sessionId);
-    if (!buffer) {
-      buffer = [];
-      this.buffers.set(options.sessionId, buffer);
-    }
-
-    buffer.push(entry);
-
-    // Trim buffer if over limit
-    if (buffer.length > this.maxBuffer) {
-      buffer.shift();
-    }
-
-    return entry;
-  }
-
-  getBuffer(sessionId: string): MemoryEntry[] {
-    return this.buffers.get(sessionId) || [];
-  }
-
-  flush(sessionId: string): void {
-    const buffer = this.buffers.get(sessionId);
-    if (!buffer || buffer.length === 0) return;
-
-    for (const entry of buffer) {
-      // Extract source from metadata (user or assistant)
-      const source = (entry.metadata?.source as 'user' | 'assistant') || 'user';
-
-      this.scallopStore.add({
-        userId: sessionId,
-        content: entry.content,
-        category: 'event',
-        importance: 3,
-        confidence: 1.0,
-        source,
-        metadata: {
-          ...entry.metadata,
-          type: entry.type,
-          tags: entry.tags,
-        },
-      }).catch((err) => {
-        console.error('HotCollector: failed to flush to ScallopStore:', err);
-      });
-    }
-
-    this.buffers.set(sessionId, []);
-  }
-
-  clear(sessionId: string): void {
-    this.buffers.set(sessionId, []);
-  }
-
-  flushAll(): void {
-    for (const sessionId of this.buffers.keys()) {
-      this.flush(sessionId);
-    }
-  }
-}
 
 export interface BackgroundGardenerOptions {
   scallopStore: ScallopMemoryStore;
@@ -132,6 +28,9 @@ export class BackgroundGardener {
   private interval: number;
   private timer: NodeJS.Timeout | null = null;
   private running = false;
+  private tickCount = 0;
+  /** Run pruning every ~60 ticks (once per hour at default 60s interval) */
+  private static readonly PRUNE_EVERY = 60;
 
   constructor(options: BackgroundGardenerOptions) {
     this.scallopStore = options.scallopStore;
@@ -171,6 +70,25 @@ export class BackgroundGardener {
         { updated: decayResult.updated, archived: decayResult.archived },
         'ScallopMemory decay processed'
       );
+    }
+
+    // Periodic pruning: old sessions + archived memories
+    this.tickCount++;
+    if (this.tickCount >= BackgroundGardener.PRUNE_EVERY) {
+      this.tickCount = 0;
+      try {
+        const db = this.scallopStore.getDatabase();
+        const sessionsDeleted = db.pruneOldSessions(30);
+        const memoriesDeleted = db.pruneArchivedMemories(0.01);
+        if (sessionsDeleted > 0 || memoriesDeleted > 0) {
+          this.logger.info(
+            { sessionsDeleted, memoriesDeleted },
+            'Periodic pruning complete'
+          );
+        }
+      } catch (err) {
+        this.logger.warn({ error: (err as Error).message }, 'Pruning failed');
+      }
     }
   }
 }

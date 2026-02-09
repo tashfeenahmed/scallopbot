@@ -14,7 +14,6 @@ import type { SkillRegistry } from '../skills/registry.js';
 import type { SkillExecutor } from '../skills/executor.js';
 import type { Router } from '../routing/router.js';
 import type { CostTracker } from '../routing/cost.js';
-import type { HotCollector } from '../memory/memory.js';
 import type { LLMFactExtractor } from '../memory/fact-extractor.js';
 import type { ScallopMemoryStore } from '../memory/scallop-store.js';
 import type { ContextManager } from '../routing/context.js';
@@ -31,7 +30,6 @@ export interface AgentOptions {
   skillExecutor?: SkillExecutor;
   router?: Router;
   costTracker?: CostTracker;
-  hotCollector?: HotCollector;
   scallopStore?: ScallopMemoryStore;
   factExtractor?: LLMFactExtractor;
   contextManager?: ContextManager;
@@ -126,7 +124,6 @@ export class Agent {
   private skillExecutor: SkillExecutor | null;
   private router: Router | null;
   private costTracker: CostTracker | null;
-  private hotCollector: HotCollector | null;
   private scallopStore: ScallopMemoryStore | null;
   private factExtractor: LLMFactExtractor | null;
   private contextManager: ContextManager | null;
@@ -149,7 +146,6 @@ export class Agent {
     this.skillExecutor = options.skillExecutor || null;
     this.router = options.router || null;
     this.costTracker = options.costTracker || null;
-    this.hotCollector = options.hotCollector || null;
     this.scallopStore = options.scallopStore || null;
     this.factExtractor = options.factExtractor || null;
     this.contextManager = options.contextManager || null;
@@ -182,8 +178,9 @@ export class Agent {
       throw new Error(`Session not found: ${sessionId}`);
     }
 
-    // Resolve real userId from session metadata (e.g. "telegram:12345"), fall back to "default"
-    const resolvedUserId = (session.metadata?.userId as string) || 'default';
+    // Single-user bot: always use canonical userId for memory operations.
+    // Channel-prefixed userId (e.g. "telegram:12345") is kept only for tool/routing via session metadata.
+    const resolvedUserId = 'default';
 
     // Check budget before processing
     if (this.costTracker) {
@@ -248,16 +245,6 @@ export class Agent {
       role: 'user',
       content: typeof processedContent === 'string' ? processedContent : processedContent,
     });
-
-    // Collect user message in memory
-    if (this.hotCollector) {
-      this.hotCollector.collect({
-        content: userMessage,
-        sessionId,
-        source: 'user',
-        tags: ['conversation', 'user-message'],
-      });
-    }
 
     // Queue LLM-based fact extraction (async, non-blocking)
     // Pass the last assistant response as context for references like "that's my office"
@@ -482,22 +469,6 @@ export class Agent {
         { dailySpend: budget.dailySpend.toFixed(4), monthlySpend: budget.monthlySpend.toFixed(4) },
         'Cost recorded'
       );
-    }
-
-    // Collect assistant response in memory
-    if (this.hotCollector && finalResponse) {
-      this.hotCollector.collect({
-        content: finalResponse,
-        sessionId,
-        source: 'assistant',
-        tags: ['conversation', 'assistant-response'],
-      });
-    }
-
-    // Flush memories to persistent storage
-    if (this.hotCollector) {
-      this.hotCollector.flush(sessionId);
-      this.logger.debug({ sessionId }, 'Memories flushed to store');
     }
 
     // NOTE: Assistant trigger extraction removed — it duplicated user-set reminders.
@@ -1056,16 +1027,6 @@ ALWAYS use **send_file** after creating any file (PDFs, images, documents, scrip
             });
           }
 
-          // Collect in memory
-          if (this.hotCollector && resultSuccess) {
-            this.hotCollector.collect({
-              content: `Skill ${toolUse.name} executed: ${resultOutput.slice(0, 500)}`,
-              sessionId,
-              source: `skill:${toolUse.name}`,
-              tags: ['skill-execution', toolUse.name],
-              metadata: { skillInput: toolUse.input },
-            });
-          }
         } catch (error) {
           const err = error as Error;
           this.logger.error({ skillName: toolUse.name, error: err.message }, 'Skill execution failed');
