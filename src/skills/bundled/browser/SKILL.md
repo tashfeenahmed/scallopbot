@@ -1,177 +1,229 @@
 ---
 name: browser
-description: "Browse websites via bash. Workflow: 1) agent-browser open <url>, 2) agent-browser get text body (read page), 3) agent-browser snapshot -i (see interactive elements), 4) agent-browser click/fill @ref (interact). Always extract content after opening."
+description: "Browser automation CLI for AI agents. Use when the user needs to interact with websites, including navigating pages, filling forms, clicking buttons, taking screenshots, extracting data, testing web apps, or automating any browser task."
 user-invocable: false
-triggers: [browse, web, website, page, scrape, click, navigate, screenshot]
+triggers: [browse, web, website, page, scrape, click, navigate, screenshot, login, form, automate]
 metadata:
   openclaw:
     emoji: "\U0001F310"
     requires:
       bins: [agent-browser]
+    install:
+      - id: npm
+        kind: npm
+        package: agent-browser
+        bins: [agent-browser]
+        label: "Install agent-browser CLI"
 ---
 
-# Browser Skill (agent-browser CLI)
+# Browser Automation with agent-browser
 
-Use the `agent-browser` CLI via the `bash` tool for all web automation. This is a powerful headless browser optimized for AI agents.
+## Core Workflow
 
-Example: `bash("agent-browser open https://example.com")`
+Every browser automation follows this pattern:
 
-## Workflow
+1. **Navigate**: `agent-browser open <url>`
+2. **Snapshot**: `agent-browser snapshot -i` (get element refs like `@e1`, `@e2`)
+3. **Interact**: Use refs to click, fill, select
+4. **Re-snapshot**: After navigation or DOM changes, get fresh refs
 
-1. **Navigate** to a URL with `open`
-2. **Snapshot** to see interactive elements with refs (@e1, @e2, etc.)
-3. **Interact** using refs from snapshot (click, fill, type)
-4. **Extract** content with `get text` or `screenshot`
+```bash
+agent-browser open https://example.com/form
+agent-browser snapshot -i
+# Output: @e1 [input type="email"], @e2 [input type="password"], @e3 [button] "Submit"
 
-## Core Commands
+agent-browser fill @e1 "user@example.com"
+agent-browser fill @e2 "password123"
+agent-browser click @e3
+agent-browser wait --load networkidle
+agent-browser snapshot -i  # Check result
+```
+
+## Essential Commands
 
 ```bash
 # Navigation
-agent-browser open <url>              # Go to URL
-agent-browser back                    # Go back
-agent-browser forward                 # Go forward
-agent-browser reload                  # Reload page
+agent-browser open <url>              # Navigate (aliases: goto, navigate)
+agent-browser close                   # Close browser
 
-# Get page state (ALWAYS do this after navigating)
-agent-browser snapshot                # Get elements with refs
-agent-browser snapshot -i             # Interactive elements only (recommended)
+# Snapshot
+agent-browser snapshot -i             # Interactive elements with refs (recommended)
+agent-browser snapshot -i -C          # Include cursor-interactive elements (divs with onclick, cursor:pointer)
+agent-browser snapshot -s "#selector" # Scope to CSS selector
 
-# Click elements
-agent-browser click @e2               # Click by ref from snapshot
-agent-browser click "text=Submit"     # Click by visible text
-agent-browser click "#login-btn"      # Click by CSS selector
+# Interaction (use @refs from snapshot)
+agent-browser click @e1               # Click element
+agent-browser fill @e2 "text"         # Clear and type text
+agent-browser type @e2 "text"         # Type without clearing
+agent-browser select @e1 "option"     # Select dropdown option
+agent-browser check @e1               # Check checkbox
+agent-browser press Enter             # Press key
+agent-browser scroll down 500         # Scroll page
 
-# Fill forms
-agent-browser fill @e3 "user@example.com"   # Fill input by ref
-agent-browser type @e4 "password"           # Type character by character
-agent-browser press Enter                    # Press key
-
-# Select dropdowns
-agent-browser select @e5 "option-value"
-
-# Extract content
-agent-browser get text body           # Get all page text
+# Get information
 agent-browser get text @e1            # Get element text
-agent-browser get html body           # Get page HTML
 agent-browser get url                 # Get current URL
 agent-browser get title               # Get page title
 
-# Screenshots
-agent-browser screenshot              # Viewport screenshot
-agent-browser screenshot --full       # Full page screenshot
-agent-browser screenshot page.png     # Save to file
-
 # Wait
 agent-browser wait @e1                # Wait for element
-agent-browser wait 2000               # Wait 2 seconds
+agent-browser wait --load networkidle # Wait for network idle
+agent-browser wait --url "**/page"    # Wait for URL pattern
+agent-browser wait 2000               # Wait milliseconds
 
-# Scroll
-agent-browser scroll down 500         # Scroll down 500px
-agent-browser scrollintoview @e10     # Scroll element into view
+# Capture
+agent-browser screenshot              # Screenshot to temp dir
+agent-browser screenshot --full       # Full page screenshot
+agent-browser pdf output.pdf          # Save as PDF
 ```
 
-## Understanding Refs
+## Common Patterns
 
-After `snapshot`, elements have refs like `@e1`, `@e2`. Use these refs for reliable interaction:
-
-```bash
-# Example snapshot output:
-# @e1 link "Home"
-# @e2 link "Products"
-# @e3 textbox "Search..."
-# @e4 button "Search"
-
-# Then interact:
-agent-browser fill @e3 "laptop"
-agent-browser click @e4
-```
-
-## Advanced Options
+### Form Submission
 
 ```bash
-# Run headed (visible browser)
-agent-browser --headed open example.com
-
-# Use proxy
-agent-browser --proxy "http://127.0.0.1:8888" open example.com
-
-# Ignore HTTPS errors
-agent-browser --ignore-https-errors open https://self-signed.example.com
-
-# JSON output (for parsing)
-agent-browser --json snapshot
-agent-browser --json get text body
-
-# Custom user agent
-agent-browser --user-agent "Mozilla/5.0..." open example.com
-
-# Persistent profile (keeps cookies/state)
-agent-browser --profile ~/.browser-profile open example.com
-```
-
-## Common Workflows
-
-### Login to a website
-
-```bash
-agent-browser open https://example.com/login
+agent-browser open https://example.com/signup
 agent-browser snapshot -i
-# Find email/password fields from snapshot
-agent-browser fill @e2 "user@example.com"
-agent-browser fill @e3 "password123"
-agent-browser click @e4  # Submit button
-agent-browser wait 2000
-agent-browser get url    # Verify redirect
+agent-browser fill @e1 "Jane Doe"
+agent-browser fill @e2 "jane@example.com"
+agent-browser select @e3 "California"
+agent-browser check @e4
+agent-browser click @e5
+agent-browser wait --load networkidle
 ```
 
-### Search and extract results
+### Authentication with State Persistence
 
 ```bash
-agent-browser open https://search.example.com
+# Login once and save state
+agent-browser open https://app.example.com/login
 agent-browser snapshot -i
-agent-browser fill @e1 "search query"
-agent-browser press Enter
-agent-browser wait 2000
-agent-browser get text body   # Get search results
+agent-browser fill @e1 "$USERNAME"
+agent-browser fill @e2 "$PASSWORD"
+agent-browser click @e3
+agent-browser wait --url "**/dashboard"
+agent-browser state save auth.json
+
+# Reuse in future sessions
+agent-browser state load auth.json
+agent-browser open https://app.example.com/dashboard
 ```
 
-### Take screenshot for visual analysis
+### Data Extraction
 
 ```bash
-agent-browser open https://example.com
-agent-browser wait 2000
-agent-browser screenshot --full page.png
+agent-browser open https://example.com/products
+agent-browser snapshot -i
+agent-browser get text @e5           # Get specific element text
+agent-browser get text body > page.txt  # Get all page text
+
+# JSON output for parsing
+agent-browser snapshot -i --json
+agent-browser get text @e1 --json
 ```
 
-### Scrape content from page
+### Parallel Sessions
 
 ```bash
-agent-browser open https://news.example.com/article
-agent-browser wait 1000
-agent-browser get text body
+agent-browser --session site1 open https://site-a.com
+agent-browser --session site2 open https://site-b.com
+
+agent-browser --session site1 snapshot -i
+agent-browser --session site2 snapshot -i
+
+agent-browser session list
 ```
 
-## Session Management
-
-Sessions keep browser state between commands:
+### Visual Browser (Debugging)
 
 ```bash
-# All commands in same session share state
-export AGENT_BROWSER_SESSION="my-session"
-agent-browser open https://example.com
-agent-browser snapshot
-agent-browser click @e1
-# Browser stays open between commands
-
-# Close when done
-agent-browser close
+agent-browser --headed open https://example.com
+agent-browser highlight @e1          # Highlight element
+agent-browser record start demo.webm # Record session
 ```
 
-## Tips
+### Local Files (PDFs, HTML)
 
-1. **Always snapshot after navigation** - refs change when page changes
-2. **Use `-i` flag** for snapshot to see only interactive elements
-3. **Use `--json` flag** when you need to parse output programmatically
-4. **Wait after actions** that trigger page loads
-5. **Use refs (@e1)** instead of CSS selectors when possible - more reliable
-6. **Check `get url`** after clicks to verify navigation happened
+```bash
+# Open local files with file:// URLs
+agent-browser --allow-file-access open file:///path/to/document.pdf
+agent-browser --allow-file-access open file:///path/to/page.html
+agent-browser screenshot output.png
+```
+
+### iOS Simulator (Mobile Safari)
+
+```bash
+# List available iOS simulators
+agent-browser device list
+
+# Launch Safari on a specific device
+agent-browser -p ios --device "iPhone 16 Pro" open https://example.com
+
+# Same workflow as desktop - snapshot, interact, re-snapshot
+agent-browser -p ios snapshot -i
+agent-browser -p ios tap @e1          # Tap (alias for click)
+agent-browser -p ios fill @e2 "text"
+agent-browser -p ios swipe up         # Mobile-specific gesture
+
+# Take screenshot
+agent-browser -p ios screenshot mobile.png
+
+# Close session (shuts down simulator)
+agent-browser -p ios close
+```
+
+**Requirements:** macOS with Xcode, Appium (`npm install -g appium && appium driver install xcuitest`)
+
+**Real devices:** Works with physical iOS devices if pre-configured. Use `--device "<UDID>"` where UDID is from `xcrun xctrace list devices`.
+
+## Ref Lifecycle (Important)
+
+Refs (`@e1`, `@e2`, etc.) are invalidated when the page changes. Always re-snapshot after:
+
+- Clicking links or buttons that navigate
+- Form submissions
+- Dynamic content loading (dropdowns, modals)
+
+```bash
+agent-browser click @e5              # Navigates to new page
+agent-browser snapshot -i            # MUST re-snapshot
+agent-browser click @e1              # Use new refs
+```
+
+## Semantic Locators (Alternative to Refs)
+
+When refs are unavailable or unreliable, use semantic locators:
+
+```bash
+agent-browser find text "Sign In" click
+agent-browser find label "Email" fill "user@test.com"
+agent-browser find role button click --name "Submit"
+agent-browser find placeholder "Search" type "query"
+agent-browser find testid "submit-btn" click
+```
+
+## Deep-Dive Documentation
+
+| Reference | When to Use |
+|-----------|-------------|
+| [references/commands.md](references/commands.md) | Full command reference with all options |
+| [references/snapshot-refs.md](references/snapshot-refs.md) | Ref lifecycle, invalidation rules, troubleshooting |
+| [references/session-management.md](references/session-management.md) | Parallel sessions, state persistence, concurrent scraping |
+| [references/authentication.md](references/authentication.md) | Login flows, OAuth, 2FA handling, state reuse |
+| [references/video-recording.md](references/video-recording.md) | Recording workflows for debugging and documentation |
+| [references/proxy-support.md](references/proxy-support.md) | Proxy configuration, geo-testing, rotating proxies |
+
+## Ready-to-Use Templates
+
+| Template | Description |
+|----------|-------------|
+| [templates/form-automation.sh](templates/form-automation.sh) | Form filling with validation |
+| [templates/authenticated-session.sh](templates/authenticated-session.sh) | Login once, reuse state |
+| [templates/capture-workflow.sh](templates/capture-workflow.sh) | Content extraction with screenshots |
+
+```bash
+./templates/form-automation.sh https://example.com/form
+./templates/authenticated-session.sh https://app.example.com/login
+./templates/capture-workflow.sh https://example.com ./output
+```
