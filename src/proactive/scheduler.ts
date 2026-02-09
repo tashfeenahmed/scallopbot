@@ -97,6 +97,7 @@ export class UnifiedScheduler {
 
   private intervalHandle: ReturnType<typeof setInterval> | null = null;
   private isRunning = false;
+  private evaluating = false;
 
   constructor(options: UnifiedSchedulerOptions) {
     this.db = options.db;
@@ -164,30 +165,44 @@ export class UnifiedScheduler {
    * Evaluate and process due items
    */
   async evaluate(): Promise<void> {
-    // First, expire old items
-    const expiredCount = this.db.expireOldScheduledItems(this.maxItemAge);
-    if (expiredCount > 0) {
-      this.logger.debug({ count: expiredCount }, 'Expired old scheduled items');
-    }
-
-    // Get due items
-    const dueItems = this.db.getDueScheduledItems();
-    if (dueItems.length === 0) {
+    // Prevent overlapping evaluations — if a previous tick is still processing
+    // (e.g. waiting on LLM), skip this tick entirely to avoid duplicate firings
+    if (this.evaluating) {
+      this.logger.debug('Skipping scheduler tick — previous evaluation still running');
       return;
     }
+    this.evaluating = true;
 
-    this.logger.info({ count: dueItems.length }, 'Found due scheduled items');
-
-    // Process each item
-    for (const item of dueItems) {
-      try {
-        await this.processItem(item);
-      } catch (err) {
-        this.logger.error(
-          { itemId: item.id, error: (err as Error).message },
-          'Failed to process scheduled item'
-        );
+    try {
+      // First, expire old items
+      const expiredCount = this.db.expireOldScheduledItems(this.maxItemAge);
+      if (expiredCount > 0) {
+        this.logger.debug({ count: expiredCount }, 'Expired old scheduled items');
       }
+
+      // Atomically claim due items (marks them 'processing' so no other tick can grab them)
+      const dueItems = this.db.claimDueScheduledItems();
+      if (dueItems.length === 0) {
+        return;
+      }
+
+      this.logger.info({ count: dueItems.length }, 'Found due scheduled items');
+
+      // Process each item
+      for (const item of dueItems) {
+        try {
+          await this.processItem(item);
+        } catch (err) {
+          this.logger.error(
+            { itemId: item.id, error: (err as Error).message },
+            'Failed to process scheduled item'
+          );
+          // Reset to pending so it can be retried on the next tick
+          this.db.resetScheduledItemToPending(item.id);
+        }
+      }
+    } finally {
+      this.evaluating = false;
     }
   }
 

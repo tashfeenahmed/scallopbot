@@ -1185,6 +1185,49 @@ export class ScallopDatabase {
   }
 
   /**
+   * Atomically claim due items by selecting them AND marking as 'processing'.
+   * Prevents duplicate processing when scheduler ticks overlap.
+   */
+  claimDueScheduledItems(now: number = Date.now()): ScheduledItem[] {
+    const selectStmt = this.db.prepare(`
+      SELECT * FROM scheduled_items
+      WHERE status = 'pending' AND trigger_at <= ?
+      ORDER BY trigger_at ASC
+    `);
+    const updateStmt = this.db.prepare(`
+      UPDATE scheduled_items
+      SET status = 'processing', updated_at = ?
+      WHERE id = ? AND status = 'pending'
+    `);
+
+    const rows = selectStmt.all(now) as Record<string, unknown>[];
+    const claimed: ScheduledItem[] = [];
+
+    for (const row of rows) {
+      const result = updateStmt.run(now, row.id);
+      if (result.changes > 0) {
+        claimed.push(this.rowToScheduledItem(row));
+      }
+    }
+
+    return claimed;
+  }
+
+  /**
+   * Reset an item back to pending (e.g. after a processing failure)
+   */
+  resetScheduledItemToPending(id: string): boolean {
+    const now = Date.now();
+    const stmt = this.db.prepare(`
+      UPDATE scheduled_items
+      SET status = 'pending', updated_at = ?
+      WHERE id = ? AND status = 'processing'
+    `);
+    const result = stmt.run(now, id);
+    return result.changes > 0;
+  }
+
+  /**
    * Get all pending items for a user
    */
   getPendingScheduledItemsByUser(userId: string): ScheduledItem[] {
@@ -1218,7 +1261,7 @@ export class ScallopDatabase {
     const stmt = this.db.prepare(`
       UPDATE scheduled_items
       SET status = 'fired', fired_at = ?, updated_at = ?
-      WHERE id = ?
+      WHERE id = ? AND status IN ('pending', 'processing')
     `);
     const result = stmt.run(now, now, id);
     return result.changes > 0;
@@ -1354,7 +1397,7 @@ export class ScallopDatabase {
     const stmt = this.db.prepare(`
       UPDATE scheduled_items
       SET status = 'expired', updated_at = ?
-      WHERE status = 'pending' AND trigger_at < ?
+      WHERE status IN ('pending', 'processing') AND trigger_at < ?
     `);
     const result = stmt.run(now, cutoff);
     return result.changes;
