@@ -54,7 +54,7 @@ export interface RequestCheck {
   reason?: string;
 }
 
-// Default pricing per million tokens (as of 2024)
+// Default pricing per million tokens (updated Feb 2026)
 const DEFAULT_PRICING: Record<string, ModelPricing> = {
   // Anthropic
   'claude-sonnet-4-20250514': { inputPerMillion: 3, outputPerMillion: 15 },
@@ -64,10 +64,42 @@ const DEFAULT_PRICING: Record<string, ModelPricing> = {
   'claude-3-opus-20240229': { inputPerMillion: 15, outputPerMillion: 75 },
   'claude-3-haiku-20240307': { inputPerMillion: 0.25, outputPerMillion: 1.25 },
 
-  // OpenAI
+  // OpenAI — GPT-5.x
+  'gpt-5.2': { inputPerMillion: 1.75, outputPerMillion: 14 },
+  'gpt-5.2-chat': { inputPerMillion: 1.75, outputPerMillion: 14 },
+  'gpt-5.2-codex': { inputPerMillion: 1.75, outputPerMillion: 14 },
+  'gpt-5.2-pro': { inputPerMillion: 21, outputPerMillion: 168 },
+  'gpt-5.1': { inputPerMillion: 1.25, outputPerMillion: 10 },
+  'gpt-5.1-chat': { inputPerMillion: 1.25, outputPerMillion: 10 },
+  'gpt-5.1-codex': { inputPerMillion: 1.25, outputPerMillion: 10 },
+  'gpt-5.1-codex-mini': { inputPerMillion: 0.25, outputPerMillion: 2 },
+  'gpt-5': { inputPerMillion: 1.25, outputPerMillion: 10 },
+  'gpt-5-chat': { inputPerMillion: 1.25, outputPerMillion: 10 },
+  'gpt-5-codex': { inputPerMillion: 1.25, outputPerMillion: 10 },
+  'gpt-5-mini': { inputPerMillion: 0.25, outputPerMillion: 2 },
+  'gpt-5-nano': { inputPerMillion: 0.05, outputPerMillion: 0.4 },
+  'gpt-5-pro': { inputPerMillion: 15, outputPerMillion: 120 },
+  // OpenAI — GPT-4.1
+  'gpt-4.1': { inputPerMillion: 2, outputPerMillion: 8 },
+  'gpt-4.1-mini': { inputPerMillion: 0.4, outputPerMillion: 1.6 },
+  'gpt-4.1-nano': { inputPerMillion: 0.1, outputPerMillion: 0.4 },
+  // OpenAI — GPT-4o (legacy)
   'gpt-4o': { inputPerMillion: 2.5, outputPerMillion: 10 },
+  'gpt-4o-2024-08-06': { inputPerMillion: 2.5, outputPerMillion: 10 },
+  'gpt-4o-2024-11-20': { inputPerMillion: 2.5, outputPerMillion: 10 },
   'gpt-4o-mini': { inputPerMillion: 0.15, outputPerMillion: 0.6 },
+  'gpt-4o-mini-2024-07-18': { inputPerMillion: 0.15, outputPerMillion: 0.6 },
   'gpt-4-turbo': { inputPerMillion: 10, outputPerMillion: 30 },
+  // OpenAI — o-series reasoning
+  'o3': { inputPerMillion: 2, outputPerMillion: 8 },
+  'o3-mini': { inputPerMillion: 1.1, outputPerMillion: 4.4 },
+  'o3-pro': { inputPerMillion: 20, outputPerMillion: 80 },
+  'o4-mini': { inputPerMillion: 1.1, outputPerMillion: 4.4 },
+  'o1': { inputPerMillion: 15, outputPerMillion: 60 },
+  // OpenAI — Audio
+  'gpt-audio': { inputPerMillion: 2.5, outputPerMillion: 10 },
+  'gpt-audio-mini': { inputPerMillion: 0.6, outputPerMillion: 2.4 },
+  'gpt-4o-audio-preview': { inputPerMillion: 2.5, outputPerMillion: 10 },
 
   // xAI (Grok)
   'grok-4': { inputPerMillion: 3, outputPerMillion: 15 },
