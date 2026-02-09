@@ -7,6 +7,7 @@ import type { Attachment } from './types.js';
 import { VoiceManager } from '../voice/index.js';
 import { getPendingVoiceAttachments, cleanupVoiceAttachments } from '../voice/attachments.js';
 import { BotConfigManager } from './bot-config.js';
+import { resolveTimezone } from '../utils/country-timezone.js';
 
 const MAX_MESSAGE_LENGTH = 4096;
 const TYPING_INTERVAL = 5000; // 5 seconds
@@ -605,48 +606,50 @@ export class TelegramChannel {
 
     await ctx.reply(
       "Personality set!\n\n" +
-      "What timezone are you in? Please enter an IANA timezone name, for example:\n\n" +
-      "<code>Europe/Dublin</code>\n" +
-      "<code>America/New_York</code>\n" +
-      "<code>Asia/Tokyo</code>\n" +
-      "<code>US/Pacific</code>\n\n" +
-      "This ensures reminders and scheduled messages arrive at the right time.",
+      "What country are you in? For example:\n\n" +
+      "<code>Ireland</code>\n" +
+      "<code>Japan</code>\n" +
+      "<code>USA</code>\n" +
+      "<code>Germany</code>\n\n" +
+      "This ensures reminders and scheduled messages arrive at the right time.\n\n" +
+      "<i>You can also enter an IANA timezone directly (e.g. Europe/Dublin).</i>",
       { parse_mode: 'HTML' }
     );
     return true;
   }
 
   private async handleTimezoneStep(ctx: Context, userId: string, message: string): Promise<boolean> {
-    const timezone = message.trim();
+    const result = resolveTimezone(message);
 
-    // Validate IANA timezone name
-    try {
-      Intl.DateTimeFormat(undefined, { timeZone: timezone });
-    } catch {
+    if (!result) {
       await ctx.reply(
-        "That doesn't look like a valid timezone. Please enter an IANA timezone name, e.g.:\n\n" +
-        "<code>Europe/Dublin</code>\n" +
-        "<code>America/New_York</code>\n" +
-        "<code>Asia/Tokyo</code>\n" +
-        "<code>US/Pacific</code>\n" +
-        "<code>UTC</code>",
+        "I couldn't recognise that country or timezone. Please enter your country name, e.g.:\n\n" +
+        "<code>Ireland</code>\n" +
+        "<code>Japan</code>\n" +
+        "<code>USA</code>\n" +
+        "<code>Germany</code>\n\n" +
+        "Or an IANA timezone like <code>Europe/Dublin</code>",
         { parse_mode: 'HTML' }
       );
       return true;
     }
 
     await this.configManager.updateUserConfig(userId, {
-      timezone,
+      timezone: result.timezone,
       onboardingStep: 'complete',
       onboardingComplete: true,
     });
 
     const config = this.configManager.getUserConfig(userId);
 
+    const countryNote = result.source === 'country'
+      ? `\n<i>(Mapped from "${message.trim()}" → ${config.timezone})</i>\n`
+      : '';
+
     await ctx.reply(
       `<b>Setup Complete!</b>\n\n` +
       `I'm now <b>${config.botName}</b>\n` +
-      `Timezone: <b>${config.timezone}</b>\n\n` +
+      `Timezone: <b>${config.timezone}</b>${countryNote}\n\n` +
       `You can change these anytime with /setup\n\n` +
       `How can I help you today?`,
       { parse_mode: 'HTML' }
