@@ -565,44 +565,49 @@ Respond with JSON only:
     // Use limitedFacts from here on
     const facts_to_process = limitedFacts;
 
-    // Step 2: Quick deduplication pass using embeddings
+    // Step 2: Single merged search per fact (dedup + classification in one pass)
+    // Run all searches in parallel since SQLite WAL mode supports concurrent reads
+    const searchResults = await Promise.all(
+      facts_to_process.map(fact =>
+        this.scallopStore.search(fact.content, {
+          userId,
+          limit: 10,
+          minProminence: 0.1,
+          queryEmbedding: fact.embedding,
+        })
+      )
+    );
+
+    // Step 3: Dedup check against search results
     const factsToClassify: ExtractedFactWithEmbedding[] = [];
-    const duplicateFacts: Set<number> = new Set();
+    const factSearchResults: Map<ExtractedFactWithEmbedding, typeof searchResults[0]> = new Map();
+    // Collect all candidate memory IDs from searches for consolidation
+    const allCandidateMemoryIds = new Set<string>();
 
     for (let i = 0; i < facts_to_process.length; i++) {
       const fact = facts_to_process[i];
+      const scallopResults = searchResults[i];
 
-      // Search ScallopStore for dedup
-      const scallopResults = await this.scallopStore.search(fact.content, {
-        userId,
-        limit: 3,
-        minProminence: 0.1,
-      });
-      const existingFacts = scallopResults.map((r) => ({
-        entry: { embedding: r.memory.embedding ?? undefined },
-        score: r.score,
-      }));
+      // Track candidate IDs for consolidation
+      for (const r of scallopResults) {
+        allCandidateMemoryIds.add(r.memory.id);
+      }
 
       // Check for exact duplicates using embeddings
       let isDuplicate = false;
-      if (fact.embedding && existingFacts.length > 0) {
-        for (const existing of existingFacts) {
-          if (existing.entry.embedding) {
-            const similarity = cosineSimilarity(fact.embedding, existing.entry.embedding);
+      if (fact.embedding && scallopResults.length > 0) {
+        for (const r of scallopResults) {
+          if (r.memory.embedding) {
+            const similarity = cosineSimilarity(fact.embedding, r.memory.embedding);
             if (similarity >= this.deduplicationThreshold) {
               isDuplicate = true;
               // Reinforce the existing memory: bump confidence, prominence, times_confirmed
-              const matchingResult = scallopResults.find(r =>
-                r.memory.embedding && cosineSimilarity(fact.embedding!, r.memory.embedding) >= this.deduplicationThreshold
+              const db = this.scallopStore.getDatabase();
+              db.reinforceMemory(r.memory.id);
+              this.logger.debug(
+                { memoryId: r.memory.id, content: fact.content },
+                'Duplicate fact reinforced existing memory'
               );
-              if (matchingResult) {
-                const db = this.scallopStore.getDatabase();
-                db.reinforceMemory(matchingResult.memory.id);
-                this.logger.debug(
-                  { memoryId: matchingResult.memory.id, content: fact.content },
-                  'Duplicate fact reinforced existing memory'
-                );
-              }
               break;
             }
           }
@@ -610,10 +615,10 @@ Respond with JSON only:
       }
 
       if (isDuplicate) {
-        duplicateFacts.add(i);
         result.duplicates++;
       } else {
         factsToClassify.push(fact);
+        factSearchResults.set(fact, scallopResults);
       }
     }
 
@@ -626,27 +631,22 @@ Respond with JSON only:
       if (mem) storedMemories.push(mem);
     };
 
-    // Step 3: Batch classification with single LLM call
-    // Only compare against semantically similar existing facts (not ALL user facts)
+    // Step 4: Batch classification with single LLM call
+    // Build relevant facts from pre-fetched search results (no re-searching)
     if (this.relationshipClassifier && factsToClassify.length > 0) {
-      // Gather relevant existing facts by searching ScallopStore
       const relevantFactIds = new Set<string>();
       const relevantFacts: { id: string; content: string; subject: string; category: string }[] = [];
 
       for (const fact of factsToClassify) {
-        const similar = await this.scallopStore.search(fact.content, {
-          userId,
-          limit: 10,
-          minProminence: 0.1,
-        });
-        for (const result of similar) {
-          if (!relevantFactIds.has(result.memory.id)) {
-            relevantFactIds.add(result.memory.id);
+        const similar = factSearchResults.get(fact) ?? [];
+        for (const r of similar) {
+          if (!relevantFactIds.has(r.memory.id)) {
+            relevantFactIds.add(r.memory.id);
             relevantFacts.push({
-              id: result.memory.id,
-              content: result.memory.content,
-              subject: (result.memory.metadata?.subject as string) || 'user',
-              category: (result.memory.metadata?.originalCategory as string) || result.memory.category || 'general',
+              id: r.memory.id,
+              content: r.memory.content,
+              subject: (r.memory.metadata?.subject as string) || 'user',
+              category: (r.memory.metadata?.originalCategory as string) || r.memory.category || 'general',
             });
           }
         }
@@ -671,7 +671,7 @@ Respond with JSON only:
             'Batch classification complete'
           );
 
-          // Step 4: Apply classifications and store
+          // Step 5: Apply classifications and store
           for (let i = 0; i < factsToClassify.length; i++) {
             const fact = factsToClassify[i];
             const classification = classifications[i];
@@ -724,6 +724,7 @@ Respond with JSON only:
           userId,
           storedMemories.map(m => m.content),
           sourceMessage,
+          Array.from(allCandidateMemoryIds),
         ).catch(err => {
           this.logger.warn({ error: (err as Error).message }, 'Background consolidation failed');
         });
@@ -775,6 +776,8 @@ Respond with JSON only:
       sourceChunk: sourceMessage ? sourceMessage.substring(0, 500) : undefined,
       metadata: provenance,
       learnedFrom,
+      detectRelations: false,
+      embedding: fact.embedding,
     });
 
     return { id: newMemory.id, content: searchableContent };
@@ -885,23 +888,37 @@ Respond with JSON only:
     userId: string,
     storedFacts: string[],
     sourceMessage?: string,
+    /** Pre-fetched candidate memory IDs from the merged search pass */
+    candidateMemoryIds?: string[],
   ): Promise<void> {
     if (!this.scallopStore) return;
 
     const profileManager = this.scallopStore.getProfileManager();
     const newIdSet = new Set(newMemoryIds);
+    const db = this.scallopStore.getDatabase();
 
-    // Search for similar existing memories across all new facts
+    // Use pre-fetched candidates if available, otherwise fall back to searching
     const allCandidates = new Map<string, { id: string; content: string }>();
-    for (const factContent of storedFacts) {
-      const similar = await this.scallopStore.search(factContent, {
-        userId,
-        minProminence: 0.05,
-        limit: 5,
-      });
-      for (const s of similar) {
-        if (!newIdSet.has(s.memory.id) && s.memory.isLatest) {
-          allCandidates.set(s.memory.id, { id: s.memory.id, content: s.memory.content });
+    if (candidateMemoryIds && candidateMemoryIds.length > 0) {
+      for (const id of candidateMemoryIds) {
+        if (newIdSet.has(id)) continue;
+        const mem = db.getMemory(id);
+        if (mem && mem.isLatest) {
+          allCandidates.set(id, { id, content: mem.content });
+        }
+      }
+    } else {
+      // Fallback: search for similar existing memories
+      for (const factContent of storedFacts) {
+        const similar = await this.scallopStore.search(factContent, {
+          userId,
+          minProminence: 0.05,
+          limit: 5,
+        });
+        for (const s of similar) {
+          if (!newIdSet.has(s.memory.id) && s.memory.isLatest) {
+            allCandidates.set(s.memory.id, { id: s.memory.id, content: s.memory.content });
+          }
         }
       }
     }
