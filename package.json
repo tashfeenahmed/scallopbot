@@ -7,7 +7,7 @@
   "scripts": {
     "clean": "rm -rf dist",
     "build:web": "cd web && npm install && npm run build",
-    "build": "npm run build:web && rm -rf dist && tsc && node -e \"const fs=require('fs'),p=require('path');fs.readdirSync('src/skills/bundled').forEach(d=>{const s=p.join('src/skills/bundled',d,'SKILL.md'),t=p.join('dist/skills/bundled',d);if(fs.existsSync(s)){fs.mkdirSync(t,{recursive:true});fs.copyFileSync(s,p.join(t,'SKILL.md'))}})\"",
+    "build": "npm run build:web && rm -rf dist && tsc && node -e \"const fs=require('fs'),p=require('path');function cpDir(s,t){fs.mkdirSync(t,{recursive:true});fs.readdirSync(s,{withFileTypes:true}).forEach(e=>{const sp=p.join(s,e.name),tp=p.join(t,e.name);e.isDirectory()?cpDir(sp,tp):fs.copyFileSync(sp,tp)})}fs.readdirSync('src/skills/bundled').forEach(d=>{const s=p.join('src/skills/bundled',d),t=p.join('dist/skills/bundled',d);if(fs.existsSync(p.join(s,'SKILL.md')))cpDir(s,t)})\"",
     "start": "node dist/cli.js start",
     "dev": "tsx watch src/index.ts",
     "test": "vitest",
@@ -39,7 +39,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.72.1",
-    "agent-browser": "^0.9.0",
+    "agent-browser": "^0.9.1",
     "better-sqlite3": "^12.6.2",
     "chalk": "^5.6.2",
     "commander": "^14.0.3",
