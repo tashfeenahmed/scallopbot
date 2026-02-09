@@ -60,6 +60,8 @@ export interface AddMemoryOptions {
   detectRelations?: boolean;
   /** How the memory was learned: conversation, correction, inference, consolidation */
   learnedFrom?: string;
+  /** Pre-computed embedding vector — skips embedder.embed() when provided */
+  embedding?: number[];
 }
 
 /**
@@ -77,6 +79,8 @@ export interface ScallopSearchOptions {
   eventDateRange?: { start: number; end: number };
   /** Time range for document dates */
   documentDateRange?: { start: number; end: number };
+  /** Pre-computed query embedding — skips embedder.embed(query) when provided */
+  queryEmbedding?: number[];
 }
 
 /**
@@ -110,7 +114,7 @@ export class ScallopMemoryStore {
 
     // Initialize components
     this.decayEngine = new DecayEngine(options.decayConfig);
-    this.relationGraph = new RelationGraph(this.db, options.embedder, options.relationOptions);
+    this.relationGraph = new RelationGraph(this.db, this.embedder, options.relationOptions);
     this.profileManager = new ProfileManager(this.db, options.profileOptions);
     this.temporalExtractor = new TemporalExtractor();
 
@@ -140,9 +144,9 @@ export class ScallopMemoryStore {
     const temporal = this.temporalExtractor.extract(content);
     const eventDate = options.eventDate ?? temporal.eventDate;
 
-    // Generate embedding if embedder available (non-fatal if it fails)
-    let embedding: number[] | undefined;
-    if (this.embedder) {
+    // Use pre-computed embedding if provided, otherwise generate via embedder
+    let embedding: number[] | undefined = options.embedding;
+    if (!embedding && this.embedder) {
       try {
         embedding = await this.embedder.embed(content);
       } catch (err) {
@@ -320,11 +324,10 @@ export class ScallopMemoryStore {
     const results: ScallopSearchResult[] = [];
     const queryLower = query.toLowerCase();
 
-    // Only compute query embedding if at least one candidate has an embedding
-    // This avoids wasting API calls when no semantic comparison is possible
+    // Use pre-computed query embedding if provided, otherwise compute it
     const anyCandidateHasEmbedding = candidates.some(m => m.embedding !== null);
-    let queryEmbedding: number[] | undefined;
-    if (this.embedder && anyCandidateHasEmbedding) {
+    let queryEmbedding: number[] | undefined = options.queryEmbedding;
+    if (!queryEmbedding && this.embedder && anyCandidateHasEmbedding) {
       try {
         queryEmbedding = await this.embedder.embed(query);
       } catch (err) {
