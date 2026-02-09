@@ -2,7 +2,8 @@
  * Memory Search Skill Execution Script
  *
  * Opens the SQLite memories database directly (safe in WAL mode)
- * and searches using hybrid BM25 keyword + TF-IDF semantic scoring.
+ * and searches using hybrid BM25 keyword + Ollama/TF-IDF semantic scoring.
+ * Uses stored Ollama embeddings on memories when available.
  */
 
 import * as path from 'path';
@@ -11,7 +12,7 @@ import {
   type ScallopMemoryEntry,
 } from '../../../../memory/db.js';
 import { calculateBM25Score, buildDocFreqMap, type BM25Options } from '../../../../memory/bm25.js';
-import { TFIDFEmbedder, cosineSimilarity } from '../../../../memory/embeddings.js';
+import { TFIDFEmbedder, OllamaEmbedder, cosineSimilarity } from '../../../../memory/embeddings.js';
 
 // Types
 interface MemorySearchArgs {
@@ -96,13 +97,27 @@ function parseArgs(): MemorySearchArgs {
 }
 
 /**
- * Score and rank memories using hybrid BM25 + TF-IDF semantic search
+ * Try to get query embedding via Ollama. Returns undefined if unavailable.
  */
-function searchMemories(
+async function getOllamaQueryEmbedding(query: string): Promise<number[] | undefined> {
+  const baseUrl = process.env.OLLAMA_BASE_URL || 'http://localhost:11434';
+  try {
+    const embedder = new OllamaEmbedder({ baseUrl, model: 'nomic-embed-text' });
+    return await embedder.embed(query);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Score and rank memories using hybrid BM25 + semantic search.
+ * Uses stored Ollama embeddings when available, falls back to TF-IDF.
+ */
+async function searchMemories(
   memories: ScallopMemoryEntry[],
   query: string,
   limit: number
-): { memory: ScallopMemoryEntry; score: number }[] {
+): Promise<{ memory: ScallopMemoryEntry; score: number }[]> {
   if (memories.length === 0) return [];
 
   const contentTexts = memories.map((m) => m.content);
@@ -116,19 +131,41 @@ function searchMemories(
     docFreq,
   };
 
-  // Build TF-IDF embedder trained on candidate corpus for semantic matching
-  const embedder = new TFIDFEmbedder();
-  embedder.addDocuments(contentTexts);
-  const queryEmbedding = embedder.embedSync(query);
+  // Check if memories have stored embeddings (from Ollama during fact extraction)
+  const hasStoredEmbeddings = memories.some(m => m.embedding !== null);
+
+  // Try Ollama for query embedding if memories have stored embeddings
+  let queryEmbedding: number[] | undefined;
+  let useTfidf = true;
+  if (hasStoredEmbeddings) {
+    queryEmbedding = await getOllamaQueryEmbedding(query);
+    if (queryEmbedding) {
+      useTfidf = false;
+    }
+  }
+
+  // Fall back to TF-IDF if Ollama unavailable or no stored embeddings
+  let tfidfEmbedder: TFIDFEmbedder | undefined;
+  let tfidfQueryEmbedding: number[] | undefined;
+  if (useTfidf) {
+    tfidfEmbedder = new TFIDFEmbedder();
+    tfidfEmbedder.addDocuments(contentTexts);
+    tfidfQueryEmbedding = tfidfEmbedder.embedSync(query);
+  }
 
   const results: { memory: ScallopMemoryEntry; score: number }[] = [];
 
   for (const memory of memories) {
     const keywordScore = calculateBM25Score(query, memory.content, bm25Options);
 
-    // Semantic score via TF-IDF cosine similarity
-    const memEmbedding = embedder.embedSync(memory.content);
-    const semanticScore = cosineSimilarity(queryEmbedding, memEmbedding);
+    // Semantic score: use stored Ollama embedding or fall back to TF-IDF
+    let semanticScore = 0;
+    if (!useTfidf && queryEmbedding && memory.embedding) {
+      semanticScore = cosineSimilarity(queryEmbedding, memory.embedding);
+    } else if (tfidfEmbedder && tfidfQueryEmbedding) {
+      const memEmbedding = tfidfEmbedder.embedSync(memory.content);
+      semanticScore = cosineSimilarity(tfidfQueryEmbedding, memEmbedding);
+    }
 
     // Combined: only count if there's actual relevance
     const relevanceScore = keywordScore * 0.5 + semanticScore * 0.5;
@@ -178,7 +215,7 @@ function formatResults(results: { memory: ScallopMemoryEntry; score: number }[])
 /**
  * Execute memory search against SQLite database
  */
-function executeSearch(args: MemorySearchArgs): void {
+async function executeSearch(args: MemorySearchArgs): Promise<void> {
   const workspace = process.env.SKILL_WORKSPACE || process.env.AGENT_WORKSPACE || process.cwd();
   const dbPath = path.join(workspace, 'memories.db');
 
@@ -212,7 +249,7 @@ function executeSearch(args: MemorySearchArgs): void {
     }
 
     const limit = Math.min(args.limit || 10, 50);
-    const results = searchMemories(candidates, args.query, limit);
+    const results = await searchMemories(candidates, args.query, limit);
 
     outputResult({
       success: true,
