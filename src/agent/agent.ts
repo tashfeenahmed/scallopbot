@@ -331,9 +331,10 @@ export class Agent {
         ? this.contextManager.buildContextMessages(rawMessages)
         : rawMessages;
 
-      // Enable thinking only for providers that support it and for complex queries
+      // Enable thinking for providers that support it (complexity gating removed —
+      // the model decides internally how much to think based on the query)
       const providerSupportsThinking = activeProvider.name === 'moonshot';
-      const useThinking = this.enableThinking && providerSupportsThinking && complexity.suggestedModelTier === 'capable';
+      const useThinking = this.enableThinking && providerSupportsThinking;
 
       // Build completion request
       const request: CompletionRequest = {
