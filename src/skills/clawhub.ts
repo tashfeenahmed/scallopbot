@@ -985,16 +985,20 @@ export class SkillPackageManager {
    */
   async installFromClawHub(slug: string, version?: string): Promise<InstallResult> {
     try {
-      // Sanitize slug
-      let safeSlug: string;
-      try {
-        safeSlug = sanitizeSkillName(slug);
-      } catch (err) {
-        return {
-          success: false,
-          error: (err as Error).message,
-        };
+      // ClawHub slugs are "owner/name" format — validate both parts separately
+      // but use the full slug for API calls and just the name for the local directory
+      const slugParts = slug.split('/');
+      if (slugParts.length > 2 || slugParts.some(p => p.includes('..') || p.includes('\\'))) {
+        return { success: false, error: `Invalid ClawHub slug: "${slug}"` };
       }
+      // Validate each part has safe characters
+      for (const part of slugParts) {
+        if (!/^[a-zA-Z0-9_-]+$/.test(part)) {
+          return { success: false, error: `Invalid ClawHub slug: "${slug}" contains invalid characters` };
+        }
+      }
+      const safeSlug = slug; // full slug for API calls
+      const localName = slugParts[slugParts.length - 1]; // just the name for local directory
 
       this.logger?.info({ slug: safeSlug, version }, 'Installing from ClawHub');
 
@@ -1016,8 +1020,8 @@ export class SkillPackageManager {
         };
       }
 
-      // Create skill directory
-      const skillDir = path.join(this.skillsDir, safeSlug);
+      // Create skill directory (use just the name part, not owner/name)
+      const skillDir = path.join(this.skillsDir, localName);
       await fs.mkdir(skillDir, { recursive: true });
 
       // Extract ZIP
@@ -1090,7 +1094,7 @@ export class SkillPackageManager {
       }
 
       const skill: Skill = {
-        name: parsed.frontmatter.name || safeSlug,
+        name: parsed.frontmatter.name || localName,
         description: parsed.frontmatter.description || skillInfo.summary,
         path: skillMdPath,
         source: 'local',
