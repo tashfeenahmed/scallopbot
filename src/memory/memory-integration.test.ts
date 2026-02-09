@@ -58,6 +58,7 @@ function createTestEmbedder(): EmbeddingProvider {
     dimension: DIM,
     embed: vi.fn().mockImplementation((t: string) => Promise.resolve(embed(t))),
     embedBatch: vi.fn().mockImplementation((ts: string[]) => Promise.resolve(ts.map(embed))),
+    isAvailable: () => true,
   };
 }
 
