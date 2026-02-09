@@ -72,6 +72,14 @@ export interface ScallopMemoryEntry {
   // Metadata (stored as JSON string)
   metadata: Record<string, unknown> | null;
 
+  // Source memory tracking (optional with defaults for backward compatibility)
+  /** How the memory was learned: conversation, correction, inference, consolidation */
+  learnedFrom?: string;
+  /** Number of times this fact has been re-stated/confirmed */
+  timesConfirmed?: number;
+  /** JSON array of memory IDs that contradict this one */
+  contradictionIds?: string[] | null;
+
   createdAt: number;
   updatedAt: number;
 }
@@ -142,6 +150,21 @@ export interface SessionMessageRow {
   sessionId: string;
   role: string;
   content: string;
+  createdAt: number;
+}
+
+/**
+ * Session summary entry (LLM-generated)
+ */
+export interface SessionSummaryRow {
+  id: string;
+  sessionId: string;
+  userId: string;
+  summary: string;
+  topics: string[];
+  messageCount: number;
+  durationMs: number;
+  embedding: number[] | null;
   createdAt: number;
 }
 
@@ -434,7 +457,24 @@ export class ScallopDatabase {
         updated_at INTEGER NOT NULL
       );
 
+      -- Session summaries (LLM-generated summaries of past sessions)
+      CREATE TABLE IF NOT EXISTS session_summaries (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        user_id TEXT NOT NULL DEFAULT 'default',
+        summary TEXT NOT NULL,
+        topics TEXT,          -- JSON array of topic strings
+        message_count INTEGER DEFAULT 0,
+        duration_ms INTEGER DEFAULT 0,
+        embedding TEXT,       -- JSON array (embedding vector)
+        created_at INTEGER NOT NULL,
+        FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+      );
+
       -- Indexes for performance
+      CREATE INDEX IF NOT EXISTS idx_session_summaries_user ON session_summaries(user_id);
+      CREATE INDEX IF NOT EXISTS idx_session_summaries_session ON session_summaries(session_id);
+      CREATE INDEX IF NOT EXISTS idx_session_summaries_created ON session_summaries(created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_sessions_created ON sessions(created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_session_messages_session ON session_messages(session_id, id);
       CREATE INDEX IF NOT EXISTS idx_cost_usage_timestamp ON cost_usage(timestamp);
@@ -466,6 +506,9 @@ export class ScallopDatabase {
 
     // Migration: Consolidate all memory user_ids to 'default' (single-user bot)
     this.migrateConsolidateMemoryUserIds();
+
+    // Migration: Add source memory columns (learned_from, times_confirmed, contradiction_ids)
+    this.migrateAddSourceMemoryColumns();
   }
 
   /**
@@ -525,6 +568,28 @@ export class ScallopDatabase {
     }
   }
 
+  /**
+   * Add source memory columns: learned_from, times_confirmed, contradiction_ids
+   */
+  private migrateAddSourceMemoryColumns(): void {
+    try {
+      const tableInfo = this.db.prepare("PRAGMA table_info(memories)").all() as Array<{ name: string }>;
+      const columns = new Set(tableInfo.map(col => col.name));
+
+      if (!columns.has('learned_from')) {
+        this.db.exec("ALTER TABLE memories ADD COLUMN learned_from TEXT DEFAULT 'conversation'");
+      }
+      if (!columns.has('times_confirmed')) {
+        this.db.exec("ALTER TABLE memories ADD COLUMN times_confirmed INTEGER DEFAULT 1");
+      }
+      if (!columns.has('contradiction_ids')) {
+        this.db.exec("ALTER TABLE memories ADD COLUMN contradiction_ids TEXT DEFAULT NULL");
+      }
+    } catch {
+      // Columns might already exist or table might not exist yet
+    }
+  }
+
   // ============ Memory CRUD Operations ============
 
   /**
@@ -538,11 +603,13 @@ export class ScallopDatabase {
       INSERT INTO memories (
         id, user_id, content, category, memory_type, importance, confidence, is_latest,
         source, document_date, event_date, prominence, last_accessed, access_count,
-        source_chunk, embedding, metadata, created_at, updated_at
+        source_chunk, embedding, metadata, learned_from, times_confirmed, contradiction_ids,
+        created_at, updated_at
       ) VALUES (
         ?, ?, ?, ?, ?, ?, ?, ?,
         ?, ?, ?, ?, ?, ?,
-        ?, ?, ?, ?, ?
+        ?, ?, ?, ?, ?, ?,
+        ?, ?
       )
     `);
 
@@ -564,6 +631,9 @@ export class ScallopDatabase {
       memory.sourceChunk,
       memory.embedding ? JSON.stringify(memory.embedding) : null,
       memory.metadata ? JSON.stringify(memory.metadata) : null,
+      memory.learnedFrom || 'conversation',
+      memory.timesConfirmed || 1,
+      memory.contradictionIds ? JSON.stringify(memory.contradictionIds) : null,
       now,
       now
     );
@@ -709,6 +779,38 @@ export class ScallopDatabase {
     const stmt = this.db.prepare(query);
     const rows = stmt.all(...params) as Record<string, unknown>[];
     return rows.map((row) => this.rowToMemory(row));
+  }
+
+  /**
+   * Bump confirmation count and boost confidence/prominence for a re-stated fact.
+   */
+  reinforceMemory(id: string, confidenceBoost: number = 0.05, prominenceBoost: number = 0.1): void {
+    const now = Date.now();
+    this.db.prepare(`
+      UPDATE memories SET
+        times_confirmed = times_confirmed + 1,
+        confidence = MIN(1.0, confidence + ?),
+        prominence = MIN(1.0, prominence + ?),
+        updated_at = ?
+      WHERE id = ?
+    `).run(confidenceBoost, prominenceBoost, now, id);
+  }
+
+  /**
+   * Add contradiction IDs to a memory.
+   */
+  addContradiction(memoryId: string, contradictingId: string): void {
+    const memory = this.getMemory(memoryId);
+    if (!memory) return;
+
+    const existing = memory.contradictionIds || [];
+    if (!existing.includes(contradictingId)) {
+      existing.push(contradictingId);
+      const now = Date.now();
+      this.db.prepare(
+        'UPDATE memories SET contradiction_ids = ?, updated_at = ? WHERE id = ?'
+      ).run(JSON.stringify(existing), now, memoryId);
+    }
   }
 
   /**
@@ -1054,6 +1156,70 @@ export class ScallopDatabase {
     const stmt = this.db.prepare('SELECT * FROM session_messages WHERE session_id = ? ORDER BY id');
     const rows = stmt.all(sessionId) as Record<string, unknown>[];
     return rows.map(row => this.rowToSessionMessage(row));
+  }
+
+  // ============ Session Summary Operations ============
+
+  addSessionSummary(summary: Omit<SessionSummaryRow, 'id' | 'createdAt'>): SessionSummaryRow {
+    const id = nanoid();
+    const now = Date.now();
+
+    this.db.prepare(`
+      INSERT INTO session_summaries (id, session_id, user_id, summary, topics, message_count, duration_ms, embedding, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id,
+      summary.sessionId,
+      summary.userId,
+      summary.summary,
+      JSON.stringify(summary.topics),
+      summary.messageCount,
+      summary.durationMs,
+      summary.embedding ? JSON.stringify(summary.embedding) : null,
+      now
+    );
+
+    return { ...summary, id, createdAt: now };
+  }
+
+  getSessionSummary(sessionId: string): SessionSummaryRow | null {
+    const row = this.db.prepare(
+      'SELECT * FROM session_summaries WHERE session_id = ?'
+    ).get(sessionId) as Record<string, unknown> | undefined;
+    return row ? this.rowToSessionSummary(row) : null;
+  }
+
+  getSessionSummariesByUser(userId: string, limit: number = 20): SessionSummaryRow[] {
+    const rows = this.db.prepare(
+      'SELECT * FROM session_summaries WHERE user_id = ? ORDER BY created_at DESC LIMIT ?'
+    ).all(userId, limit) as Record<string, unknown>[];
+    return rows.map(row => this.rowToSessionSummary(row));
+  }
+
+  getAllSessionSummaries(limit: number = 50): SessionSummaryRow[] {
+    const rows = this.db.prepare(
+      'SELECT * FROM session_summaries ORDER BY created_at DESC LIMIT ?'
+    ).all(limit) as Record<string, unknown>[];
+    return rows.map(row => this.rowToSessionSummary(row));
+  }
+
+  getSessionSummaryCount(): number {
+    const row = this.db.prepare('SELECT COUNT(*) as count FROM session_summaries').get() as { count: number };
+    return row.count;
+  }
+
+  private rowToSessionSummary(row: Record<string, unknown>): SessionSummaryRow {
+    return {
+      id: row.id as string,
+      sessionId: row.session_id as string,
+      userId: row.user_id as string,
+      summary: row.summary as string,
+      topics: row.topics ? JSON.parse(row.topics as string) : [],
+      messageCount: row.message_count as number,
+      durationMs: row.duration_ms as number,
+      embedding: row.embedding ? JSON.parse(row.embedding as string) : null,
+      createdAt: row.created_at as number,
+    };
   }
 
   /**
@@ -1605,6 +1771,9 @@ export class ScallopDatabase {
       sourceChunk: row.source_chunk as string | null,
       embedding: row.embedding ? JSON.parse(row.embedding as string) : null,
       metadata: row.metadata ? JSON.parse(row.metadata as string) : null,
+      learnedFrom: (row.learned_from as string) || 'conversation',
+      timesConfirmed: (row.times_confirmed as number) || 1,
+      contradictionIds: row.contradiction_ids ? JSON.parse(row.contradiction_ids as string) : null,
       createdAt: row.created_at as number,
       updatedAt: row.updated_at as number,
     };

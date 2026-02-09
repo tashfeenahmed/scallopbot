@@ -21,8 +21,8 @@ import { RelationGraph, type RelationDetectionOptions } from './relations.js';
 import { ProfileManager, type ProfileUpdateOptions } from './profiles.js';
 import { TemporalExtractor, TemporalQuery } from './temporal.js';
 import type { EmbeddingProvider } from './embeddings.js';
-import { cosineSimilarity } from './embeddings.js';
-import { calculateBM25Score, buildDocFreqMap, type BM25Options } from './bm25.js';
+import { cosineSimilarity, CachedEmbedder } from './embeddings.js';
+import { calculateBM25Score, buildDocFreqMap, SEARCH_WEIGHTS, type BM25Options } from './bm25.js';
 
 /**
  * Options for ScallopMemoryStore
@@ -58,6 +58,8 @@ export interface AddMemoryOptions {
   source?: 'user' | 'assistant';
   /** Automatically detect relations with existing memories */
   detectRelations?: boolean;
+  /** How the memory was learned: conversation, correction, inference, consolidation */
+  learnedFrom?: string;
 }
 
 /**
@@ -103,7 +105,8 @@ export class ScallopMemoryStore {
   constructor(options: ScallopMemoryStoreOptions) {
     this.db = new ScallopDatabase(options.dbPath);
     this.logger = options.logger.child({ component: 'scallop-memory' });
-    this.embedder = options.embedder;
+    // Wrap embedder with cache to avoid recomputing embeddings for seen texts
+    this.embedder = options.embedder ? new CachedEmbedder(options.embedder) : undefined;
 
     // Initialize components
     this.decayEngine = new DecayEngine(options.decayConfig);
@@ -130,6 +133,7 @@ export class ScallopMemoryStore {
       metadata,
       source = 'user',
       detectRelations = true,
+      learnedFrom = 'conversation',
     } = options;
 
     // Extract temporal information
@@ -168,6 +172,9 @@ export class ScallopMemoryStore {
         rawDateText: temporal.rawDateText,
         isRelativeDate: temporal.isRelative,
       },
+      learnedFrom,
+      timesConfirmed: 1,
+      contradictionIds: null,
     });
 
     this.logger.debug({ memoryId: memory.id, category, userId }, 'Memory added');
@@ -354,8 +361,8 @@ export class ScallopMemoryStore {
       }
 
       // Combine scores: prominence is a tiebreaker, not a baseline
-      const relevanceScore = keywordScore * 0.4 + semanticScore * 0.4;
-      score = relevanceScore > 0 ? relevanceScore + memory.prominence * 0.2 : 0;
+      const relevanceScore = keywordScore * SEARCH_WEIGHTS.keyword + semanticScore * SEARCH_WEIGHTS.semantic;
+      score = relevanceScore > 0 ? relevanceScore + memory.prominence * SEARCH_WEIGHTS.prominence : 0;
 
       // Boost for exact matches
       if (memory.content.toLowerCase().includes(queryLower)) {
@@ -435,6 +442,77 @@ export class ScallopMemoryStore {
     return results.map((row) => this.db.getMemory(row.id as string)!).filter(Boolean);
   }
 
+  // ============ Session Summary Search ============
+
+  /**
+   * Search session summaries with hybrid keyword + semantic search
+   */
+  async searchSessions(query: string, options: { userId?: string; limit?: number } = {}): Promise<Array<{
+    summary: import('./db.js').SessionSummaryRow;
+    score: number;
+  }>> {
+    const { userId, limit = 5 } = options;
+    const db = this.db;
+
+    // Get candidate summaries
+    const candidates = userId
+      ? db.getSessionSummariesByUser(userId, 50)
+      : db.getAllSessionSummaries(50);
+
+    if (candidates.length === 0) return [];
+
+    // Compute query embedding if available
+    let queryEmbedding: number[] | undefined;
+    const anyCandidateHasEmbedding = candidates.some(s => s.embedding !== null);
+    if (this.embedder && anyCandidateHasEmbedding) {
+      try {
+        queryEmbedding = await this.embedder.embed(query);
+      } catch {
+        // Fall through to keyword-only
+      }
+    }
+
+    const queryLower = query.toLowerCase();
+    const results: Array<{ summary: import('./db.js').SessionSummaryRow; score: number }> = [];
+
+    for (const summary of candidates) {
+      let score = 0;
+
+      // Keyword matching: check summary text and topics
+      const summaryLower = summary.summary.toLowerCase();
+      const topicsStr = summary.topics.join(' ').toLowerCase();
+      const combinedText = `${summaryLower} ${topicsStr}`;
+
+      // Simple keyword overlap score
+      const queryTerms = queryLower.split(/\s+/).filter(t => t.length > 2);
+      let matchedTerms = 0;
+      for (const term of queryTerms) {
+        if (combinedText.includes(term)) matchedTerms++;
+      }
+      const keywordScore = queryTerms.length > 0 ? matchedTerms / queryTerms.length : 0;
+
+      // Semantic score
+      let semanticScore = 0;
+      if (queryEmbedding && summary.embedding) {
+        semanticScore = cosineSimilarity(queryEmbedding, summary.embedding);
+      }
+
+      score = keywordScore * SEARCH_WEIGHTS.keyword + semanticScore * SEARCH_WEIGHTS.semantic;
+
+      // Boost for exact phrase match
+      if (combinedText.includes(queryLower)) {
+        score *= 1.5;
+      }
+
+      if (score > 0.05) {
+        results.push({ summary, score });
+      }
+    }
+
+    results.sort((a, b) => b.score - a.score);
+    return results.slice(0, limit);
+  }
+
   // ============ Relations ============
 
   /**
@@ -509,6 +587,15 @@ export class ScallopMemoryStore {
   }
 
   /**
+   * Process full decay for all memories (deep consolidation)
+   */
+  processFullDecay(): { updated: number; archived: number } {
+    const result = this.decayEngine.processFullDecay(this.db);
+    this.logger.debug(result, 'Full decay processed');
+    return result;
+  }
+
+  /**
    * Get memory status based on prominence
    */
   getMemoryStatus(memory: ScallopMemoryEntry): 'active' | 'dormant' | 'archived' {
@@ -557,6 +644,42 @@ export class ScallopMemoryStore {
     this.logger.info({ profile: populated, fieldsPopulated: count }, 'Default profile backfill complete');
 
     return { fieldsPopulated: count };
+  }
+
+  /**
+   * Get memory system statistics for observability
+   */
+  getStats(): {
+    totalMemories: number;
+    activeMemories: number;
+    dormantMemories: number;
+    sessionSummaries: number;
+    embeddingCacheHitRate: number | null;
+  } {
+    const total = this.db.getMemoryCount();
+    const active = this.db.raw<{ count: number }>(
+      'SELECT COUNT(*) as count FROM memories WHERE prominence >= ?',
+      [PROMINENCE_THRESHOLDS.ACTIVE]
+    )[0]?.count ?? 0;
+    const dormant = this.db.raw<{ count: number }>(
+      'SELECT COUNT(*) as count FROM memories WHERE prominence >= ? AND prominence < ?',
+      [PROMINENCE_THRESHOLDS.DORMANT, PROMINENCE_THRESHOLDS.ACTIVE]
+    )[0]?.count ?? 0;
+    const sessionSummaries = this.db.getSessionSummaryCount();
+
+    // Get embedding cache hit rate if using CachedEmbedder
+    let embeddingCacheHitRate: number | null = null;
+    if (this.embedder && 'getHitRate' in this.embedder) {
+      embeddingCacheHitRate = (this.embedder as CachedEmbedder).getHitRate();
+    }
+
+    return {
+      totalMemories: total,
+      activeMemories: active,
+      dormantMemories: dormant,
+      sessionSummaries,
+      embeddingCacheHitRate,
+    };
   }
 
   /**

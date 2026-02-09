@@ -73,6 +73,8 @@ const createMockDatabase = () => ({
     updatedAt: Date.now(),
     firedAt: null,
   })),
+  reinforceMemory: vi.fn(),
+  addContradiction: vi.fn(),
 });
 
 // Mock ScallopMemoryStore

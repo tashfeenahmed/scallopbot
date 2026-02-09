@@ -620,6 +620,89 @@ export class FallbackEmbedder implements EmbeddingProvider {
 }
 
 /**
+ * CachedEmbedder - wraps any EmbeddingProvider with EmbeddingCache
+ * to avoid recomputing embeddings for previously seen texts.
+ */
+export class CachedEmbedder implements EmbeddingProvider {
+  name: string;
+  dimension: number;
+
+  private inner: EmbeddingProvider;
+  private cache: EmbeddingCache;
+  private hits = 0;
+  private misses = 0;
+
+  constructor(inner: EmbeddingProvider, cache?: EmbeddingCache) {
+    this.inner = inner;
+    this.cache = cache ?? new EmbeddingCache();
+    this.name = `cached(${inner.name})`;
+    this.dimension = inner.dimension;
+  }
+
+  isAvailable(): boolean {
+    return this.inner.isAvailable();
+  }
+
+  async embed(text: string): Promise<number[]> {
+    const cached = this.cache.get(text);
+    if (cached) {
+      this.hits++;
+      return cached;
+    }
+    this.misses++;
+    const embedding = await this.inner.embed(text);
+    this.cache.set(text, embedding);
+    return embedding;
+  }
+
+  async embedBatch(texts: string[]): Promise<number[][]> {
+    const results: number[][] = new Array(texts.length);
+    const uncachedIndices: number[] = [];
+    const uncachedTexts: string[] = [];
+
+    for (let i = 0; i < texts.length; i++) {
+      const cached = this.cache.get(texts[i]);
+      if (cached) {
+        results[i] = cached;
+        this.hits++;
+      } else {
+        uncachedIndices.push(i);
+        uncachedTexts.push(texts[i]);
+        this.misses++;
+      }
+    }
+
+    if (uncachedTexts.length > 0) {
+      const embeddings = await this.inner.embedBatch(uncachedTexts);
+      for (let j = 0; j < uncachedIndices.length; j++) {
+        results[uncachedIndices[j]] = embeddings[j];
+        this.cache.set(uncachedTexts[j], embeddings[j]);
+      }
+    }
+
+    return results;
+  }
+
+  /** Get cache hit rate (0-1) */
+  getHitRate(): number {
+    const total = this.hits + this.misses;
+    return total === 0 ? 0 : this.hits / total;
+  }
+
+  /** Get cache stats */
+  getCacheStats(): { hits: number; misses: number; hitRate: number; cacheSize: number; estimatedMemoryMB: number } {
+    const cacheStats = this.cache.getStats();
+    return {
+      hits: this.hits,
+      misses: this.misses,
+      hitRate: this.getHitRate(),
+      cacheSize: cacheStats.size,
+      estimatedMemoryMB: cacheStats.estimatedMemoryMB,
+    };
+  }
+}
+
+/**
  * Create default embedding provider (TF-IDF)
  */
 export function createDefaultEmbedder(): EmbeddingProvider {
