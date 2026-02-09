@@ -463,6 +463,9 @@ export class ScallopDatabase {
 
     // Migration: Add timezone column to bot_config
     this.migrateAddTimezoneColumn();
+
+    // Migration: Consolidate all memory user_ids to 'default' (single-user bot)
+    this.migrateConsolidateMemoryUserIds();
   }
 
   /**
@@ -495,6 +498,30 @@ export class ScallopDatabase {
       }
     } catch {
       // Column might already exist or table might not exist yet
+    }
+  }
+
+  /**
+   * Consolidate all memory user_ids to 'default' (single-user bot).
+   * Memories may have been stored under channel-prefixed userIds like
+   * "telegram:12345" or "api:ws-xxx" — merge them all to 'default'.
+   */
+  private migrateConsolidateMemoryUserIds(): void {
+    try {
+      const result = this.db.prepare(
+        "UPDATE memories SET user_id = 'default' WHERE user_id != 'default'"
+      ).run();
+      if (result.changes > 0) {
+        // Also consolidate user_profiles
+        this.db.prepare(
+          "DELETE FROM user_profiles WHERE user_id != 'default' AND key IN (SELECT key FROM user_profiles WHERE user_id = 'default')"
+        ).run();
+        this.db.prepare(
+          "UPDATE user_profiles SET user_id = 'default' WHERE user_id != 'default'"
+        ).run();
+      }
+    } catch {
+      // Tables might not exist yet on fresh DB
     }
   }
 
@@ -1027,6 +1054,41 @@ export class ScallopDatabase {
     const stmt = this.db.prepare('SELECT * FROM session_messages WHERE session_id = ? ORDER BY id');
     const rows = stmt.all(sessionId) as Record<string, unknown>[];
     return rows.map(row => this.rowToSessionMessage(row));
+  }
+
+  /**
+   * Delete sessions (and their messages) older than maxAgeDays.
+   * Returns the number of sessions deleted.
+   */
+  pruneOldSessions(maxAgeDays: number = 30): number {
+    const cutoff = Date.now() - maxAgeDays * 24 * 60 * 60 * 1000;
+    // Delete messages first (foreign key not enforced in SQLite by default)
+    this.db.prepare(
+      'DELETE FROM session_messages WHERE session_id IN (SELECT id FROM sessions WHERE updated_at < ?)'
+    ).run(cutoff);
+    const result = this.db.prepare('DELETE FROM sessions WHERE updated_at < ?').run(cutoff);
+    return result.changes;
+  }
+
+  /**
+   * Delete archived/dormant memories with prominence below threshold.
+   * Returns the number of memories deleted.
+   */
+  pruneArchivedMemories(maxProminence: number = 0.01): number {
+    // Also clean up relations pointing to deleted memories
+    const ids = this.db.prepare(
+      'SELECT id FROM memories WHERE prominence < ? AND is_latest = 0'
+    ).all(maxProminence) as Array<{ id: string }>;
+    if (ids.length === 0) return 0;
+
+    const idList = ids.map(r => r.id);
+    for (const id of idList) {
+      this.db.prepare('DELETE FROM memory_relations WHERE source_id = ? OR target_id = ?').run(id, id);
+    }
+    const result = this.db.prepare(
+      `DELETE FROM memories WHERE prominence < ? AND is_latest = 0`
+    ).run(maxProminence);
+    return result.changes;
   }
 
   // ============ Bot Config Operations ============
