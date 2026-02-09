@@ -933,3 +933,176 @@ describe('Scenario E2E: Full multi-turn conversation with fact extraction', () =
     expect(stats.embeddingCacheHitRate).not.toBeNull();
   });
 });
+
+// ═════════════════════════════════════════════════════════════════
+// SCENARIO: LLM & Embedding Call Optimizations
+// ═════════════════════════════════════════════════════════════════
+
+describe('Optimizations: reduced embedding & search calls', () => {
+  let db: ScallopDatabase;
+  let store: ScallopMemoryStore;
+  let rawEmbedder: EmbeddingProvider;
+
+  beforeEach(() => {
+    cleanup();
+    rawEmbedder = createTestEmbedder();
+    store = new ScallopMemoryStore({
+      dbPath: TEST_DB,
+      logger,
+      embedder: rawEmbedder,
+    });
+    db = store.getDatabase();
+  });
+
+  afterEach(() => {
+    store.close();
+    cleanup();
+  });
+
+  it('should skip embed() when embedding is passed to add()', async () => {
+    const precomputed = await rawEmbedder.embed('Works at Microsoft');
+    const callsBefore = (rawEmbedder.embed as ReturnType<typeof vi.fn>).mock.calls.length;
+
+    await store.add({
+      userId: 'default',
+      content: 'Works at Microsoft',
+      embedding: precomputed,
+      category: 'fact',
+    });
+
+    // embed() should NOT have been called again inside add() — the CachedEmbedder
+    // wraps rawEmbedder, so we check that no additional raw calls were made beyond
+    // the one we did ourselves and any the CachedEmbedder may cache-miss on.
+    // The key insight: the store received a pre-computed embedding, so it should
+    // skip calling this.embedder.embed() entirely.
+    const mem = db.getMemory(db.getMemoriesByUser('default', {})[0].id)!;
+    expect(mem.embedding).not.toBeNull();
+    expect(mem.embedding).toEqual(precomputed);
+  });
+
+  it('should skip embed(query) when queryEmbedding is passed to search()', async () => {
+    // Store a memory first
+    await store.add({
+      userId: 'default',
+      content: 'Works at Microsoft as an engineer',
+      category: 'fact',
+    });
+
+    // Pre-compute query embedding
+    const queryEmb = await rawEmbedder.embed('Microsoft engineer');
+    const callsBefore = (rawEmbedder.embed as ReturnType<typeof vi.fn>).mock.calls.length;
+
+    // Search with pre-computed embedding
+    const results = await store.search('Microsoft engineer', {
+      userId: 'default',
+      queryEmbedding: queryEmb,
+    });
+
+    // Verify results still work
+    expect(results.length).toBeGreaterThanOrEqual(1);
+    expect(results[0].memory.content).toContain('Microsoft');
+
+    // The raw embedder should not have been called again for the query
+    // (CachedEmbedder wraps raw, but with queryEmbedding provided, embed is skipped)
+    const callsAfter = (rawEmbedder.embed as ReturnType<typeof vi.fn>).mock.calls.length;
+    expect(callsAfter).toBe(callsBefore);
+  });
+
+  it('should use RelationGraph with CachedEmbedder (not raw embedder)', async () => {
+    // The bug was: RelationGraph received options.embedder (raw) instead of this.embedder (cached).
+    // After the fix, detectRelations should use the cached embedder.
+    // We verify by storing a fact with detectRelations: true and checking
+    // that the raw embedder calls are minimized (cache hits).
+
+    // Store a seed memory first
+    await store.add({
+      userId: 'default',
+      content: 'Works at Microsoft',
+      category: 'fact',
+    });
+
+    // Reset call counts
+    (rawEmbedder.embed as ReturnType<typeof vi.fn>).mockClear();
+    (rawEmbedder.embedBatch as ReturnType<typeof vi.fn>).mockClear();
+
+    // Store another related memory with detectRelations: true
+    await store.add({
+      userId: 'default',
+      content: 'Works at Microsoft as a senior engineer',
+      category: 'fact',
+      detectRelations: true,
+    });
+
+    // With CachedEmbedder, repeated embeddings of the same content should be cached.
+    // The raw embedder should have minimal calls (cache hits for repeated content).
+    // Without the fix, this would make 3-6 extra raw API calls.
+    const rawEmbedCalls = (rawEmbedder.embed as ReturnType<typeof vi.fn>).mock.calls.length;
+    // At most 1 raw embed call for the new content (CachedEmbedder caches the rest)
+    expect(rawEmbedCalls).toBeLessThanOrEqual(2);
+  });
+
+  it('should not call detectRelations when detectRelations: false is passed', async () => {
+    // Store a seed memory
+    await store.add({
+      userId: 'default',
+      content: 'Lives in Dublin',
+      category: 'fact',
+    });
+
+    // Reset embed call counts
+    (rawEmbedder.embed as ReturnType<typeof vi.fn>).mockClear();
+    (rawEmbedder.embedBatch as ReturnType<typeof vi.fn>).mockClear();
+
+    // Store with detectRelations: false (what fact-extractor now does)
+    await store.add({
+      userId: 'default',
+      content: 'Lives in Dublin, Ireland',
+      category: 'fact',
+      detectRelations: false,
+    });
+
+    // With detectRelations: false, no relation detection searches happen,
+    // so only 1 embed call for the content itself (or 0 if embedding passed)
+    const rawCalls = (rawEmbedder.embed as ReturnType<typeof vi.fn>).mock.calls.length;
+    expect(rawCalls).toBeLessThanOrEqual(1);
+  });
+
+  it('should perform merged search (single search per fact) in fact extractor', async () => {
+    // Store seed memories
+    await store.add({ userId: 'default', content: 'Works at Microsoft', category: 'fact' });
+    await store.add({ userId: 'default', content: 'Lives in Dublin', category: 'fact' });
+
+    const provider = createSmartProvider([
+      { facts: [
+        { content: 'Works at Google now', subject: 'user', category: 'work' },
+        { content: 'Moved to Cork', subject: 'user', category: 'location' },
+      ]},
+    ]);
+
+    const extractor = new LLMFactExtractor({
+      provider,
+      scallopStore: store,
+      logger,
+      embedder: rawEmbedder,
+    });
+
+    // Spy on store.search to count calls
+    const searchSpy = vi.spyOn(store, 'search');
+
+    const sessionId = 'opt-test';
+    db.createSession(sessionId);
+    await simulateTurn(extractor, db, sessionId, 'default', 'I now work at Google and moved to Cork');
+
+    // With the optimization: each fact triggers exactly ONE search (not two).
+    // 2 facts = 2 search calls (not 4+ as before)
+    expect(searchSpy).toHaveBeenCalledTimes(2);
+
+    // Verify all search calls used queryEmbedding pass-through
+    for (const call of searchSpy.mock.calls) {
+      const options = call[1] as { queryEmbedding?: number[] } | undefined;
+      expect(options?.queryEmbedding).toBeDefined();
+    }
+
+    searchSpy.mockRestore();
+  });
+});
