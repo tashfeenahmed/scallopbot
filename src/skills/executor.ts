@@ -203,6 +203,13 @@ export class SkillExecutor {
     return new Promise((resolve) => {
       const stdout: string[] = [];
       const stderr: string[] = [];
+      let resolved = false;
+
+      const done = (result: SkillExecutionResult) => {
+        if (resolved) return;
+        resolved = true;
+        resolve(result);
+      };
 
       const child = spawn(command, args, {
         cwd,
@@ -213,7 +220,7 @@ export class SkillExecutor {
       // Set timeout
       const timeout = setTimeout(() => {
         child.kill('SIGTERM');
-        resolve({
+        done({
           success: false,
           output: stdout.join(''),
           error: `Script timed out after ${DEFAULT_TIMEOUT_MS}ms`,
@@ -231,7 +238,7 @@ export class SkillExecutor {
 
       child.on('error', (error) => {
         clearTimeout(timeout);
-        resolve({
+        done({
           success: false,
           error: `Failed to execute script: ${error.message}`,
           exitCode: 1,
@@ -243,7 +250,7 @@ export class SkillExecutor {
         const exitCode = code ?? 0;
         const success = exitCode === 0;
 
-        resolve({
+        done({
           success,
           output: stdout.join(''),
           error: stderr.length > 0 ? stderr.join('') : undefined,
