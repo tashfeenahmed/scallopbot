@@ -113,8 +113,10 @@ ACTION TYPES:
 - "preference_update": User is explicitly stating a preference comparison (prefer X over Y)
 
 Rules:
-1. Only extract concrete facts, not opinions or temporary states
-2. For each fact, identify WHO it's about:
+1. Only extract CONCRETE, DURABLE facts — NOT questions, greetings, opinions, temporary states, or conversational filler
+2. NEVER extract: "hey how are you", "what do you know", "what time is it", "good morning", casual chat, rhetorical questions, or messages that contain no factual information about the user
+3. A valid fact is something worth remembering long-term: name, job, location, family, preferences, projects, skills, relationships
+4. For each fact, identify WHO it's about:
    - "user" if it's about the person speaking (their name, job, preferences, relationships, location)
    - "agent" if the user is telling the AI assistant about itself (giving it a name, personality, behavior instructions)
    - The person's name if it's SPECIFICALLY about someone else's attributes (their job, hobbies, etc.)
@@ -204,8 +206,11 @@ Notes:
 - "old_value" only for corrections
 - "replaces" only for preference_update
 - Set confidence based on how certain the extraction is (0.9+ for explicit statements, 0.6-0.8 for inferred facts)
-- If no facts can be extracted, return empty facts array
+- If no facts can be extracted, return EMPTY facts array — this is the CORRECT response for greetings, questions, small talk, and messages with no factual content
 - If nothing time-sensitive found, return empty proactive_triggers array
+- NEVER store questions the user asked (e.g., "what do you know about me") — those are queries, not facts
+- NEVER store greetings or filler ("hey", "hi", "thanks", "good morning")
+- Each fact should be a concise statement under 100 characters
 - CRITICAL: trigger_time MUST include a specific time (hour:minute), not just a date!
 - "TODAY" alone is NOT valid - must be "TODAY 2pm" or similar with time
 - Only create triggers for EXPLICIT time-sensitive items, not vague statements`;
@@ -714,6 +719,12 @@ Respond with JSON only:
       }
     }
 
+    // Immediate agent profile update: when user configures the bot, don't wait for consolidation
+    const agentFacts = facts.filter(f => f.subject === 'agent');
+    if (agentFacts.length > 0) {
+      this.applyAgentProfileImmediately(agentFacts);
+    }
+
     // Throttled fire-and-forget: run consolidation every N extractions to save LLM calls
     if (storedMemories.length > 0) {
       this.extractionCount++;
@@ -744,6 +755,25 @@ Respond with JSON only:
     sourceMessageId?: string,
     learnedFrom: string = 'conversation'
   ): Promise<{ id: string; content: string } | null> {
+    // Reject facts that are too long (real facts are concise)
+    if (fact.content.length > 200) {
+      this.logger.debug({ contentLength: fact.content.length }, 'Fact too long, skipping');
+      return null;
+    }
+
+    // Reject facts that are too short (single words, greetings)
+    const lower = fact.content.toLowerCase().trim();
+    if (lower.length < 5) {
+      this.logger.debug({ content: fact.content }, 'Fact too short, skipping');
+      return null;
+    }
+
+    // Reject facts that look like questions, greetings, or commands
+    if (/^(what|how|where|when|why|who|do |can |does |is |are |hey|hi |hello|good morning|good evening|thanks|thank you|show me|check out|find |search |build |analyze |gather |identify )/i.test(lower) && lower.length < 100) {
+      this.logger.debug({ content: fact.content }, 'Fact looks like question/greeting/command, skipping');
+      return null;
+    }
+
     let searchableContent = fact.content;
     if (fact.subject !== 'user') {
       if (!fact.content.toLowerCase().includes(fact.subject.toLowerCase())) {
@@ -781,6 +811,47 @@ Respond with JSON only:
     });
 
     return { id: newMemory.id, content: searchableContent };
+  }
+
+  /**
+   * Immediately apply agent-subject facts to the agent profile (don't wait for consolidation).
+   * Handles facts like "Name is Charlie", "Personality is witty and sarcastic".
+   */
+  private applyAgentProfileImmediately(agentFacts: ExtractedFactWithEmbedding[]): void {
+    const profileManager = this.scallopStore.getProfileManager();
+
+    for (const fact of agentFacts) {
+      const lower = fact.content.toLowerCase();
+
+      // Extract name: "Name is X" or "Name: X"
+      const nameMatch = lower.match(/^name\s+(?:is\s+)?(.+)/i);
+      if (nameMatch) {
+        const name = fact.content.slice(fact.content.length - nameMatch[1].length).trim();
+        profileManager.setStaticValue('agent', 'name', name);
+        this.logger.info({ name }, 'Agent name set immediately');
+      }
+
+      // Extract personality: "Personality is X" or "Personality: X"
+      const personalityMatch = lower.match(/^personality\s+(?:is\s+)?(.+)/i);
+      if (personalityMatch) {
+        const personality = fact.content.slice(fact.content.length - personalityMatch[1].length).trim();
+        profileManager.setStaticValue('agent', 'personality', personality);
+        this.logger.info({ personality }, 'Agent personality set immediately');
+      }
+
+      // Generic key-value: "X is Y" pattern for other agent fields
+      if (!nameMatch && !personalityMatch) {
+        const kvMatch = lower.match(/^(\w+)\s+is\s+(.+)/i);
+        if (kvMatch) {
+          const key = kvMatch[1].trim();
+          const value = fact.content.slice(fact.content.indexOf(kvMatch[2])).trim();
+          if (key && value && !['it', 'he', 'she', 'this', 'that', 'there'].includes(key)) {
+            profileManager.setStaticValue('agent', key, value);
+            this.logger.info({ key, value }, 'Agent profile field set immediately');
+          }
+        }
+      }
+    }
   }
 
   /**
@@ -832,15 +903,27 @@ Respond with JSON only:
     sourceMessage?: string,
     sourceMessageId?: string
   ): Promise<{ updated: boolean; newMemoryId?: string }> {
-    // Build search query from old_value if available, otherwise use content
+    // Build search queries — search for both old value and the category to cast a wider net
     const searchQuery = correction.oldValue || correction.replaces || correction.content;
 
-    // Find memories that might be corrected
-    const candidates = await this.scallopStore.search(searchQuery, {
-      userId,
-      limit: 5,
-      minProminence: 0.1,
-    });
+    // Search with multiple queries to find all related facts that should be superseded
+    const candidateSets = await Promise.all([
+      this.scallopStore.search(searchQuery, { userId, limit: 5, minProminence: 0.1 }),
+      // Also search by category keywords (e.g., for "Works at Google" → search "works at")
+      correction.category ? this.scallopStore.search(correction.category, { userId, limit: 5, minProminence: 0.1 }) : Promise.resolve([]),
+    ]);
+
+    // Deduplicate candidates
+    const seenIds = new Set<string>();
+    const candidates = [];
+    for (const set of candidateSets) {
+      for (const c of set) {
+        if (!seenIds.has(c.memory.id)) {
+          seenIds.add(c.memory.id);
+          candidates.push(c);
+        }
+      }
+    }
 
     // Store the correction as new fact with high confidence first (to get the new ID)
     const newMemory = await this.storeNewFact(
@@ -1032,20 +1115,48 @@ Respond with JSON only:
         }
       }
 
-      // 2. Update user profile
+      // 2. Update user profile (with validation)
       if (parsed.user_profile && typeof parsed.user_profile === 'object') {
+        // Only allow known profile fields
+        const allowedFields = new Set(['name', 'location', 'timezone', 'language', 'occupation', 'personality', 'mood', 'focus']);
         for (const [key, value] of Object.entries(parsed.user_profile)) {
-          if (typeof value === 'string' && value.trim()) {
-            profileManager.setStaticValue('default', key, value.trim());
-            this.logger.info({ key, value: value.trim() }, 'User profile updated via LLM');
+          if (typeof value !== 'string' || !value.trim()) continue;
+          if (!allowedFields.has(key)) continue;
+          const trimmed = value.trim();
+
+          // Validate timezone is a real IANA timezone
+          if (key === 'timezone') {
+            const { ProfileManager: PM } = await import('./profiles.js');
+            if (!PM.isValidTimezone(trimmed)) {
+              this.logger.debug({ timezone: trimmed }, 'Invalid timezone from LLM, skipping');
+              continue;
+            }
           }
+
+          // Truncate focus to max 5 items to prevent bloat
+          if (key === 'focus') {
+            const items = trimmed.split(',').map(s => s.trim()).filter(Boolean).slice(0, 5);
+            profileManager.setStaticValue('default', key, items.join(', '));
+            this.logger.info({ key, value: items.join(', ') }, 'User profile updated via LLM');
+            continue;
+          }
+
+          // Reject mood values that describe bot behavior rather than user state
+          if (key === 'mood' && /\b(assist|help|check|remind|offer|execute|search)\b/i.test(trimmed)) {
+            this.logger.debug({ mood: trimmed }, 'Mood describes bot behavior, skipping');
+            continue;
+          }
+
+          profileManager.setStaticValue('default', key, trimmed);
+          this.logger.info({ key, value: trimmed }, 'User profile updated via LLM');
         }
       }
 
-      // 3. Update agent profile
+      // 3. Update agent profile (only accept known fields)
       if (parsed.agent_profile && typeof parsed.agent_profile === 'object') {
+        const allowedAgentFields = new Set(['name', 'personality', 'tone', 'style', 'language']);
         for (const [key, value] of Object.entries(parsed.agent_profile)) {
-          if (typeof value === 'string' && value.trim()) {
+          if (typeof value === 'string' && value.trim() && allowedAgentFields.has(key)) {
             profileManager.setStaticValue('agent', key, value.trim());
             this.logger.info({ key, value: value.trim() }, 'Agent profile updated via LLM');
           }

@@ -133,10 +133,13 @@ export class ProfileManager {
         }
       }
 
-      // Extract timezone (if mentioned)
+      // Extract timezone (if mentioned) — validate it's a real IANA timezone
       const tzMatch = lower.match(/timezone[:\s]+([a-z_\/]+)/i);
       if (tzMatch) {
-        this.setStaticValue(userId, 'timezone', tzMatch[1], fact.confidence);
+        const tz = tzMatch[1];
+        if (ProfileManager.isValidTimezone(tz)) {
+          this.setStaticValue(userId, 'timezone', tz, fact.confidence);
+        }
       }
 
       // Extract language preference
@@ -151,6 +154,21 @@ export class ProfileManager {
       if (occupationMatch) {
         this.setStaticValue(userId, 'occupation', occupationMatch[1].trim(), fact.confidence);
       }
+    }
+  }
+
+  /**
+   * Validate that a timezone string is a valid IANA timezone.
+   */
+  static isValidTimezone(tz: string): boolean {
+    // Must contain a slash (e.g., America/New_York) or be UTC
+    if (tz === 'UTC' || tz === 'GMT') return true;
+    if (!tz.includes('/')) return false;
+    try {
+      Intl.DateTimeFormat(undefined, { timeZone: tz });
+      return true;
+    } catch {
+      return false;
     }
   }
 

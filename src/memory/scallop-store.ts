@@ -293,6 +293,7 @@ export class ScallopMemoryStore {
         minProminence,
         isLatest,
         limit: candidateLimit,
+        includeAllSources: false, // Exclude skill outputs and system pollution
       });
     } else {
       this.logger.warn('Search called without userId - searching ALL users. This may leak memories across users in multi-user deployments.');
