@@ -701,6 +701,22 @@ export class ApiChannel implements Channel, TriggerSource {
       .sort((a, b) => b.cost - a.cost)
       .slice(0, 5);
 
+    // Aggregate daily history (last 30 days)
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+    const dailyMap = new Map<string, { cost: number; requests: number }>();
+    for (const record of history) {
+      if (record.timestamp < thirtyDaysAgo) continue;
+      const dateKey = record.timestamp.toISOString().slice(0, 10);
+      const entry = dailyMap.get(dateKey) || { cost: 0, requests: 0 };
+      entry.cost += record.cost;
+      entry.requests += 1;
+      dailyMap.set(dateKey, entry);
+    }
+    const dailyHistory = Array.from(dailyMap.entries())
+      .map(([date, { cost, requests }]) => ({ date, cost: Math.round(cost * 10000) / 10000, requests }))
+      .sort((a, b) => a.date.localeCompare(b.date));
+
     this.sendJson(res, 200, {
       enabled: true,
       daily: {
@@ -719,6 +735,7 @@ export class ApiChannel implements Channel, TriggerSource {
       },
       topModels,
       totalRequests: history.length,
+      dailyHistory,
     });
   }
 

@@ -1,4 +1,5 @@
 import type { CostData } from '../hooks/useCosts';
+import SpendingChart from './SpendingChart';
 
 interface CreditsPanelProps {
   costs: CostData;
@@ -92,6 +93,10 @@ export default function CreditsPanel({ costs }: CreditsPanelProps) {
               </div>
             ))}
           </div>
+        )}
+
+        {costs.dailyHistory?.length > 0 && (
+          <SpendingChart dailyHistory={costs.dailyHistory} />
         )}
       </div>
     </div>
