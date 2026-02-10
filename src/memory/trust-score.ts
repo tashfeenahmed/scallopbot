@@ -116,8 +116,7 @@ function computeSessionReturnRate(sessions: SessionInput[]): number {
     (s) => now - s.startTime <= WEEK_MS,
   );
   const sessionsPerWeek = recentSessions.length;
-  // sigmoid: 7 sessions/week maps to ~0.5 at the inflection
-  // We use midpoint=7 so that 7 sessions/week gives ~0.5
+  // sigmoid with midpoint=7: 7 sessions/week gives ~0.88
   return sigmoid(sessionsPerWeek, 7);
 }
 
