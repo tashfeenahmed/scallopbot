@@ -400,10 +400,12 @@ describe('spreadActivation', () => {
         return [];
       };
 
-      const result = spreadActivation('seed', getRelations, defaultConfig);
+      // Use maxSteps=1 to isolate single-step activation calculation
+      const config = { ...defaultConfig, maxSteps: 1 };
+      const result = spreadActivation('seed', getRelations, config);
 
       expect(result.has('A')).toBe(true);
-      // Activation = 1.0 * UPDATES.forward(0.9) * confidence(1.0) * decayFactor(0.5) / degree(1)
+      // After 1 step: A gets activation = 1.0 * UPDATES.forward(0.9) * decayFactor(0.5) / degree(1) = 0.45
       const expected = 1.0 * 0.9 * 1.0 * 0.5 / 1;
       expect(result.get('A')).toBeCloseTo(expected, 4);
     });
@@ -421,7 +423,9 @@ describe('spreadActivation', () => {
         return [];
       };
 
-      const result = spreadActivation('seed', getRelations, defaultConfig);
+      // Use maxSteps=1 to isolate single-step fan-out normalization
+      const config = { ...defaultConfig, maxSteps: 1 };
+      const result = spreadActivation('seed', getRelations, config);
 
       // Each neighbor: 1.0 * 0.9 * 0.5 / 3 = 0.15
       const expected = 1.0 * 0.9 * 1.0 * 0.5 / 3;
@@ -710,13 +714,15 @@ describe('getRelatedMemoriesWithActivation', () => {
     } as any;
 
     const graph = new RelationGraph(mockDb);
-    const results = graph.getRelatedMemoriesWithActivation('seed', { noiseSigma: 0 });
+    const results = graph.getRelatedMemoriesWithActivation('seed', {
+      noiseSigma: 0,
+      resultThreshold: 0.001,  // Low threshold to keep A despite low prominence
+    });
 
     expect(results.length).toBe(2);
     // B should be ranked higher because prominence=1.0 even though activation is lower
-    // A has activation * 0.1 prominence, B has lower activation * 1.0 prominence
-    // UPDATES forward 0.9 * 1.0 * 0.5 / 2 = 0.225, * 0.1 prom = 0.0225
-    // EXTENDS forward 0.7 * 0.5 * 0.5 / 2 = 0.0875, * 1.0 prom = 0.0875
+    // A has higher activation * 0.1 prominence = low final score
+    // B has lower activation * 1.0 prominence = higher final score
     // So B should be first
     expect(results[0].id).toBe('B');
   });
@@ -757,12 +763,16 @@ describe('getRelatedMemoriesWithActivation', () => {
   it('should fall back to getRelatedMemoriesForContext on error', () => {
     const memA = makeMemory({ id: 'A', content: 'Fallback memory' });
 
+    // Track call count: first call (from spreadActivation) throws,
+    // subsequent calls (from fallback getRelatedMemoriesForContext) succeed.
+    let callCount = 0;
     const mockDb = {
       getRelations: (id: string): MemoryRelation[] => {
-        if (id === 'seed') throw new Error('DB error');
-        // Fallback path uses getRelations too, so provide data for fallback call
-        if (id === 'fallback-seed') return [makeRelation('fallback-seed', 'A', 'UPDATES', 1.0)];
-        return [makeRelation('seed', 'A', 'UPDATES', 1.0)];
+        callCount++;
+        if (callCount === 1) throw new Error('DB error');
+        // Fallback path: return data for BFS traversal
+        if (id === 'seed') return [makeRelation('seed', 'A', 'UPDATES', 1.0)];
+        return [];
       },
       getMemory: (id: string): ScallopMemoryEntry | null => {
         if (id === 'A') return memA;
@@ -777,7 +787,11 @@ describe('getRelatedMemoriesWithActivation', () => {
     const graph = new RelationGraph(mockDb);
 
     // Should not throw - should fall back gracefully
-    expect(() => graph.getRelatedMemoriesWithActivation('seed', { noiseSigma: 0 })).not.toThrow();
+    const results = graph.getRelatedMemoriesWithActivation('seed', { noiseSigma: 0 });
+    expect(Array.isArray(results)).toBe(true);
+    // Fallback should have returned the BFS result
+    expect(results.length).toBe(1);
+    expect(results[0].id).toBe('A');
   });
 
   it('should limit results to maxResults', () => {
