@@ -206,9 +206,12 @@ export function pruneOrphanedRelations(db: ScallopDatabase): number {
 
   if (orphans.length === 0) return 0;
 
+  let deleted = 0;
   for (const orphan of orphans) {
-    db.raw('DELETE FROM memory_relations WHERE id = ?', [orphan.id]);
+    if (db.deleteRelation(orphan.id)) {
+      deleted++;
+    }
   }
 
-  return orphans.length;
+  return deleted;
 }
