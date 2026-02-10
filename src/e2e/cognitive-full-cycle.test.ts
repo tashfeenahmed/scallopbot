@@ -404,5 +404,31 @@ describe('E2E Cognitive Full Cycle', () => {
       expect(wsResult.type).toBe('proactive');
       expect(wsResult.content).toBe(testInput.message);
     });
+
+    it('should use correct icon for known gap types and truncate long messages', () => {
+      // Known gap type 'stale_goal' should use the target icon
+      const staleGoalInput: ProactiveFormatInput = {
+        message: 'Your goal seems stale. Want to revisit it?',
+        gapType: 'stale_goal',
+        urgency: 'high',
+        source: 'gap_scanner',
+      };
+      const staleResult = formatProactiveForTelegram(staleGoalInput);
+      // stale_goal maps to target icon U+1F3AF
+      expect(staleResult).toContain('\uD83C\uDFAF');
+
+      // Long messages (>250 chars) should be truncated with "..."
+      const longMessage = 'A'.repeat(300);
+      const longInput: ProactiveFormatInput = {
+        message: longMessage,
+        gapType: undefined,
+        urgency: 'low',
+        source: 'gap_scanner',
+      };
+      const longResult = formatProactiveForTelegram(longInput);
+      expect(longResult).toContain('...');
+      // Original 300-char message should NOT appear in full
+      expect(longResult).not.toContain(longMessage);
+    });
   });
 });
