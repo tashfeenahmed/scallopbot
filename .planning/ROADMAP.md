@@ -111,7 +111,10 @@ Plans:
 **Plans**: TBD
 
 Plans:
-- [ ] 31-01: TBD
+- [ ] 31-01: Gap Signal Heuristics (TDD)
+- [ ] 31-02: LLM Gap Diagnosis (TDD)
+- [ ] 31-03: Proactiveness-Gated Actions (TDD)
+- [ ] 31-04: Wire Gap Scanner into sleepTick
 
 #### Phase 32: Inner Thoughts & Timing
 
@@ -147,7 +150,7 @@ Plans:
 | 28. Dream REM Exploration | v4.0 | 3/3 | Complete | 2026-02-10 |
 | 29. Enhanced Forgetting | v4.0 | 2/2 | Complete | 2026-02-10 |
 | 30. Self-Reflection | v4.0 | 2/2 | Complete | 2026-02-10 |
-| 31. Gap Scanner | v4.0 | 0/? | Not started | - |
+| 31. Gap Scanner | v4.0 | 0/4 | Not started | - |
 | 32. Inner Thoughts & Timing | v4.0 | 0/? | Not started | - |
 | 33. E2E Cognitive Testing | v4.0 | 0/? | Not started | - |
 
