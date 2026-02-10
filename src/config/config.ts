@@ -119,8 +119,6 @@ const memorySchema = z.object({
   filePath: z.string().default('memories.jsonl'),
   /** Enable memory persistence (default: true) */
   persist: z.boolean().default(true),
-  /** @deprecated ScallopMemory is now always enabled — this flag is ignored */
-  useScallopMemory: z.boolean().default(true),
   /** Path to SQLite database (relative to workspace) */
   dbPath: z.string().default('memories.db'),
 });
@@ -148,7 +146,7 @@ export const configSchema = z.object({
   routing: routingSchema.default({ providerOrder: ['anthropic', 'openai', 'groq', 'ollama'], enableComplexityAnalysis: true }),
   cost: costSchema.default({ warningThreshold: 0.75 }),
   context: contextSchema.default({ hotWindowSize: 50, maxContextTokens: 128000, compressionThreshold: 0.7, maxToolOutputBytes: 30000 }),
-  memory: memorySchema.default({ filePath: 'memories.jsonl', persist: true, useScallopMemory: true, dbPath: 'memories.db' }),
+  memory: memorySchema.default({ filePath: 'memories.jsonl', persist: true, dbPath: 'memories.db' }),
   gateway: gatewaySchema.default({ port: 3000, host: '127.0.0.1' }),
   tailscale: tailscaleSchema.default({ mode: 'off', resetOnExit: true }),
 });
@@ -267,7 +265,6 @@ export function loadConfig(): Config {
     memory: {
       filePath: process.env.MEMORY_FILE_PATH || 'memories.jsonl',
       persist: process.env.MEMORY_PERSIST !== 'false',
-      useScallopMemory: true, // Always enabled — SQLite is the sole backend
       dbPath: process.env.MEMORY_DB_PATH || 'memories.db',
     },
     gateway: {

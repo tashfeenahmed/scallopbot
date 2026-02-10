@@ -2,10 +2,10 @@
   <img src="assets/scallop.png" alt="ScallopBot" width="120" height="120">
 </p>
 
-# 🐚 ScallopBot — Cost-Optimized Personal AI
+# ScallopBot
 
 <p align="center">
-  <strong>Your AI. Your Server. Your Budget.</strong>
+  <strong>Self-hosted AI assistant with intelligent cost optimization, persistent memory, and multi-channel deployment.</strong>
 </p>
 
 <p align="center">
@@ -17,357 +17,215 @@
 
 ---
 
-**ScallopBot** is a self-hosted AI assistant that runs on your VPS with **intelligent cost optimization**. It automatically routes requests to the cheapest capable model, tracks your spending in real-time, and falls back gracefully when providers fail.
+ScallopBot runs on your own server, routes each request to the cheapest model that can handle it, tracks every cent in real time, and fails over across 7 LLM providers automatically. It connects to Telegram, Discord, WhatsApp, Slack, Signal, Matrix, a CLI, and a REST/WebSocket API — all from a single Node.js process.
 
-Unlike cloud-hosted assistants, ScallopBot gives you:
-- **Full system access** — bash, file operations, browser automation
-- **Persistent memory** — remembers your preferences, facts, and context
-- **Multi-provider routing** — uses the right model for each task
-- **Budget controls** — daily/monthly limits with automatic throttling
-- **8 chat channels** — Telegram, Discord, WhatsApp, Slack, Signal, Matrix, CLI, REST API
+## Key Innovations
 
-## Why ScallopBot?
+### Hybrid Memory Engine
 
-Both ScallopBot and [OpenClaw](https://github.com/openclaw/openclaw) are self-hosted AI assistants. Here's how they differ:
+SQLite-backed memory with ACID guarantees. Combines BM25 keyword scoring with semantic embeddings (Ollama/OpenAI) and a relationship graph (UPDATES, EXTENDS, DERIVES). A decay engine progressively fades stale memories while a fact extractor automatically captures names, preferences, and relationships from conversations. User profiles, session summaries, and temporal grounding (understands "next Tuesday" in context) are all built in.
 
-| Feature | ScallopBot | OpenClaw |
-|---------|:----------:|:--------:|
-| **Cost tracking & budgets** | ✅ Built-in | ❌ |
-| **Multi-provider routing** | ✅ 7 providers | ✅ 2 providers |
-| **Smart model selection** | ✅ Auto-routes by task | ❌ Manual |
-| **Setup complexity** | Simple (just Node.js) | Complex (daemon + apps) |
-| **Channels** | 8 (Telegram, Discord, WhatsApp, Slack, Signal, Matrix, CLI, API) | 12+ channels |
-| **Native apps** | ❌ | ✅ macOS/iOS/Android |
-| **Voice Wake** | ❌ | ✅ |
-| **Canvas/Visual workspace** | ❌ | ✅ |
-| **Persistent memory** | ✅ Semantic + facts | ✅ |
-| **Skills system** | ✅ OpenClaw-compatible | ✅ |
-| **File send/receive** | ✅ | ✅ |
-| **Recurring reminders** | ✅ | ✅ Cron |
-| **Browser automation** | ✅ | ✅ |
+### Cost-Aware Model Routing
 
-**TL;DR:**
-- Choose **ScallopBot** if you want **cost control**, **multi-provider flexibility**, and **simple deployment**
-- Choose **OpenClaw** if you need **many channels**, **native apps**, and **Voice Wake**
+Every API call is priced at the token level using a built-in pricing database covering 50+ models. A complexity analyzer scores each request and routes it to the cheapest capable tier: fast (Groq, Moonshot), standard (OpenAI, xAI), or capable (Anthropic). Daily and monthly budgets gate requests before they're sent. Provider health is tracked per-call — consecutive failures trigger automatic failover with exponential backoff and jitter.
 
-## Highlights
+### Local-First Voice Pipeline
 
-- **🎯 Smart Model Routing** — Routes simple queries to cheap models, complex tasks to capable ones
-- **💰 Real-time Cost Tracking** — Daily/monthly budgets with automatic throttling
-- **🧠 Persistent Memory** — SQLite-backed semantic search + automatic fact extraction
-- **🔄 Provider Fallback** — Automatically switches providers on failures
-- **💬 8 Chat Channels** — Telegram, Discord, WhatsApp, Slack, Signal, Matrix, CLI, REST API
-- **🗣️ Voice Support** — Speech-to-text input, text-to-speech responses
-- **⏰ Smart Reminders** — Intervals, absolute times, and recurring schedules
-- **📁 File Operations** — Send and receive files via chat
-- **🌐 Browser Automation** — Navigate, scrape, and interact with websites
-- **🔧 Extensible Skills** — OpenClaw-compatible SKILL.md format
-- **📄 Media Processing** — PDF extraction, image analysis, link previews
+Speech-to-text via faster-whisper (CTranslate2-optimized Whisper) and text-to-speech via Kokoro (82M param ONNX model) run entirely on-device with zero API cost. Cloud providers (Groq STT, OpenAI TTS) serve as automatic fallbacks. Telegram voice messages are transcribed inline; voice replies are synthesized when enabled.
 
-## Supported Providers
+### Proactive Scheduling with Double-Write Prevention
 
-| Provider | Models | Best For |
-|----------|--------|----------|
-| **Anthropic** | Claude Opus 4.5, Sonnet 4 | Complex reasoning, coding |
-| **Moonshot** | Kimi K2.5 | Cost-effective daily driver |
-| **OpenAI** | GPT-4o, GPT-4 Turbo | General tasks |
-| **xAI** | Grok 2, Grok 3 | Real-time information |
-| **Groq** | Llama 3.3 70B | Ultra-fast responses |
-| **Ollama** | Any local model | Privacy, offline use |
-| **OpenRouter** | 100+ models | Maximum flexibility |
+A unified cron scheduler handles user reminders, agent-triggered messages, and webhook callbacks. Atomic claim guards prevent duplicate execution across restarts. Reminders with action words ("check the build", "search for updates") execute the action autonomously when they fire, not just notify.
+
+### Skills-Only Architecture
+
+All capabilities — bash, browser, file I/O, git, Docker, PDF, web search, memory — are implemented as self-contained skills using the [OpenClaw](https://github.com/openclaw/openclaw) SKILL.md format. Skills declare their own requirements (binaries, env vars, OS) and are gated at load time. Community skills install from [ClawHub](https://clawhub.ai) with a single CLI command.
 
 ## Quick Start
 
-**Runtime:** Node.js ≥22
-
 ```bash
-# Clone and install
 git clone https://github.com/tashfeenahmed/scallopbot.git
 cd scallopbot
 npm install
 
-# Configure
 cp .env.example .env
-# Edit .env with your API keys
+# Add at least one LLM provider API key
 
-# Build and run
 npm run build
 node dist/cli.js start
 ```
+
+Requires Node.js 22+.
+
+## Providers
+
+| Provider | Default Model | Best For |
+|----------|--------------|----------|
+| **Anthropic** | Claude Sonnet 4 | Complex reasoning, coding |
+| **Moonshot** | Kimi K2.5 (extended thinking) | Cost-effective daily driver |
+| **OpenAI** | GPT-4o | General tasks |
+| **xAI** | Grok 4 | Real-time information |
+| **Groq** | Llama 3.3 70B | Ultra-fast inference |
+| **Ollama** | Any local model | Privacy, offline use |
+| **OpenRouter** | 100+ models | Maximum flexibility |
+
+Configure one or more in `.env`. The router handles selection and failover automatically.
+
+## Bundled Skills
+
+16 skills ship out of the box:
+
+| Skill | Description |
+|-------|-------------|
+| `bash` | Execute shell commands |
+| `read_file` | Read file contents |
+| `write_file` | Create/overwrite files |
+| `edit_file` | Make targeted edits |
+| `browser` | Web automation ([agent-browser](https://github.com/ArcadeAI/agent-browser) from Vercel Labs) |
+| `web_search` | Search via Brave API |
+| `memory_search` | Query the hybrid memory engine |
+| `reminder` | One-time, interval, and recurring cron reminders |
+| `pdf` | Create PDFs with [Typst](https://typst.app), read with poppler, edit with qpdf |
+| `git` | Version control operations |
+| `npm` | Package management |
+| `docker` | Container management |
+| `telegram_send` | Send messages programmatically |
+| `goals` | Track and manage goals |
+| `triggers` | Define event-based triggers |
+| `progress` | Report progress to the user |
+
+Install community skills from ClawHub:
+
+```bash
+node dist/cli.js skill install elicitation
+```
+
+## Channels
+
+| Channel | Features |
+|---------|----------|
+| **Telegram** | Voice transcription, voice reply, file upload/download, photo analysis, per-user onboarding |
+| **Discord** | Slash commands, mention-based chat, DM support |
+| **WhatsApp** | Regular account (no Business API needed), QR auth, media support |
+| **Slack** | App-based integration |
+| **Signal** | End-to-end encrypted messaging |
+| **Matrix** | Federated chat |
+| **CLI** | Interactive terminal session with session resume (`-s <id>`) |
+| **REST API** | `POST /api/chat`, SSE streaming, session management, file download |
+| **WebSocket** | Real-time bidirectional communication with the web dashboard |
+
+## Web Dashboard
+
+A React + Tailwind + Vite single-page app served from the API channel. Features:
+
+- Real-time chat with markdown rendering and streaming responses
+- Debug mode showing tool execution (start/complete/error), thinking steps, and memory operations
+- Cost panel with daily/monthly budget bars, per-model breakdown, and a 14-day spending chart
+- File send/receive with download links
+- Proactive message delivery (reminders, triggers)
 
 ## Configuration
 
 Minimal `.env`:
 
 ```bash
-# At least one LLM provider required
-MOONSHOT_API_KEY=sk-...          # Recommended: cost-effective default
-
-# Telegram bot (optional)
-TELEGRAM_BOT_TOKEN=...
-TELEGRAM_ALLOWED_USERS=123456789
-
-# Discord bot (optional)
-DISCORD_BOT_TOKEN=...
-
-# Optional but recommended
-BRAVE_SEARCH_API_KEY=...         # Enables web search
+ANTHROPIC_API_KEY=sk-...           # At least one provider required
+TELEGRAM_BOT_TOKEN=...             # Optional: enable Telegram
+TELEGRAM_ALLOWED_USERS=123456789   # Optional: restrict access
+BRAVE_SEARCH_API_KEY=...           # Optional: enable web search
 ```
 
-Full configuration reference: [.env.example](.env.example)
+Budget controls:
 
-## Cost Optimization
-
-ScallopBot includes built-in cost controls:
-
-```typescript
-// In your .env or config
-COST_DAILY_BUDGET=5.00           # $5/day limit
-COST_MONTHLY_BUDGET=100.00       # $100/month limit
-COST_WARNING_THRESHOLD=0.8       # Warn at 80% usage
+```bash
+COST_DAILY_BUDGET=5.00
+COST_MONTHLY_BUDGET=100.00
+COST_WARNING_THRESHOLD=0.8
 ```
 
-**How it works:**
-1. Every API call is tracked with token counts and model pricing
-2. Budget usage is calculated in real-time
-3. When approaching limits, the system warns you
-4. At budget limit, requests are blocked (not charged)
-5. Provider fallback prefers cheaper alternatives
-
-## Bundled Skills
-
-ScallopBot uses a skills-only architecture with 12 bundled skills:
-
-| Skill | Category | Description |
-|-------|----------|-------------|
-| `bash` | System | Execute shell commands |
-| `read_file` | Coding | Read file contents |
-| `write_file` | Coding | Create/overwrite files |
-| `edit_file` | Coding | Make targeted edits |
-| `browser` | Web | Navigate and scrape websites |
-| `web_search` | Search | Search the web (Brave API) |
-| `memory_search` | Memory | Search conversation history and memories |
-| `reminder` | Automation | Set one-time or recurring reminders |
-| `telegram_send` | Comms | Send Telegram messages programmatically |
-| `git` | DevOps | Git version control operations |
-| `npm` | DevOps | Node package manager commands |
-| `docker` | DevOps | Docker container management |
+Full reference: [.env.example](.env.example)
 
 ## Reminders
 
-ScallopBot supports flexible reminder scheduling:
+Natural language scheduling with timezone awareness:
 
 ```
 "remind me in 5 minutes to check the build"     → Interval
-"remind me at 10am to take medicine"            → Absolute time
-"remind me every day at 9am to check email"     → Daily recurring
-"remind me every Monday at 3pm about standup"   → Weekly recurring
-"remind me weekdays at 8am to exercise"         → Weekday recurring
+"remind me at 10am to take medicine"             → Absolute time
+"remind me every day at 9am to check email"      → Daily recurring
+"remind me every Monday at 3pm about standup"    → Weekly recurring
+"remind me weekdays at 8am to exercise"          → Weekday recurring
 ```
 
-**Actionable reminders** — If the reminder contains an action word (check, get, search, find), ScallopBot will **execute the action** when it triggers, not just remind you.
+Actionable reminders automatically execute when they contain action words (check, search, get, find).
 
-## Skills (OpenClaw Compatible)
+## Error Recovery
 
-ScallopBot uses the OpenClaw SKILL.md format:
-
-```markdown
----
-name: git
-description: Git version control operations
-user-invocable: true
-metadata:
-  openclaw:
-    emoji: "🔀"
-    requires:
-      bins: [git]
----
-
-# Git Skill
-
-Help with git operations: status, commit, push, pull, branch management...
-```
-
-**Skill loading priority:**
-1. User skills (`~/.scallopbot/skills/`)
-2. Project skills (`./.scallopbot/skills/`)
-3. Bundled skills (built-in)
-
-## Installing Skills from ClawHub
-
-[ClawHub](https://clawhub.ai) is the community skill registry. Browse available skills at https://clawhub.ai/skills
-
-### Search for skills
-
-```bash
-node dist/cli.js skill search git
-```
-
-### View skill details
-
-```bash
-node dist/cli.js skill hub elicitation
-```
-
-### Install a skill
-
-```bash
-# Install by slug (from ClawHub URL: clawhub.ai/username/skill-name → use skill-name)
-node dist/cli.js skill install elicitation
-
-# Install specific version
-node dist/cli.js skill install elicitation -v 1.0.0
-```
-
-### After installing
-
-Restart the bot to load new skills:
-
-```bash
-# If running with PM2
-pm2 restart scallopbot
-
-# If running directly
-# Stop and restart: node dist/cli.js start
-```
-
-### Manage installed skills
-
-```bash
-# List all installed skills
-node dist/cli.js skill list
-
-# Show skill details
-node dist/cli.js skill info elicitation
-
-# Uninstall a skill
-node dist/cli.js skill uninstall elicitation
-
-# Update skills
-node dist/cli.js skill update           # Update all
-node dist/cli.js skill update elicitation  # Update specific
-```
+| Failure | Response |
+|---------|----------|
+| Context overflow | Emergency compression — summarize old messages, keep recent context |
+| Auth errors (401/403) | Rotate API keys if multiple are configured |
+| Provider outage | Automatic failover to next healthy provider |
+| Rate limits | Exponential backoff with jitter |
+| Tool crash | RecoveryManager resumes from saved state |
+| Process crash | PM2 auto-restart with crash state persistence |
 
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────────────────────────┐
-│                            SCALLOPBOT                                │
-├──────────────────────────────────────────────────────────────────────┤
-│                                                                      │
-│  Telegram ───┐                                                       │
-│  Discord ────┤                                                       │
-│  WhatsApp ───┤                                                       │
-│  Slack ──────┼──▶ GATEWAY ──▶ AGENT ──▶ ROUTER ──▶ PROVIDERS        │
-│  Signal ─────┤        │         │                    │               │
-│  Matrix ─────┤   ┌────┴────┐    │         ┌──────────┤               │
-│  CLI ────────┤   │ Session │    │         │ Anthropic│               │
-│  API ────────┘   │ Manager │    │         │ Moonshot │               │
-│                  └─────────┘    │         │ OpenAI   │               │
-│                                 │         │ xAI      │               │
-│                            ┌────┴────┐    │ Groq     │               │
-│                            │ Skills  │    │ Ollama   │               │
-│                            │ Memory  │    │ OpenRouter               │
-│                            │ Voice   │    └──────────┘               │
-│                            │         │                               │
-│                            └─────────┘                               │
-│                                                                      │
-└──────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                          SCALLOPBOT                             │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  Telegram ───┐                                                  │
+│  Discord ────┤                                                  │
+│  WhatsApp ───┤                                                  │
+│  Slack ──────┼──▶ GATEWAY ──▶ AGENT ──▶ ROUTER ──▶ PROVIDERS   │
+│  Signal ─────┤       │         │                    │           │
+│  Matrix ─────┤  ┌────┴────┐    │         ┌──────────┤           │
+│  CLI ────────┤  │ Session │    │         │ Anthropic│           │
+│  API/WS ─────┘  │ Manager │    │         │ Moonshot │           │
+│                  └─────────┘    │         │ OpenAI   │           │
+│                                 │         │ xAI      │           │
+│                            ┌────┴────┐    │ Groq     │           │
+│                            │ Skills  │    │ Ollama   │           │
+│                            │ Memory  │    │ OpenRouter│          │
+│                            │ Voice   │    └──────────┘           │
+│                            │ Scheduler│                          │
+│                            └─────────┘                           │
+│                                                                  │
+└──────────────────────────────────────────────────────────────────┘
 ```
-
-## CLI Commands
-
-| Command | Description |
-|---------|-------------|
-| `start` | Start gateway with all configured channels |
-| `chat` | Interactive CLI session (supports `-s <id>` to resume) |
-| `config` | Show current configuration (`--json` for JSON output) |
-| `version` | Show version information |
-| `skill search <query>` | Search ClawHub for skills |
-| `skill install <slug>` | Install a skill from ClawHub |
-| `skill uninstall <name>` | Uninstall a skill |
-| `skill list` | List installed skills (`--available` for all) |
-| `skill update [name]` | Update one or all skills |
-| `skill hub <slug>` | Get skill info from ClawHub |
-| `skill versions <slug>` | List available versions |
-| `skill info <name>` | Show details of an installed skill |
-| `migrate run` | Migrate JSONL memories to SQLite |
-| `migrate verify` | Verify migration integrity |
-| `migrate rollback` | Remove SQLite database (requires `--force`) |
-
-## Telegram Commands
-
-| Command | Description |
-|---------|-------------|
-| `/start` | Welcome + onboarding |
-| `/help` | Show all commands |
-| `/stop` | Stop current task |
-| `/settings` | View configuration |
-| `/setup` | Reconfigure bot name/personality |
-| `/new` | Start fresh conversation |
-
-Telegram also supports voice messages (auto-transcribed), document/file uploads, and photo analysis.
-
-## Discord Commands
-
-| Command | Description |
-|---------|-------------|
-| `/ask <message>` | Ask ScallopBot a question |
-| `/reset` | Clear conversation history |
-| `/help` | Show help information |
-| `/status` | Show current session status |
-
-Discord also supports direct message replies and mention-based chat in channels.
 
 ## Deployment
 
-### Server Install Script (Recommended)
-
-The install script sets up everything on a fresh Ubuntu 24.04 server — Node.js 22, PM2, Python voice packages (Kokoro TTS + faster-whisper STT), Ollama embeddings, ffmpeg, and sox:
+### One-Command Server Setup (Ubuntu 24.04)
 
 ```bash
-# Clone to server
 git clone https://github.com/tashfeenahmed/scallopbot.git /opt/scallopbot
 cd /opt/scallopbot
-
-# Run the install script (installs all system + app dependencies)
-bash scripts/server-install.sh
-
-# Configure
-cp .env.example .env
-# Edit .env with your API keys
-
-# Start
-pm2 start ecosystem.config.cjs --env production
-pm2 save
+bash scripts/server-install.sh    # Installs Node 22, PM2, voice deps, Ollama
+cp .env.example .env && nano .env
+pm2 start ecosystem.config.cjs --env production && pm2 save
 ```
 
-The script is idempotent — safe to run multiple times. It installs:
+The install script is idempotent and sets up:
 
-| Component | What | Why |
-|-----------|------|-----|
-| **Node.js 22** | Runtime | Required |
-| **PM2** | Process manager | Auto-restart, logging, boot persistence |
-| **Python venv** | `~/.scallopbot/venv/` | Voice support (TTS + STT) |
-| **kokoro-onnx** | Local TTS | Free text-to-speech (10 voices) |
-| **faster-whisper** | Local STT | Free speech-to-text (CTranslate2 optimized) |
-| **Kokoro models** | `~/.cache/kokoro/` | 82M param ONNX model + voice embeddings |
-| **Ollama** | Local embedding server | Semantic memory search |
-| **nomic-embed-text** | Embedding model (274MB) | Vector embeddings for memory |
-| **ffmpeg / sox** | Audio tools | Voice format conversion |
+| Component | Purpose |
+|-----------|---------|
+| Node.js 22 + PM2 | Runtime and process management |
+| Python venv (kokoro-onnx, faster-whisper) | Local voice — zero API cost TTS/STT |
+| Ollama + nomic-embed-text | Local embeddings for semantic memory search |
+| ffmpeg + sox | Audio format conversion |
 
-### PM2
+### Alternative: Docker
 
 ```bash
-# Start with PM2 (uses ecosystem.config.cjs)
-npx pm2 start ecosystem.config.cjs --env production
-npx pm2 save
-npx pm2 startup  # Enable auto-start on boot
+docker build -t scallopbot .
+docker run -d --env-file .env scallopbot
 ```
 
-**Important:** Always use `dist/cli.js start`, not `dist/index.js`. The ecosystem config handles this automatically.
-
-### Systemd Service
+### Alternative: systemd
 
 ```bash
 sudo tee /etc/systemd/system/scallopbot.service << EOF
@@ -387,88 +245,78 @@ RestartSec=10
 WantedBy=multi-user.target
 EOF
 
-sudo systemctl enable scallopbot
-sudo systemctl start scallopbot
+sudo systemctl enable --now scallopbot
 ```
 
-### Docker
+## CLI Reference
 
-```bash
-docker build -t scallopbot .
-docker run -d --env-file .env scallopbot
-```
-
-## Development
-
-```bash
-npm test              # Run tests
-npm run dev           # Dev mode with hot reload
-npm run typecheck     # Type check only
-npm run build         # Production build
-```
-
-## Memory System
-
-ScallopBot uses a **SQLite-backed memory store** with WAL mode for concurrent access:
-
-- **Extracts facts** from conversations (names, preferences, relationships)
-- **Hybrid search** — combines semantic (embedding-based) and keyword (BM25) matching
-- **Memory relations** — tracks UPDATES, EXTENDS, and DERIVES relationships between memories
-- **Decay engine** — progressively diminishes importance of old memories
-- **Profile tracking** — maintains user/entity profiles (name, role, relationships)
-- **Temporal grounding** — event dates and document dates for time-aware queries
-- **Categories** — raw, fact, summary, preference, and context memory types
-
-Memory is persisted to disk and survives restarts. Legacy JSONL stores can be migrated to SQLite via `migrate run`.
-
-## Error Recovery
-
-When things go wrong, ScallopBot handles it gracefully:
-
-1. **Context overflow** → Emergency compression (keeps recent context)
-2. **Auth errors (401/403)** → Rotate API keys if available
-3. **Provider errors** → Automatic fallback to next provider
-4. **Rate limits** → Exponential backoff with jitter
+| Command | Description |
+|---------|-------------|
+| `start` | Launch gateway with all configured channels |
+| `chat` | Interactive CLI session (`-s <id>` to resume) |
+| `config` | Show current configuration (`--json` for machine output) |
+| `version` | Show version |
+| `skill search <query>` | Search ClawHub |
+| `skill install <slug>` | Install from ClawHub |
+| `skill uninstall <name>` | Remove a skill |
+| `skill list` | List installed skills |
+| `skill update [name]` | Update one or all skills |
+| `migrate run` | Migrate legacy JSONL memories to SQLite |
 
 ## Project Structure
 
 ```
 src/
-├── agent/          # Agent loop, session management, recovery
-├── branching/      # Branching logic
-├── cache/          # Caching layer
+├── agent/          # Agent loop, session management, crash recovery
 ├── channels/       # Telegram, Discord, WhatsApp, Slack, Signal, Matrix, CLI, API
-├── config/         # Configuration schemas (Zod-validated)
-├── dashboard/      # Web dashboard
-├── gateway/        # Server orchestration and initialization
+├── config/         # Zod-validated configuration schemas
+├── dashboard/      # Systemd config generator, crash recovery
+├── gateway/        # Server orchestration and channel initialization
 ├── media/          # PDF, image, URL processing
-├── memory/         # SQLite-backed semantic search, fact extraction, decay
+├── memory/         # Hybrid search, fact extraction, decay engine, profiles
+├── proactive/      # Unified scheduler for reminders and triggers
 ├── providers/      # LLM provider implementations (7 providers)
 ├── reliability/    # Circuit breaker, graceful degradation
 ├── routing/        # Cost tracking, complexity analysis, model selection
-├── scheduler/      # Task scheduling
-├── skills/         # Skill loading, registry, ClawHub integration (12 bundled skills)
-├── tailscale/      # Tailscale VPN integration
-├── triggers/       # Event trigger system
-├── utils/          # Utilities and helpers
-├── voice/          # STT/TTS support
+├── skills/         # Loader, registry, executor, ClawHub client (16 bundled)
+├── voice/          # STT (faster-whisper/Groq/OpenAI), TTS (Kokoro/OpenAI)
 ├── cli.ts          # CLI entry point
 └── index.ts        # Library exports
+
+web/                # React + Tailwind + Vite dashboard
 ```
 
-## Contributing
+## Development
 
-PRs welcome! Please:
-1. Run `npm test` before submitting
-2. Follow existing code style
-3. Add tests for new features
+```bash
+npm run dev           # Dev mode with hot reload
+npm test              # Run tests (Vitest)
+npm run typecheck     # Type check
+npm run build         # Production build (compiles TS + builds web dashboard)
+```
+
+## Comparison with OpenClaw
+
+| Feature | ScallopBot | OpenClaw |
+|---------|:----------:|:--------:|
+| Cost tracking & budgets | Built-in | -- |
+| Multi-provider routing | 7 providers with failover | 2 providers |
+| Smart model selection | Auto-routes by complexity | Manual |
+| Memory system | Hybrid BM25 + semantic + relations | Semantic |
+| Setup | Single Node.js process | Daemon + apps |
+| Channels | 8 | 12+ |
+| Native apps | -- | macOS/iOS/Android |
+| Voice Wake | -- | Supported |
+| Skills | 16 bundled, OpenClaw-compatible | Supported |
+| PDF generation | Typst | -- |
+| Local voice (zero cost) | Kokoro TTS + faster-whisper STT | -- |
 
 ## License
 
-MIT — use it however you want.
+MIT
 
 ---
 
 <p align="center">
-  Built with 🐚 by <a href="https://github.com/tashfeenahmed">@tashfeenahmed</a>
+  Built by <a href="https://github.com/tashfeenahmed">@tashfeenahmed</a>
 </p>
