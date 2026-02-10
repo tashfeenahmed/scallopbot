@@ -10,11 +10,11 @@ See: .planning/PROJECT.md (updated 2026-02-09 after v3.0 milestone creation)
 ## Current Position
 
 Phase: 22 of 23 (Behavioral Profiling)
-Plan: 1 of 2 in current phase
-Status: In progress
-Last activity: 2026-02-10 - Completed 22-01-PLAN.md
+Plan: 2 of 2 in current phase
+Status: Phase complete
+Last activity: 2026-02-10 - Completed 22-02-PLAN.md
 
-Progress: █████████░ 75%
+Progress: ██████████ 83%
 
 ## Shipped Milestones
 
@@ -69,6 +69,9 @@ Full decision log in PROJECT.md Key Decisions table.
 - Import cosineSimilarity from embeddings.js for topic switch detection (reuse, not reimplement)
 - Cold start null returns for behavioral signals (type-safe caller handling)
 - EMA halfLife 7 days for frequency/length signals; topic switch threshold 0.3 cosine similarity
+- Store behavioral signals in response_preferences JSON with _sig_ prefix keys (no schema migration)
+- Optional sessions/messageEmbeddings params for backward-compatible signal computation
+- Natural-language signal formatting for LLM context (personality insights, not raw numbers)
 
 ### Deferred Issues
 
@@ -89,5 +92,5 @@ None.
 ## Session Continuity
 
 Last session: 2026-02-10
-Stopped at: Completed 22-01-PLAN.md — Phase 22 in progress (1/2 plans done)
+Stopped at: Completed 22-02-PLAN.md — Phase 22 complete (2/2 plans done)
 Resume file: None
