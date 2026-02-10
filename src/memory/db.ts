@@ -237,7 +237,7 @@ export type ScheduledItemType =
 /**
  * Status of scheduled item
  */
-export type ScheduledItemStatus = 'pending' | 'fired' | 'dismissed' | 'expired';
+export type ScheduledItemStatus = 'pending' | 'fired' | 'dismissed' | 'expired' | 'acted';
 
 /**
  * Recurring schedule types
@@ -1689,6 +1689,20 @@ export class ScallopDatabase {
     const stmt = this.db.prepare(`
       UPDATE scheduled_items
       SET status = 'dismissed', updated_at = ?
+      WHERE id = ?
+    `);
+    const result = stmt.run(now, id);
+    return result.changes > 0;
+  }
+
+  /**
+   * Mark a scheduled item as acted (user engaged with proactive message)
+   */
+  markScheduledItemActed(id: string): boolean {
+    const now = Date.now();
+    const stmt = this.db.prepare(`
+      UPDATE scheduled_items
+      SET status = 'acted', updated_at = ?
       WHERE id = ?
     `);
     const result = stmt.run(now, id);
