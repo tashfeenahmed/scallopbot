@@ -8,9 +8,8 @@
  * No LLM calls — all heuristics are deterministic computation.
  */
 
-import type { GoalItem } from '../goals/types.js';
+import type { GoalItem, CheckinFrequency } from '../goals/types.js';
 import type { BehavioralPatterns, SessionSummaryRow } from './db.js';
-import type { CheckinFrequency } from '../goals/types.js';
 
 // ============ Types ============
 
@@ -208,8 +207,7 @@ export function scanUnresolvedThreads(
   // Sort summaries by createdAt for follow-up detection
   const sorted = [...summaries].sort((a, b) => a.createdAt - b.createdAt);
 
-  for (let i = 0; i < sorted.length; i++) {
-    const summary = sorted[i];
+  for (const summary of sorted) {
     const ageMs = now - summary.createdAt;
     const ageDays = ageMs / DAY_MS;
 
