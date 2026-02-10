@@ -9,12 +9,12 @@ See: .planning/PROJECT.md (updated 2026-02-09 after v3.0 milestone creation)
 
 ## Current Position
 
-Phase: 21 of 27 (Memory Fusion Engine)
+Phase: 21 of 23 (Memory Fusion Engine)
 Plan: 2 of 2 in current phase
 Status: Phase complete
-Last activity: 2026-02-10 - Completed 21-02-PLAN.md
+Last activity: 2026-02-10 - Completed 21-02-PLAN.md, removed phases 22-26, renumbered 27→22, added phase 23
 
-Progress: █████░░░░░ 40%
+Progress: ████████░░ 67%
 
 ## Shipped Milestones
 
@@ -80,6 +80,7 @@ None.
 - v1.0 shipped: Phases 1-7, 11 plans (2026-02-04)
 - v2.0 shipped: Phases 9-17, 11 plans (2026-02-04)
 - v3.0 created: Phases 18-27, 10 phases — Research-Driven Intelligence (2026-02-09)
+- v3.0 trimmed: Removed phases 22-26 (routing, caching, browser safety), renumbered 27→22, added phase 23 (E2E WebSocket testing). Now 6 phases (18-23).
 - Archives: .planning/milestones/v1.0-ROADMAP.md, v2.0-ROADMAP.md
 
 ## Session Continuity
