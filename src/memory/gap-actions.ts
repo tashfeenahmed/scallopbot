@@ -13,7 +13,6 @@
  */
 
 import type { DiagnosedGap } from './gap-diagnosis.js';
-import type { GapSignal } from './gap-scanner.js';
 
 // ============ Types ============
 
