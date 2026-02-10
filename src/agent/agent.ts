@@ -259,6 +259,38 @@ export class Agent {
       });
     }
 
+    // Per-message affect classification (sync, non-blocking)
+    // Only classify user messages — bot messages would contaminate affect signal
+    if (this.scallopStore) {
+      try {
+        const { classifyAffect } = await import('../memory/affect.js');
+        const { updateAffectEMA, getSmoothedAffect, createInitialAffectState } = await import('../memory/affect-smoothing.js');
+
+        const rawAffect = classifyAffect(userMessage);
+        const profileManager = this.scallopStore.getProfileManager();
+        const existingPatterns = profileManager.getBehavioralPatterns(resolvedUserId);
+        const currentState = existingPatterns?.affectState ?? createInitialAffectState();
+        const newState = updateAffectEMA(currentState, rawAffect, Date.now());
+        const smoothed = getSmoothedAffect(newState);
+
+        // Persist affect EMA state and smoothed affect
+        profileManager.updateBehavioralPatterns(resolvedUserId, {
+          affectState: newState,
+          smoothedAffect: smoothed,
+        });
+
+        // Update dynamic profile currentMood with emotion label (backward compat)
+        profileManager.setCurrentMood(resolvedUserId, smoothed.emotion);
+
+        this.logger.debug(
+          { emotion: smoothed.emotion, valence: smoothed.valence.toFixed(2), arousal: smoothed.arousal.toFixed(2), goalSignal: smoothed.goalSignal },
+          'Affect classified'
+        );
+      } catch (error) {
+        this.logger.warn({ error: (error as Error).message }, 'Affect classification failed');
+      }
+    }
+
     // Build system prompt with memory context
     const { prompt: systemPrompt, memoryStats, memoryItems } = await this.buildSystemPrompt(userMessage, sessionId, resolvedUserId);
 

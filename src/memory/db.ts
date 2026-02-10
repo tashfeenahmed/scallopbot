@@ -18,6 +18,7 @@ import type {
   TopicSwitchSignal,
   ResponseLengthSignal,
 } from './behavioral-signals.js';
+import type { AffectEMAState, SmoothedAffect } from './affect-smoothing.js';
 
 /**
  * Memory types for decay calculation
@@ -141,6 +142,10 @@ export interface BehavioralPatterns {
   topicSwitch: TopicSwitchSignal | null;
   /** EMA-smoothed message length evolution (null = insufficient data) */
   responseLength: ResponseLengthSignal | null;
+  /** Affect EMA state for continuation across messages (null = no affect data yet) */
+  affectState: AffectEMAState | null;
+  /** Derived smoothed affect: emotion label, valence, arousal, goal signal (null = no affect data yet) */
+  smoothedAffect: SmoothedAffect | null;
   updatedAt: number;
 }
 
@@ -1174,6 +1179,12 @@ export class ScallopDatabase {
     if (patterns.responseLength !== undefined) {
       responsePrefsToStore._sig_responseLength = patterns.responseLength;
     }
+    if (patterns.affectState !== undefined) {
+      responsePrefsToStore.affectState = patterns.affectState;
+    }
+    if (patterns.smoothedAffect !== undefined) {
+      responsePrefsToStore.smoothedAffect = patterns.smoothedAffect;
+    }
 
     const existing = this.db.prepare('SELECT * FROM behavioral_patterns WHERE user_id = ?').get(userId) as Record<string, unknown> | undefined;
 
@@ -1988,10 +1999,14 @@ export class ScallopDatabase {
     const topicSwitch = (rawPrefs._sig_topicSwitch as TopicSwitchSignal | undefined) ?? null;
     const responseLength = (rawPrefs._sig_responseLength as ResponseLengthSignal | undefined) ?? null;
 
-    // Build clean responsePreferences without signal fields
+    // Extract affect fields from response_preferences JSON (plain keys per Phase 24 decision)
+    const affectState = (rawPrefs.affectState as AffectEMAState | undefined) ?? null;
+    const smoothedAffect = (rawPrefs.smoothedAffect as SmoothedAffect | undefined) ?? null;
+
+    // Build clean responsePreferences without signal fields and affect fields
     const responsePreferences: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(rawPrefs)) {
-      if (!key.startsWith('_sig_')) {
+      if (!key.startsWith('_sig_') && key !== 'affectState' && key !== 'smoothedAffect') {
         responsePreferences[key] = value;
       }
     }
@@ -2006,6 +2021,8 @@ export class ScallopDatabase {
       sessionEngagement,
       topicSwitch,
       responseLength,
+      affectState,
+      smoothedAffect,
       updatedAt: row.updated_at as number,
     };
   }
