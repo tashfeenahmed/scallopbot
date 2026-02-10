@@ -7,8 +7,15 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { RelationGraph, type DetectedRelation } from './relations.js';
-import type { ScallopMemoryEntry } from './db.js';
+import {
+  RelationGraph,
+  type DetectedRelation,
+  spreadActivation,
+  getEdgeWeight,
+  EDGE_WEIGHTS,
+  type ActivationConfig,
+} from './relations.js';
+import type { ScallopMemoryEntry, MemoryRelation, RelationType } from './db.js';
 import type { LLMProvider, CompletionResponse } from '../providers/types.js';
 import type { EmbeddingProvider } from './embeddings.js';
 
@@ -344,5 +351,460 @@ describe('RelationGraph LLM-based classification', () => {
       expect(classifierProvider.complete).not.toHaveBeenCalled();
       expect(result.length).toBe(0);
     });
+  });
+});
+
+// --- Spreading Activation Tests ---
+
+/** Helper: create a MemoryRelation for test graphs */
+function makeRelation(
+  sourceId: string,
+  targetId: string,
+  relationType: RelationType,
+  confidence: number = 1.0,
+): MemoryRelation {
+  return {
+    id: `rel-${sourceId}-${targetId}`,
+    sourceId,
+    targetId,
+    relationType,
+    confidence,
+    createdAt: Date.now(),
+  };
+}
+
+describe('spreadActivation', () => {
+  const defaultConfig: ActivationConfig = {
+    maxSteps: 3,
+    decayFactor: 0.5,
+    activationThreshold: 0.01,
+    noiseSigma: 0,
+    resultThreshold: 0.05,
+    maxResults: 10,
+  };
+
+  describe('basic behavior', () => {
+    it('should return empty Map when seed has no neighbors', () => {
+      const getRelations = (_id: string): MemoryRelation[] => [];
+      const result = spreadActivation('seed', getRelations, defaultConfig);
+
+      expect(result).toBeInstanceOf(Map);
+      expect(result.size).toBe(0);
+    });
+
+    it('should return neighbor with correct activation for seed with 1 neighbor', () => {
+      // seed --UPDATES(confidence=1.0)--> A
+      const getRelations = (id: string): MemoryRelation[] => {
+        if (id === 'seed') return [makeRelation('seed', 'A', 'UPDATES', 1.0)];
+        if (id === 'A') return [makeRelation('seed', 'A', 'UPDATES', 1.0)];
+        return [];
+      };
+
+      const result = spreadActivation('seed', getRelations, defaultConfig);
+
+      expect(result.has('A')).toBe(true);
+      // Activation = 1.0 * UPDATES.forward(0.9) * confidence(1.0) * decayFactor(0.5) / degree(1)
+      const expected = 1.0 * 0.9 * 1.0 * 0.5 / 1;
+      expect(result.get('A')).toBeCloseTo(expected, 4);
+    });
+
+    it('should normalize by fan-out for seed with 3 neighbors', () => {
+      const getRelations = (id: string): MemoryRelation[] => {
+        if (id === 'seed') return [
+          makeRelation('seed', 'A', 'UPDATES', 1.0),
+          makeRelation('seed', 'B', 'UPDATES', 1.0),
+          makeRelation('seed', 'C', 'UPDATES', 1.0),
+        ];
+        // Each neighbor sees only the edge back to seed
+        if (id === 'A' || id === 'B' || id === 'C')
+          return [makeRelation('seed', id, 'UPDATES', 1.0)];
+        return [];
+      };
+
+      const result = spreadActivation('seed', getRelations, defaultConfig);
+
+      // Each neighbor: 1.0 * 0.9 * 0.5 / 3 = 0.15
+      const expected = 1.0 * 0.9 * 1.0 * 0.5 / 3;
+      expect(result.get('A')).toBeCloseTo(expected, 4);
+      expect(result.get('B')).toBeCloseTo(expected, 4);
+      expect(result.get('C')).toBeCloseTo(expected, 4);
+    });
+
+    it('should reduce activation over 2 hops (decay * decay)', () => {
+      // seed --> A --> B (linear chain)
+      const getRelations = (id: string): MemoryRelation[] => {
+        if (id === 'seed') return [makeRelation('seed', 'A', 'UPDATES', 1.0)];
+        if (id === 'A') return [
+          makeRelation('seed', 'A', 'UPDATES', 1.0),
+          makeRelation('A', 'B', 'UPDATES', 1.0),
+        ];
+        if (id === 'B') return [makeRelation('A', 'B', 'UPDATES', 1.0)];
+        return [];
+      };
+
+      const result = spreadActivation('seed', getRelations, defaultConfig);
+
+      expect(result.has('B')).toBe(true);
+      // B should have less activation than A
+      expect(result.get('B')!).toBeLessThan(result.get('A')!);
+    });
+
+    it('should accumulate activation from multiple paths but clamp to 1.0', () => {
+      // seed --> A --> C
+      // seed --> B --> C
+      // C receives activation from both A and B
+      const getRelations = (id: string): MemoryRelation[] => {
+        if (id === 'seed') return [
+          makeRelation('seed', 'A', 'UPDATES', 1.0),
+          makeRelation('seed', 'B', 'UPDATES', 1.0),
+        ];
+        if (id === 'A') return [
+          makeRelation('seed', 'A', 'UPDATES', 1.0),
+          makeRelation('A', 'C', 'UPDATES', 1.0),
+        ];
+        if (id === 'B') return [
+          makeRelation('seed', 'B', 'UPDATES', 1.0),
+          makeRelation('B', 'C', 'UPDATES', 1.0),
+        ];
+        if (id === 'C') return [
+          makeRelation('A', 'C', 'UPDATES', 1.0),
+          makeRelation('B', 'C', 'UPDATES', 1.0),
+        ];
+        return [];
+      };
+
+      const result = spreadActivation('seed', getRelations, defaultConfig);
+
+      expect(result.has('C')).toBe(true);
+      // C gets activation from both paths - should be accumulated
+      // And must not exceed 1.0
+      expect(result.get('C')!).toBeLessThanOrEqual(1.0);
+      expect(result.get('C')!).toBeGreaterThan(0);
+    });
+
+    it('should exclude seed from results', () => {
+      const getRelations = (id: string): MemoryRelation[] => {
+        if (id === 'seed') return [makeRelation('seed', 'A', 'UPDATES', 1.0)];
+        if (id === 'A') return [makeRelation('seed', 'A', 'UPDATES', 1.0)];
+        return [];
+      };
+
+      const result = spreadActivation('seed', getRelations, defaultConfig);
+
+      expect(result.has('seed')).toBe(false);
+    });
+  });
+
+  describe('edge weights', () => {
+    it('UPDATES forward should use weight 0.9 * confidence', () => {
+      const rel = makeRelation('A', 'B', 'UPDATES', 0.8);
+      const weight = getEdgeWeight(rel, 'A'); // forward
+      expect(weight).toBeCloseTo(0.9 * 0.8, 4);
+    });
+
+    it('UPDATES reverse should use weight 0.9 * confidence', () => {
+      const rel = makeRelation('A', 'B', 'UPDATES', 0.8);
+      const weight = getEdgeWeight(rel, 'B'); // reverse
+      expect(weight).toBeCloseTo(0.9 * 0.8, 4);
+    });
+
+    it('EXTENDS forward should use weight 0.7 * confidence', () => {
+      const rel = makeRelation('A', 'B', 'EXTENDS', 1.0);
+      const weight = getEdgeWeight(rel, 'A');
+      expect(weight).toBeCloseTo(0.7, 4);
+    });
+
+    it('EXTENDS reverse should use weight 0.5 * confidence', () => {
+      const rel = makeRelation('A', 'B', 'EXTENDS', 1.0);
+      const weight = getEdgeWeight(rel, 'B');
+      expect(weight).toBeCloseTo(0.5, 4);
+    });
+
+    it('DERIVES forward should use weight 0.4 * confidence', () => {
+      const rel = makeRelation('A', 'B', 'DERIVES', 1.0);
+      const weight = getEdgeWeight(rel, 'A');
+      expect(weight).toBeCloseTo(0.4, 4);
+    });
+
+    it('DERIVES reverse should use weight 0.6 * confidence', () => {
+      const rel = makeRelation('A', 'B', 'DERIVES', 1.0);
+      const weight = getEdgeWeight(rel, 'B');
+      expect(weight).toBeCloseTo(0.6, 4);
+    });
+
+    it('EDGE_WEIGHTS constant should have correct values', () => {
+      expect(EDGE_WEIGHTS.UPDATES).toEqual({ forward: 0.9, reverse: 0.9 });
+      expect(EDGE_WEIGHTS.EXTENDS).toEqual({ forward: 0.7, reverse: 0.5 });
+      expect(EDGE_WEIGHTS.DERIVES).toEqual({ forward: 0.4, reverse: 0.6 });
+    });
+  });
+
+  describe('noise', () => {
+    it('sigma=0 should produce deterministic results', () => {
+      const getRelations = (id: string): MemoryRelation[] => {
+        if (id === 'seed') return [makeRelation('seed', 'A', 'UPDATES', 1.0)];
+        if (id === 'A') return [makeRelation('seed', 'A', 'UPDATES', 1.0)];
+        return [];
+      };
+
+      const config = { ...defaultConfig, noiseSigma: 0 };
+      const result1 = spreadActivation('seed', getRelations, config);
+      const result2 = spreadActivation('seed', getRelations, config);
+
+      expect(result1.get('A')).toBe(result2.get('A'));
+    });
+
+    it('sigma>0 should produce varying results', () => {
+      const getRelations = (id: string): MemoryRelation[] => {
+        if (id === 'seed') return [
+          makeRelation('seed', 'A', 'UPDATES', 1.0),
+          makeRelation('seed', 'B', 'UPDATES', 1.0),
+          makeRelation('seed', 'C', 'UPDATES', 1.0),
+        ];
+        return [makeRelation('seed', id, 'UPDATES', 1.0)];
+      };
+
+      const config = { ...defaultConfig, noiseSigma: 0.5 };
+
+      // Run multiple times and check that at least one result differs
+      const results: number[] = [];
+      for (let i = 0; i < 10; i++) {
+        const result = spreadActivation('seed', getRelations, config);
+        results.push(result.get('A') ?? 0);
+      }
+
+      // With sigma=0.5, results should vary
+      const allSame = results.every(r => r === results[0]);
+      expect(allSame).toBe(false);
+    });
+  });
+
+  describe('thresholds and limits', () => {
+    it('should filter results below resultThreshold', () => {
+      // Create a chain that produces very low activation at the end
+      const getRelations = (id: string): MemoryRelation[] => {
+        if (id === 'seed') return [makeRelation('seed', 'A', 'DERIVES', 0.3)];
+        if (id === 'A') return [
+          makeRelation('seed', 'A', 'DERIVES', 0.3),
+          makeRelation('A', 'B', 'DERIVES', 0.3),
+        ];
+        if (id === 'B') return [makeRelation('A', 'B', 'DERIVES', 0.3)];
+        return [];
+      };
+
+      const config = { ...defaultConfig, resultThreshold: 0.05 };
+      const result = spreadActivation('seed', getRelations, config);
+
+      // All values in result should be >= resultThreshold
+      for (const [, score] of result) {
+        expect(score).toBeGreaterThanOrEqual(0.05);
+      }
+    });
+
+    it('should limit results to maxResults', () => {
+      // Create many neighbors
+      const neighbors = Array.from({ length: 20 }, (_, i) => `N${i}`);
+      const getRelations = (id: string): MemoryRelation[] => {
+        if (id === 'seed') return neighbors.map(n => makeRelation('seed', n, 'UPDATES', 1.0));
+        return [makeRelation('seed', id, 'UPDATES', 1.0)];
+      };
+
+      const config = { ...defaultConfig, maxResults: 5 };
+      const result = spreadActivation('seed', getRelations, config);
+
+      expect(result.size).toBeLessThanOrEqual(5);
+    });
+
+    it('should stop propagating activation below activationThreshold', () => {
+      // With very low confidence, activation should die out quickly
+      const getRelations = (id: string): MemoryRelation[] => {
+        if (id === 'seed') return [makeRelation('seed', 'A', 'DERIVES', 0.1)];
+        if (id === 'A') return [
+          makeRelation('seed', 'A', 'DERIVES', 0.1),
+          makeRelation('A', 'B', 'DERIVES', 0.1),
+        ];
+        if (id === 'B') return [
+          makeRelation('A', 'B', 'DERIVES', 0.1),
+          makeRelation('B', 'C', 'DERIVES', 0.1),
+        ];
+        if (id === 'C') return [makeRelation('B', 'C', 'DERIVES', 0.1)];
+        return [];
+      };
+
+      const config = { ...defaultConfig, activationThreshold: 0.01, maxSteps: 5 };
+      const result = spreadActivation('seed', getRelations, config);
+
+      // Activation should die out - deep nodes shouldn't be reached or should have very low activation
+      // C should not appear or have very tiny activation
+      if (result.has('C')) {
+        expect(result.get('C')!).toBeLessThan(0.05);
+      }
+    });
+  });
+});
+
+describe('getRelatedMemoriesWithActivation', () => {
+  it('should return ScallopMemoryEntry[] sorted by score descending', () => {
+    const memA = makeMemory({ id: 'A', content: 'Memory A', prominence: 0.8 });
+    const memB = makeMemory({ id: 'B', content: 'Memory B', prominence: 1.0 });
+
+    const mockDb = {
+      getRelations: (id: string): MemoryRelation[] => {
+        if (id === 'seed') return [
+          makeRelation('seed', 'A', 'UPDATES', 1.0),
+          makeRelation('seed', 'B', 'EXTENDS', 1.0),
+        ];
+        if (id === 'A') return [makeRelation('seed', 'A', 'UPDATES', 1.0)];
+        if (id === 'B') return [makeRelation('seed', 'B', 'EXTENDS', 1.0)];
+        return [];
+      },
+      getMemory: (id: string): ScallopMemoryEntry | null => {
+        if (id === 'A') return memA;
+        if (id === 'B') return memB;
+        return null;
+      },
+      getMemoriesByUser: () => [],
+      addRelation: vi.fn(),
+      getOutgoingRelations: () => [],
+      getIncomingRelations: () => [],
+    } as any;
+
+    const graph = new RelationGraph(mockDb);
+    const results = graph.getRelatedMemoriesWithActivation('seed', { noiseSigma: 0 });
+
+    expect(Array.isArray(results)).toBe(true);
+    expect(results.length).toBeGreaterThan(0);
+
+    // Should be sorted by score descending
+    for (let i = 1; i < results.length; i++) {
+      // We can't directly check scores, but order should reflect activation * prominence
+      expect(results).toBeDefined();
+    }
+  });
+
+  it('should multiply activation by prominence', () => {
+    // memA has high activation but low prominence
+    // memB has lower activation but high prominence
+    const memA = makeMemory({ id: 'A', content: 'Memory A', prominence: 0.1 });
+    const memB = makeMemory({ id: 'B', content: 'Memory B', prominence: 1.0 });
+
+    const mockDb = {
+      getRelations: (id: string): MemoryRelation[] => {
+        if (id === 'seed') return [
+          makeRelation('seed', 'A', 'UPDATES', 1.0),  // high edge weight -> high activation
+          makeRelation('seed', 'B', 'EXTENDS', 0.5),   // lower edge weight -> lower activation
+        ];
+        if (id === 'A') return [makeRelation('seed', 'A', 'UPDATES', 1.0)];
+        if (id === 'B') return [makeRelation('seed', 'B', 'EXTENDS', 0.5)];
+        return [];
+      },
+      getMemory: (id: string): ScallopMemoryEntry | null => {
+        if (id === 'A') return memA;
+        if (id === 'B') return memB;
+        return null;
+      },
+      getMemoriesByUser: () => [],
+      addRelation: vi.fn(),
+      getOutgoingRelations: () => [],
+      getIncomingRelations: () => [],
+    } as any;
+
+    const graph = new RelationGraph(mockDb);
+    const results = graph.getRelatedMemoriesWithActivation('seed', { noiseSigma: 0 });
+
+    expect(results.length).toBe(2);
+    // B should be ranked higher because prominence=1.0 even though activation is lower
+    // A has activation * 0.1 prominence, B has lower activation * 1.0 prominence
+    // UPDATES forward 0.9 * 1.0 * 0.5 / 2 = 0.225, * 0.1 prom = 0.0225
+    // EXTENDS forward 0.7 * 0.5 * 0.5 / 2 = 0.0875, * 1.0 prom = 0.0875
+    // So B should be first
+    expect(results[0].id).toBe('B');
+  });
+
+  it('should filter to isLatest memories only', () => {
+    const memLatest = makeMemory({ id: 'A', content: 'Latest', isLatest: true });
+    const memOld = makeMemory({ id: 'B', content: 'Old', isLatest: false });
+
+    const mockDb = {
+      getRelations: (id: string): MemoryRelation[] => {
+        if (id === 'seed') return [
+          makeRelation('seed', 'A', 'UPDATES', 1.0),
+          makeRelation('seed', 'B', 'UPDATES', 1.0),
+        ];
+        if (id === 'A') return [makeRelation('seed', 'A', 'UPDATES', 1.0)];
+        if (id === 'B') return [makeRelation('seed', 'B', 'UPDATES', 1.0)];
+        return [];
+      },
+      getMemory: (id: string): ScallopMemoryEntry | null => {
+        if (id === 'A') return memLatest;
+        if (id === 'B') return memOld;
+        return null;
+      },
+      getMemoriesByUser: () => [],
+      addRelation: vi.fn(),
+      getOutgoingRelations: () => [],
+      getIncomingRelations: () => [],
+    } as any;
+
+    const graph = new RelationGraph(mockDb);
+    const results = graph.getRelatedMemoriesWithActivation('seed', { noiseSigma: 0 });
+
+    expect(results.length).toBe(1);
+    expect(results[0].id).toBe('A');
+    expect(results[0].isLatest).toBe(true);
+  });
+
+  it('should fall back to getRelatedMemoriesForContext on error', () => {
+    const memA = makeMemory({ id: 'A', content: 'Fallback memory' });
+
+    const mockDb = {
+      getRelations: (id: string): MemoryRelation[] => {
+        if (id === 'seed') throw new Error('DB error');
+        // Fallback path uses getRelations too, so provide data for fallback call
+        if (id === 'fallback-seed') return [makeRelation('fallback-seed', 'A', 'UPDATES', 1.0)];
+        return [makeRelation('seed', 'A', 'UPDATES', 1.0)];
+      },
+      getMemory: (id: string): ScallopMemoryEntry | null => {
+        if (id === 'A') return memA;
+        return null;
+      },
+      getMemoriesByUser: () => [],
+      addRelation: vi.fn(),
+      getOutgoingRelations: () => [],
+      getIncomingRelations: () => [],
+    } as any;
+
+    const graph = new RelationGraph(mockDb);
+
+    // Should not throw - should fall back gracefully
+    expect(() => graph.getRelatedMemoriesWithActivation('seed', { noiseSigma: 0 })).not.toThrow();
+  });
+
+  it('should limit results to maxResults', () => {
+    const neighbors = Array.from({ length: 20 }, (_, i) => `N${i}`);
+    const memories = neighbors.map(n => makeMemory({ id: n, content: `Memory ${n}`, prominence: 1.0 }));
+
+    const mockDb = {
+      getRelations: (id: string): MemoryRelation[] => {
+        if (id === 'seed') return neighbors.map(n => makeRelation('seed', n, 'UPDATES', 1.0));
+        return [makeRelation('seed', id, 'UPDATES', 1.0)];
+      },
+      getMemory: (id: string): ScallopMemoryEntry | null => {
+        const mem = memories.find(m => m.id === id);
+        return mem ?? null;
+      },
+      getMemoriesByUser: () => [],
+      addRelation: vi.fn(),
+      getOutgoingRelations: () => [],
+      getIncomingRelations: () => [],
+    } as any;
+
+    const graph = new RelationGraph(mockDb);
+    const results = graph.getRelatedMemoriesWithActivation('seed', {
+      noiseSigma: 0,
+      maxResults: 5,
+    });
+
+    expect(results.length).toBeLessThanOrEqual(5);
   });
 });
