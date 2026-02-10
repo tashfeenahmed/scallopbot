@@ -17,7 +17,7 @@ import {
   type MemoryCategory,
 } from './db.js';
 import { DecayEngine, PROMINENCE_THRESHOLDS, type DecayConfig } from './decay.js';
-import { RelationGraph, type RelationDetectionOptions } from './relations.js';
+import { RelationGraph, type RelationDetectionOptions, type ActivationConfig } from './relations.js';
 import { ProfileManager, type ProfileUpdateOptions } from './profiles.js';
 import { TemporalExtractor, TemporalQuery } from './temporal.js';
 import type { EmbeddingProvider } from './embeddings.js';
@@ -46,6 +46,8 @@ export interface ScallopMemoryStoreOptions {
   rerankProvider?: LLMProvider;
   /** Optional LLM provider for LLM-based relation classification */
   relationsProvider?: LLMProvider;
+  /** Optional spreading activation config for related memory retrieval */
+  activationConfig?: ActivationConfig;
 }
 
 /**
@@ -108,6 +110,7 @@ export class ScallopMemoryStore {
   private logger: Logger;
   private embedder?: EmbeddingProvider;
   private rerankProvider?: LLMProvider;
+  private activationConfig?: ActivationConfig;
   private decayEngine: DecayEngine;
   private relationGraph: RelationGraph;
   private profileManager: ProfileManager;
@@ -119,6 +122,7 @@ export class ScallopMemoryStore {
     // Wrap embedder with cache to avoid recomputing embeddings for seen texts
     this.embedder = options.embedder ? new CachedEmbedder(options.embedder) : undefined;
     this.rerankProvider = options.rerankProvider;
+    this.activationConfig = options.activationConfig;
 
     // Initialize components
     this.decayEngine = new DecayEngine(options.decayConfig);
@@ -448,9 +452,12 @@ export class ScallopMemoryStore {
       }
     }
 
-    // Add related memories if requested
+    // Add related memories using spreading activation (ranked by activation score)
     for (const result of topResults) {
-      result.relatedMemories = this.relationGraph.getRelatedMemoriesForContext(result.memory.id);
+      result.relatedMemories = this.relationGraph.getRelatedMemoriesWithActivation(
+        result.memory.id,
+        this.activationConfig,
+      );
     }
 
     // Record access for top results

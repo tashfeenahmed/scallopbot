@@ -83,6 +83,7 @@ export {
 export {
   RelationGraph,
   createRelationGraph,
+  type ActivationConfig,
   type RelationDetectionOptions,
   type DetectedRelation,
 } from './relations.js';
