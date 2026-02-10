@@ -13,6 +13,12 @@ import type {
   BehavioralPatterns,
   ScallopMemoryEntry,
 } from './db.js';
+import {
+  computeMessageFrequency,
+  computeSessionEngagement,
+  computeTopicSwitchRate,
+  computeResponseLengthEvolution,
+} from './behavioral-signals.js';
 
 /**
  * Full user profile combining all three components
@@ -288,8 +294,18 @@ export class ProfileManager {
    * Infer behavioral patterns from conversation history.
    * Incremental: only processes new messages since last analysis,
    * merging with existing patterns instead of recomputing from scratch.
+   *
+   * @param sessions - Optional session records for engagement signal (backward-compatible)
+   * @param messageEmbeddings - Optional embeddings for topic switch signal (backward-compatible, no new embeddings generated)
    */
-  inferBehavioralPatterns(userId: string, messages: Array<{ content: string; timestamp: number }>): void {
+  inferBehavioralPatterns(
+    userId: string,
+    messages: Array<{ content: string; timestamp: number }>,
+    options?: {
+      sessions?: Array<{ messageCount: number; durationMs: number; startTime: number }>;
+      messageEmbeddings?: Array<{ content: string; embedding?: number[] }>;
+    },
+  ): void {
     if (messages.length === 0) return;
 
     // Only process messages we haven't seen yet
@@ -369,11 +385,34 @@ export class ProfileManager {
       verbosityLevel: avgLength < 100 ? 2 : avgLength < 300 ? 3 : 4,
     };
 
+    // Compute behavioral signals (cold start returns null when insufficient data)
+    const messageFrequency = computeMessageFrequency(
+      messages.map(m => ({ timestamp: m.timestamp })),
+      existing?.messageFrequency ?? null,
+    );
+
+    const sessionEngagement = options?.sessions
+      ? computeSessionEngagement(options.sessions, existing?.sessionEngagement ?? null)
+      : (existing?.sessionEngagement ?? null);
+
+    const topicSwitch = options?.messageEmbeddings
+      ? computeTopicSwitchRate(options.messageEmbeddings, existing?.topicSwitch ?? null)
+      : (existing?.topicSwitch ?? null);
+
+    const responseLength = computeResponseLengthEvolution(
+      messages,
+      existing?.responseLength ?? null,
+    );
+
     this.updateBehavioralPatterns(userId, {
       communicationStyle,
       expertiseAreas,
       responsePreferences,
       activeHours: sortedHours,
+      messageFrequency,
+      sessionEngagement,
+      topicSwitch,
+      responseLength,
     });
   }
 

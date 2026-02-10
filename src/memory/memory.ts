@@ -278,7 +278,29 @@ export class BackgroundGardener {
         }
       }
       if (allMessages.length > 0) {
-        profileManager.inferBehavioralPatterns('default', allMessages);
+        // Build session engagement data from session summaries (already available)
+        const sessionSummaries = db.getSessionSummariesByUser('default', 20);
+        const sessions = sessionSummaries
+          .filter(s => s.messageCount > 0)
+          .map(s => ({
+            messageCount: s.messageCount,
+            durationMs: s.durationMs,
+            startTime: s.createdAt,
+          }));
+
+        // Collect existing embeddings from memories (no new embedding generation)
+        const userMemories = db.getMemoriesByUser('default', { isLatest: true, limit: 100 });
+        const messageEmbeddings = userMemories
+          .filter(m => m.embedding != null)
+          .map(m => ({
+            content: m.content,
+            embedding: m.embedding!,
+          }));
+
+        profileManager.inferBehavioralPatterns('default', allMessages, {
+          sessions: sessions.length > 0 ? sessions : undefined,
+          messageEmbeddings: messageEmbeddings.length > 0 ? messageEmbeddings : undefined,
+        });
         this.logger.debug({ messageCount: allMessages.length }, 'Behavioral patterns updated');
       }
     } catch (err) {
