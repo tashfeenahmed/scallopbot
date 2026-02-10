@@ -6,6 +6,7 @@ import * as os from 'os';
 import { pino } from 'pino';
 import type { CompletionResponse, LLMProvider, Message } from '../providers/types.js';
 import { ScallopDatabase } from '../memory/db.js';
+import { ScallopMemoryStore } from '../memory/scallop-store.js';
 
 // Mock provider that simulates LLM responses
 function createMockProvider(responses: CompletionResponse[]): LLMProvider {
@@ -676,6 +677,262 @@ describe('Agent', () => {
       // Skill executor should NOT be called since skill wasn't found
       expect(mockSkillExecutor.execute).not.toHaveBeenCalled();
       expect(result.response).toBe('That skill does not exist.');
+    });
+  });
+
+  describe('affect context injection', () => {
+    it('should include affect observation block when smoothedAffect is available', async () => {
+      const { Agent } = await import('./agent.js');
+      const { SessionManager } = await import('./session.js');
+
+      const logger = pino({ level: 'silent' });
+      const scallopStore = new ScallopMemoryStore({
+        dbPath: path.join(testDir, 'affect-test.db'),
+        logger,
+      });
+
+      // Pre-seed affectState EMA so the per-message classification preserves these values.
+      // "ok test" has no AFINN words → confidence < 0.1 → EMA not updated → pre-seeded values persist.
+      const profileManager = scallopStore.getProfileManager();
+      profileManager.updateBehavioralPatterns('default', {
+        communicationStyle: 'moderate',
+        expertiseAreas: ['typescript'],
+        affectState: {
+          fastValence: 0.45,
+          slowValence: 0.45,
+          fastArousal: 0.55,
+          slowArousal: 0.55,
+          lastUpdateMs: Date.now() - 1000,
+        },
+        smoothedAffect: {
+          emotion: 'excited',
+          valence: 0.45,
+          arousal: 0.55,
+          goalSignal: 'user_engaged',
+        },
+      });
+
+      const provider = createMockProvider([
+        {
+          content: [{ type: 'text', text: 'Response' }],
+          stopReason: 'end_turn',
+          usage: { inputTokens: 10, outputTokens: 5 },
+          model: 'test-model',
+        },
+      ]);
+
+      const sessionManager = new SessionManager(db);
+
+      const agent = new Agent({
+        provider,
+        sessionManager,
+        scallopStore,
+        workspace: testDir,
+        logger,
+        maxIterations: 20,
+      });
+
+      const session = await sessionManager.createSession();
+      // Use a neutral message with no AFINN sentiment words so EMA state is preserved
+      await agent.processMessage(session.id, 'ok test');
+
+      const callArgs = (provider.complete as any).mock.calls[0][0];
+      const systemPrompt: string = callArgs.system;
+
+      // Verify affect observation block is present
+      expect(systemPrompt).toContain('## USER AFFECT CONTEXT');
+      expect(systemPrompt).toContain('not an instruction to change your tone');
+      expect(systemPrompt).toContain('Emotion: excited');
+      expect(systemPrompt).toContain('Valence: 0.45');
+      expect(systemPrompt).toContain('Arousal: 0.55');
+      expect(systemPrompt).toContain('Mood trend: user_engaged');
+
+      scallopStore.close();
+    });
+
+    it('should NOT include affect observation block when no scallopStore is provided', async () => {
+      const { Agent } = await import('./agent.js');
+      const { SessionManager } = await import('./session.js');
+
+      const logger = pino({ level: 'silent' });
+
+      const provider = createMockProvider([
+        {
+          content: [{ type: 'text', text: 'Response' }],
+          stopReason: 'end_turn',
+          usage: { inputTokens: 10, outputTokens: 5 },
+          model: 'test-model',
+        },
+      ]);
+
+      const sessionManager = new SessionManager(db);
+
+      // No scallopStore — no memory system, no affect
+      const agent = new Agent({
+        provider,
+        sessionManager,
+        workspace: testDir,
+        logger,
+        maxIterations: 20,
+      });
+
+      const session = await sessionManager.createSession();
+      await agent.processMessage(session.id, 'Hello there');
+
+      const callArgs = (provider.complete as any).mock.calls[0][0];
+      const systemPrompt: string = callArgs.system;
+
+      // Verify affect observation block is NOT present
+      expect(systemPrompt).not.toContain('## USER AFFECT CONTEXT');
+      expect(systemPrompt).not.toContain('not an instruction to change your tone');
+
+      // Behavioral patterns should also not be present (no scallopStore)
+      expect(systemPrompt).not.toContain('USER BEHAVIORAL PATTERNS');
+    });
+
+    it('should include all behavioral signal types in system prompt', async () => {
+      const { Agent } = await import('./agent.js');
+      const { SessionManager } = await import('./session.js');
+
+      const logger = pino({ level: 'silent' });
+      const scallopStore = new ScallopMemoryStore({
+        dbPath: path.join(testDir, 'signals-test.db'),
+        logger,
+      });
+
+      // Set up behavioral patterns with all signal types
+      const profileManager = scallopStore.getProfileManager();
+      profileManager.updateBehavioralPatterns('default', {
+        communicationStyle: 'detailed',
+        expertiseAreas: ['react', 'node'],
+        messageFrequency: {
+          dailyRate: 12.5,
+          weeklyAvg: 87.5,
+          trend: 'increasing',
+          lastComputed: Date.now(),
+        },
+        sessionEngagement: {
+          avgMessagesPerSession: 8.0,
+          avgDurationMs: 600000,
+          trend: 'stable',
+          lastComputed: Date.now(),
+        },
+        topicSwitch: {
+          switchRate: 0.3,
+          avgTopicDepth: 4.2,
+          totalSwitches: 15,
+          lastComputed: Date.now(),
+        },
+        responseLength: {
+          avgLength: 150,
+          trend: 'increasing',
+          lastComputed: Date.now(),
+        },
+      });
+
+      const provider = createMockProvider([
+        {
+          content: [{ type: 'text', text: 'Response' }],
+          stopReason: 'end_turn',
+          usage: { inputTokens: 10, outputTokens: 5 },
+          model: 'test-model',
+        },
+      ]);
+
+      const sessionManager = new SessionManager(db);
+
+      const agent = new Agent({
+        provider,
+        sessionManager,
+        scallopStore,
+        workspace: testDir,
+        logger,
+        maxIterations: 20,
+      });
+
+      const session = await sessionManager.createSession();
+      // Use a neutral message so affect classification doesn't interfere with behavioral signal test
+      await agent.processMessage(session.id, 'ok test');
+
+      const callArgs = (provider.complete as any).mock.calls[0][0];
+      const systemPrompt: string = callArgs.system;
+
+      // Verify all behavioral signal types are present
+      expect(systemPrompt).toContain('USER BEHAVIORAL PATTERNS');
+      expect(systemPrompt).toContain('Style: detailed');
+      expect(systemPrompt).toContain('Expertise: react, node');
+      expect(systemPrompt).toContain('Messaging pace');
+      expect(systemPrompt).toContain('Session style');
+      expect(systemPrompt).toContain('Focuses deeply on topics');
+      expect(systemPrompt).toContain('Message length trend: increasing');
+
+      scallopStore.close();
+    });
+
+    it('should omit mood trend line when goalSignal is stable', async () => {
+      const { Agent } = await import('./agent.js');
+      const { SessionManager } = await import('./session.js');
+
+      const logger = pino({ level: 'silent' });
+      const scallopStore = new ScallopMemoryStore({
+        dbPath: path.join(testDir, 'stable-affect-test.db'),
+        logger,
+      });
+
+      // Pre-seed affectState EMA so values persist after neutral message classification.
+      // Valence > 0.3 and arousal <= 0 with equal fast/slow → emotion 'content', goalSignal 'stable'
+      const profileManager = scallopStore.getProfileManager();
+      profileManager.updateBehavioralPatterns('default', {
+        communicationStyle: 'moderate',
+        affectState: {
+          fastValence: 0.35,
+          slowValence: 0.35,
+          fastArousal: -0.05,
+          slowArousal: -0.05,
+          lastUpdateMs: Date.now() - 1000,
+        },
+        smoothedAffect: {
+          emotion: 'content',
+          valence: 0.35,
+          arousal: -0.05,
+          goalSignal: 'stable',
+        },
+      });
+
+      const provider = createMockProvider([
+        {
+          content: [{ type: 'text', text: 'Response' }],
+          stopReason: 'end_turn',
+          usage: { inputTokens: 10, outputTokens: 5 },
+          model: 'test-model',
+        },
+      ]);
+
+      const sessionManager = new SessionManager(db);
+
+      const agent = new Agent({
+        provider,
+        sessionManager,
+        scallopStore,
+        workspace: testDir,
+        logger,
+        maxIterations: 20,
+      });
+
+      const session = await sessionManager.createSession();
+      // Use a neutral message so EMA state is preserved
+      await agent.processMessage(session.id, 'ok test');
+
+      const callArgs = (provider.complete as any).mock.calls[0][0];
+      const systemPrompt: string = callArgs.system;
+
+      // Verify affect block is present but without mood trend (goalSignal is 'stable')
+      expect(systemPrompt).toContain('## USER AFFECT CONTEXT');
+      expect(systemPrompt).toContain('Emotion: content');
+      expect(systemPrompt).toContain('Valence: 0.35');
+      expect(systemPrompt).not.toContain('Mood trend');
+
+      scallopStore.close();
     });
   });
 });
