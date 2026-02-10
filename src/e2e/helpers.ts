@@ -84,6 +84,63 @@ export function createMockLLMProvider(
 }
 
 // ---------------------------------------------------------------------------
+// Scenario LLM Provider (supports tool_use responses)
+// ---------------------------------------------------------------------------
+
+export interface MockCompletionResponse {
+  content: ContentBlock[];
+  stopReason: 'end_turn' | 'tool_use' | 'max_tokens';
+}
+
+/**
+ * Create a scenario-aware mock LLM provider that returns full CompletionResponse
+ * objects (including tool_use blocks). Cycles through the given responses array.
+ * Tracks all requests for assertions on tool_result feedback.
+ */
+export function createScenarioLLMProvider(
+  responses: MockCompletionResponse[]
+): LLMProvider & {
+  callCount: number;
+  lastRequest: CompletionRequest | null;
+  allRequests: CompletionRequest[];
+} {
+  let callIndex = 0;
+
+  const provider: LLMProvider & {
+    callCount: number;
+    lastRequest: CompletionRequest | null;
+    allRequests: CompletionRequest[];
+  } = {
+    name: 'mock-scenario',
+    callCount: 0,
+    lastRequest: null,
+    allRequests: [],
+
+    async complete(request: CompletionRequest): Promise<CompletionResponse> {
+      provider.callCount++;
+      provider.lastRequest = request;
+      provider.allRequests.push(request);
+
+      const resp = responses[callIndex % responses.length];
+      callIndex++;
+
+      return {
+        content: resp.content,
+        stopReason: resp.stopReason,
+        usage: { inputTokens: 10, outputTokens: 20 },
+        model: 'mock-scenario-model',
+      };
+    },
+
+    isAvailable(): boolean {
+      return true;
+    },
+  };
+
+  return provider;
+}
+
+// ---------------------------------------------------------------------------
 // Mock Embedding Provider
 // ---------------------------------------------------------------------------
 
@@ -141,13 +198,15 @@ export interface E2EGatewayContext {
   /** Path to the test SQLite database */
   dbPath: string;
   /** The mock LLM provider for assertions */
-  mockProvider: LLMProvider & { callCount: number; lastRequest: CompletionRequest | null };
+  mockProvider: LLMProvider & { callCount: number; lastRequest: CompletionRequest | null; allRequests?: CompletionRequest[] };
   /** The real ScallopMemoryStore for direct DB assertions */
   scallopStore: ScallopMemoryStore;
   /** The real SessionManager */
   sessionManager: SessionManager;
   /** The real Agent */
   agent: Agent;
+  /** The skill registry for registering test skills */
+  skillRegistry: SkillRegistry;
 }
 
 export interface CreateE2EGatewayOptions {
@@ -157,6 +216,11 @@ export interface CreateE2EGatewayOptions {
   dbPath?: string;
   /** Pre-configured LLM responses for the agent's main provider */
   responses?: string[];
+  /** Full CompletionResponse objects for scenario testing (tool_use, etc.).
+   *  When provided, uses createScenarioLLMProvider instead of createMockLLMProvider. */
+  scenarioResponses?: MockCompletionResponse[];
+  /** Maximum agent iterations (default: 10) */
+  maxIterations?: number;
   /** Pre-configured LLM responses for the fact extractor provider.
    *  If provided, a LLMFactExtractor is wired into the agent.
    *  Each response should be JSON with a "facts" array. */
@@ -183,8 +247,10 @@ export async function createE2EGateway(
   const port = options.port ?? (10000 + Math.floor(Math.random() * 10000));
   const dbPath = options.dbPath ?? `/tmp/e2e-test-${Date.now()}-${Math.floor(Math.random() * 10000)}.db`;
 
-  // 1. Create mock providers
-  const mockProvider = createMockLLMProvider(options.responses);
+  // 1. Create mock providers (scenario provider if scenarioResponses given)
+  const mockProvider = options.scenarioResponses
+    ? createScenarioLLMProvider(options.scenarioResponses)
+    : createMockLLMProvider(options.responses);
   const mockEmbedder = createMockEmbeddingProvider();
 
   // 2. Create optional mock providers for re-ranking and relations
@@ -263,7 +329,7 @@ export async function createE2EGateway(
     configManager,
     workspace: '/tmp',
     logger: testLogger,
-    maxIterations: 10,
+    maxIterations: options.maxIterations ?? 10,
     enableThinking: false,
   });
 
@@ -287,6 +353,7 @@ export async function createE2EGateway(
     scallopStore,
     sessionManager,
     agent,
+    skillRegistry,
   };
 }
 
