@@ -10,11 +10,11 @@ See: .planning/PROJECT.md (updated 2026-02-09 after v3.0 milestone creation)
 ## Current Position
 
 Phase: 18 of 27 (Retrieval Re-ranking)
-Plan: Not started
-Status: Ready to plan
-Last activity: 2026-02-09 - Milestone v3.0 created
+Plan: 1 of 2 in current phase
+Status: In progress
+Last activity: 2026-02-10 - Completed 18-01-PLAN.md
 
-Progress: ░░░░░░░░░░ 0%
+Progress: █░░░░░░░░░ 5%
 
 ## Shipped Milestones
 
@@ -47,6 +47,11 @@ Full decision log in PROJECT.md Key Decisions table.
 - Each phase includes WebSocket-based conversation testing
 - Goal: make memory/routing/tool-use feel human-like
 
+**v3.0 Decisions:**
+- Re-ranker score blending: original*0.4 + LLM*0.6 (LLM dominates for semantic understanding)
+- Stateless pure functions for re-ranking (no class needed)
+- Graceful fallback to original scores on any LLM failure
+
 ### Deferred Issues
 
 - read, write, edit skills (for future milestone)
@@ -64,6 +69,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-02-09
-Stopped at: Milestone v3.0 initialization
+Last session: 2026-02-10
+Stopped at: Completed 18-01-PLAN.md (18-02 remaining)
 Resume file: None
