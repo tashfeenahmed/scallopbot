@@ -155,6 +155,7 @@ export class Gateway {
       scallopStore: this.scallopMemoryStore,
       logger: this.logger,
       interval: 60000, // 1 minute
+      fusionProvider: rerankProvider,
     });
 
     // Initialize LLM-based fact extractor
