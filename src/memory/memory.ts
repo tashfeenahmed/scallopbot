@@ -9,6 +9,8 @@
  */
 
 import type { Logger } from 'pino';
+import * as path from 'node:path';
+import * as fsPromises from 'node:fs/promises';
 
 // Re-export types from legacy-types (needed by migrate.ts)
 export type { MemoryType, MemoryEntry, PartialMemoryEntry } from './legacy-types.js';
@@ -27,6 +29,7 @@ import { auditRetrievalHistory } from './retrieval-audit.js';
 import { archiveLowUtilityMemories, pruneOrphanedRelations } from './utility-score.js';
 import { computeTrustScore } from './trust-score.js';
 import { checkGoalDeadlines } from './goal-deadline-check.js';
+import { reflect } from './reflection.js';
 
 export interface BackgroundGardenerOptions {
   scallopStore: ScallopMemoryStore;
@@ -39,6 +42,8 @@ export interface BackgroundGardenerOptions {
   fusionProvider?: LLMProvider;
   /** Quiet hours for sleep tick (default: 2-5 AM local time) */
   quietHours?: { start: number; end: number };
+  /** Workspace directory for SOUL.md I/O (optional — reflection skipped if not provided) */
+  workspace?: string;
 }
 
 /**
@@ -68,6 +73,7 @@ export class BackgroundGardener {
   private tickCount = 0;
   private sleepTickCount = 0;
   private quietHours: { start: number; end: number };
+  private workspace?: string;
 
   /** Deep consolidation runs every DEEP_EVERY light ticks.
    *  With default 5-min interval: 72 ticks × 5 min = 6 hours */
@@ -84,6 +90,7 @@ export class BackgroundGardener {
     this.sessionSummarizer = options.sessionSummarizer;
     this.fusionProvider = options.fusionProvider;
     this.quietHours = options.quietHours ?? { start: 2, end: 5 };
+    this.workspace = options.workspace;
   }
 
   start(): void {
@@ -470,6 +477,7 @@ export class BackgroundGardener {
    * Sleep tick: nightly cognitive processing (Tier 3).
    * Phase 27: NREM consolidation (wider prominence window, cross-category clustering)
    * Phase 28: REM exploration (creative association discovery via EXTENDS relations)
+   * Phase 30: Self-reflection (composite reflection → SOUL.md re-distillation)
    */
   async sleepTick(): Promise<void> {
     this.logger.info('Sleep tick: nightly cognitive processing starting');
@@ -613,7 +621,91 @@ export class BackgroundGardener {
       }
     }
 
-    // Phase 30: Self-reflection (placeholder)
+    // Phase 30: Self-reflection
+    if (this.fusionProvider && this.workspace) {
+      try {
+        const db = this.scallopStore.getDatabase();
+        // Get today's session summaries (all users — iterate per user like dream cycle)
+        const userRows = db.raw<{ user_id: string }>('SELECT DISTINCT user_id FROM session_summaries', []);
+
+        for (const { user_id: userId } of userRows) {
+          try {
+            // Get recent session summaries (last 24h worth)
+            const allSummaries = db.getSessionSummariesByUser(userId, 50);
+            const oneDayAgo = Date.now() - 24 * 60 * 60 * 1000;
+            const todaySummaries = allSummaries.filter(s => s.createdAt >= oneDayAgo);
+
+            if (todaySummaries.length === 0) continue;
+
+            // Read current SOUL.md (may not exist yet)
+            let currentSoul: string | null = null;
+            const soulPath = path.join(this.workspace, 'SOUL.md');
+            try {
+              currentSoul = await fsPromises.readFile(soulPath, 'utf-8');
+            } catch {
+              // First run — SOUL.md doesn't exist yet
+            }
+
+            // Generate reflections
+            const result = await reflect(todaySummaries, currentSoul, this.fusionProvider);
+
+            if (result.skipped) {
+              this.logger.debug({ userId, reason: result.skipReason }, 'Self-reflection skipped');
+              continue;
+            }
+
+            // Store insights as insight-category memories with DERIVES relations
+            for (const insight of result.insights) {
+              try {
+                const mem = await this.scallopStore.add({
+                  userId,
+                  content: insight.content,
+                  category: 'insight',
+                  importance: 7,
+                  confidence: 0.85,
+                  sourceChunk: insight.sourceSessionIds.join(' | '),
+                  metadata: {
+                    reflectedAt: new Date().toISOString(),
+                    topics: insight.topics,
+                    sourceSessionIds: insight.sourceSessionIds,
+                  },
+                  learnedFrom: 'self_reflection',
+                  detectRelations: false,
+                });
+                db.updateMemory(mem.id, { memoryType: 'derived' });
+
+                // DERIVES relations to source session summary memory entries
+                // (session summaries are stored in a separate table, not memories —
+                //  so we skip DERIVES relations to sessions and rely on metadata.sourceSessionIds)
+              } catch (err) {
+                this.logger.warn({ error: (err as Error).message, userId }, 'Reflection insight storage failed');
+              }
+            }
+
+            // Write updated SOUL.md
+            if (result.updatedSoul) {
+              try {
+                await fsPromises.writeFile(soulPath, result.updatedSoul, 'utf-8');
+                this.logger.info({ userId }, 'SOUL.md updated from self-reflection');
+              } catch (err) {
+                this.logger.warn({ error: (err as Error).message }, 'SOUL.md write failed');
+              }
+            }
+
+            this.logger.info({
+              userId,
+              insightsGenerated: result.insights.length,
+              soulUpdated: result.updatedSoul !== null,
+              sessionsReflected: todaySummaries.length,
+            }, 'Self-reflection complete for user');
+          } catch (err) {
+            this.logger.warn({ error: (err as Error).message, userId }, 'Self-reflection failed for user');
+          }
+        }
+      } catch (err) {
+        this.logger.warn({ error: (err as Error).message }, 'Self-reflection phase failed');
+      }
+    }
 
     this.logger.info('Sleep tick complete');
   }
