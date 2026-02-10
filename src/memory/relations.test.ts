@@ -29,6 +29,7 @@ function makeMemory(overrides: Partial<ScallopMemoryEntry> & { id: string; conte
     memoryType: 'regular',
     importance: 5,
     confidence: 0.8,
+    createdAt: Date.now(),
     isLatest: true,
     documentDate: Date.now(),
     eventDate: null,
@@ -52,7 +53,7 @@ function createMockEmbedder(similarityMap?: Map<string, number[]>): EmbeddingPro
     embedBatch: vi.fn().mockImplementation(async (texts: string[]) => {
       return texts.map(t => similarityMap?.get(t) ?? defaultEmbedding);
     }),
-    dimensions: 4,
+    dimension: 4,
   };
 }
 
