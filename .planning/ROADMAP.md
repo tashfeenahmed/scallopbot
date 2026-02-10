@@ -43,7 +43,7 @@ Plans:
 Plans:
 - [x] 25-01: Affect Classifier (TDD)
 - [x] 25-02: Affect EMA Smoothing (TDD)
-- [ ] 25-03: Wire Affect Integration
+- [x] 25-03: Wire Affect Integration
 
 #### Phase 26: Affect Context Injection
 
@@ -135,7 +135,7 @@ Plans:
 | 9-17 | v2.0 | 11/11 | Complete | 2026-02-04 |
 | 18-23 | v3.0 | 13/13 | Complete | 2026-02-10 |
 | 24. Heartbeat Tier Enhancements | v4.0 | 5/5 | Complete | 2026-02-10 |
-| 25. Affect Detection | v4.0 | 2/3 | In progress | - |
+| 25. Affect Detection | v4.0 | 3/3 | Complete | 2026-02-10 |
 | 26. Affect Context Injection | v4.0 | 0/? | Not started | - |
 | 27. Dream NREM Consolidation | v4.0 | 0/? | Not started | - |
 | 28. Dream REM Exploration | v4.0 | 0/? | Not started | - |
