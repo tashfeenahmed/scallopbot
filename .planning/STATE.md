@@ -9,12 +9,12 @@ See: .planning/PROJECT.md (updated 2026-02-09 after v3.0 milestone creation)
 
 ## Current Position
 
-Phase: 21 of 23 (Memory Fusion Engine)
-Plan: 2 of 2 in current phase
-Status: Phase complete
-Last activity: 2026-02-10 - Completed 21-02-PLAN.md, removed phases 22-26, renumbered 27→22, added phase 23
+Phase: 22 of 23 (Behavioral Profiling)
+Plan: 1 of 2 in current phase
+Status: In progress
+Last activity: 2026-02-10 - Completed 22-01-PLAN.md
 
-Progress: ████████░░ 67%
+Progress: █████████░ 75%
 
 ## Shipped Milestones
 
@@ -66,6 +66,9 @@ Full decision log in PROJECT.md Key Decisions table.
 - Summary length validation ensures fusion reduces storage
 - Opt-in fusionProvider in BackgroundGardener — same fast-tier provider reuse pattern
 - maxProminence 0.7 for fusion (decay formula floor ~0.52 makes 0.5 unreachable)
+- Import cosineSimilarity from embeddings.js for topic switch detection (reuse, not reimplement)
+- Cold start null returns for behavioral signals (type-safe caller handling)
+- EMA halfLife 7 days for frequency/length signals; topic switch threshold 0.3 cosine similarity
 
 ### Deferred Issues
 
@@ -86,5 +89,5 @@ None.
 ## Session Continuity
 
 Last session: 2026-02-10
-Stopped at: Completed 21-02-PLAN.md — Phase 21 complete (2/2 plans done)
+Stopped at: Completed 22-01-PLAN.md — Phase 22 in progress (1/2 plans done)
 Resume file: None
