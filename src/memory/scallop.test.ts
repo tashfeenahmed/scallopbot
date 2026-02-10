@@ -2,7 +2,7 @@
  * Tests for ScallopMemory System
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
 import {
@@ -16,6 +16,7 @@ import {
   PROMINENCE_THRESHOLDS,
 } from './index.js';
 import pino from 'pino';
+import type { LLMProvider, CompletionResponse } from '../providers/types.js';
 
 const TEST_DB_PATH = '/tmp/scallop-test.db';
 const logger = pino({ level: 'silent' });
@@ -696,5 +697,137 @@ describe('ScallopMemoryStore', () => {
 
     const context = await store.getProfileContext('user1');
     expect(context).toContain('Test User');
+  });
+});
+
+describe('ScallopMemoryStore search with re-ranking', () => {
+  const RERANK_DB_PATH = '/tmp/scallop-rerank-test.db';
+
+  function cleanupRerankDb() {
+    try {
+      fs.unlinkSync(RERANK_DB_PATH);
+      fs.unlinkSync(RERANK_DB_PATH + '-wal');
+      fs.unlinkSync(RERANK_DB_PATH + '-shm');
+    } catch {
+      // Ignore if files don't exist
+    }
+  }
+
+  /**
+   * Create a mock LLMProvider that returns predictable relevance scores.
+   * Maps memory index to LLM score via the provided scoreMap.
+   */
+  function createMockRerankProvider(scoreMap: Record<number, number>): LLMProvider {
+    const llmResponse = JSON.stringify(
+      Object.entries(scoreMap).map(([index, score]) => ({ index: Number(index), score }))
+    );
+    return {
+      name: 'mock-reranker',
+      isAvailable: () => true,
+      complete: vi.fn().mockResolvedValue({
+        content: [{ type: 'text', text: llmResponse }],
+        stopReason: 'end_turn',
+        usage: { inputTokens: 100, outputTokens: 50 },
+        model: 'mock-model',
+      } satisfies CompletionResponse),
+    };
+  }
+
+  it('should re-order results based on LLM relevance scores', async () => {
+    cleanupRerankDb();
+
+    // LLM will rank "sushi restaurant" highest, then "vegetarian options", and push "hiking" lower
+    const rerankProvider = createMockRerankProvider({
+      0: 0.9,   // sushi restaurant — top LLM relevance
+      1: 0.1,   // hiking trails — low LLM relevance
+      2: 0.8,   // vegetarian options — high LLM relevance
+    });
+
+    const store = new ScallopMemoryStore({
+      dbPath: RERANK_DB_PATH,
+      logger,
+      rerankProvider,
+    });
+
+    try {
+      // Store memories — content crafted so BM25 "food" keyword scoring gives different order
+      await store.add({ userId: 'user1', content: 'Best sushi restaurant downtown', category: 'fact' });
+      await store.add({ userId: 'user1', content: 'Great hiking trails nearby with food stands', category: 'fact' });
+      await store.add({ userId: 'user1', content: 'Vegetarian food options at the café', category: 'preference' });
+
+      const results = await store.search('food recommendations', { userId: 'user1', limit: 3 });
+
+      // Verify provider.complete was called (re-ranking happened)
+      expect(rerankProvider.complete).toHaveBeenCalled();
+
+      // Results should be re-ordered by LLM scores
+      expect(results.length).toBeGreaterThan(0);
+
+      // The re-ranked order should reflect LLM preference:
+      // sushi (0.9 LLM) should beat hiking (0.1 LLM)
+      const ids = results.map(r => r.memory.content);
+      const sushiIdx = ids.findIndex(c => c.includes('sushi'));
+      const hikingIdx = ids.findIndex(c => c.includes('hiking'));
+      if (sushiIdx !== -1 && hikingIdx !== -1) {
+        expect(sushiIdx).toBeLessThan(hikingIdx);
+      }
+    } finally {
+      store.close();
+      cleanupRerankDb();
+    }
+  });
+
+  it('should fall back to original scores when LLM fails', async () => {
+    cleanupRerankDb();
+
+    const failingProvider: LLMProvider = {
+      name: 'mock-failing',
+      isAvailable: () => true,
+      complete: vi.fn().mockRejectedValue(new Error('API rate limit exceeded')),
+    };
+
+    const store = new ScallopMemoryStore({
+      dbPath: RERANK_DB_PATH,
+      logger,
+      rerankProvider: failingProvider,
+    });
+
+    try {
+      await store.add({ userId: 'user1', content: 'User works at Microsoft', category: 'fact' });
+      await store.add({ userId: 'user1', content: 'User likes TypeScript', category: 'preference' });
+
+      const results = await store.search('Microsoft', { userId: 'user1' });
+
+      // Should still return results despite LLM failure
+      expect(results.length).toBeGreaterThan(0);
+      expect(results[0].memory.content).toContain('Microsoft');
+    } finally {
+      store.close();
+      cleanupRerankDb();
+    }
+  });
+
+  it('should skip re-ranking when no rerankProvider set', async () => {
+    cleanupRerankDb();
+
+    const store = new ScallopMemoryStore({
+      dbPath: RERANK_DB_PATH,
+      logger,
+      // No rerankProvider — should use original scoring only
+    });
+
+    try {
+      await store.add({ userId: 'user1', content: 'User works at Google', category: 'fact' });
+      await store.add({ userId: 'user1', content: 'User enjoys cooking', category: 'preference' });
+
+      const results = await store.search('Google', { userId: 'user1' });
+
+      // Should return results with original BM25+semantic scores
+      expect(results.length).toBeGreaterThan(0);
+      expect(results[0].memory.content).toContain('Google');
+    } finally {
+      store.close();
+      cleanupRerankDb();
+    }
   });
 });
