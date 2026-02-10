@@ -136,6 +136,17 @@ export {
   type FusionResult,
 } from './fusion.js';
 
+// NREM Consolidation
+export {
+  nremConsolidate,
+  buildNremFusionPrompt,
+  buildRelationContext,
+  DEFAULT_NREM_CONFIG,
+  type NremConfig,
+  type NremResult,
+  type RelationContextEntry,
+} from './nrem-consolidation.js';
+
 // Behavioral Signals
 export {
   computeMessageFrequency,

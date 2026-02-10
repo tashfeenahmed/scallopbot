@@ -20,6 +20,7 @@ import type { ScallopMemoryStore } from './scallop-store.js';
 import type { SessionSummarizer } from './session-summary.js';
 import type { LLMProvider } from '../providers/types.js';
 import { findFusionClusters, fuseMemoryCluster } from './fusion.js';
+import { nremConsolidate } from './nrem-consolidation.js';
 import { performHealthPing } from './health-ping.js';
 import { auditRetrievalHistory } from './retrieval-audit.js';
 import { computeTrustScore } from './trust-score.js';
@@ -431,15 +432,112 @@ export class BackgroundGardener {
 
   /**
    * Sleep tick: nightly cognitive processing (Tier 3).
-   * Placeholder for Phase 27+ operations.
+   * Phase 27: NREM consolidation (wider prominence window, cross-category clustering)
    */
   async sleepTick(): Promise<void> {
     this.logger.info('Sleep tick: nightly cognitive processing starting');
-    // Placeholder for Phase 27+ operations:
-    // - NREM consolidation (Phase 27)
-    // - REM exploration (Phase 28)
-    // - Self-reflection (Phase 30)
-    this.logger.info('Sleep tick complete (no operations configured yet)');
+
+    const db = this.scallopStore.getDatabase();
+
+    // Phase 27: NREM consolidation
+    if (this.fusionProvider) {
+      try {
+        const userRows = db.raw<{ user_id: string }>('SELECT DISTINCT user_id FROM memories WHERE source != \'_cleaned_sentinel\'', []);
+        let totalFused = 0;
+        let totalMerged = 0;
+
+        for (const { user_id: userId } of userRows) {
+          // Get memories with NREM's wider prominence window [0.05, 0.8)
+          const allMemories = db.getMemoriesByUser(userId, {
+            minProminence: 0.05,
+            isLatest: true,
+            includeAllSources: true,
+          });
+          // Filter in JS: prominence < 0.8, exclude static_profile and derived
+          const eligibleMemories = allMemories.filter(m =>
+            m.prominence < 0.8 &&
+            m.memoryType !== 'static_profile' &&
+            m.memoryType !== 'derived'
+          );
+
+          if (eligibleMemories.length < 3) continue;
+
+          // Run NREM consolidation (pure function — handles clustering, relation context, LLM fusion)
+          const nremResult = await nremConsolidate(
+            eligibleMemories,
+            (id) => db.getRelations(id),
+            this.fusionProvider,
+          );
+
+          // Store each fused result (same pattern as deep tick fusion)
+          for (const result of nremResult.fusionResults) {
+            try {
+              const fusedMemory = await this.scallopStore.add({
+                userId,
+                content: result.summary,
+                category: result.category,
+                importance: result.importance,
+                confidence: result.confidence,
+                sourceChunk: result.sourceMemoryIds.join(' | '),
+                metadata: {
+                  fusedAt: new Date().toISOString(),
+                  sourceCount: result.sourceMemoryIds.length,
+                  sourceIds: result.sourceMemoryIds,
+                  nrem: true,
+                },
+                learnedFrom: 'nrem_consolidation',
+                detectRelations: false,
+              });
+
+              // Override memoryType to 'derived' (add() sets 'regular')
+              db.updateMemory(fusedMemory.id, { memoryType: 'derived' });
+
+              // Add DERIVES relations from fused memory to each source
+              for (const sourceId of result.sourceMemoryIds) {
+                db.addRelation(fusedMemory.id, sourceId, 'DERIVES', 0.95);
+              }
+
+              // Mark sources as superseded
+              for (const sourceId of result.sourceMemoryIds) {
+                this.scallopStore.update(sourceId, { isLatest: false });
+                db.updateMemory(sourceId, { memoryType: 'superseded' });
+              }
+
+              // Set fused memory prominence
+              const sourceMemories = allMemories.filter(m => result.sourceMemoryIds.includes(m.id));
+              const maxProminence = Math.max(...sourceMemories.map(m => m.prominence));
+              const fusedProminence = Math.min(0.6, maxProminence + 0.1);
+              db.updateProminences([{ id: fusedMemory.id, prominence: fusedProminence }]);
+
+              totalFused++;
+              totalMerged += result.sourceMemoryIds.length;
+            } catch (err) {
+              this.logger.warn({ error: (err as Error).message, userId }, 'NREM cluster storage failed');
+            }
+          }
+
+          if (nremResult.clustersProcessed > 0) {
+            this.logger.info({
+              userId,
+              clustersProcessed: nremResult.clustersProcessed,
+              memoriesConsolidated: nremResult.fusionResults.length,
+              failures: nremResult.failures,
+            }, 'NREM consolidation complete for user');
+          }
+        }
+
+        if (totalFused > 0) {
+          this.logger.info({ fused: totalFused, memoriesMerged: totalMerged }, 'NREM consolidation complete');
+        }
+      } catch (err) {
+        this.logger.warn({ error: (err as Error).message }, 'NREM consolidation failed');
+      }
+    }
+
+    // Phase 28: REM exploration (placeholder)
+    // Phase 30: Self-reflection (placeholder)
+
+    this.logger.info('Sleep tick complete');
   }
 
   /** Backward-compatible: processMemories calls lightTick */
