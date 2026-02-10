@@ -60,10 +60,12 @@ Plans:
 **Goal**: Implement the NREM phase of the dream cycle — expand fusion clustering from same-category to cross-category, widen prominence window to [0.05, 0.8), enrich fusion prompts with relation context, run as part of a new nightly Tier 3 (Sleep) tick
 **Depends on**: Phase 24 (heartbeat tier infrastructure for Tier 3 scheduling)
 **Research**: Unlikely (extends existing fusion.ts — Hu et al. consolidation patterns already designed)
-**Plans**: TBD
+**Plans**: 3
 
 Plans:
-- [ ] 27-01: TBD
+- [ ] 27-01: Cross-Category Fusion Clustering (TDD)
+- [ ] 27-02: NREM Consolidation Module (TDD)
+- [ ] 27-03: Wire NREM into sleepTick
 
 #### Phase 28: Dream REM Exploration
 
@@ -137,7 +139,7 @@ Plans:
 | 24. Heartbeat Tier Enhancements | v4.0 | 5/5 | Complete | 2026-02-10 |
 | 25. Affect Detection | v4.0 | 3/3 | Complete | 2026-02-10 |
 | 26. Affect Context Injection | v4.0 | 1/1 | Complete | 2026-02-10 |
-| 27. Dream NREM Consolidation | v4.0 | 0/? | Not started | - |
+| 27. Dream NREM Consolidation | v4.0 | 0/3 | Planned | - |
 | 28. Dream REM Exploration | v4.0 | 0/? | Not started | - |
 | 29. Enhanced Forgetting | v4.0 | 0/? | Not started | - |
 | 30. Self-Reflection | v4.0 | 0/? | Not started | - |
