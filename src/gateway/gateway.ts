@@ -121,6 +121,7 @@ export class Gateway {
       logger: this.logger,
       embedder,
       rerankProvider,
+      relationsProvider: rerankProvider,
     });
     this.logger.info({ dbPath, count: this.scallopMemoryStore.getCount() }, 'ScallopMemory initialized');
 
