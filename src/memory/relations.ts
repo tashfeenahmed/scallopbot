@@ -15,6 +15,13 @@ import type {
 } from './db.js';
 import type { EmbeddingProvider } from './embeddings.js';
 import { cosineSimilarity } from './embeddings.js';
+import type { LLMProvider } from '../providers/types.js';
+import {
+  RelationshipClassifier,
+  type ClassificationResult,
+  type FactToClassify,
+  type ExistingFact,
+} from './relation-classifier.js';
 
 /**
  * Options for relation detection
@@ -46,11 +53,13 @@ export class RelationGraph {
   private db: ScallopDatabase;
   private embedder?: EmbeddingProvider;
   private options: Required<RelationDetectionOptions>;
+  private classifier?: RelationshipClassifier;
 
   constructor(
     db: ScallopDatabase,
     embedder?: EmbeddingProvider,
-    options: RelationDetectionOptions = {}
+    options: RelationDetectionOptions = {},
+    classifierProvider?: LLMProvider,
   ) {
     this.db = db;
     this.embedder = embedder;
@@ -59,6 +68,10 @@ export class RelationGraph {
       extendThreshold: options.extendThreshold ?? 0.5,
       maxRelations: options.maxRelations ?? 5,
     };
+
+    if (classifierProvider) {
+      this.classifier = new RelationshipClassifier(classifierProvider);
+    }
   }
 
   /**
@@ -186,13 +199,15 @@ export class RelationGraph {
    * Detect potential relations for a new memory.
    * Optimized: uses batch embeddings, early exit on high confidence,
    * and pre-filters candidates by category.
+   *
+   * When an LLM classifier is available, batches all similarity-passing
+   * candidates into a single LLM call. Falls back to regex heuristics
+   * when no classifier is configured or on LLM failure.
    */
   async detectRelations(
     newMemory: ScallopMemoryEntry,
     candidateMemories?: ScallopMemoryEntry[]
   ): Promise<DetectedRelation[]> {
-    const detected: DetectedRelation[] = [];
-
     // Get candidates if not provided - filter by same category for relevance
     const candidates = candidateMemories ?? this.db.getMemoriesByUser(newMemory.userId, {
       category: newMemory.category,
@@ -204,7 +219,7 @@ export class RelationGraph {
     const filtered = candidates.filter((m) => m.id !== newMemory.id);
 
     if (filtered.length === 0 || !this.embedder) {
-      return detected;
+      return [];
     }
 
     // Get embedding for new memory
@@ -225,40 +240,160 @@ export class RelationGraph {
       }
     }
 
+    // Collect candidates that pass similarity threshold
+    const similarCandidates: Array<{ memory: ScallopMemoryEntry; similarity: number }> = [];
     for (const candidate of filtered) {
       const candidateEmbedding = candidate.embedding;
-      if (!candidateEmbedding) continue; // Skip if no embedding available
+      if (!candidateEmbedding) continue;
 
-      // Calculate similarity
       const similarity = cosineSimilarity(newEmbedding, candidateEmbedding);
-
-      // Early skip for very low similarity
-      if (similarity < this.options.extendThreshold) {
-        continue;
+      if (similarity >= this.options.extendThreshold) {
+        similarCandidates.push({ memory: candidate, similarity });
       }
+    }
 
-      // Detect relation type based on similarity and content analysis
-      const relation = this.classifyRelation(newMemory, candidate, similarity);
+    if (similarCandidates.length === 0) {
+      return [];
+    }
 
-      if (relation) {
-        detected.push(relation);
-
-        // Early exit: high-confidence UPDATE found, no need to check more
-        if (relation.relationType === 'UPDATES' && relation.confidence >= 0.85) {
-          break;
-        }
-      }
-
-      // Stop if we have enough relations
-      if (detected.length >= this.options.maxRelations) {
-        break;
-      }
+    // Use LLM classifier if available, otherwise regex fallback
+    let detected: DetectedRelation[];
+    if (this.classifier) {
+      detected = await this.classifyWithLLM(newMemory, similarCandidates);
+    } else {
+      detected = this.classifyWithRegex(newMemory, similarCandidates);
     }
 
     // Sort by confidence
     detected.sort((a, b) => b.confidence - a.confidence);
 
     return detected.slice(0, this.options.maxRelations);
+  }
+
+  /**
+   * Classify relations using LLM-based RelationshipClassifier.
+   * Falls back to regex if LLM call fails.
+   *
+   * Note: RelationshipClassifier internally catches LLM errors and returns
+   * { classification: 'NEW', confidence: 0.5, reason: '...failed...' }.
+   * We detect this pattern to trigger regex fallback.
+   */
+  private async classifyWithLLM(
+    newMemory: ScallopMemoryEntry,
+    similarCandidates: Array<{ memory: ScallopMemoryEntry; similarity: number }>,
+  ): Promise<DetectedRelation[]> {
+    try {
+      const newFact = this.memoryToFact(newMemory);
+      const existingFacts = similarCandidates.map(c => this.memoryToExistingFact(c.memory));
+
+      let classificationResults: ClassificationResult[];
+
+      if (similarCandidates.length === 1) {
+        // Single candidate: use classify()
+        const result = await this.classifier!.classify(newFact, existingFacts);
+        classificationResults = [result];
+      } else {
+        // Multiple candidates: use classifyBatch() for efficiency
+        // classifyBatch takes new facts to classify against existing facts.
+        // Here we have one new fact but want to classify it against each existing fact.
+        // We send one new fact per existing candidate so the LLM compares each pair.
+        const newFacts = similarCandidates.map(() => newFact);
+        classificationResults = await this.classifier!.classifyBatch(newFacts, existingFacts);
+      }
+
+      // Detect LLM failure: classifier swallows errors and returns all NEW with
+      // confidence 0.5 and a "failed" reason. Fall back to regex in this case.
+      const allFailed = classificationResults.every(
+        r => r.classification === 'NEW' && r.confidence === 0.5 && r.reason.includes('failed')
+      );
+      if (allFailed) {
+        return this.classifyWithRegex(newMemory, similarCandidates);
+      }
+
+      // Map classification results to DetectedRelation[]
+      const detected: DetectedRelation[] = [];
+      for (let i = 0; i < classificationResults.length; i++) {
+        const result = classificationResults[i];
+        const candidate = similarCandidates[i];
+
+        // Filter out NEW classifications (no relation)
+        if (result.classification === 'NEW') {
+          continue;
+        }
+
+        const relation: DetectedRelation = {
+          sourceId: newMemory.id,
+          targetId: result.targetId ?? candidate.memory.id,
+          relationType: result.classification as RelationType,
+          confidence: result.confidence,
+          reason: result.reason,
+        };
+
+        detected.push(relation);
+
+        // Early exit: high-confidence UPDATE found
+        if (relation.relationType === 'UPDATES' && relation.confidence >= 0.85) {
+          break;
+        }
+      }
+
+      return detected;
+    } catch {
+      // LLM threw an uncaught error — fall back to regex for all candidates
+      return this.classifyWithRegex(newMemory, similarCandidates);
+    }
+  }
+
+  /**
+   * Classify relations using regex-based heuristics (original behavior).
+   */
+  private classifyWithRegex(
+    newMemory: ScallopMemoryEntry,
+    similarCandidates: Array<{ memory: ScallopMemoryEntry; similarity: number }>,
+  ): DetectedRelation[] {
+    const detected: DetectedRelation[] = [];
+
+    for (const { memory: candidate, similarity } of similarCandidates) {
+      const relation = this.classifyRelation(newMemory, candidate, similarity);
+
+      if (relation) {
+        detected.push(relation);
+
+        // Early exit: high-confidence UPDATE found
+        if (relation.relationType === 'UPDATES' && relation.confidence >= 0.85) {
+          break;
+        }
+      }
+
+      if (detected.length >= this.options.maxRelations) {
+        break;
+      }
+    }
+
+    return detected;
+  }
+
+  /**
+   * Convert a ScallopMemoryEntry to FactToClassify for the LLM classifier.
+   */
+  private memoryToFact(memory: ScallopMemoryEntry): FactToClassify {
+    return {
+      content: memory.content,
+      subject: memory.userId,
+      category: memory.category,
+    };
+  }
+
+  /**
+   * Convert a ScallopMemoryEntry to ExistingFact for the LLM classifier.
+   */
+  private memoryToExistingFact(memory: ScallopMemoryEntry): ExistingFact {
+    return {
+      id: memory.id,
+      content: memory.content,
+      subject: memory.userId,
+      category: memory.category,
+    };
   }
 
   /**
@@ -423,7 +558,8 @@ export class RelationGraph {
 export function createRelationGraph(
   db: ScallopDatabase,
   embedder?: EmbeddingProvider,
-  options?: RelationDetectionOptions
+  options?: RelationDetectionOptions,
+  classifierProvider?: LLMProvider,
 ): RelationGraph {
-  return new RelationGraph(db, embedder, options);
+  return new RelationGraph(db, embedder, options, classifierProvider);
 }
