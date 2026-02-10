@@ -280,3 +280,13 @@ export {
   DIAL_THRESHOLDS,
   type GapAction,
 } from './gap-actions.js';
+
+// Inner Thoughts (Post-session proactive evaluation)
+export {
+  evaluateInnerThoughts,
+  shouldRunInnerThoughts,
+  buildInnerThoughtsPrompt,
+  parseInnerThoughtsResponse,
+  type InnerThoughtsInput,
+  type InnerThoughtsResult,
+} from './inner-thoughts.js';

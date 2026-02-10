@@ -33,6 +33,8 @@ import { reflect } from './reflection.js';
 import { scanForGaps } from './gap-scanner.js';
 import { diagnoseGaps } from './gap-diagnosis.js';
 import { createGapActions } from './gap-actions.js';
+import { evaluateInnerThoughts } from './inner-thoughts.js';
+import { computeDeliveryTime } from '../proactive/timing-model.js';
 
 export interface BackgroundGardenerOptions {
   scallopStore: ScallopMemoryStore;
@@ -460,6 +462,104 @@ export class BackgroundGardener {
       this.logger.warn({ error: (err as Error).message }, 'Goal deadline check failed');
     }
 
+    // 7. Inner thoughts evaluation (for users with recent session summaries)
+    if (this.fusionProvider) {
+      try {
+        const userRows = db.raw<{ user_id: string }>('SELECT DISTINCT user_id FROM session_summaries', []);
+        const sixHoursAgo = Date.now() - 6 * 60 * 60 * 1000;
+
+        for (const { user_id: userId } of userRows) {
+          try {
+            // Only evaluate inner thoughts for users with session summaries created since last deep tick (~6h)
+            const allSummaries = db.getSessionSummariesByUser(userId, 10);
+            const recentSummaries = allSummaries.filter(s => s.createdAt >= sixHoursAgo);
+
+            if (recentSummaries.length === 0) continue;
+
+            // Use the most recent session summary
+            const sessionSummary = recentSummaries[0];
+
+            // Gather context for inner thoughts evaluation
+            const behavioralPatterns = db.getBehavioralPatterns(userId);
+            const affect = behavioralPatterns?.smoothedAffect ?? null;
+            const dial = (behavioralPatterns?.responsePreferences?.proactivenessDial as 'conservative' | 'moderate' | 'eager') ?? 'moderate';
+            const activeHours = behavioralPatterns?.activeHours ?? [];
+
+            // Get last proactive firing timestamp
+            const scheduledItems = db.getScheduledItemsByUser(userId);
+            const lastFiredAgent = scheduledItems
+              .filter(i => i.source === 'agent' && i.firedAt != null)
+              .sort((a, b) => (b.firedAt ?? 0) - (a.firedAt ?? 0));
+            const lastProactiveAt = lastFiredAgent.length > 0 ? lastFiredAgent[0].firedAt : null;
+
+            // Get recent gap signals (reuse scanner inputs)
+            const GoalService = (await import('../goals/goal-service.js')).GoalService;
+            const goalService = new GoalService({ db, logger: this.logger });
+            const activeGoals = await goalService.listGoals(userId, { status: 'active' });
+            const safeBehavioral = behavioralPatterns ?? {
+              userId,
+              communicationStyle: null,
+              expertiseAreas: [],
+              responsePreferences: {},
+              activeHours: [],
+              messageFrequency: null,
+              sessionEngagement: null,
+              topicSwitch: null,
+              responseLength: null,
+              affectState: null,
+              smoothedAffect: null,
+              updatedAt: 0,
+            };
+            const gapSignals = scanForGaps({
+              activeGoals,
+              behavioralSignals: safeBehavioral,
+              sessionSummaries: allSummaries,
+            });
+
+            const result = await evaluateInnerThoughts({
+              sessionSummary,
+              recentGapSignals: gapSignals,
+              affect,
+              dial,
+              lastProactiveAt,
+              activeHours,
+            }, this.fusionProvider);
+
+            if (result.decision === 'proact' && result.message) {
+              // Compute delivery time using timing model
+              const currentHour = new Date().getHours();
+              const timing = computeDeliveryTime({
+                userActiveHours: activeHours,
+                quietHours: this.quietHours,
+                lastProactiveAt,
+                currentHour,
+                urgency: result.urgency,
+                now: Date.now(),
+              });
+
+              db.addScheduledItem({
+                userId,
+                sessionId: null,
+                source: 'agent',
+                type: 'follow_up',
+                message: result.message,
+                context: JSON.stringify({ source: 'inner_thoughts', reason: result.reason, urgency: result.urgency }),
+                triggerAt: timing.deliverAt,
+                recurring: null,
+                sourceMemoryId: null,
+              });
+
+              this.logger.info({ userId, urgency: result.urgency, strategy: timing.strategy, reason: result.reason }, 'Inner thoughts created proactive item');
+            }
+          } catch (err) {
+            this.logger.warn({ error: (err as Error).message, userId }, 'Inner thoughts failed for user');
+          }
+        }
+      } catch (err) {
+        this.logger.warn({ error: (err as Error).message }, 'Inner thoughts phase failed');
+      }
+    }
+
     this.logger.info('Deep tick complete');
   }
 
@@ -773,8 +873,32 @@ export class BackgroundGardener {
               pendingItems.map(i => ({ message: i.message })),
             );
 
-            // Insert scheduled items
+            // Insert scheduled items with timing model (replaces fixed 30-min delay)
+            const currentHour = new Date().getHours();
+            const gapActiveHours = safeBehavioral.activeHours ?? [];
+            // Get last proactive firing timestamp for gap enforcement
+            const lastFiredGap = existingItems
+              .filter(i => i.source === 'agent' && i.firedAt != null)
+              .sort((a, b) => (b.firedAt ?? 0) - (a.firedAt ?? 0));
+            const lastProactiveAtGap = lastFiredGap.length > 0 ? lastFiredGap[0].firedAt : null;
+
             for (const action of actions) {
+              // Map gap severity to timing urgency
+              const gapContext = action.scheduledItem.context ? JSON.parse(action.scheduledItem.context) : {};
+              const gapSeverity = gapContext.severity as string | undefined;
+              const timingUrgency: 'low' | 'medium' | 'high' =
+                gapSeverity === 'high' ? 'high' :
+                gapSeverity === 'medium' ? 'medium' : 'low';
+
+              const timing = computeDeliveryTime({
+                userActiveHours: gapActiveHours,
+                quietHours: this.quietHours,
+                lastProactiveAt: lastProactiveAtGap,
+                currentHour,
+                urgency: timingUrgency,
+                now: Date.now(),
+              });
+
               db.addScheduledItem({
                 userId,
                 sessionId: null,
@@ -782,7 +906,7 @@ export class BackgroundGardener {
                 type: 'follow_up',
                 message: action.scheduledItem.message,
                 context: action.scheduledItem.context,
-                triggerAt: action.scheduledItem.triggerAt,
+                triggerAt: timing.deliverAt,
                 recurring: null,
                 sourceMemoryId: null,
               });
