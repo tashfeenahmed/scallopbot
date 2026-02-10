@@ -18,6 +18,7 @@ export interface CostData {
   };
   topModels: { model: string; cost: number; percentage: number }[];
   totalRequests: number;
+  dailyHistory: { date: string; cost: number; requests: number }[];
 }
 
 const POLL_INTERVAL = 30000;

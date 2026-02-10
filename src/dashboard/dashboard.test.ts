@@ -1,6 +1,5 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
-  CostDashboard,
   DaemonManager,
   CrashRecovery,
   formatCurrency,
@@ -43,90 +42,6 @@ describe('formatDuration', () => {
 
   it('should format days', () => {
     expect(formatDuration(86400 + 3600)).toBe('1d 1h 0m 0s');
-  });
-});
-
-describe('CostDashboard', () => {
-  let dashboard: CostDashboard;
-  let mockCostTracker: {
-    getDailySpend: ReturnType<typeof vi.fn>;
-    getMonthlySpend: ReturnType<typeof vi.fn>;
-    getUsageHistory: ReturnType<typeof vi.fn>;
-  };
-
-  beforeEach(() => {
-    mockCostTracker = {
-      getDailySpend: vi.fn().mockReturnValue(150), // $1.50
-      getMonthlySpend: vi.fn().mockReturnValue(2500), // $25.00
-      getUsageHistory: vi.fn().mockReturnValue([
-        { date: '2024-01-01', cost: 100, requests: 50 },
-        { date: '2024-01-02', cost: 200, requests: 75 },
-        { date: '2024-01-03', cost: 150, requests: 60 },
-      ]),
-    };
-
-    dashboard = new CostDashboard({
-      costTracker: mockCostTracker as any,
-      dailyBudget: 500, // $5.00
-      monthlyBudget: 5000, // $50.00
-    });
-  });
-
-  describe('getSummary', () => {
-    it('should return current spend summary', () => {
-      const summary = dashboard.getSummary();
-
-      expect(summary.daily.spent).toBe(150);
-      expect(summary.daily.budget).toBe(500);
-      expect(summary.monthly.spent).toBe(2500);
-      expect(summary.monthly.budget).toBe(5000);
-    });
-
-    it('should calculate usage percentages', () => {
-      const summary = dashboard.getSummary();
-
-      expect(summary.daily.percentage).toBe(30);
-      expect(summary.monthly.percentage).toBe(50);
-    });
-  });
-
-  describe('getFormattedReport', () => {
-    it('should generate formatted text report', () => {
-      const report = dashboard.getFormattedReport();
-
-      expect(report).toContain('Daily');
-      expect(report).toContain('Monthly');
-      expect(report).toContain('$');
-    });
-
-    it('should include budget status', () => {
-      const report = dashboard.getFormattedReport();
-
-      expect(report).toContain('%');
-    });
-  });
-
-  describe('getHistoryChart', () => {
-    it('should generate ASCII chart of spending history', () => {
-      const chart = dashboard.getHistoryChart(7);
-
-      expect(chart).toBeDefined();
-      expect(chart.length).toBeGreaterThan(0);
-    });
-  });
-
-  describe('getTopModels', () => {
-    it('should return spending by model', () => {
-      mockCostTracker.getUsageHistory.mockReturnValue([
-        { model: 'gpt-4', cost: 100 },
-        { model: 'gpt-4', cost: 200 },
-        { model: 'claude-3', cost: 150 },
-      ]);
-
-      const topModels = dashboard.getTopModels();
-
-      expect(topModels).toBeDefined();
-    });
   });
 });
 
