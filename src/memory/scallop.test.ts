@@ -549,6 +549,157 @@ describe('ProfileManager', () => {
     expect(context).toContain('ScallopBot');
     expect(context).toContain('Memory System');
   });
+
+  it('should populate all 4 signal fields when sufficient data is provided', () => {
+    const now = Date.now();
+    const DAY = 24 * 60 * 60 * 1000;
+
+    // Generate 15 messages spread over several days (>= 10 needed for frequency + length)
+    const messages: Array<{ content: string; timestamp: number }> = [];
+    for (let i = 0; i < 15; i++) {
+      messages.push({
+        content: `Test message number ${i} with some content to analyze for length trends`,
+        timestamp: now - (14 - i) * DAY + i * 1000,
+      });
+    }
+
+    // Generate 4 sessions (>= 3 needed for engagement)
+    const sessions = [
+      { messageCount: 5, durationMs: 600000, startTime: now - 10 * DAY },
+      { messageCount: 8, durationMs: 900000, startTime: now - 7 * DAY },
+      { messageCount: 3, durationMs: 300000, startTime: now - 3 * DAY },
+      { messageCount: 6, durationMs: 720000, startTime: now - 1 * DAY },
+    ];
+
+    // Generate 6 messages with embeddings (>= 5 needed for topic switch)
+    // Use orthogonal-ish embeddings to simulate topic switches
+    const messageEmbeddings = [
+      { content: 'msg1', embedding: [1, 0, 0, 0] },
+      { content: 'msg2', embedding: [0.9, 0.1, 0, 0] }, // similar to prev
+      { content: 'msg3', embedding: [0, 1, 0, 0] },      // switch
+      { content: 'msg4', embedding: [0, 0.9, 0.1, 0] },  // similar to prev
+      { content: 'msg5', embedding: [0, 0, 1, 0] },      // switch
+      { content: 'msg6', embedding: [0, 0, 0.9, 0.1] },  // similar to prev
+    ];
+
+    profiles.inferBehavioralPatterns('user1', messages, {
+      sessions,
+      messageEmbeddings,
+    });
+
+    const behavioral = profiles.getBehavioralPatterns('user1');
+    expect(behavioral).not.toBeNull();
+
+    // All 4 signal fields should be populated
+    expect(behavioral!.messageFrequency).not.toBeNull();
+    expect(behavioral!.messageFrequency!.dailyRate).toBeGreaterThan(0);
+    expect(behavioral!.messageFrequency!.trend).toBeDefined();
+
+    expect(behavioral!.sessionEngagement).not.toBeNull();
+    expect(behavioral!.sessionEngagement!.avgMessagesPerSession).toBeGreaterThan(0);
+    expect(behavioral!.sessionEngagement!.avgDurationMs).toBeGreaterThan(0);
+
+    expect(behavioral!.topicSwitch).not.toBeNull();
+    expect(behavioral!.topicSwitch!.switchRate).toBeGreaterThan(0);
+    expect(behavioral!.topicSwitch!.avgTopicDepth).toBeGreaterThan(0);
+
+    expect(behavioral!.responseLength).not.toBeNull();
+    expect(behavioral!.responseLength!.avgLength).toBeGreaterThan(0);
+  });
+
+  it('should include signal insights in formatProfileContext when signals are populated', () => {
+    const now = Date.now();
+    const DAY = 24 * 60 * 60 * 1000;
+
+    // Generate enough messages for signal computation
+    const messages: Array<{ content: string; timestamp: number }> = [];
+    for (let i = 0; i < 15; i++) {
+      messages.push({
+        content: `Message ${i} about various topics and content`,
+        timestamp: now - (14 - i) * DAY,
+      });
+    }
+
+    const sessions = [
+      { messageCount: 5, durationMs: 600000, startTime: now - 10 * DAY },
+      { messageCount: 8, durationMs: 900000, startTime: now - 7 * DAY },
+      { messageCount: 3, durationMs: 300000, startTime: now - 3 * DAY },
+    ];
+
+    const messageEmbeddings = [
+      { content: 'a', embedding: [1, 0, 0, 0] },
+      { content: 'b', embedding: [0.9, 0.1, 0, 0] },
+      { content: 'c', embedding: [0, 1, 0, 0] },
+      { content: 'd', embedding: [0, 0.9, 0.1, 0] },
+      { content: 'e', embedding: [0, 0, 1, 0] },
+    ];
+
+    profiles.inferBehavioralPatterns('user1', messages, {
+      sessions,
+      messageEmbeddings,
+    });
+
+    const context = profiles.formatProfileContext('user1');
+
+    // Check for signal-based insights
+    expect(context.behavioralPatterns).toContain('Messaging pace');
+    expect(context.behavioralPatterns).toContain('/day');
+    expect(context.behavioralPatterns).toContain('Session style');
+    expect(context.behavioralPatterns).toContain('messages over');
+    expect(context.behavioralPatterns).toContain('messages per topic');
+  });
+
+  it('should return null signals on cold start (insufficient data)', () => {
+    // Only 3 messages (below 10 threshold for frequency + length)
+    const now = Date.now();
+    const messages = [
+      { content: 'Hello', timestamp: now - 3000 },
+      { content: 'How are you?', timestamp: now - 2000 },
+      { content: 'Fine thanks', timestamp: now - 1000 },
+    ];
+
+    profiles.inferBehavioralPatterns('user1', messages);
+
+    const behavioral = profiles.getBehavioralPatterns('user1');
+    expect(behavioral).not.toBeNull();
+
+    // Signals should be null due to cold start
+    expect(behavioral!.messageFrequency).toBeNull();
+    expect(behavioral!.responseLength).toBeNull();
+    // No sessions or embeddings provided — also null
+    expect(behavioral!.sessionEngagement).toBeNull();
+    expect(behavioral!.topicSwitch).toBeNull();
+  });
+
+  it('should be backward compatible (calling without optional params)', () => {
+    const now = Date.now();
+    const DAY = 24 * 60 * 60 * 1000;
+
+    // Generate enough messages for basic analysis
+    const messages: Array<{ content: string; timestamp: number }> = [];
+    for (let i = 0; i < 12; i++) {
+      messages.push({
+        content: `Test message number ${i}`,
+        timestamp: now - (11 - i) * DAY,
+      });
+    }
+
+    // Call without the optional params — should not throw
+    profiles.inferBehavioralPatterns('user1', messages);
+
+    const behavioral = profiles.getBehavioralPatterns('user1');
+    expect(behavioral).not.toBeNull();
+    expect(behavioral!.communicationStyle).toBeDefined();
+    expect(behavioral!.activeHours).toBeDefined();
+
+    // messageFrequency and responseLength should compute (>= 10 messages)
+    expect(behavioral!.messageFrequency).not.toBeNull();
+    expect(behavioral!.responseLength).not.toBeNull();
+
+    // sessionEngagement and topicSwitch should be null (no optional params)
+    expect(behavioral!.sessionEngagement).toBeNull();
+    expect(behavioral!.topicSwitch).toBeNull();
+  });
 });
 
 describe('TemporalExtractor', () => {
