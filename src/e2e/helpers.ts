@@ -29,6 +29,7 @@ import type {
   ContentBlock,
 } from '../providers/types.js';
 import type { EmbeddingProvider } from '../memory/embeddings.js';
+import type { ActivationConfig } from '../memory/relations.js';
 
 // ---------------------------------------------------------------------------
 // Silent logger for tests
@@ -160,6 +161,15 @@ export interface CreateE2EGatewayOptions {
    *  If provided, a LLMFactExtractor is wired into the agent.
    *  Each response should be JSON with a "facts" array. */
   factExtractorResponses?: string[];
+  /** Pre-configured LLM responses for the re-rank provider.
+   *  If provided, a rerankProvider is wired into ScallopMemoryStore.
+   *  Each response should be a JSON array of { index, score }. */
+  rerankResponses?: string[];
+  /** Pre-configured LLM responses for the relations classifier provider.
+   *  If provided, a relationsProvider is wired into ScallopMemoryStore. */
+  relationsResponses?: string[];
+  /** Spreading activation config for ScallopMemoryStore. */
+  activationConfig?: ActivationConfig;
 }
 
 /**
@@ -177,17 +187,28 @@ export async function createE2EGateway(
   const mockProvider = createMockLLMProvider(options.responses);
   const mockEmbedder = createMockEmbeddingProvider();
 
-  // 2. Create real ScallopMemoryStore with mock embedder
+  // 2. Create optional mock providers for re-ranking and relations
+  const rerankProvider = options.rerankResponses
+    ? createMockLLMProvider(options.rerankResponses)
+    : undefined;
+  const relationsProvider = options.relationsResponses
+    ? createMockLLMProvider(options.relationsResponses)
+    : undefined;
+
+  // 3. Create real ScallopMemoryStore with mock embedder
   const scallopStore = new ScallopMemoryStore({
     dbPath,
     logger: testLogger,
     embedder: mockEmbedder,
+    rerankProvider,
+    relationsProvider,
+    activationConfig: options.activationConfig,
   });
 
-  // 3. Create real SessionManager (uses SQLite via ScallopDatabase)
+  // 4. Create real SessionManager (uses SQLite via ScallopDatabase)
   const sessionManager = new SessionManager(scallopStore.getDatabase());
 
-  // 4. Create ContextManager
+  // 5. Create ContextManager
   const contextManager = new ContextManager({
     hotWindowSize: 50,
     maxContextTokens: 128000,
@@ -195,19 +216,19 @@ export async function createE2EGateway(
     maxToolOutputBytes: 30000,
   });
 
-  // 5. Create Router and register mock provider
+  // 6. Create Router and register mock provider
   const router = new Router({});
   router.registerProvider(mockProvider);
 
-  // 6. Create CostTracker
+  // 7. Create CostTracker
   const costTracker = new CostTracker({
     db: scallopStore.getDatabase(),
   });
 
-  // 7. Create BotConfigManager
+  // 8. Create BotConfigManager
   const configManager = new BotConfigManager(scallopStore.getDatabase(), testLogger);
 
-  // 8. Optionally create LLMFactExtractor with a separate mock provider
+  // 9. Optionally create LLMFactExtractor with a separate mock provider
   let factExtractor: LLMFactExtractor | undefined;
   if (options.factExtractorResponses) {
     const factProvider = createMockLLMProvider(options.factExtractorResponses);
@@ -221,14 +242,14 @@ export async function createE2EGateway(
     });
   }
 
-  // 9. Create SkillRegistry (empty workspace, no skills loaded from disk)
+  // 10. Create SkillRegistry (empty workspace, no skills loaded from disk)
   const skillRegistry = createSkillRegistry('/tmp', testLogger);
   await skillRegistry.initialize();
 
-  // 10. Create SkillExecutor
+  // 11. Create SkillExecutor
   const skillExecutor = createSkillExecutor(testLogger);
 
-  // 11. Create real Agent
+  // 12. Create real Agent
   const agent = new Agent({
     provider: mockProvider,
     sessionManager,
@@ -246,7 +267,7 @@ export async function createE2EGateway(
     enableThinking: false,
   });
 
-  // 12. Create and start ApiChannel
+  // 13. Create and start ApiChannel
   const apiChannel = new ApiChannel({
     port,
     host: '127.0.0.1',
