@@ -175,3 +175,11 @@ export {
   checkGoalDeadlines,
   type GoalDeadlineResult,
 } from './goal-deadline-check.js';
+
+// Affect Detection
+export {
+  classifyAffect,
+  mapToEmotion,
+  type RawAffect,
+  type EmotionLabel,
+} from './affect.js';
