@@ -9,12 +9,12 @@ See: .planning/PROJECT.md (updated 2026-02-10 after v3.0 milestone)
 
 ## Current Position
 
-Phase: 26 of 33 (Affect Context Injection)
-Plan: 1 of 1 in current phase
-Status: Phase complete
-Last activity: 2026-02-10 — Completed 26-01-PLAN.md
+Phase: 27 of 33 (Dream NREM Consolidation)
+Plan: 1 of 3 in current phase
+Status: In progress
+Last activity: 2026-02-10 — Completed 27-01-PLAN.md
 
-Progress: ███░░░░░░░ 23%
+Progress: █████░░░░░ 56%
 
 ## Shipped Milestones
 
@@ -35,7 +35,7 @@ Full decision log in PROJECT.md Key Decisions table.
 **v1.0:** Skills-only architecture, SKILL_ARGS JSON env var, 60s timeout
 **v2.0:** [DONE] marker, TriggerSource abstraction, 60-line system prompt
 **v3.0:** Stateless pure functions, opt-in provider pattern, fast-tier provider reuse, EMA behavioral signals, _sig_ prefix storage, direct-wiring E2E
-**v4.0 (in progress):** Plain keys (not _sig_ prefix) for trust/proactiveness behavioral patterns, dynamic import for cross-module tick dependencies, tick-counter with wall-clock gate for Tier 3 sleep scheduling, AFINN-165 + VADER heuristics + Russell circumplex for affect classification, dual-EMA (fast 2h / slow 3d) for mood smoothing with goal signal derivation, per-message affect classification wired into agent.processMessage, affect stored as plain keys in response_preferences JSON, observation-only affect guard in system prompt (per Mozikov et al.), formatProfileContext reuse in buildMemoryContext for full behavioral signal flow
+**v4.0 (in progress):** Plain keys (not _sig_ prefix) for trust/proactiveness behavioral patterns, dynamic import for cross-module tick dependencies, tick-counter with wall-clock gate for Tier 3 sleep scheduling, AFINN-165 + VADER heuristics + Russell circumplex for affect classification, dual-EMA (fast 2h / slow 3d) for mood smoothing with goal signal derivation, per-message affect classification wired into agent.processMessage, affect stored as plain keys in response_preferences JSON, observation-only affect guard in system prompt (per Mozikov et al.), formatProfileContext reuse in buildMemoryContext for full behavioral signal flow, crossCategory config flag for cross-category fusion clustering (conditional category-split bypass)
 
 ### Deferred Issues
 
@@ -56,5 +56,5 @@ None.
 ## Session Continuity
 
 Last session: 2026-02-10
-Stopped at: Phase 26 complete
+Stopped at: Completed 27-01-PLAN.md
 Resume file: None
