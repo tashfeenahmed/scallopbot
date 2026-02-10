@@ -474,6 +474,25 @@ export class ProfileManager {
       if (profile.behavioral.expertiseAreas.length > 0) {
         behavioralPatterns += `\n  - Expertise: ${profile.behavioral.expertiseAreas.join(', ')}`;
       }
+
+      // Behavioral signal insights (natural language, only when computed)
+      if (profile.behavioral.messageFrequency) {
+        const mf = profile.behavioral.messageFrequency;
+        behavioralPatterns += `\n  - Messaging pace: ~${mf.dailyRate.toFixed(1)}/day (${mf.trend})`;
+      }
+      if (profile.behavioral.sessionEngagement) {
+        const se = profile.behavioral.sessionEngagement;
+        const avgMinutes = (se.avgDurationMs / 60000).toFixed(0);
+        behavioralPatterns += `\n  - Session style: ~${se.avgMessagesPerSession.toFixed(0)} messages over ~${avgMinutes} min (${se.trend})`;
+      }
+      if (profile.behavioral.topicSwitch) {
+        const ts = profile.behavioral.topicSwitch;
+        const topicStyle = ts.switchRate > 0.5 ? 'Explores many topics' : 'Focuses deeply on topics';
+        behavioralPatterns += `\n  - ${topicStyle} (avg ${ts.avgTopicDepth.toFixed(1)} messages per topic)`;
+      }
+      if (profile.behavioral.responseLength && profile.behavioral.responseLength.trend !== 'stable') {
+        behavioralPatterns += `\n  - Message length trend: ${profile.behavioral.responseLength.trend}`;
+      }
     } else {
       behavioralPatterns += '\n  - (not yet analyzed)';
     }
