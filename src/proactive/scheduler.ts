@@ -20,6 +20,9 @@ import type { LLMProvider, ContentBlock } from '../providers/types.js';
 import type { CostTracker } from '../routing/cost.js';
 import type { ScallopMemoryStore } from '../memory/scallop-store.js';
 import type { GoalService } from '../goals/index.js';
+import { parseUserIdPrefix } from '../triggers/types.js';
+import { formatProactiveMessage, type ProactiveFormatInput } from './proactive-format.js';
+import { detectProactiveEngagement } from './feedback.js';
 
 /**
  * Handler for sending messages to users
@@ -279,9 +282,51 @@ export class UnifiedScheduler {
   }
 
   /**
-   * Send a formatted message to the user
+   * Send a formatted message to the user.
+   * For agent-sourced items, applies per-channel proactive formatting.
    */
   private async sendFormattedMessage(item: ScheduledItem, message: string): Promise<void> {
+    if (item.source === 'agent') {
+      const { channel } = parseUserIdPrefix(item.userId);
+
+      if (channel === 'telegram' || channel === 'api') {
+        // Parse gapType from item context if available
+        let gapType: string | undefined;
+        let urgency: 'low' | 'medium' | 'high' = 'low';
+        let source: 'inner_thoughts' | 'gap_scanner' = 'gap_scanner';
+        if (item.context) {
+          try {
+            const ctx = JSON.parse(item.context) as Record<string, unknown>;
+            gapType = ctx.gapType as string | undefined;
+            if (ctx.urgency === 'high' || ctx.urgency === 'medium' || ctx.urgency === 'low') {
+              urgency = ctx.urgency as 'low' | 'medium' | 'high';
+            }
+            if (ctx.source === 'inner_thoughts') {
+              source = 'inner_thoughts';
+            }
+          } catch {
+            // Context parsing failed, use defaults
+          }
+        }
+
+        const formatInput: ProactiveFormatInput = {
+          message,
+          gapType,
+          urgency,
+          source,
+        };
+
+        const formatted = formatProactiveMessage(channel, formatInput);
+        const formattedStr = typeof formatted === 'string'
+          ? formatted
+          : JSON.stringify(formatted);
+
+        await this.onSendMessage(item.userId, formattedStr);
+        return;
+      }
+    }
+
+    // User-sourced items or unknown channels: send as-is
     await this.onSendMessage(item.userId, message);
   }
 
@@ -558,6 +603,28 @@ Generate the proactive message:`;
    */
   async evaluateNow(): Promise<void> {
     await this.evaluate();
+  }
+
+  /**
+   * Check for user engagement with recently-fired proactive items.
+   * Call this when a user sends a message to detect engagement.
+   *
+   * For each recently-fired agent item within the engagement window,
+   * marks it as 'acted' to close the trust feedback loop.
+   */
+  checkEngagement(userId: string): void {
+    try {
+      const items = this.db.getScheduledItemsByUser(userId);
+      const actedIds = detectProactiveEngagement(userId, items);
+      for (const id of actedIds) {
+        this.db.markScheduledItemActed(id);
+      }
+      if (actedIds.length > 0) {
+        this.logger.debug({ userId, actedCount: actedIds.length }, 'Proactive engagement detected');
+      }
+    } catch (err) {
+      this.logger.warn({ error: (err as Error).message, userId }, 'Engagement detection failed');
+    }
   }
 
   /**
