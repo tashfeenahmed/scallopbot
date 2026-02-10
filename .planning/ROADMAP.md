@@ -121,10 +121,13 @@ Plans:
 **Goal**: Post-session inner monologue — after each user session ends, run lightweight "inner thoughts" LLM evaluation of whether proactive action is warranted (per Liu et al. CHI 2025). Implement timing model: respect quiet hours, prefer session-start moments, per-channel formatting (Telegram short + expand, WebSocket structured JSON). Trust-calibrated feedback loop
 **Depends on**: Phase 31 (gap scanner provides the proactive pipeline), Phase 25 (affect for suppression when stressed)
 **Research**: Unlikely (inner thoughts pattern well-defined in report, extends existing scheduler delivery)
-**Plans**: TBD
+**Plans**: 4
 
 Plans:
-- [ ] 32-01: TBD
+- [ ] 32-01: Inner Thoughts Module (TDD)
+- [ ] 32-02: Timing Model (TDD)
+- [ ] 32-03: Feedback Loop & Per-Channel Formatting (TDD)
+- [ ] 32-04: Wire Inner Thoughts & Timing into Pipeline
 
 #### Phase 33: E2E Cognitive Testing
 
@@ -151,7 +154,7 @@ Plans:
 | 29. Enhanced Forgetting | v4.0 | 2/2 | Complete | 2026-02-10 |
 | 30. Self-Reflection | v4.0 | 2/2 | Complete | 2026-02-10 |
 | 31. Gap Scanner | v4.0 | 4/4 | Complete | 2026-02-10 |
-| 32. Inner Thoughts & Timing | v4.0 | 0/? | Not started | - |
+| 32. Inner Thoughts & Timing | v4.0 | 0/4 | Planned | - |
 | 33. E2E Cognitive Testing | v4.0 | 0/? | Not started | - |
 
 **Total:** 23 phases + 10 new, 41 plans completed across 3+ milestones
