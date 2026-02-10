@@ -10,11 +10,11 @@ See: .planning/PROJECT.md (updated 2026-02-09 after v3.0 milestone creation)
 ## Current Position
 
 Phase: 23 of 23 (E2E WebSocket Integration Testing)
-Plan: 2 of 3 in current phase
-Status: In progress
-Last activity: 2026-02-10 - Completed 23-02-PLAN.md
+Plan: 3 of 3 in current phase
+Status: Phase complete
+Last activity: 2026-02-10 - Completed 23-03-PLAN.md
 
-Progress: ██████████ 91%
+Progress: ██████████ 100%
 
 ## Shipped Milestones
 
@@ -77,6 +77,8 @@ Full decision log in PROJECT.md Key Decisions table.
 - Content-aware mock LLM providers for E2E: inspect prompt content for dynamic scoring (vs cycling responses)
 - Fact extractor stores with detectRelations=false — E2E relation tests seed via scallopStore.add() with detectRelations=true
 - noiseSigma=0 in ActivationConfig for deterministic spreading activation in tests
+- Decay-aware test seeding: use insight category + old documentDate for desired post-decay prominence (fusion tests)
+- Direct component testing (BackgroundGardener.deepTick(), ProfileManager.formatProfileContext()) without WebSocket overhead
 
 ### Deferred Issues
 
@@ -97,5 +99,5 @@ None.
 ## Session Continuity
 
 Last session: 2026-02-10
-Stopped at: Completed 23-02-PLAN.md — Phase 23 in progress (2/3 plans done)
+Stopped at: Completed 23-03-PLAN.md — Phase 23 complete, v3.0 milestone ready for completion
 Resume file: None
