@@ -28,6 +28,7 @@ None
 
 Plans:
 - [x] 24-01: Health Ping & Retrieval Audit (TDD)
+- [x] 24-02: Trust Score Computation (TDD)
 
 #### Phase 25: Affect Detection
 
@@ -128,7 +129,7 @@ Plans:
 | 1-7 | v1.0 | 11/11 | Complete | 2026-02-04 |
 | 9-17 | v2.0 | 11/11 | Complete | 2026-02-04 |
 | 18-23 | v3.0 | 13/13 | Complete | 2026-02-10 |
-| 24. Heartbeat Tier Enhancements | v4.0 | 1/5 | In progress | - |
+| 24. Heartbeat Tier Enhancements | v4.0 | 2/5 | In progress | - |
 | 25. Affect Detection | v4.0 | 0/? | Not started | - |
 | 26. Affect Context Injection | v4.0 | 0/? | Not started | - |
 | 27. Dream NREM Consolidation | v4.0 | 0/? | Not started | - |
