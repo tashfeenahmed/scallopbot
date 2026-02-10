@@ -131,7 +131,7 @@ interface WsMessage {
 }
 
 interface WsResponse {
-  type: 'response' | 'chunk' | 'error' | 'pong' | 'trigger' | 'file' | 'skill_start' | 'skill_complete' | 'skill_error' | 'thinking' | 'planning' | 'debug' | 'memory';
+  type: 'response' | 'chunk' | 'error' | 'pong' | 'trigger' | 'file' | 'skill_start' | 'skill_complete' | 'skill_error' | 'thinking' | 'planning' | 'debug' | 'memory' | 'proactive';
   sessionId?: string;
   content?: string;
   error?: string;
@@ -148,6 +148,12 @@ interface WsResponse {
   count?: number;
   action?: string;
   items?: { type: string; content: string; subject?: string }[];
+  /** For 'proactive' type: gap category */
+  category?: string;
+  /** For 'proactive' type: urgency level */
+  urgency?: string;
+  /** For 'proactive' type: originating source */
+  source?: string;
 }
 
 /**
@@ -1046,10 +1052,30 @@ export class ApiChannel implements Channel, TriggerSource {
       return false;
     }
 
+    // Check if message is a structured proactive JSON object
+    let wsMessage: WsResponse;
+    try {
+      const parsed = JSON.parse(message) as { type?: string; content?: string; category?: string; urgency?: string; source?: string };
+      if (parsed.type === 'proactive') {
+        wsMessage = {
+          type: 'proactive',
+          content: parsed.content,
+          category: parsed.category,
+          urgency: parsed.urgency,
+          source: parsed.source,
+        };
+      } else {
+        wsMessage = { type: 'trigger', content: message };
+      }
+    } catch {
+      // Not JSON — send as plain trigger
+      wsMessage = { type: 'trigger', content: message };
+    }
+
     let sentCount = 0;
     for (const ws of clients) {
       if (ws.readyState === WebSocket.OPEN) {
-        this.sendWsMessage(ws, { type: 'trigger', content: message });
+        this.sendWsMessage(ws, wsMessage);
         sentCount++;
       }
     }
