@@ -12,6 +12,12 @@ import Database from 'better-sqlite3';
 import * as path from 'path';
 import * as fs from 'fs';
 import { nanoid } from 'nanoid';
+import type {
+  MessageFrequencySignal,
+  SessionEngagementSignal,
+  TopicSwitchSignal,
+  ResponseLengthSignal,
+} from './behavioral-signals.js';
 
 /**
  * Memory types for decay calculation
@@ -127,6 +133,14 @@ export interface BehavioralPatterns {
   expertiseAreas: string[];
   responsePreferences: Record<string, unknown>;
   activeHours: number[];
+  /** EMA-smoothed daily message rate with trend (null = insufficient data) */
+  messageFrequency: MessageFrequencySignal | null;
+  /** EMA-smoothed session engagement with trend (null = insufficient data) */
+  sessionEngagement: SessionEngagementSignal | null;
+  /** Embedding-based topic switch rate (null = insufficient data) */
+  topicSwitch: TopicSwitchSignal | null;
+  /** EMA-smoothed message length evolution (null = insufficient data) */
+  responseLength: ResponseLengthSignal | null;
   updatedAt: number;
 }
 
@@ -1137,19 +1151,44 @@ export class ScallopDatabase {
   // ============ Behavioral Patterns Operations ============
 
   /**
-   * Update behavioral patterns
+   * Update behavioral patterns.
+   * Signal fields (messageFrequency, sessionEngagement, topicSwitch, responseLength)
+   * are stored inside the response_preferences JSON column to avoid schema migration.
    */
   updateBehavioralPatterns(userId: string, patterns: Partial<Omit<BehavioralPatterns, 'userId' | 'updatedAt'>>): void {
     const now = Date.now();
 
-    const existing = this.db.prepare('SELECT * FROM behavioral_patterns WHERE user_id = ?').get(userId);
+    // Merge signal fields into responsePreferences JSON for storage
+    const responsePrefsToStore: Record<string, unknown> = {
+      ...(patterns.responsePreferences ?? {}),
+    };
+    if (patterns.messageFrequency !== undefined) {
+      responsePrefsToStore._sig_messageFrequency = patterns.messageFrequency;
+    }
+    if (patterns.sessionEngagement !== undefined) {
+      responsePrefsToStore._sig_sessionEngagement = patterns.sessionEngagement;
+    }
+    if (patterns.topicSwitch !== undefined) {
+      responsePrefsToStore._sig_topicSwitch = patterns.topicSwitch;
+    }
+    if (patterns.responseLength !== undefined) {
+      responsePrefsToStore._sig_responseLength = patterns.responseLength;
+    }
+
+    const existing = this.db.prepare('SELECT * FROM behavioral_patterns WHERE user_id = ?').get(userId) as Record<string, unknown> | undefined;
 
     if (existing) {
+      // Merge signal fields with existing response_preferences
+      const existingPrefs: Record<string, unknown> = existing.response_preferences
+        ? JSON.parse(existing.response_preferences as string)
+        : {};
+      const mergedPrefs = { ...existingPrefs, ...responsePrefsToStore };
+
       const stmt = this.db.prepare(`
         UPDATE behavioral_patterns SET
           communication_style = COALESCE(?, communication_style),
           expertise_areas = COALESCE(?, expertise_areas),
-          response_preferences = COALESCE(?, response_preferences),
+          response_preferences = ?,
           active_hours = COALESCE(?, active_hours),
           updated_at = ?
         WHERE user_id = ?
@@ -1157,7 +1196,7 @@ export class ScallopDatabase {
       stmt.run(
         patterns.communicationStyle ?? null,
         patterns.expertiseAreas ? JSON.stringify(patterns.expertiseAreas) : null,
-        patterns.responsePreferences ? JSON.stringify(patterns.responsePreferences) : null,
+        JSON.stringify(mergedPrefs),
         patterns.activeHours ? JSON.stringify(patterns.activeHours) : null,
         now,
         userId
@@ -1171,7 +1210,7 @@ export class ScallopDatabase {
         userId,
         patterns.communicationStyle ?? null,
         patterns.expertiseAreas ? JSON.stringify(patterns.expertiseAreas) : '[]',
-        patterns.responsePreferences ? JSON.stringify(patterns.responsePreferences) : '{}',
+        Object.keys(responsePrefsToStore).length > 0 ? JSON.stringify(responsePrefsToStore) : '{}',
         patterns.activeHours ? JSON.stringify(patterns.activeHours) : '[]',
         now
       );
@@ -1926,12 +1965,34 @@ export class ScallopDatabase {
   }
 
   private rowToBehavioralPatterns(row: Record<string, unknown>): BehavioralPatterns {
+    const rawPrefs: Record<string, unknown> = row.response_preferences
+      ? JSON.parse(row.response_preferences as string)
+      : {};
+
+    // Extract signal fields from response_preferences JSON
+    const messageFrequency = (rawPrefs._sig_messageFrequency as MessageFrequencySignal | undefined) ?? null;
+    const sessionEngagement = (rawPrefs._sig_sessionEngagement as SessionEngagementSignal | undefined) ?? null;
+    const topicSwitch = (rawPrefs._sig_topicSwitch as TopicSwitchSignal | undefined) ?? null;
+    const responseLength = (rawPrefs._sig_responseLength as ResponseLengthSignal | undefined) ?? null;
+
+    // Build clean responsePreferences without signal fields
+    const responsePreferences: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(rawPrefs)) {
+      if (!key.startsWith('_sig_')) {
+        responsePreferences[key] = value;
+      }
+    }
+
     return {
       userId: row.user_id as string,
       communicationStyle: row.communication_style as string | null,
       expertiseAreas: row.expertise_areas ? JSON.parse(row.expertise_areas as string) : [],
-      responsePreferences: row.response_preferences ? JSON.parse(row.response_preferences as string) : {},
+      responsePreferences,
       activeHours: row.active_hours ? JSON.parse(row.active_hours as string) : [],
+      messageFrequency,
+      sessionEngagement,
+      topicSwitch,
+      responseLength,
       updatedAt: row.updated_at as number,
     };
   }

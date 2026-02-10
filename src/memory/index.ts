@@ -135,3 +135,18 @@ export {
   type FusionConfig,
   type FusionResult,
 } from './fusion.js';
+
+// Behavioral Signals
+export {
+  computeMessageFrequency,
+  computeSessionEngagement,
+  computeTopicSwitchRate,
+  computeResponseLengthEvolution,
+  updateEMA,
+  detectTrend,
+  type MessageFrequencySignal,
+  type SessionEngagementSignal,
+  type TopicSwitchSignal,
+  type ResponseLengthSignal,
+  type BehavioralSignals,
+} from './behavioral-signals.js';
