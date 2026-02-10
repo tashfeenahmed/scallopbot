@@ -173,7 +173,7 @@ describe('RelationGraph LLM-based classification', () => {
 
       const classifierProvider = createMockClassifierProvider({
         classifications: [
-          { index: 1, classification: 'UPDATES', targetId: 'old1', confidence: 0.9, reason: 'Location update' },
+          { index: 1, classification: 'UPDATES', targetId: 'old1', confidence: 0.8, reason: 'Location update' },
           { index: 2, classification: 'EXTENDS', targetId: 'old2', confidence: 0.7, reason: 'Related location info' },
         ],
       });
@@ -198,7 +198,7 @@ describe('RelationGraph LLM-based classification', () => {
 
       // Results sorted by confidence (highest first)
       expect(result[0].relationType).toBe('UPDATES');
-      expect(result[0].confidence).toBe(0.9);
+      expect(result[0].confidence).toBe(0.8);
       expect(result[1].relationType).toBe('EXTENDS');
       expect(result[1].confidence).toBe(0.7);
     });
