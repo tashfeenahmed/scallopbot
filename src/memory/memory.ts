@@ -342,14 +342,14 @@ export class BackgroundGardener {
         .filter(i => i.status !== 'expired')
         .map(i => ({ status: i.status as 'pending' | 'fired' | 'acted' | 'dismissed', source: i.source, firedAt: i.firedAt ?? undefined }));
       const existingPatterns = profileManager.getBehavioralPatterns('default');
-      const existingTrust = existingPatterns?.responsePreferences?._sig_trust as number | undefined;
+      const existingTrust = existingPatterns?.responsePreferences?.trustScore as number | undefined;
       const trustResult = computeTrustScore(sessions, scheduledItems, { existingScore: existingTrust });
       if (trustResult) {
         profileManager.updateBehavioralPatterns('default', {
           responsePreferences: {
             ...(existingPatterns?.responsePreferences ?? {}),
-            _sig_trust: trustResult.trustScore,
-            _sig_proactiveness_dial: trustResult.proactivenessDial,
+            trustScore: trustResult.trustScore,
+            proactivenessDial: trustResult.proactivenessDial,
           },
         });
         this.logger.debug({ trustScore: trustResult.trustScore, dial: trustResult.proactivenessDial }, 'Trust score updated');
