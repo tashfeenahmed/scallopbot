@@ -10,11 +10,11 @@ See: .planning/PROJECT.md (updated 2026-02-10 after v3.0 milestone)
 ## Current Position
 
 Phase: 24 of 33 (Heartbeat Tier Enhancements)
-Plan: 4 of 5 in current phase
-Status: In progress
-Last activity: 2026-02-10 — Completed 24-04-PLAN.md
+Plan: 5 of 5 in current phase
+Status: Phase complete
+Last activity: 2026-02-10 — Completed 24-05-PLAN.md
 
-Progress: █░░░░░░░░░ 4%
+Progress: █░░░░░░░░░ 10%
 
 ## Shipped Milestones
 
@@ -35,7 +35,7 @@ Full decision log in PROJECT.md Key Decisions table.
 **v1.0:** Skills-only architecture, SKILL_ARGS JSON env var, 60s timeout
 **v2.0:** [DONE] marker, TriggerSource abstraction, 60-line system prompt
 **v3.0:** Stateless pure functions, opt-in provider pattern, fast-tier provider reuse, EMA behavioral signals, _sig_ prefix storage, direct-wiring E2E
-**v4.0 (in progress):** Plain keys (not _sig_ prefix) for trust/proactiveness behavioral patterns, dynamic import for cross-module tick dependencies
+**v4.0 (in progress):** Plain keys (not _sig_ prefix) for trust/proactiveness behavioral patterns, dynamic import for cross-module tick dependencies, tick-counter with wall-clock gate for Tier 3 sleep scheduling
 
 ### Deferred Issues
 
@@ -56,5 +56,5 @@ None.
 ## Session Continuity
 
 Last session: 2026-02-10
-Stopped at: Completed 24-04-PLAN.md
+Stopped at: Completed 24-05-PLAN.md (Phase 24 complete)
 Resume file: None
