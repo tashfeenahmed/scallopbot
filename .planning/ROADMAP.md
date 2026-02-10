@@ -72,7 +72,7 @@ Plans:
 
 Plans:
 - [x] 21-01: Memory fusion engine TDD (findFusionClusters + fuseMemoryCluster pure functions)
-- [ ] 21-02: Wire fusion into deep tick + integration tests
+- [x] 21-02: Wire fusion into deep tick + integration tests
 
 #### Phase 22: Per-Turn Model Routing
 
@@ -144,7 +144,7 @@ Plans:
 | 18. Retrieval Re-ranking | v3.0 | 2/2 | Complete | 2026-02-10 |
 | 19. LLM-Guided Memory Relations | v3.0 | 2/2 | Complete | 2026-02-10 |
 | 20. Spreading Activation | v3.0 | 2/2 | Complete | 2026-02-10 |
-| 21. Memory Fusion Engine | v3.0 | 1/2 | In progress | - |
+| 21. Memory Fusion Engine | v3.0 | 2/2 | Complete | 2026-02-10 |
 | 22. Per-Turn Model Routing | v3.0 | 0/? | Not started | - |
 | 23. Token Budget Control | v3.0 | 0/? | Not started | - |
 | 24. Semantic Response Cache | v3.0 | 0/? | Not started | - |
@@ -152,4 +152,4 @@ Plans:
 | 26. Browser Safety Layer | v3.0 | 0/? | Not started | - |
 | 27. Behavioral Profiling | v3.0 | 0/? | Not started | - |
 
-**Total:** 16 phases + 10 new = 26 phases, 22 plans completed
+**Total:** 16 phases + 10 new = 26 phases, 30 plans completed
