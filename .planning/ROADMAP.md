@@ -89,8 +89,8 @@ Plans:
 
 Plans:
 - [x] 23-01: E2E test harness + baseline conversation tests (gateway bootstrap, WS client helper, ping/pong, chat, memory storage/retrieval)
-- [ ] 23-02: Memory intelligence E2E (re-ranking reorders results, LLM relations stored, spreading activation retrieves related)
-- [ ] 23-03: Memory lifecycle + full flow E2E (fusion merges dormant, behavioral signals computed, multi-turn conversation smoke test)
+- [x] 23-02: Memory intelligence E2E (re-ranking reorders results, LLM relations stored, spreading activation retrieves related)
+- [x] 23-03: Memory lifecycle + full flow E2E (fusion merges dormant, behavioral signals computed, multi-turn conversation smoke test)
 
 ## Progress
 
@@ -103,6 +103,6 @@ Plans:
 | 20. Spreading Activation | v3.0 | 2/2 | Complete | 2026-02-10 |
 | 21. Memory Fusion Engine | v3.0 | 2/2 | Complete | 2026-02-10 |
 | 22. Behavioral Profiling | v3.0 | 2/2 | Complete | 2026-02-10 |
-| 23. E2E WebSocket Testing | v3.0 | 2/3 | In progress | - |
+| 23. E2E WebSocket Testing | v3.0 | 3/3 | Complete | 2026-02-10 |
 
-**Total:** 16 phases + 6 new = 22 phases, 31 plans completed
+**Total:** 16 phases + 6 new = 22 phases, 32 plans completed
