@@ -74,10 +74,11 @@ Plans:
 **Goal**: Track implicit user signals (message frequency, session duration, topic switching, response length patterns) alongside conversation-extracted facts for richer user profiles
 **Depends on**: Phase 21
 **Research**: Unlikely (extending existing ProfileManager)
-**Plans**: TBD
+**Plans**: 2
 
 Plans:
-- [ ] 22-01: TBD
+- [x] 22-01: Behavioral signal extractor TDD (computeMessageFrequency, computeSessionEngagement, computeTopicSwitchRate, computeResponseLengthEvolution)
+- [ ] 22-02: Wire signals into ProfileManager, BackgroundGardener, and LLM context formatting
 
 #### Phase 23: End-to-End WebSocket Integration Testing
 
@@ -99,7 +100,7 @@ Plans:
 | 19. LLM-Guided Memory Relations | v3.0 | 2/2 | Complete | 2026-02-10 |
 | 20. Spreading Activation | v3.0 | 2/2 | Complete | 2026-02-10 |
 | 21. Memory Fusion Engine | v3.0 | 2/2 | Complete | 2026-02-10 |
-| 22. Behavioral Profiling | v3.0 | 0/? | Not started | - |
+| 22. Behavioral Profiling | v3.0 | 1/2 | In progress | - |
 | 23. E2E WebSocket Testing | v3.0 | 0/? | Not started | - |
 
 **Total:** 16 phases + 6 new = 22 phases, 30 plans completed
