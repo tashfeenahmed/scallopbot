@@ -169,8 +169,10 @@ open coverage/index.html
 - Example: `src/agent/agent.test.ts`
 
 **E2E Tests:**
-- Not currently implemented
-- CLI integration tested manually
+- Location: `src/e2e/` (separate directory from unit tests)
+- Boots real ApiChannel + Agent + ScallopMemoryStore with mock LLM/embedding providers
+- WebSocket client wrapper for send/receive assertions
+- Helpers: `src/e2e/helpers.ts` (createE2EGateway, createWsClient, cleanupE2E)
 
 ## Common Patterns
 

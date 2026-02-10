@@ -9,12 +9,12 @@ See: .planning/PROJECT.md (updated 2026-02-09 after v3.0 milestone creation)
 
 ## Current Position
 
-Phase: 22 of 23 (Behavioral Profiling)
-Plan: 2 of 2 in current phase
-Status: Phase complete
-Last activity: 2026-02-10 - Completed 22-02-PLAN.md
+Phase: 23 of 23 (E2E WebSocket Integration Testing)
+Plan: 1 of 3 in current phase
+Status: In progress
+Last activity: 2026-02-10 - Completed 23-01-PLAN.md
 
-Progress: ██████████ 83%
+Progress: ██████████ 86%
 
 ## Shipped Milestones
 
@@ -72,6 +72,8 @@ Full decision log in PROJECT.md Key Decisions table.
 - Store behavioral signals in response_preferences JSON with _sig_ prefix keys (no schema migration)
 - Optional sessions/messageEmbeddings params for backward-compatible signal computation
 - Natural-language signal formatting for LLM context (personality insights, not raw numbers)
+- Direct wiring for E2E: bypass Gateway class, wire ApiChannel+Agent+ScallopMemoryStore with mock providers
+- Separate mock providers for agent (natural language + [DONE]) vs fact-extractor (structured JSON)
 
 ### Deferred Issues
 
@@ -92,5 +94,5 @@ None.
 ## Session Continuity
 
 Last session: 2026-02-10
-Stopped at: Completed 22-02-PLAN.md — Phase 22 complete (2/2 plans done)
+Stopped at: Completed 23-01-PLAN.md — Phase 23 in progress (1/3 plans done)
 Resume file: None
