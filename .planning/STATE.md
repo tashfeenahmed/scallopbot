@@ -9,12 +9,12 @@ See: .planning/PROJECT.md (updated 2026-02-09 after v3.0 milestone creation)
 
 ## Current Position
 
-Phase: 20 of 27 (Spreading Activation)
-Plan: 2 of 2 in current phase
-Status: Phase complete
-Last activity: 2026-02-10 - Completed 20-02-PLAN.md
+Phase: 21 of 27 (Memory Fusion Engine)
+Plan: 1 of 2 in current phase
+Status: In progress
+Last activity: 2026-02-10 - Completed 21-01-PLAN.md
 
-Progress: ████░░░░░░ 33%
+Progress: █████░░░░░ 37%
 
 ## Shipped Milestones
 
@@ -61,6 +61,9 @@ Full decision log in PROJECT.md Key Decisions table.
 - Activation * prominence composition for temporal-spatial relevance blending
 - ActivationConfig opt-in via ScallopMemoryStoreOptions constructor — same pattern as rerankProvider
 - ScallopSearchResult interface unchanged — activation scores internal to ranking
+- Pure function findFusionClusters() with getRelations callback — BFS cluster detection, category-boundary splitting
+- Graceful null return from fuseMemoryCluster() on LLM failure — caller decides fallback
+- Summary length validation ensures fusion reduces storage
 
 ### Deferred Issues
 
@@ -80,5 +83,5 @@ None.
 ## Session Continuity
 
 Last session: 2026-02-10
-Stopped at: Completed 20-02-PLAN.md — Phase 20 complete (2/2 plans done)
+Stopped at: Completed 21-01-PLAN.md — Phase 21 in progress (1/2 plans done)
 Resume file: None
