@@ -9,10 +9,10 @@ See: .planning/PROJECT.md (updated 2026-02-09 after v3.0 milestone creation)
 
 ## Current Position
 
-Phase: 19 of 27 (LLM-Guided Memory Relations)
-Plan: 2 of 2 in current phase
-Status: Phase complete
-Last activity: 2026-02-10 - Completed 19-02-PLAN.md
+Phase: 20 of 27 (Spreading Activation)
+Plan: 1 of 2 in current phase
+Status: In progress
+Last activity: 2026-02-10 - Completed 20-01-PLAN.md
 
 Progress: ███░░░░░░░ 30%
 
@@ -57,6 +57,8 @@ Full decision log in PROJECT.md Key Decisions table.
 - Error signal detection for classifier failures (all NEW/0.5/failed → regex fallback)
 - Single candidate → classify(), 2+ → classifyBatch() for efficiency
 - Reuse rerankProvider as relationsProvider — both need fast/cheap LLM tier
+- Pure function spreadActivation() with getRelations callback — stateless, testable
+- Activation * prominence composition for temporal-spatial relevance blending
 
 ### Deferred Issues
 
@@ -76,5 +78,5 @@ None.
 ## Session Continuity
 
 Last session: 2026-02-10
-Stopped at: Completed 19-02-PLAN.md — Phase 19 complete
+Stopped at: Completed 20-01-PLAN.md — Phase 20 in progress (1/2 plans done)
 Resume file: None
