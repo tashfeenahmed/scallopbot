@@ -19,6 +19,7 @@ import { ContextManager } from '../routing/context.js';
 import { Router } from '../routing/router.js';
 import { ProviderRegistry } from '../providers/registry.js';
 import { CostTracker } from '../routing/cost.js';
+import { LLMFactExtractor } from '../memory/fact-extractor.js';
 import { createSkillRegistry, type SkillRegistry } from '../skills/registry.js';
 import { createSkillExecutor, type SkillExecutor } from '../skills/executor.js';
 import type {
@@ -153,8 +154,12 @@ export interface CreateE2EGatewayOptions {
   port?: number;
   /** Path to SQLite database (default: /tmp/e2e-test-<random>.db) */
   dbPath?: string;
-  /** Pre-configured LLM responses */
+  /** Pre-configured LLM responses for the agent's main provider */
   responses?: string[];
+  /** Pre-configured LLM responses for the fact extractor provider.
+   *  If provided, a LLMFactExtractor is wired into the agent.
+   *  Each response should be JSON with a "facts" array. */
+  factExtractorResponses?: string[];
 }
 
 /**
@@ -202,14 +207,28 @@ export async function createE2EGateway(
   // 7. Create BotConfigManager
   const configManager = new BotConfigManager(scallopStore.getDatabase(), testLogger);
 
-  // 8. Create SkillRegistry (empty workspace, no skills loaded from disk)
+  // 8. Optionally create LLMFactExtractor with a separate mock provider
+  let factExtractor: LLMFactExtractor | undefined;
+  if (options.factExtractorResponses) {
+    const factProvider = createMockLLMProvider(options.factExtractorResponses);
+    factExtractor = new LLMFactExtractor({
+      provider: factProvider,
+      scallopStore,
+      logger: testLogger,
+      embedder: mockEmbedder,
+      costTracker,
+      deduplicationThreshold: 0.95,
+    });
+  }
+
+  // 9. Create SkillRegistry (empty workspace, no skills loaded from disk)
   const skillRegistry = createSkillRegistry('/tmp', testLogger);
   await skillRegistry.initialize();
 
-  // 9. Create SkillExecutor
+  // 10. Create SkillExecutor
   const skillExecutor = createSkillExecutor(testLogger);
 
-  // 10. Create real Agent
+  // 11. Create real Agent
   const agent = new Agent({
     provider: mockProvider,
     sessionManager,
@@ -218,6 +237,7 @@ export async function createE2EGateway(
     router,
     costTracker,
     scallopStore,
+    factExtractor,
     contextManager,
     configManager,
     workspace: '/tmp',
@@ -226,7 +246,7 @@ export async function createE2EGateway(
     enableThinking: false,
   });
 
-  // 11. Create and start ApiChannel
+  // 12. Create and start ApiChannel
   const apiChannel = new ApiChannel({
     port,
     host: '127.0.0.1',
