@@ -38,10 +38,12 @@ Plans:
 **Goal**: Build the affect classifier module — keyword-based valence/arousal detection, mood EMA signal integration into behavioral-signals.ts, and the `affect.ts` module that outputs `{valence, arousal, emotion, goalSignal}`
 **Depends on**: Phase 24 (health infrastructure for affect decay in light tick)
 **Research**: Unlikely (keyword heuristic first, per Borotschnig teleology-driven approach — no external API)
-**Plans**: TBD
+**Plans**: 3
 
 Plans:
-- [ ] 25-01: TBD
+- [ ] 25-01: Affect Classifier (TDD)
+- [ ] 25-02: Affect EMA Smoothing (TDD)
+- [ ] 25-03: Wire Affect Integration
 
 #### Phase 26: Affect Context Injection
 
@@ -133,7 +135,7 @@ Plans:
 | 9-17 | v2.0 | 11/11 | Complete | 2026-02-04 |
 | 18-23 | v3.0 | 13/13 | Complete | 2026-02-10 |
 | 24. Heartbeat Tier Enhancements | v4.0 | 5/5 | Complete | 2026-02-10 |
-| 25. Affect Detection | v4.0 | 0/? | Not started | - |
+| 25. Affect Detection | v4.0 | 0/3 | Planned | - |
 | 26. Affect Context Injection | v4.0 | 0/? | Not started | - |
 | 27. Dream NREM Consolidation | v4.0 | 0/? | Not started | - |
 | 28. Dream REM Exploration | v4.0 | 0/? | Not started | - |
