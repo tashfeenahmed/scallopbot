@@ -194,3 +194,12 @@ export {
   type GoalSignal,
   type SmoothedAffect,
 } from './affect-smoothing.js';
+
+// Affect Lexicon Resources
+export {
+  AROUSAL_MAP,
+  NEGATION_WORDS,
+  BOOSTER_DICT,
+  EMOJI_VALENCE,
+  N_SCALAR,
+} from './affect-lexicon.js';

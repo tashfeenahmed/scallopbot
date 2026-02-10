@@ -493,6 +493,15 @@ export class ProfileManager {
       if (profile.behavioral.responseLength && profile.behavioral.responseLength.trend !== 'stable') {
         behavioralPatterns += `\n  - Message length trend: ${profile.behavioral.responseLength.trend}`;
       }
+
+      // Affect signals (observation only — not instructions, per Mozikov et al.)
+      if (profile.behavioral.smoothedAffect) {
+        const sa = profile.behavioral.smoothedAffect;
+        behavioralPatterns += `\n  - Current affect: ${sa.emotion} (valence: ${sa.valence.toFixed(2)}, arousal: ${sa.arousal.toFixed(2)})`;
+        if (sa.goalSignal !== 'stable') {
+          behavioralPatterns += `\n  - Mood signal: ${sa.goalSignal}`;
+        }
+      }
     } else {
       behavioralPatterns += '\n  - (not yet analyzed)';
     }
