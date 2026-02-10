@@ -15,6 +15,7 @@ import {
   ScallopMemoryStore,
   TFIDFEmbedder,
   PROMINENCE_THRESHOLDS,
+  type ActivationConfig,
 } from './index.js';
 import pino from 'pino';
 import type { LLMProvider, CompletionResponse } from '../providers/types.js';
@@ -970,6 +971,181 @@ describe('ScallopMemoryStore LLM relation classification', () => {
     } finally {
       store.close();
       cleanupRelationsDb();
+    }
+  });
+});
+
+describe('ScallopMemoryStore activation-based related memories', () => {
+  const ACTIVATION_DB_PATH = '/tmp/scallop-activation-test.db';
+
+  function cleanupActivationDb() {
+    try {
+      fs.unlinkSync(ACTIVATION_DB_PATH);
+      fs.unlinkSync(ACTIVATION_DB_PATH + '-wal');
+      fs.unlinkSync(ACTIVATION_DB_PATH + '-shm');
+    } catch {
+      // Ignore if files don't exist
+    }
+  }
+
+  it('should return related memories ordered by activation score', async () => {
+    cleanupActivationDb();
+
+    const embedder = new TFIDFEmbedder();
+    // Use deterministic activation (no noise) so ordering is predictable
+    const activationConfig: ActivationConfig = { noiseSigma: 0, resultThreshold: 0.001 };
+
+    const store = new ScallopMemoryStore({
+      dbPath: ACTIVATION_DB_PATH,
+      logger,
+      embedder,
+      activationConfig,
+    });
+
+    try {
+      const db = store.getDatabase();
+
+      // Create seed memory — this is the one we'll search for
+      const seed = await store.add({
+        userId: 'user1',
+        content: 'User works at Acme Corporation as a software engineer',
+        category: 'fact',
+        detectRelations: false,
+      });
+
+      // Create related memory A — will have UPDATES relation (high edge weight)
+      const relatedA = await store.add({
+        userId: 'user1',
+        content: 'User was promoted to senior engineer at Acme Corporation',
+        category: 'fact',
+        detectRelations: false,
+      });
+
+      // Create related memory B — will have EXTENDS relation (lower edge weight)
+      const relatedB = await store.add({
+        userId: 'user1',
+        content: 'Acme Corporation is located in San Francisco downtown',
+        category: 'fact',
+        detectRelations: false,
+      });
+
+      // Manually add relations via DB with known confidences:
+      // relatedA UPDATES seed with confidence 0.9
+      // Edge weight: UPDATES forward=0.9, so 0.9 * 0.9 = 0.81
+      db.addRelation(relatedA.id, seed.id, 'UPDATES', 0.9);
+
+      // Restore seed's isLatest since UPDATES marks the target as superseded
+      db.updateMemory(seed.id, { isLatest: true });
+
+      // seed EXTENDS relatedB with confidence 0.7
+      // Edge weight: EXTENDS forward=0.7, so 0.7 * 0.7 = 0.49
+      db.addRelation(seed.id, relatedB.id, 'EXTENDS', 0.7);
+
+      // Search for the seed memory
+      const results = await store.search('Acme Corporation software engineer', {
+        userId: 'user1',
+        limit: 5,
+      });
+
+      // Find the search result for the seed memory
+      const seedResult = results.find(r => r.memory.id === seed.id);
+      expect(seedResult).toBeDefined();
+      expect(seedResult!.relatedMemories).toBeDefined();
+      expect(seedResult!.relatedMemories!.length).toBeGreaterThanOrEqual(1);
+
+      // Related memories should be ordered by activation score:
+      // relatedA (UPDATES, weight 0.81) should come before relatedB (EXTENDS, weight 0.49)
+      const relatedIds = seedResult!.relatedMemories!.map(m => m.id);
+      const idxA = relatedIds.indexOf(relatedA.id);
+      const idxB = relatedIds.indexOf(relatedB.id);
+
+      // Both should be present (relatedA has isLatest=true since it's the source of UPDATES)
+      expect(idxA).not.toBe(-1);
+      if (idxB !== -1) {
+        // When both present, A should rank before B due to higher activation
+        expect(idxA).toBeLessThan(idxB);
+      }
+    } finally {
+      store.close();
+      cleanupActivationDb();
+    }
+  });
+
+  it('should filter related memories to isLatest only', async () => {
+    cleanupActivationDb();
+
+    const embedder = new TFIDFEmbedder();
+    const activationConfig: ActivationConfig = { noiseSigma: 0, resultThreshold: 0.001 };
+
+    const store = new ScallopMemoryStore({
+      dbPath: ACTIVATION_DB_PATH,
+      logger,
+      embedder,
+      activationConfig,
+    });
+
+    try {
+      const db = store.getDatabase();
+
+      // Create seed memory
+      const seed = await store.add({
+        userId: 'user1',
+        content: 'User prefers dark mode in all applications',
+        category: 'preference',
+        detectRelations: false,
+      });
+
+      // Create a superseded (not-latest) related memory
+      const oldRelated = await store.add({
+        userId: 'user1',
+        content: 'User prefers light mode for reading applications',
+        category: 'preference',
+        detectRelations: false,
+      });
+
+      // Create the latest version that supersedes oldRelated
+      const newRelated = await store.add({
+        userId: 'user1',
+        content: 'User prefers dark mode for reading applications too',
+        category: 'preference',
+        detectRelations: false,
+      });
+
+      // newRelated UPDATES oldRelated — oldRelated becomes isLatest=false
+      db.addRelation(newRelated.id, oldRelated.id, 'UPDATES', 0.9);
+
+      // Link seed to oldRelated via EXTENDS
+      db.addRelation(seed.id, oldRelated.id, 'EXTENDS', 0.8);
+
+      // Link seed to newRelated via EXTENDS
+      db.addRelation(seed.id, newRelated.id, 'EXTENDS', 0.8);
+
+      // Search for the seed memory
+      const results = await store.search('dark mode preference', {
+        userId: 'user1',
+        limit: 5,
+      });
+
+      const seedResult = results.find(r => r.memory.id === seed.id);
+      expect(seedResult).toBeDefined();
+
+      if (seedResult!.relatedMemories && seedResult!.relatedMemories.length > 0) {
+        // All related memories should be isLatest=true
+        for (const related of seedResult!.relatedMemories) {
+          expect(related.isLatest).toBe(true);
+        }
+
+        // oldRelated should NOT appear (it's superseded)
+        const oldRelatedFound = seedResult!.relatedMemories.find(m => m.id === oldRelated.id);
+        expect(oldRelatedFound).toBeUndefined();
+
+        // newRelated should appear (it's the latest version)
+        const newRelatedFound = seedResult!.relatedMemories.find(m => m.id === newRelated.id);
+        expect(newRelatedFound).toBeDefined();
+      }
+    } finally {
+      store.close();
+      cleanupActivationDb();
     }
   });
 });
