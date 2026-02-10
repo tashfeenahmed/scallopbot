@@ -357,8 +357,9 @@ describe('BackgroundGardener NREM integration', () => {
     // sleepTick should not throw despite first cluster failing
     await expect(gardener.sleepTick()).resolves.not.toThrow();
 
-    // Assert: fusionProvider was called at least twice (once per cluster)
-    expect(fusionProvider.complete).toHaveBeenCalledTimes(2);
+    // Assert: fusionProvider was called at least twice (once per NREM cluster;
+    // additional calls may come from REM exploration using the same provider)
+    expect((fusionProvider.complete as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThanOrEqual(2);
 
     // Assert: at least one derived memory was created (from the second cluster that succeeded)
     const allMemories = db.getMemoriesByUser('user-1', { includeAllSources: true });
