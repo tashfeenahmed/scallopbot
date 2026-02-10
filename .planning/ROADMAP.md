@@ -52,7 +52,7 @@ Plans:
 **Depends on**: Phase 19
 **Research**: Likely (ACT-R activation formulas, SYNAPSE spreading algorithm)
 **Research topics**: ACT-R base-level activation formula, lateral inhibition parameters, spreading activation decay rates, stochastic noise calibration
-**Plans**: TBD
+**Plans**: 2
 
 Plans:
 - [x] 20-01: Spreading activation TDD (spreadActivation function with typed edge weights and noise)
@@ -85,10 +85,12 @@ Plans:
 **Goal**: Automated end-to-end validation of all v3.0 features (re-ranking, LLM relations, spreading activation, memory fusion, behavioral profiling) via WebSocket conversation tests against a local instance — send messages, verify DB state, confirm memory operations work correctly in production-like flow
 **Depends on**: Phase 22
 **Research**: Unlikely (writing test harness against existing WebSocket API)
-**Plans**: TBD
+**Plans**: 3
 
 Plans:
-- [ ] 23-01: TBD
+- [x] 23-01: E2E test harness + baseline conversation tests (gateway bootstrap, WS client helper, ping/pong, chat, memory storage/retrieval)
+- [ ] 23-02: Memory intelligence E2E (re-ranking reorders results, LLM relations stored, spreading activation retrieves related)
+- [ ] 23-03: Memory lifecycle + full flow E2E (fusion merges dormant, behavioral signals computed, multi-turn conversation smoke test)
 
 ## Progress
 
@@ -101,6 +103,6 @@ Plans:
 | 20. Spreading Activation | v3.0 | 2/2 | Complete | 2026-02-10 |
 | 21. Memory Fusion Engine | v3.0 | 2/2 | Complete | 2026-02-10 |
 | 22. Behavioral Profiling | v3.0 | 2/2 | Complete | 2026-02-10 |
-| 23. E2E WebSocket Testing | v3.0 | 0/? | Not started | - |
+| 23. E2E WebSocket Testing | v3.0 | 1/3 | In progress | - |
 
 **Total:** 16 phases + 6 new = 22 phases, 30 plans completed

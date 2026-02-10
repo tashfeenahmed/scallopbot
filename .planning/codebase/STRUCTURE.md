@@ -21,6 +21,7 @@ smartbot/
 │   ├── media/             # Media processing
 │   ├── voice/             # Speech I/O
 │   ├── scheduler/         # Task scheduling
+│   ├── e2e/               # End-to-end WebSocket tests
 │   ├── cache/             # Caching layer
 │   ├── reliability/       # Resilience patterns
 │   └── utils/             # Utilities
@@ -104,7 +105,8 @@ smartbot/
 - `src/memory/memory.ts` - Memory system
 
 **Testing:**
-- `src/**/*.test.ts` - Co-located tests (44 files)
+- `src/**/*.test.ts` - Co-located unit tests (44 files)
+- `src/e2e/` - End-to-end WebSocket integration tests
 - `vitest.config.ts` - Test configuration
 
 ## Naming Conventions
