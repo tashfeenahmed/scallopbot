@@ -377,11 +377,152 @@ describe('buildFusionPrompt', () => {
   });
 });
 
+describe('findFusionClusters with crossCategory', () => {
+  it('returns 1 cluster of 6 when crossCategory: true and 6 memories (3 facts + 3 preferences) all connected', () => {
+    const memories = [
+      makeMemory({ id: 'm1', content: 'Interested in Rust', prominence: 0.3, category: 'fact' }),
+      makeMemory({ id: 'm2', content: 'Learning Rust for 6 months', prominence: 0.25, category: 'fact' }),
+      makeMemory({ id: 'm3', content: 'Rust is their primary language now', prominence: 0.2, category: 'fact' }),
+      makeMemory({ id: 'm4', content: 'Prefers systems programming', prominence: 0.3, category: 'preference' }),
+      makeMemory({ id: 'm5', content: 'Likes low-level control', prominence: 0.25, category: 'preference' }),
+      makeMemory({ id: 'm6', content: 'Prefers compiled languages', prominence: 0.2, category: 'preference' }),
+    ];
+
+    // All connected in one graph component
+    const relations = [
+      makeRelation('m1', 'm2'),
+      makeRelation('m2', 'm3'),
+      makeRelation('m3', 'm4'),
+      makeRelation('m4', 'm5'),
+      makeRelation('m5', 'm6'),
+    ];
+
+    const clusters = findFusionClusters(memories, buildGetRelations(relations), {
+      minClusterSize: 3,
+      crossCategory: true,
+    });
+
+    // crossCategory: true → no category split → 1 cluster of 6
+    expect(clusters).toHaveLength(1);
+    expect(clusters[0]).toHaveLength(6);
+    const ids = clusters[0].map(m => m.id).sort();
+    expect(ids).toEqual(['m1', 'm2', 'm3', 'm4', 'm5', 'm6']);
+  });
+
+  it('returns 1 cluster of 4 when crossCategory: true and 4 memories (2 facts + 2 events) in same BFS component', () => {
+    const memories = [
+      makeMemory({ id: 'm1', content: 'Knows TypeScript', prominence: 0.3, category: 'fact' }),
+      makeMemory({ id: 'm2', content: 'Uses Node.js daily', prominence: 0.25, category: 'fact' }),
+      makeMemory({ id: 'm3', content: 'Started a new project last week', prominence: 0.2, category: 'event' }),
+      makeMemory({ id: 'm4', content: 'Deployed to production yesterday', prominence: 0.3, category: 'event' }),
+    ];
+
+    const relations = [
+      makeRelation('m1', 'm2'),
+      makeRelation('m2', 'm3'),
+      makeRelation('m3', 'm4'),
+    ];
+
+    const clusters = findFusionClusters(memories, buildGetRelations(relations), {
+      minClusterSize: 3,
+      crossCategory: true,
+    });
+
+    expect(clusters).toHaveLength(1);
+    expect(clusters[0]).toHaveLength(4);
+  });
+
+  it('returns separate clusters for disconnected components even with crossCategory: true', () => {
+    const memories = [
+      // Component A: 3 mixed memories
+      makeMemory({ id: 'a1', content: 'Likes Python', prominence: 0.3, category: 'preference' }),
+      makeMemory({ id: 'a2', content: 'Uses Python at work', prominence: 0.25, category: 'fact' }),
+      makeMemory({ id: 'a3', content: 'Python expert level', prominence: 0.2, category: 'fact' }),
+      // Component B: 3 mixed memories (disconnected from A)
+      makeMemory({ id: 'b1', content: 'Enjoys hiking', prominence: 0.3, category: 'preference' }),
+      makeMemory({ id: 'b2', content: 'Hiked Mt. Fuji', prominence: 0.25, category: 'event' }),
+      makeMemory({ id: 'b3', content: 'Plans to hike Kilimanjaro', prominence: 0.2, category: 'event' }),
+    ];
+
+    // Only relations within each component, not across
+    const relations = [
+      makeRelation('a1', 'a2'),
+      makeRelation('a2', 'a3'),
+      makeRelation('b1', 'b2'),
+      makeRelation('b2', 'b3'),
+    ];
+
+    const clusters = findFusionClusters(memories, buildGetRelations(relations), {
+      minClusterSize: 3,
+      crossCategory: true,
+    });
+
+    // 2 separate clusters (BFS boundary respected despite crossCategory: true)
+    expect(clusters).toHaveLength(2);
+    expect(clusters[0]).toHaveLength(3);
+    expect(clusters[1]).toHaveLength(3);
+  });
+
+  it('excludes cross-category cluster below minClusterSize when crossCategory: true', () => {
+    const memories = [
+      makeMemory({ id: 'm1', content: 'Likes Go', prominence: 0.3, category: 'preference' }),
+      makeMemory({ id: 'm2', content: 'Uses Go at work', prominence: 0.25, category: 'fact' }),
+      // Only 2 memories in component — below minClusterSize of 3
+    ];
+
+    const relations = [
+      makeRelation('m1', 'm2'),
+    ];
+
+    const clusters = findFusionClusters(memories, buildGetRelations(relations), {
+      minClusterSize: 3,
+      crossCategory: true,
+    });
+
+    expect(clusters).toHaveLength(0);
+  });
+
+  it('defaults to false (backward compatible) when crossCategory is undefined', () => {
+    const memories = [
+      makeMemory({ id: 'm1', content: 'Interested in Rust', prominence: 0.3, category: 'fact' }),
+      makeMemory({ id: 'm2', content: 'Learning Rust', prominence: 0.25, category: 'fact' }),
+      makeMemory({ id: 'm3', content: 'Rust expert', prominence: 0.2, category: 'fact' }),
+      makeMemory({ id: 'm4', content: 'Prefers systems langs', prominence: 0.3, category: 'preference' }),
+      makeMemory({ id: 'm5', content: 'Likes low-level', prominence: 0.25, category: 'preference' }),
+      makeMemory({ id: 'm6', content: 'Prefers compiled', prominence: 0.2, category: 'preference' }),
+    ];
+
+    const relations = [
+      makeRelation('m1', 'm2'),
+      makeRelation('m2', 'm3'),
+      makeRelation('m3', 'm4'),
+      makeRelation('m4', 'm5'),
+      makeRelation('m5', 'm6'),
+    ];
+
+    // No crossCategory in options → defaults to false → category split
+    const clusters = findFusionClusters(memories, buildGetRelations(relations), {
+      minClusterSize: 3,
+    });
+
+    // Should split by category → 2 clusters (same as existing behavior)
+    expect(clusters).toHaveLength(2);
+    const factCluster = clusters.find(c => c[0].category === 'fact')!;
+    const prefCluster = clusters.find(c => c[0].category === 'preference')!;
+    expect(factCluster).toHaveLength(3);
+    expect(prefCluster).toHaveLength(3);
+  });
+});
+
 describe('DEFAULT_FUSION_CONFIG', () => {
   it('has expected default values', () => {
     expect(DEFAULT_FUSION_CONFIG.minClusterSize).toBe(3);
     expect(DEFAULT_FUSION_CONFIG.maxClusters).toBe(5);
     expect(DEFAULT_FUSION_CONFIG.minProminence).toBeCloseTo(0.1, 2); // DORMANT
     expect(DEFAULT_FUSION_CONFIG.maxProminence).toBeCloseTo(0.5, 2); // ACTIVE
+  });
+
+  it('has crossCategory defaulting to false', () => {
+    expect(DEFAULT_FUSION_CONFIG.crossCategory).toBe(false);
   });
 });
