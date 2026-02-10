@@ -57,5 +57,8 @@ DEPLOYMENT_*.md
 test-vision*.ts
 test-vision*.ts
 
+# PDFs
+pdf/
+
 # Web UI
 web/node_modules/
