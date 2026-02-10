@@ -10,11 +10,11 @@ See: .planning/PROJECT.md (updated 2026-02-09 after v3.0 milestone creation)
 ## Current Position
 
 Phase: 19 of 27 (LLM-Guided Memory Relations)
-Plan: 1 of 2 in current phase
-Status: In progress
-Last activity: 2026-02-10 - Completed 19-01-PLAN.md
+Plan: 2 of 2 in current phase
+Status: Phase complete
+Last activity: 2026-02-10 - Completed 19-02-PLAN.md
 
-Progress: ██▓░░░░░░░ 25%
+Progress: ███░░░░░░░ 30%
 
 ## Shipped Milestones
 
@@ -56,6 +56,7 @@ Full decision log in PROJECT.md Key Decisions table.
 - Optional classifierProvider for RelationGraph — regex fallback when absent
 - Error signal detection for classifier failures (all NEW/0.5/failed → regex fallback)
 - Single candidate → classify(), 2+ → classifyBatch() for efficiency
+- Reuse rerankProvider as relationsProvider — both need fast/cheap LLM tier
 
 ### Deferred Issues
 
@@ -75,5 +76,5 @@ None.
 ## Session Continuity
 
 Last session: 2026-02-10
-Stopped at: Completed 19-01-PLAN.md
+Stopped at: Completed 19-02-PLAN.md — Phase 19 complete
 Resume file: None
