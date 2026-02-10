@@ -59,7 +59,8 @@ export const DEFAULT_FUSION_CONFIG: FusionConfig = {
  * Find clusters of related dormant memories suitable for fusion.
  *
  * Pure function. Uses BFS via getRelations callback to find connected
- * components among dormant memories, then splits by category.
+ * components among dormant memories, then splits by category (unless
+ * crossCategory is true, in which case BFS components are used directly).
  *
  * Filters:
  * - Only isLatest=true memories
