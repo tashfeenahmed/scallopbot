@@ -125,3 +125,13 @@ export {
   type ScallopSearchOptions,
   type ScallopSearchResult,
 } from './scallop-store.js';
+
+// Memory Fusion
+export {
+  findFusionClusters,
+  fuseMemoryCluster,
+  buildFusionPrompt,
+  DEFAULT_FUSION_CONFIG,
+  type FusionConfig,
+  type FusionResult,
+} from './fusion.js';
