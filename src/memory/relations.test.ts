@@ -49,7 +49,7 @@ function createMockEmbedder(similarityMap?: Map<string, number[]>): EmbeddingPro
   const defaultEmbedding = [1, 0, 0, 0];
   return {
     name: 'mock-embedder',
-    isAvailable: true,
+    isAvailable: () => true,
     embed: vi.fn().mockImplementation(async (text: string) => {
       return similarityMap?.get(text) ?? defaultEmbedding;
     }),
