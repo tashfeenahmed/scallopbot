@@ -13,6 +13,7 @@ import {
   TemporalExtractor,
   TemporalQuery,
   ScallopMemoryStore,
+  TFIDFEmbedder,
   PROMINENCE_THRESHOLDS,
 } from './index.js';
 import pino from 'pino';
@@ -828,6 +829,147 @@ describe('ScallopMemoryStore search with re-ranking', () => {
     } finally {
       store.close();
       cleanupRerankDb();
+    }
+  });
+});
+
+describe('ScallopMemoryStore LLM relation classification', () => {
+  const RELATIONS_DB_PATH = '/tmp/scallop-relations-test.db';
+
+  function cleanupRelationsDb() {
+    try {
+      fs.unlinkSync(RELATIONS_DB_PATH);
+      fs.unlinkSync(RELATIONS_DB_PATH + '-wal');
+      fs.unlinkSync(RELATIONS_DB_PATH + '-shm');
+    } catch {
+      // Ignore if files don't exist
+    }
+  }
+
+  it('should use LLM classifier for relation detection when relationsProvider is set', async () => {
+    cleanupRelationsDb();
+
+    const mockComplete = vi.fn().mockImplementation(async (req: unknown) => {
+      // Return UPDATES classification with the targetId of the first existing fact
+      // The classifier sends existing facts in format: [id] (subject, category): "content"
+      // We need to extract the targetId from the prompt
+      const messages = (req as { messages: Array<{ content: string }> }).messages;
+      const prompt = messages[0].content;
+      const idMatch = prompt.match(/\[([^\]]+)\]/);
+      const targetId = idMatch ? idMatch[1] : 'unknown';
+
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify({
+          classification: 'UPDATES',
+          targetId,
+          confidence: 0.9,
+          reason: 'Location has changed',
+        }) }],
+        stopReason: 'end_turn' as const,
+        usage: { inputTokens: 100, outputTokens: 50 },
+        model: 'mock-model',
+      } satisfies CompletionResponse;
+    });
+
+    const mockRelationsProvider: LLMProvider = {
+      name: 'mock-relations',
+      isAvailable: () => true,
+      complete: mockComplete,
+    };
+
+    const embedder = new TFIDFEmbedder();
+    const store = new ScallopMemoryStore({
+      dbPath: RELATIONS_DB_PATH,
+      logger,
+      embedder,
+      relationsProvider: mockRelationsProvider,
+    });
+
+    try {
+      // Store first memory
+      const mem1 = await store.add({
+        userId: 'user1',
+        content: 'Lives in Dublin',
+        category: 'fact',
+        detectRelations: true,
+      });
+
+      // Store second memory with similar content — should trigger LLM classification
+      const mem2 = await store.add({
+        userId: 'user1',
+        content: 'Lives in Cork',
+        category: 'fact',
+        detectRelations: true,
+      });
+
+      // Verify the LLM provider was called for classification
+      expect(mockComplete).toHaveBeenCalled();
+
+      // Verify UPDATES relation was created between the memories
+      const db = store.getDatabase();
+      const relations = db.getRelations(mem2.id);
+      expect(relations.length).toBeGreaterThan(0);
+
+      const updatesRelation = relations.find(r => r.relationType === 'UPDATES');
+      expect(updatesRelation).toBeDefined();
+      expect(updatesRelation!.sourceId).toBe(mem2.id);
+      expect(updatesRelation!.targetId).toBe(mem1.id);
+    } finally {
+      store.close();
+      cleanupRelationsDb();
+    }
+  });
+
+  it('should fall back to regex when LLM classification fails', async () => {
+    cleanupRelationsDb();
+
+    const failingProvider: LLMProvider = {
+      name: 'mock-failing-relations',
+      isAvailable: () => true,
+      complete: vi.fn().mockRejectedValue(new Error('LLM service unavailable')),
+    };
+
+    const embedder = new TFIDFEmbedder();
+    const store = new ScallopMemoryStore({
+      dbPath: RELATIONS_DB_PATH,
+      logger,
+      embedder,
+      relationsProvider: failingProvider,
+    });
+
+    try {
+      // Store first memory
+      const mem1 = await store.add({
+        userId: 'user1',
+        content: 'Lives in Dublin',
+        category: 'fact',
+        detectRelations: true,
+      });
+
+      // Store second memory — LLM will fail, should fall back to regex
+      // Regex detects "lives in X" vs "lives in Y" as UPDATES
+      const mem2 = await store.add({
+        userId: 'user1',
+        content: 'Lives in Cork',
+        category: 'fact',
+        detectRelations: true,
+      });
+
+      // Verify the LLM was attempted
+      expect(failingProvider.complete).toHaveBeenCalled();
+
+      // Verify relation was still detected via regex fallback
+      const db = store.getDatabase();
+      const relations = db.getRelations(mem2.id);
+      expect(relations.length).toBeGreaterThan(0);
+
+      const updatesRelation = relations.find(r => r.relationType === 'UPDATES');
+      expect(updatesRelation).toBeDefined();
+      expect(updatesRelation!.sourceId).toBe(mem2.id);
+      expect(updatesRelation!.targetId).toBe(mem1.id);
+    } finally {
+      store.close();
+      cleanupRelationsDb();
     }
   });
 });
