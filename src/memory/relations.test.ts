@@ -30,6 +30,7 @@ function makeMemory(overrides: Partial<ScallopMemoryEntry> & { id: string; conte
     importance: 5,
     confidence: 0.8,
     createdAt: Date.now(),
+    updatedAt: Date.now(),
     isLatest: true,
     documentDate: Date.now(),
     eventDate: null,
@@ -47,6 +48,8 @@ function makeMemory(overrides: Partial<ScallopMemoryEntry> & { id: string; conte
 function createMockEmbedder(similarityMap?: Map<string, number[]>): EmbeddingProvider {
   const defaultEmbedding = [1, 0, 0, 0];
   return {
+    name: 'mock-embedder',
+    isAvailable: true,
     embed: vi.fn().mockImplementation(async (text: string) => {
       return similarityMap?.get(text) ?? defaultEmbedding;
     }),
