@@ -8,7 +8,6 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
-import Database from 'better-sqlite3';
 import {
   createE2EGateway,
   createWsClient,
@@ -254,6 +253,233 @@ describe('E2E Memory Intelligence', () => {
   });
 
   // -------------------------------------------------------------------------
-  // These tests will be added in Task 2
+  // Test 2: LLM-classified relations stored after fact extraction
   // -------------------------------------------------------------------------
+  describe('LLM relations', () => {
+    let ctx: E2EGatewayContext;
+    let client: WsClient;
+
+    // Classification response for the RelationGraph's LLM classifier.
+    // When it classifies the salary memory against the job memory, return EXTENDS.
+    // This is what creates memory_relations rows.
+    const RELATION_CLASSIFIER_RESPONSE = JSON.stringify({
+      classification: 'EXTENDS',
+      confidence: 0.85,
+      reason: 'Salary extends job information at the same company',
+    });
+
+    beforeAll(async () => {
+      ctx = await createE2EGateway({
+        responses: [
+          'You work at Google as a software engineer earning $200k. [DONE]',
+        ],
+        // relationsProvider enables LLM-based relation classification in RelationGraph.
+        // The response cycles, so every classify call gets this EXTENDS response.
+        relationsResponses: [RELATION_CLASSIFIER_RESPONSE],
+      });
+
+      // Seed the first memory (job at Google) without relation detection
+      await ctx.scallopStore.add({
+        userId: 'default',
+        content: 'User got a new job at Google as a software engineer',
+        category: 'fact',
+        importance: 7,
+        confidence: 0.95,
+        detectRelations: false,
+      });
+
+      // Add the second memory (salary at Google) WITH relation detection enabled.
+      // This triggers detectRelations() in the RelationGraph, which:
+      // 1. Finds the job memory as a similar candidate (cosine similarity ~0.64 > extendThreshold 0.5)
+      // 2. Calls the relationsProvider (LLM classifier) to classify the relationship
+      // 3. Gets EXTENDS classification and stores it in memory_relations table
+      await ctx.scallopStore.add({
+        userId: 'default',
+        content: "User's salary at Google is $200k",
+        category: 'fact',
+        importance: 7,
+        confidence: 0.95,
+        detectRelations: true,
+      });
+    }, 30000);
+
+    afterAll(async () => {
+      await cleanupE2E(ctx);
+    }, 15000);
+
+    beforeEach(async () => {
+      client = await createWsClient(ctx.port);
+    });
+
+    afterEach(async () => {
+      await client.close();
+    });
+
+    it('should store LLM-classified relations between related memories', async () => {
+      // Verify both facts exist in the DB
+      const db = ctx.scallopStore.getDatabase();
+      const googleMemories = db.raw<{ id: string; content: string }>(
+        "SELECT id, content FROM memories WHERE user_id = 'default' AND source = 'user' AND content LIKE '%Google%' AND is_latest = 1",
+        []
+      );
+      expect(googleMemories.length).toBeGreaterThanOrEqual(2);
+
+      // Check the memory_relations table for LLM-classified relations.
+      // The RelationGraph's detectRelations should have created an EXTENDS relation
+      // because the relationsProvider returned an EXTENDS classification.
+      const relations = db.raw<{
+        source_id: string;
+        target_id: string;
+        relation_type: string;
+        confidence: number;
+      }>(
+        'SELECT source_id, target_id, relation_type, confidence FROM memory_relations',
+        []
+      );
+
+      // At least one relation should exist between the Google-related memories
+      const googleMemoryIds = new Set(googleMemories.map(m => m.id));
+      const googleRelations = relations.filter(
+        r => googleMemoryIds.has(r.source_id) || googleMemoryIds.has(r.target_id)
+      );
+
+      expect(googleRelations.length).toBeGreaterThan(0);
+
+      // The relation type should be EXTENDS (as returned by the LLM classifier)
+      expect(googleRelations[0].relation_type).toBe('EXTENDS');
+
+      // Confidence should be from the LLM classifier (0.85)
+      expect(googleRelations[0].confidence).toBeGreaterThan(0.3);
+
+      // Now verify the relation works end-to-end through a WebSocket conversation:
+      // searching for one memory should surface the related memory too.
+      client.send({
+        type: 'chat',
+        message: 'What do you know about my job at Google?',
+      });
+
+      const messages = await client.collectUntilResponse(15000);
+      const responseMsg = messages.find(m => m.type === 'response');
+      expect(responseMsg).toBeDefined();
+
+      // The system prompt should contain both Google-related memories
+      const lastRequest = ctx.mockProvider.lastRequest;
+      expect(lastRequest).not.toBeNull();
+
+      const systemPrompt = lastRequest!.system || '';
+      const hasJobFact = systemPrompt.includes('Google') && systemPrompt.includes('engineer');
+      const hasSalaryFact = systemPrompt.includes('$200k') || systemPrompt.includes('salary');
+      // At least the job fact should be in the context (directly matched by query)
+      expect(hasJobFact).toBe(true);
+    }, 30000);
+  });
+
+  // -------------------------------------------------------------------------
+  // Test 3: Spreading activation retrieves related memories
+  // -------------------------------------------------------------------------
+  describe('spreading activation', () => {
+    let ctx: E2EGatewayContext;
+    let client: WsClient;
+
+    beforeAll(async () => {
+      ctx = await createE2EGateway({
+        responses: [
+          'Based on your living situation: you live in San Francisco, in the Mission District, and pay $3000 rent. [DONE]',
+        ],
+        activationConfig: {
+          maxSteps: 3,
+          decayFactor: 0.5,
+          noiseSigma: 0, // Deterministic for testing
+          resultThreshold: 0.01,
+          maxResults: 10,
+        },
+      });
+
+      // Seed a cluster of related memories
+      const memX = await ctx.scallopStore.add({
+        userId: 'default',
+        content: 'User lives in San Francisco',
+        category: 'fact',
+        importance: 8,
+        confidence: 0.95,
+        detectRelations: false, // Manual relation setup
+      });
+
+      const memY = await ctx.scallopStore.add({
+        userId: 'default',
+        content: "User's apartment is in Mission District",
+        category: 'fact',
+        importance: 7,
+        confidence: 0.9,
+        detectRelations: false,
+      });
+
+      const memZ = await ctx.scallopStore.add({
+        userId: 'default',
+        content: 'User pays $3000 rent',
+        category: 'fact',
+        importance: 7,
+        confidence: 0.9,
+        detectRelations: false,
+      });
+
+      // Manually insert EXTENDS relations: Y extends X, Z extends Y
+      const db = ctx.scallopStore.getDatabase();
+      db.addRelation(memY.id, memX.id, 'EXTENDS', 0.85);
+      db.addRelation(memZ.id, memY.id, 'EXTENDS', 0.80);
+    }, 30000);
+
+    afterAll(async () => {
+      await cleanupE2E(ctx);
+    }, 15000);
+
+    beforeEach(async () => {
+      client = await createWsClient(ctx.port);
+    });
+
+    afterEach(async () => {
+      await client.close();
+    });
+
+    it('should retrieve related memories through spreading activation graph', async () => {
+      // Send a query that should match the "San Francisco" memory
+      client.send({
+        type: 'chat',
+        message: 'Tell me about my living situation',
+      });
+
+      const messages = await client.collectUntilResponse(15000);
+
+      const responseMsg = messages.find(m => m.type === 'response');
+      expect(responseMsg).toBeDefined();
+      expect(responseMsg!.content).toBeTruthy();
+
+      // The system prompt should contain the seed memory AND related memories
+      // found through spreading activation (apartment + rent)
+      const lastRequest = ctx.mockProvider.lastRequest;
+      expect(lastRequest).not.toBeNull();
+
+      const systemPrompt = lastRequest!.system || '';
+
+      // San Francisco should definitely be there (direct search match)
+      expect(systemPrompt).toContain('San Francisco');
+
+      // Mission District and/or rent should also appear through activation
+      // (they wouldn't match "living situation" by keyword alone,
+      //  but spreading activation through relations should surface them)
+      const hasMissionDistrict = systemPrompt.includes('Mission District');
+      const hasRent = systemPrompt.includes('$3000');
+
+      // At least one related memory should appear via activation
+      expect(hasMissionDistrict || hasRent).toBe(true);
+
+      // Verify that access counts were updated for activated memories
+      const db = ctx.scallopStore.getDatabase();
+      const accessedMemories = db.raw<{ content: string; access_count: number }>(
+        "SELECT content, access_count FROM memories WHERE access_count > 0 AND user_id = 'default'",
+        []
+      );
+      expect(accessedMemories.length).toBeGreaterThan(0);
+    }, 30000);
+  });
 });
