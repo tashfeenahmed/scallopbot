@@ -147,6 +147,23 @@ export {
   type RelationContextEntry,
 } from './nrem-consolidation.js';
 
+// REM Exploration
+export {
+  remExplore,
+  sampleSeeds,
+  DEFAULT_REM_CONFIG,
+  type RemConfig,
+  type RemExplorationResult,
+  type RemDiscovery,
+} from './rem-exploration.js';
+
+// Dream Orchestrator
+export {
+  dream,
+  type DreamConfig,
+  type DreamResult,
+} from './dream.js';
+
 // Behavioral Signals
 export {
   computeMessageFrequency,
