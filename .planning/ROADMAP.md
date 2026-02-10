@@ -88,7 +88,8 @@ Plans:
 **Plans**: TBD
 
 Plans:
-- [ ] 29-01: TBD
+- [x] 29-01: Utility Score Computation (TDD)
+- [ ] 29-02: Wire Utility-Based Forgetting
 
 #### Phase 30: Self-Reflection
 
@@ -143,7 +144,7 @@ Plans:
 | 26. Affect Context Injection | v4.0 | 1/1 | Complete | 2026-02-10 |
 | 27. Dream NREM Consolidation | v4.0 | 3/3 | Complete | 2026-02-10 |
 | 28. Dream REM Exploration | v4.0 | 3/3 | Complete | 2026-02-10 |
-| 29. Enhanced Forgetting | v4.0 | 0/? | Not started | - |
+| 29. Enhanced Forgetting | v4.0 | 1/2 | In progress | - |
 | 30. Self-Reflection | v4.0 | 0/? | Not started | - |
 | 31. Gap Scanner | v4.0 | 0/? | Not started | - |
 | 32. Inner Thoughts & Timing | v4.0 | 0/? | Not started | - |
