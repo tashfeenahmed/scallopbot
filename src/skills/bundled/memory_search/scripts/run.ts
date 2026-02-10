@@ -13,6 +13,8 @@ import {
 } from '../../../../memory/db.js';
 import { calculateBM25Score, buildDocFreqMap, SEARCH_WEIGHTS, type BM25Options } from '../../../../memory/bm25.js';
 import { TFIDFEmbedder, OllamaEmbedder, cosineSimilarity } from '../../../../memory/embeddings.js';
+import { rerankResults, type RerankCandidate } from '../../../../memory/reranker.js';
+import type { LLMProvider, CompletionRequest, CompletionResponse } from '../../../../providers/types.js';
 
 // Types
 interface MemorySearchArgs {
@@ -110,6 +112,59 @@ async function getOllamaQueryEmbedding(query: string): Promise<number[] | undefi
 }
 
 /**
+ * Create a minimal Groq LLM provider for re-ranking (standalone, no routing dependency).
+ * Returns undefined if GROQ_API_KEY is not set.
+ */
+function createGroqRerankProvider(): LLMProvider | undefined {
+  const apiKey = process.env.GROQ_API_KEY;
+  if (!apiKey) return undefined;
+
+  return {
+    name: 'groq-rerank',
+    isAvailable: () => true,
+    complete: async (request: CompletionRequest): Promise<CompletionResponse> => {
+      const body = {
+        model: 'llama-3.1-8b-instant',
+        messages: [
+          ...(request.system ? [{ role: 'system', content: request.system }] : []),
+          ...request.messages.map(m => ({ role: m.role, content: typeof m.content === 'string' ? m.content : '' })),
+        ],
+        temperature: request.temperature ?? 0.1,
+        max_tokens: request.maxTokens ?? 500,
+      };
+
+      const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Groq API error: ${response.status} ${response.statusText}`);
+      }
+
+      const data = await response.json() as {
+        choices: Array<{ message: { content: string } }>;
+        usage?: { prompt_tokens?: number; completion_tokens?: number };
+      };
+
+      return {
+        content: [{ type: 'text', text: data.choices[0]?.message?.content ?? '' }],
+        stopReason: 'end_turn',
+        usage: {
+          inputTokens: data.usage?.prompt_tokens ?? 0,
+          outputTokens: data.usage?.completion_tokens ?? 0,
+        },
+        model: 'llama-3.1-8b-instant',
+      };
+    },
+  };
+}
+
+/**
  * Score and rank memories using hybrid BM25 + semantic search.
  * Uses stored Ollama embeddings when available, falls back to TF-IDF.
  */
@@ -182,7 +237,31 @@ async function searchMemories(
   }
 
   results.sort((a, b) => b.score - a.score);
-  return results.slice(0, limit);
+  let topResults = results.slice(0, limit);
+
+  // Optional LLM re-ranking pass (uses Groq if available)
+  const rerankProvider = createGroqRerankProvider();
+  if (rerankProvider && topResults.length > 0) {
+    try {
+      const candidates: RerankCandidate[] = topResults.map(r => ({
+        id: r.memory.id,
+        content: r.memory.content,
+        originalScore: r.score,
+      }));
+
+      const reranked = await rerankResults(query, candidates, rerankProvider, { maxCandidates: 20 });
+
+      const rerankedMap = new Map(reranked.map(r => [r.id, r.finalScore]));
+      topResults = topResults
+        .filter(r => rerankedMap.has(r.memory.id))
+        .map(r => ({ ...r, score: rerankedMap.get(r.memory.id)! }))
+        .sort((a, b) => b.score - a.score);
+    } catch {
+      // Re-ranking failed — keep original results
+    }
+  }
+
+  return topResults;
 }
 
 /**
