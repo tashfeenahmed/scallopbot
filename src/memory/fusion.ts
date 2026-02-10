@@ -28,6 +28,8 @@ export interface FusionConfig {
   minProminence: number;
   /** Maximum prominence for fusion candidates (default: ACTIVE = 0.5) */
   maxProminence: number;
+  /** Allow clusters to span multiple categories (default: false). When true, BFS components are used directly without category splitting. */
+  crossCategory?: boolean;
 }
 
 /** Result of fusing a memory cluster via LLM */
@@ -48,6 +50,7 @@ export const DEFAULT_FUSION_CONFIG: FusionConfig = {
   maxClusters: 5,
   minProminence: PROMINENCE_THRESHOLDS.DORMANT, // 0.1
   maxProminence: PROMINENCE_THRESHOLDS.ACTIVE,  // 0.5
+  crossCategory: false,
 };
 
 // ============ Cluster Detection ============
@@ -128,21 +131,26 @@ export function findFusionClusters(
     }
   }
 
-  // Step 3: Split each component by category into sub-clusters
-  const categoryClusters: ScallopMemoryEntry[][] = [];
+  // Step 3: Optionally split each component by category into sub-clusters
+  let categoryClusters: ScallopMemoryEntry[][];
 
-  for (const component of components) {
-    // Group by category
-    const byCategory = new Map<MemoryCategory, ScallopMemoryEntry[]>();
-    for (const mem of component) {
-      const existing = byCategory.get(mem.category) || [];
-      existing.push(mem);
-      byCategory.set(mem.category, existing);
-    }
+  if (config.crossCategory) {
+    // Cross-category mode: use BFS components directly as clusters
+    categoryClusters = components;
+  } else {
+    // Default mode: split each component by category
+    categoryClusters = [];
+    for (const component of components) {
+      const byCategory = new Map<MemoryCategory, ScallopMemoryEntry[]>();
+      for (const mem of component) {
+        const existing = byCategory.get(mem.category) || [];
+        existing.push(mem);
+        byCategory.set(mem.category, existing);
+      }
 
-    // Add each category group as a separate cluster
-    for (const group of byCategory.values()) {
-      categoryClusters.push(group);
+      for (const group of byCategory.values()) {
+        categoryClusters.push(group);
+      }
     }
   }
 
