@@ -1609,6 +1609,19 @@ export class ScallopDatabase {
   }
 
   /**
+   * Get all scheduled items for a user (all statuses)
+   */
+  getScheduledItemsByUser(userId: string): ScheduledItem[] {
+    const stmt = this.db.prepare(`
+      SELECT * FROM scheduled_items
+      WHERE user_id = ?
+      ORDER BY trigger_at ASC
+    `);
+    const rows = stmt.all(userId) as Record<string, unknown>[];
+    return rows.map(row => this.rowToScheduledItem(row));
+  }
+
+  /**
    * Get all pending items for a user
    */
   getPendingScheduledItemsByUser(userId: string): ScheduledItem[] {

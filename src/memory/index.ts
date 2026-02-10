@@ -150,3 +150,28 @@ export {
   type ResponseLengthSignal,
   type BehavioralSignals,
 } from './behavioral-signals.js';
+
+// Health Ping
+export {
+  performHealthPing,
+  type HealthPingResult,
+} from './health-ping.js';
+
+// Retrieval Audit
+export {
+  auditRetrievalHistory,
+  type RetrievalAuditResult,
+} from './retrieval-audit.js';
+
+// Trust Score
+export {
+  computeTrustScore,
+  type TrustScoreResult,
+  type TrustSignals,
+} from './trust-score.js';
+
+// Goal Deadline Check
+export {
+  checkGoalDeadlines,
+  type GoalDeadlineResult,
+} from './goal-deadline-check.js';
