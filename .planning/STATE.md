@@ -5,16 +5,16 @@
 See: .planning/PROJECT.md (updated 2026-02-10 after v3.0 milestone)
 
 **Core value:** Skills-only execution: Every capability the agent has comes from a skill file that advertises itself to the agent.
-**Current focus:** Planning next milestone
+**Current focus:** v4.0 Bio-Inspired Cognitive Architecture
 
 ## Current Position
 
-Phase: All complete
-Plan: N/A
-Status: Between milestones
-Last activity: 2026-02-10 — v3.0 Research-Driven Intelligence shipped
+Phase: 24 of 33 (Heartbeat Tier Enhancements)
+Plan: Not started
+Status: Ready to plan
+Last activity: 2026-02-10 — Milestone v4.0 created
 
-Progress: ██████████ 100% (v3.0)
+Progress: ░░░░░░░░░░ 0%
 
 ## Shipped Milestones
 
@@ -50,9 +50,10 @@ None.
 - v2.0 shipped: Phases 9-17, 11 plans (2026-02-04)
 - v3.0 shipped: Phases 18-23, 13 plans (2026-02-10)
 - Archives: .planning/milestones/v1.0-ROADMAP.md, v2.0-ROADMAP.md, v3.0-ROADMAP.md
+- Milestone v4.0 created: Bio-inspired cognitive architecture (dreams, emotions, heartbeat, proactive), 10 phases (Phase 24-33)
 
 ## Session Continuity
 
 Last session: 2026-02-10
-Stopped at: v3.0 milestone complete
+Stopped at: Milestone v4.0 initialization
 Resume file: None
