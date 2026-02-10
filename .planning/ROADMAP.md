@@ -77,8 +77,8 @@ Plans:
 
 Plans:
 - [x] 28-01: REM Exploration Module (TDD)
-- [ ] 28-02: Dream Orchestrator (TDD)
-- [ ] 28-03: Wire REM into sleepTick
+- [x] 28-02: Dream Orchestrator (TDD)
+- [x] 28-03: Wire REM into sleepTick
 
 #### Phase 29: Enhanced Forgetting
 
@@ -142,7 +142,7 @@ Plans:
 | 25. Affect Detection | v4.0 | 3/3 | Complete | 2026-02-10 |
 | 26. Affect Context Injection | v4.0 | 1/1 | Complete | 2026-02-10 |
 | 27. Dream NREM Consolidation | v4.0 | 3/3 | Complete | 2026-02-10 |
-| 28. Dream REM Exploration | v4.0 | 2/3 | In progress | - |
+| 28. Dream REM Exploration | v4.0 | 3/3 | Complete | 2026-02-10 |
 | 29. Enhanced Forgetting | v4.0 | 0/? | Not started | - |
 | 30. Self-Reflection | v4.0 | 0/? | Not started | - |
 | 31. Gap Scanner | v4.0 | 0/? | Not started | - |
