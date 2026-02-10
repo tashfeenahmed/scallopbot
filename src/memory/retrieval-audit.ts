@@ -24,6 +24,20 @@ export interface RetrievalAuditResult {
   candidatesForDecay: string[];
 }
 
+// ============ Constants ============
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+const DEFAULT_MIN_AGE_DAYS = 7;
+const DEFAULT_STALE_THRESHOLD_DAYS = 30;
+
+// ============ Row shape from SQL ============
+
+interface AuditRow {
+  id: string;
+  access_count: number;
+  last_accessed: number | null;
+}
+
 // ============ Main Function ============
 
 /**
@@ -33,8 +47,47 @@ export interface RetrievalAuditResult {
  * that are older than minAgeDays to avoid false positives on new memories.
  */
 export function auditRetrievalHistory(
-  _db: ScallopDatabase,
-  _options?: RetrievalAuditOptions,
+  db: ScallopDatabase,
+  options?: RetrievalAuditOptions,
 ): RetrievalAuditResult {
-  throw new Error('Not implemented');
+  const minAgeDays = options?.minAgeDays ?? DEFAULT_MIN_AGE_DAYS;
+  const staleThresholdDays = options?.staleThresholdDays ?? DEFAULT_STALE_THRESHOLD_DAYS;
+
+  const now = Date.now();
+  const ageCutoff = now - minAgeDays * DAY_MS;
+  const staleCutoff = now - staleThresholdDays * DAY_MS;
+
+  // Fetch active memories old enough to audit
+  const rows = db.raw<AuditRow>(
+    `SELECT id, access_count, last_accessed
+     FROM memories
+     WHERE prominence >= 0.5
+       AND is_latest = 1
+       AND document_date < ?`,
+    [ageCutoff],
+  );
+
+  const totalAudited = rows.length;
+  let neverRetrieved = 0;
+  let staleRetrieved = 0;
+  const candidatesForDecay: string[] = [];
+
+  for (const row of rows) {
+    if (row.access_count === 0 || row.last_accessed === null) {
+      // Never retrieved
+      neverRetrieved++;
+      candidatesForDecay.push(row.id);
+    } else if (row.last_accessed < staleCutoff) {
+      // Retrieved but stale
+      staleRetrieved++;
+      candidatesForDecay.push(row.id);
+    }
+  }
+
+  return {
+    neverRetrieved,
+    staleRetrieved,
+    totalAudited,
+    candidatesForDecay,
+  };
 }
