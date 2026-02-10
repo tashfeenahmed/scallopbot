@@ -183,3 +183,14 @@ export {
   type RawAffect,
   type EmotionLabel,
 } from './affect.js';
+
+// Affect EMA Smoothing
+export {
+  createInitialAffectState,
+  updateAffectEMA,
+  deriveGoalSignal,
+  getSmoothedAffect,
+  type AffectEMAState,
+  type GoalSignal,
+  type SmoothedAffect,
+} from './affect-smoothing.js';
