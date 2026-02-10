@@ -24,6 +24,7 @@ import type {
   CompletionResponse,
   ContentBlock,
 } from './types.js';
+import { DEFAULT_MAX_RETRIES, RETRY_STATUS_CODES, RETRY_DELAY_MS } from './constants.js';
 
 /**
  * xAI/Grok Model IDs
@@ -48,9 +49,6 @@ export const XAI_MODELS = {
 const DEFAULT_MODEL = 'grok-4';
 const DEFAULT_BASE_URL = 'https://api.x.ai/v1';
 const DEFAULT_MAX_TOKENS = 4096;
-const DEFAULT_MAX_RETRIES = 3;
-const RETRY_STATUS_CODES = [429, 500, 503];
-const RETRY_DELAY_MS = 1000;
 
 export interface ProviderCharacteristics {
   speed: 'fast' | 'standard' | 'slow';

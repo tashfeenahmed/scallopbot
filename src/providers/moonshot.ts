@@ -22,6 +22,7 @@ import type {
   ContentBlock,
   ToolResultContent,
 } from './types.js';
+import { DEFAULT_MAX_RETRIES, RETRY_STATUS_CODES, RETRY_DELAY_MS } from './constants.js';
 
 /**
  * Moonshot/Kimi Model IDs
@@ -46,9 +47,6 @@ const DEFAULT_BASE_URL = 'https://api.moonshot.ai/v1';
 const DEFAULT_MAX_TOKENS = 4096;
 /** Higher token budget for thinking mode — reasoning tokens count against max_tokens */
 const THINKING_MAX_TOKENS = 8192;
-const DEFAULT_MAX_RETRIES = 3;
-const RETRY_STATUS_CODES = [429, 500, 503];
-const RETRY_DELAY_MS = 1000;
 
 export interface ProviderCharacteristics {
   speed: 'fast' | 'standard' | 'slow';
