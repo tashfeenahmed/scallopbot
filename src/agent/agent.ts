@@ -659,21 +659,34 @@ ALWAYS use **send_file** after creating any file (PDFs, images, documents, scrip
         context += `\n\n## USER PROFILE\nUse this automatically for all relevant queries (weather → use location, time → use timezone, etc.):\n${profileText}`;
       }
 
-      // Behavioral patterns (communication style, expertise)
+      // Behavioral patterns (all signals via formatProfileContext)
       try {
-        const db = this.scallopStore!.getDatabase();
-        const behavioral = db.getBehavioralPatterns('default');
-        if (behavioral) {
-          let behavioralText = '';
-          if (behavioral.communicationStyle) {
-            behavioralText += `- Communication style: ${behavioral.communicationStyle}\n`;
+        const profileContext = profileManager.formatProfileContext(userId);
+        const behavioralText = profileContext.behavioralPatterns;
+        // formatProfileContext returns a string starting with '\nBehavioral Patterns:'
+        // Extract the content lines (skip the header, use our own section header)
+        const behavioralLines = behavioralText
+          .split('\n')
+          .filter(line => line.startsWith('  - ') && !line.includes('Current affect:') && !line.includes('Mood signal:'))
+          .map(line => line.trim())
+          .join('\n');
+        if (behavioralLines) {
+          context += `\n\n## USER BEHAVIORAL PATTERNS\n${behavioralLines}`;
+        }
+
+        // Dedicated affect observation block (observation only, not instruction)
+        const behavioral = profileManager.getBehavioralPatterns(userId);
+        if (behavioral?.smoothedAffect) {
+          const sa = behavioral.smoothedAffect;
+          let affectBlock = `\n\n## USER AFFECT CONTEXT`;
+          affectBlock += `\nObservation about the user's current emotional state — not an instruction to change your tone.`;
+          affectBlock += `\n- Emotion: ${sa.emotion}`;
+          affectBlock += `\n- Valence: ${sa.valence.toFixed(2)} (negative \u2190 0 \u2192 positive)`;
+          affectBlock += `\n- Arousal: ${sa.arousal.toFixed(2)} (calm \u2190 0 \u2192 activated)`;
+          if (sa.goalSignal !== 'stable') {
+            affectBlock += `\n- Mood trend: ${sa.goalSignal}`;
           }
-          if (behavioral.expertiseAreas && behavioral.expertiseAreas.length > 0) {
-            behavioralText += `- Expertise areas: ${behavioral.expertiseAreas.join(', ')}\n`;
-          }
-          if (behavioralText) {
-            context += `\n\n## USER BEHAVIORAL PATTERNS\n${behavioralText}`;
-          }
+          context += affectBlock;
         }
       } catch {
         // Behavioral patterns not available, that's fine
