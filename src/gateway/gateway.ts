@@ -104,10 +104,23 @@ export class Gateway {
 
     // Initialize memory system — ScallopMemory (SQLite) is always the primary backend
     const dbPath = path.join(this.config.agent.workspace, this.config.memory.dbPath);
+
+    // Get a fast-tier provider for LLM re-ranking of search results (opt-in, graceful degradation)
+    let rerankProvider: LLMProvider | undefined;
+    try {
+      rerankProvider = await this.router.selectProvider('fast') ?? undefined;
+      if (rerankProvider) {
+        this.logger.debug({ provider: rerankProvider.name }, 'Using fast-tier provider for search re-ranking');
+      }
+    } catch {
+      // No fast provider available — re-ranking will be skipped
+    }
+
     this.scallopMemoryStore = new ScallopMemoryStore({
       dbPath,
       logger: this.logger,
       embedder,
+      rerankProvider,
     });
     this.logger.info({ dbPath, count: this.scallopMemoryStore.getCount() }, 'ScallopMemory initialized');
 
