@@ -23,6 +23,8 @@ import { TemporalExtractor, TemporalQuery } from './temporal.js';
 import type { EmbeddingProvider } from './embeddings.js';
 import { cosineSimilarity, CachedEmbedder, TFIDFEmbedder } from './embeddings.js';
 import { calculateBM25Score, buildDocFreqMap, SEARCH_WEIGHTS, type BM25Options } from './bm25.js';
+import { rerankResults, type RerankCandidate } from './reranker.js';
+import type { LLMProvider } from '../providers/types.js';
 
 /**
  * Options for ScallopMemoryStore
@@ -40,6 +42,8 @@ export interface ScallopMemoryStoreOptions {
   relationOptions?: RelationDetectionOptions;
   /** Profile update options */
   profileOptions?: ProfileUpdateOptions;
+  /** Optional LLM provider for re-ranking search results */
+  rerankProvider?: LLMProvider;
 }
 
 /**
@@ -101,6 +105,7 @@ export class ScallopMemoryStore {
   private db: ScallopDatabase;
   private logger: Logger;
   private embedder?: EmbeddingProvider;
+  private rerankProvider?: LLMProvider;
   private decayEngine: DecayEngine;
   private relationGraph: RelationGraph;
   private profileManager: ProfileManager;
@@ -111,6 +116,7 @@ export class ScallopMemoryStore {
     this.logger = options.logger.child({ component: 'scallop-memory' });
     // Wrap embedder with cache to avoid recomputing embeddings for seen texts
     this.embedder = options.embedder ? new CachedEmbedder(options.embedder) : undefined;
+    this.rerankProvider = options.rerankProvider;
 
     // Initialize components
     this.decayEngine = new DecayEngine(options.decayConfig);
@@ -415,7 +421,30 @@ export class ScallopMemoryStore {
 
     // Sort by score and limit
     results.sort((a, b) => b.score - a.score);
-    const topResults = results.slice(0, limit);
+    let topResults = results.slice(0, limit);
+
+    // LLM re-ranking: refine top results using semantic relevance scoring
+    if (this.rerankProvider && topResults.length > 0) {
+      try {
+        const candidates: RerankCandidate[] = topResults.map(r => ({
+          id: r.memory.id,
+          content: r.memory.content,
+          originalScore: r.score,
+        }));
+
+        const reranked = await rerankResults(query, candidates, this.rerankProvider, { maxCandidates: 20 });
+
+        // Map re-ranked scores back to search results
+        const rerankedMap = new Map(reranked.map(r => [r.id, r.finalScore]));
+        topResults = topResults
+          .filter(r => rerankedMap.has(r.memory.id))
+          .map(r => ({ ...r, score: rerankedMap.get(r.memory.id)! }))
+          .sort((a, b) => b.score - a.score);
+      } catch (err) {
+        this.logger.warn({ error: (err as Error).message }, 'LLM re-ranking failed, using original scores');
+        // Fall through with original topResults unchanged
+      }
+    }
 
     // Add related memories if requested
     for (const result of topResults) {
