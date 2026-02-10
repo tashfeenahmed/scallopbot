@@ -9,10 +9,10 @@ See: .planning/PROJECT.md (updated 2026-02-10 after v3.0 milestone)
 
 ## Current Position
 
-Phase: 28 of 33 (Dream REM Exploration)
-Plan: 3 of 3 in current phase
-Status: Phase complete
-Last activity: 2026-02-10 — Completed 28-03-PLAN.md
+Phase: 29 of 33 (Enhanced Forgetting)
+Plan: 0 of 2 planned
+Status: Planning complete
+Last activity: 2026-02-10 — Created 29-01-PLAN.md and 29-02-PLAN.md
 
 Progress: ███████░░░ 66%
 
@@ -56,5 +56,5 @@ None.
 ## Session Continuity
 
 Last session: 2026-02-10
-Stopped at: Completed 28-03-PLAN.md (Phase 28 complete)
+Stopped at: Created Phase 29 plans (29-01 TDD + 29-02 wiring)
 Resume file: None
