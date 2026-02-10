@@ -3,9 +3,10 @@ import { CATEGORY_COLORS, CATEGORY_LABELS } from './constants';
 interface FilterBarProps {
   categories: Set<string>;
   onToggle: (cat: string) => void;
+  onHoverCategory: (cat: string | null) => void;
 }
 
-export default function FilterBar({ categories, onToggle }: FilterBarProps) {
+export default function FilterBar({ categories, onToggle, onHoverCategory }: FilterBarProps) {
   return (
     <div className="flex flex-wrap gap-1.5">
       {Object.entries(CATEGORY_COLORS).map(([cat, color]) => {
@@ -14,6 +15,8 @@ export default function FilterBar({ categories, onToggle }: FilterBarProps) {
           <button
             key={cat}
             onClick={() => onToggle(cat)}
+            onMouseEnter={() => onHoverCategory(cat)}
+            onMouseLeave={() => onHoverCategory(null)}
             className="px-2.5 py-1 rounded-full text-xs font-medium transition-all"
             style={{
               backgroundColor: active ? color + '30' : 'rgba(17,24,39,0.7)',

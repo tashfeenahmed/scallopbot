@@ -22,6 +22,8 @@ export default function MemoryMap() {
     selectedIndex: null,
   });
 
+  const [hoveredCategory, setHoveredCategory] = useState<string | null>(null);
+
   const nodes = useMemo<ProcessedNode[]>(() => {
     if (!data) return [];
     const searchLower = filters.searchQuery.toLowerCase();
@@ -111,6 +113,12 @@ export default function MemoryMap() {
     setFilters(prev => ({ ...prev, searchQuery: q }));
   }, []);
 
+  const handleHoverCategory = useCallback((cat: string | null) => {
+    setHoveredCategory(cat);
+  }, []);
+
+  const allCategoriesActive = filters.categories.size === ALL_CATEGORIES.size;
+
   if (state === 'loading') {
     return (
       <div className="flex-1 flex items-center justify-center bg-gray-950 text-gray-400">
@@ -148,6 +156,8 @@ export default function MemoryMap() {
         edges={edges}
         hoveredIndex={interaction.hoveredIndex}
         selectedIndex={interaction.selectedIndex}
+        hoveredCategory={hoveredCategory}
+        allCategoriesActive={allCategoriesActive}
         onHover={handleHover}
         onSelect={handleSelect}
       />
@@ -160,6 +170,7 @@ export default function MemoryMap() {
         edges={edges}
         nodes={nodes}
         onToggleCategory={toggleCategory}
+        onHoverCategory={handleHoverCategory}
         onSearchChange={setSearchQuery}
         onCloseDetail={() => handleSelect(null)}
       />

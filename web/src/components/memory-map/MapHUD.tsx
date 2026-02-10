@@ -14,6 +14,7 @@ interface MapHUDProps {
   edges: ProcessedEdge[];
   nodes: ProcessedNode[];
   onToggleCategory: (cat: string) => void;
+  onHoverCategory: (cat: string | null) => void;
   onSearchChange: (q: string) => void;
   onCloseDetail: () => void;
 }
@@ -27,6 +28,7 @@ export default function MapHUD({
   edges,
   nodes,
   onToggleCategory,
+  onHoverCategory,
   onSearchChange,
   onCloseDetail,
 }: MapHUDProps) {
@@ -34,7 +36,7 @@ export default function MapHUD({
     <div className="absolute inset-0 pointer-events-none">
       {/* Top bar */}
       <div className="absolute top-3 left-3 right-3 flex items-start gap-3 pointer-events-auto">
-        <FilterBar categories={filters.categories} onToggle={onToggleCategory} />
+        <FilterBar categories={filters.categories} onToggle={onToggleCategory} onHoverCategory={onHoverCategory} />
         <SearchBox value={filters.searchQuery} onChange={onSearchChange} />
       </div>
 

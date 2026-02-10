@@ -11,11 +11,13 @@ interface GraphSceneProps {
   edges: ProcessedEdge[];
   hoveredIndex: number | null;
   selectedIndex: number | null;
+  hoveredCategory: string | null;
+  allCategoriesActive: boolean;
   onHover: (index: number | null) => void;
   onSelect: (index: number | null) => void;
 }
 
-export default function GraphScene({ nodes, edges, hoveredIndex, selectedIndex, onHover, onSelect }: GraphSceneProps) {
+export default function GraphScene({ nodes, edges, hoveredIndex, selectedIndex, hoveredCategory, allCategoriesActive, onHover, onSelect }: GraphSceneProps) {
   return (
     <Canvas
       camera={{ position: [0, 0, 25], fov: 60 }}
@@ -32,6 +34,8 @@ export default function GraphScene({ nodes, edges, hoveredIndex, selectedIndex, 
         nodes={nodes}
         hoveredIndex={hoveredIndex}
         selectedIndex={selectedIndex}
+        hoveredCategory={hoveredCategory}
+        allCategoriesActive={allCategoriesActive}
         onHover={onHover}
         onSelect={onSelect}
       />
