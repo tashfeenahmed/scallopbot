@@ -38,7 +38,7 @@ None
 
 Plans:
 - [x] 18-01: LLM re-ranker TDD (rerankResults function with score blending)
-- [ ] 18-02: Integrate re-ranker into search pipeline
+- [x] 18-02: Integrate re-ranker into search pipeline
 
 #### Phase 19: LLM-Guided Memory Relations
 
@@ -138,7 +138,7 @@ Plans:
 |-------|-----------|-------|--------|-----------|
 | v1.0 | Skills-Only Architecture | 11/11 | Complete | 2026-02-04 |
 | v2.0 | Agent Polish & Enhanced Loop | 11/11 | Complete | 2026-02-04 |
-| 18. Retrieval Re-ranking | v3.0 | 1/2 | In progress | - |
+| 18. Retrieval Re-ranking | v3.0 | 2/2 | Complete | 2026-02-10 |
 | 19. LLM-Guided Memory Relations | v3.0 | 0/? | Not started | - |
 | 20. Spreading Activation | v3.0 | 0/? | Not started | - |
 | 21. Memory Fusion Engine | v3.0 | 0/? | Not started | - |

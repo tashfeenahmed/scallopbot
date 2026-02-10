@@ -10,11 +10,11 @@ See: .planning/PROJECT.md (updated 2026-02-09 after v3.0 milestone creation)
 ## Current Position
 
 Phase: 18 of 27 (Retrieval Re-ranking)
-Plan: 1 of 2 in current phase
-Status: In progress
-Last activity: 2026-02-10 - Completed 18-01-PLAN.md
+Plan: 2 of 2 in current phase
+Status: Phase complete
+Last activity: 2026-02-10 - Completed 18-02-PLAN.md
 
-Progress: █░░░░░░░░░ 5%
+Progress: ██░░░░░░░░ 10%
 
 ## Shipped Milestones
 
@@ -51,6 +51,8 @@ Full decision log in PROJECT.md Key Decisions table.
 - Re-ranker score blending: original*0.4 + LLM*0.6 (LLM dominates for semantic understanding)
 - Stateless pure functions for re-ranking (no class needed)
 - Graceful fallback to original scores on any LLM failure
+- Opt-in rerankProvider via constructor — existing search behavior unchanged without it
+- Inline Groq adapter for standalone skills — keeps skills self-contained
 
 ### Deferred Issues
 
@@ -70,5 +72,5 @@ None.
 ## Session Continuity
 
 Last session: 2026-02-10
-Stopped at: Completed 18-01-PLAN.md (18-02 remaining)
+Stopped at: Completed 18-02-PLAN.md — Phase 18 complete
 Resume file: None
