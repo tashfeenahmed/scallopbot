@@ -232,6 +232,17 @@ export {
   N_SCALAR,
 } from './affect-lexicon.js';
 
+// Self-Reflection
+export {
+  reflect,
+  buildReflectionPrompt,
+  buildSoulDistillationPrompt,
+  DEFAULT_REFLECTION_CONFIG,
+  type ReflectionConfig,
+  type ReflectionResult,
+  type ReflectionInsight,
+} from './reflection.js';
+
 // Utility Score (Enhanced Forgetting)
 export {
   computeUtilityScore,
