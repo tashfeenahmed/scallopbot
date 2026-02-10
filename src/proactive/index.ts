@@ -12,3 +12,23 @@ export {
   type MessageHandler,
   type AgentProcessHandler,
 } from './scheduler.js';
+
+export {
+  isInQuietHours,
+  computeDeliveryTime,
+  type TimingContext,
+  type DeliveryTiming,
+} from './timing-model.js';
+
+export {
+  detectProactiveEngagement,
+  DEFAULT_ENGAGEMENT_WINDOW_MS,
+} from './feedback.js';
+
+export {
+  formatProactiveForTelegram,
+  formatProactiveForWebSocket,
+  formatProactiveMessage,
+  type ProactiveFormatInput,
+  type ProactiveWebSocketOutput,
+} from './proactive-format.js';
