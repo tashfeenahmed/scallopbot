@@ -17,6 +17,8 @@ export { calculateBM25Score, buildDocFreqMap, type BM25Options } from './bm25.js
 
 import type { ScallopMemoryStore } from './scallop-store.js';
 import type { SessionSummarizer } from './session-summary.js';
+import type { LLMProvider } from '../providers/types.js';
+import { findFusionClusters, fuseMemoryCluster } from './fusion.js';
 
 export interface BackgroundGardenerOptions {
   scallopStore: ScallopMemoryStore;
@@ -25,6 +27,8 @@ export interface BackgroundGardenerOptions {
   interval?: number;
   /** Session summarizer for generating summaries before pruning */
   sessionSummarizer?: SessionSummarizer;
+  /** Optional LLM provider for memory fusion (merging dormant clusters) */
+  fusionProvider?: LLMProvider;
 }
 
 /**
@@ -45,6 +49,7 @@ export class BackgroundGardener {
   private logger: Logger;
   private interval: number;
   private sessionSummarizer?: SessionSummarizer;
+  private fusionProvider?: LLMProvider;
   private timer: NodeJS.Timeout | null = null;
   private running = false;
   private tickCount = 0;
@@ -58,6 +63,7 @@ export class BackgroundGardener {
     this.logger = options.logger.child({ component: 'gardener' });
     this.interval = options.interval ?? 5 * 60 * 1000; // 5 minutes default
     this.sessionSummarizer = options.sessionSummarizer;
+    this.fusionProvider = options.fusionProvider;
   }
 
   start(): void {
@@ -130,6 +136,91 @@ export class BackgroundGardener {
         { updated: fullDecayResult.updated, archived: fullDecayResult.archived },
         'Full decay processed'
       );
+    }
+
+    // 1.5. Memory fusion (merge dormant related memory clusters)
+    if (this.fusionProvider) {
+      try {
+        // Get all users with memories
+        const userRows = db.raw<{ user_id: string }>('SELECT DISTINCT user_id FROM memories WHERE source != \'_cleaned_sentinel\'', []);
+        let totalFused = 0;
+        let totalMerged = 0;
+
+        for (const { user_id: userId } of userRows) {
+          // Get dormant memories for this user
+          const allMemories = db.getMemoriesByUser(userId, {
+            minProminence: 0.1,
+            isLatest: true,
+            includeAllSources: true,
+          });
+          // Filter in JS: prominence < 0.5 and not static_profile or derived
+          const dormantMemories = allMemories.filter(m =>
+            m.prominence < 0.5 &&
+            m.memoryType !== 'static_profile' &&
+            m.memoryType !== 'derived'
+          );
+
+          if (dormantMemories.length < 3) continue; // Need at least minClusterSize
+
+          // Find fusion clusters
+          const clusters = findFusionClusters(
+            dormantMemories,
+            (id) => db.getRelations(id),
+            { minClusterSize: 3, maxClusters: 5 },
+          );
+
+          // Fuse each cluster
+          for (const cluster of clusters) {
+            const result = await fuseMemoryCluster(cluster, this.fusionProvider);
+            if (!result) continue;
+
+            // Store fused memory
+            const fusedMemory = await this.scallopStore.add({
+              userId,
+              content: result.summary,
+              category: result.category,
+              importance: result.importance,
+              confidence: result.confidence,
+              sourceChunk: cluster.map(m => m.content).join(' | '),
+              metadata: {
+                fusedAt: new Date().toISOString(),
+                sourceCount: cluster.length,
+                sourceIds: cluster.map(m => m.id),
+              },
+              learnedFrom: 'consolidation',
+              detectRelations: false,
+            });
+
+            // Override memoryType to 'derived' (add() sets 'regular')
+            db.updateMemory(fusedMemory.id, { memoryType: 'derived' });
+
+            // Add DERIVES relations from fused memory to each source
+            for (const source of cluster) {
+              db.addRelation(fusedMemory.id, source.id, 'DERIVES', 0.95);
+            }
+
+            // Mark sources as superseded
+            for (const source of cluster) {
+              this.scallopStore.update(source.id, { isLatest: false });
+              db.updateMemory(source.id, { memoryType: 'superseded' });
+            }
+
+            // Set fused memory prominence
+            const maxProminence = Math.max(...cluster.map(m => m.prominence));
+            const fusedProminence = Math.min(0.6, maxProminence + 0.1);
+            db.updateProminences([{ id: fusedMemory.id, prominence: fusedProminence }]);
+
+            totalFused++;
+            totalMerged += cluster.length;
+          }
+        }
+
+        if (totalFused > 0) {
+          this.logger.info({ fused: totalFused, memoriesMerged: totalMerged }, 'Memory fusion complete');
+        }
+      } catch (err) {
+        this.logger.warn({ error: (err as Error).message }, 'Memory fusion failed');
+      }
     }
 
     // 2. Generate session summaries for old sessions before pruning
