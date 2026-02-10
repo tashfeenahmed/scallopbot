@@ -1,10 +1,14 @@
-import { useCallback, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useRef, useState } from 'react';
 import { useWebSocket, type WsMessage } from './hooks/useWebSocket';
 import { useCosts } from './hooks/useCosts';
 import Header from './components/Header';
 import CreditsPanel from './components/CreditsPanel';
 import ChatContainer from './components/ChatContainer';
 import ChatInput from './components/ChatInput';
+
+const MemoryMap = lazy(() => import('./components/memory-map/MemoryMap'));
+
+export type ViewMode = 'chat' | 'memory-map';
 
 export interface ChatMessage {
   id: number;
@@ -29,6 +33,7 @@ export default function App() {
   const [debugMode, setDebugMode] = useState(false);
   const [creditsOpen, setCreditsOpen] = useState(false);
   const [isWaiting, setIsWaiting] = useState(false);
+  const [currentView, setCurrentView] = useState<ViewMode>('chat');
   const { costs, refetch: refetchCosts } = useCosts();
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -191,16 +196,30 @@ export default function App() {
         creditsAvailable={costs !== null}
         hasSpend={costs !== null && costs.daily.spent > 0}
         creditsOpen={creditsOpen}
+        currentView={currentView}
+        onViewChange={setCurrentView}
       />
       {creditsOpen && costs && <CreditsPanel costs={costs} />}
-      <ChatContainer messages={messages} debugMode={debugMode} isWaiting={isWaiting} />
-      <ChatInput
-        onSend={handleSend}
-        onStop={handleStop}
-        isWaiting={isWaiting}
-        disabled={status !== 'connected'}
-        inputRef={inputRef}
-      />
+      {currentView === 'chat' ? (
+        <>
+          <ChatContainer messages={messages} debugMode={debugMode} isWaiting={isWaiting} />
+          <ChatInput
+            onSend={handleSend}
+            onStop={handleStop}
+            isWaiting={isWaiting}
+            disabled={status !== 'connected'}
+            inputRef={inputRef}
+          />
+        </>
+      ) : (
+        <Suspense fallback={
+          <div className="flex-1 flex items-center justify-center bg-gray-950 text-gray-400">
+            <div className="w-8 h-8 border-2 border-blue-400 border-t-transparent rounded-full animate-spin" />
+          </div>
+        }>
+          <MemoryMap />
+        </Suspense>
+      )}
     </div>
   );
 }

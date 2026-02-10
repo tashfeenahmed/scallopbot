@@ -755,6 +755,183 @@ export class ScallopMemoryStore {
   }
 
   /**
+   * Get graph data for 3D memory map visualization.
+   * Returns memories, relations, and PCA-projected 3D positions.
+   */
+  getGraphData(userId: string = 'default'): {
+    memories: Array<{
+      id: string; content: string; category: string; memoryType: string;
+      importance: number; confidence: number; prominence: number;
+      isLatest: boolean; hasEmbedding: boolean; accessCount: number;
+      createdAt: number; updatedAt: number;
+    }>;
+    relations: Array<{
+      id: string; sourceId: string; targetId: string;
+      relationType: string; confidence: number; createdAt: number;
+    }>;
+    positions: Record<string, [number, number, number]> | null;
+  } {
+    // 1. Fetch memories
+    const rawMemories = this.db.getMemoriesByUser(userId, {
+      minProminence: 0.01,
+      limit: 500,
+      includeAllSources: true,
+    });
+
+    const memoryIds = new Set(rawMemories.map(m => m.id));
+
+    // 2. Fetch relations, filter to edges within the memory set
+    const allRelations = this.db.getAllRelations();
+    const relations = allRelations.filter(
+      r => memoryIds.has(r.sourceId) && memoryIds.has(r.targetId)
+    );
+
+    // 3. Compute 3D positions via server-side PCA
+    const embeddingMap = new Map<string, number[]>();
+    for (const m of rawMemories) {
+      if (m.embedding && m.embedding.length > 0) {
+        embeddingMap.set(m.id, m.embedding);
+      }
+    }
+
+    let positions: Record<string, [number, number, number]> | null = null;
+
+    if (embeddingMap.size >= 3) {
+      const ids = Array.from(embeddingMap.keys());
+      const dim = embeddingMap.get(ids[0])!.length;
+      const n = ids.length;
+
+      // Build matrix and compute mean
+      const mean = new Float64Array(dim);
+      const matrix: Float64Array[] = [];
+      for (const id of ids) {
+        const vec = new Float64Array(embeddingMap.get(id)!);
+        matrix.push(vec);
+        for (let j = 0; j < dim; j++) mean[j] += vec[j];
+      }
+      for (let j = 0; j < dim; j++) mean[j] /= n;
+
+      // Center data
+      for (const vec of matrix) {
+        for (let j = 0; j < dim; j++) vec[j] -= mean[j];
+      }
+
+      // Power iteration for top 3 principal components
+      const components: Float64Array[] = [];
+      for (let comp = 0; comp < 3; comp++) {
+        let v = new Float64Array(dim);
+        for (let j = 0; j < dim; j++) v[j] = Math.random() - 0.5;
+
+        for (let iter = 0; iter < 50; iter++) {
+          // Compute X^T * X * v
+          const newV = new Float64Array(dim);
+          for (const row of matrix) {
+            let dot = 0;
+            for (let j = 0; j < dim; j++) dot += row[j] * v[j];
+            for (let j = 0; j < dim; j++) newV[j] += dot * row[j];
+          }
+
+          // Gram-Schmidt orthogonalization against previous components
+          for (const prev of components) {
+            let dot = 0;
+            for (let j = 0; j < dim; j++) dot += newV[j] * prev[j];
+            for (let j = 0; j < dim; j++) newV[j] -= dot * prev[j];
+          }
+
+          // Normalize
+          let norm = 0;
+          for (let j = 0; j < dim; j++) norm += newV[j] * newV[j];
+          norm = Math.sqrt(norm);
+          if (norm > 0) {
+            for (let j = 0; j < dim; j++) newV[j] /= norm;
+          }
+          v = newV;
+        }
+        components.push(v);
+      }
+
+      // Project data onto 3 components
+      const projected: [number, number, number][] = [];
+      for (const row of matrix) {
+        const p: [number, number, number] = [0, 0, 0];
+        for (let c = 0; c < 3; c++) {
+          let dot = 0;
+          for (let j = 0; j < dim; j++) dot += row[j] * components[c][j];
+          p[c] = dot;
+        }
+        projected.push(p);
+      }
+
+      // Uniform normalization: use the single largest axis range so
+      // proportions are preserved (avoids stretching into a cube)
+      let globalMax = 0;
+      for (let c = 0; c < 3; c++) {
+        for (const p of projected) {
+          const abs = Math.abs(p[c]);
+          if (abs > globalMax) globalMax = abs;
+        }
+      }
+      const scale = globalMax > 0 ? 10 / globalMax : 1;
+      for (const p of projected) {
+        p[0] *= scale;
+        p[1] *= scale;
+        p[2] *= scale;
+      }
+
+      // Build positions map
+      positions = {};
+      for (let i = 0; i < ids.length; i++) {
+        positions[ids[i]] = projected[i];
+      }
+
+      // Assign random positions on a sphere for memories without embeddings
+      for (const m of rawMemories) {
+        if (!positions[m.id]) {
+          const theta = Math.random() * 2 * Math.PI;
+          const phi = Math.acos(2 * Math.random() - 1);
+          const r = 8 + Math.random() * 2; // radius 8-10, on the outer shell
+          positions[m.id] = [
+            r * Math.sin(phi) * Math.cos(theta),
+            r * Math.sin(phi) * Math.sin(theta),
+            r * Math.cos(phi),
+          ];
+        }
+      }
+    } else {
+      // No embeddings available — place all memories on a sphere
+      positions = {};
+      for (const m of rawMemories) {
+        const theta = Math.random() * 2 * Math.PI;
+        const phi = Math.acos(2 * Math.random() - 1);
+        const r = 4 + Math.random() * 6; // radius 4-10, distributed through volume
+        positions[m.id] = [
+          r * Math.sin(phi) * Math.cos(theta),
+          r * Math.sin(phi) * Math.sin(theta),
+          r * Math.cos(phi),
+        ];
+      }
+    }
+
+    // 4. Strip embeddings from response
+    const memories = rawMemories.map(m => ({
+      id: m.id,
+      content: m.content,
+      category: m.category,
+      memoryType: m.memoryType,
+      importance: m.importance,
+      confidence: m.confidence,
+      prominence: m.prominence,
+      isLatest: m.isLatest,
+      hasEmbedding: m.embedding !== null,
+      accessCount: m.accessCount,
+      createdAt: m.createdAt,
+      updatedAt: m.updatedAt,
+    }));
+
+    return { memories, relations, positions };
+  }
+
+  /**
    * Close the database
    */
   close(): void {

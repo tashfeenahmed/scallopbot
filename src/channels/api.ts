@@ -28,6 +28,7 @@ import type { SessionManager } from '../agent/session.js';
 import type { Channel, Attachment } from './types.js';
 import type { TriggerSource } from '../triggers/types.js';
 import type { CostTracker } from '../routing/cost.js';
+import type { ScallopMemoryStore } from '../memory/scallop-store.js';
 import { nanoid } from 'nanoid';
 
 /** Maximum request body size (1MB) */
@@ -57,6 +58,8 @@ export interface ApiChannelConfig {
   logger: Logger;
   /** Cost tracker for usage/credits API (optional) */
   costTracker?: CostTracker;
+  /** Memory store for graph visualization API (optional) */
+  memoryStore?: ScallopMemoryStore;
 }
 
 /** Content-Type mapping for static files */
@@ -154,11 +157,12 @@ interface WsResponse {
 export class ApiChannel implements Channel, TriggerSource {
   name = 'api';
 
-  private config: Required<Omit<ApiChannelConfig, 'apiKey' | 'allowedOrigins' | 'staticDir' | 'costTracker'>> & {
+  private config: Required<Omit<ApiChannelConfig, 'apiKey' | 'allowedOrigins' | 'staticDir' | 'costTracker' | 'memoryStore'>> & {
     apiKey?: string;
     allowedOrigins: string[];
     staticDir?: string;
     costTracker?: CostTracker;
+    memoryStore?: ScallopMemoryStore;
   };
   private server: Server | null = null;
   private wss: WebSocketServer | null = null;
@@ -179,6 +183,7 @@ export class ApiChannel implements Channel, TriggerSource {
       maxBodySize: config.maxBodySize || MAX_BODY_SIZE,
       staticDir: config.staticDir,
       costTracker: config.costTracker,
+      memoryStore: config.memoryStore,
       agent: config.agent,
       sessionManager: config.sessionManager,
       logger: config.logger,
@@ -329,7 +334,7 @@ export class ApiChannel implements Channel, TriggerSource {
     }
 
     // Check authentication for API routes (file downloads and costs exempt when same-origin)
-    const sameOriginExempt = (urlPath === '/api/files' || urlPath === '/api/costs') && method === 'GET';
+    const sameOriginExempt = (urlPath === '/api/files' || urlPath === '/api/costs' || urlPath === '/api/memories/graph') && method === 'GET';
     const skipAuth = sameOriginExempt && this.isSameOriginRequest(req);
     if (this.config.apiKey && !skipAuth && !this.authenticateRequest(req)) {
       this.sendJson(res, 401, { error: 'Unauthorized' });
@@ -356,6 +361,8 @@ export class ApiChannel implements Channel, TriggerSource {
         await this.handleDeleteSession(res, sessionId);
       } else if (urlPath === '/api/files' && method === 'GET') {
         await this.handleFileDownload(res, url);
+      } else if (urlPath === '/api/memories/graph' && method === 'GET') {
+        this.handleMemoryGraph(res);
       } else {
         this.sendJson(res, 404, { error: 'Not found' });
       }
@@ -670,6 +677,23 @@ export class ApiChannel implements Channel, TriggerSource {
         this.logger.error({ filePath, error: (error as Error).message }, 'File download error');
         this.sendJson(res, 500, { error: 'Failed to serve file' });
       }
+    }
+  }
+
+  /**
+   * Handle GET /api/memories/graph
+   */
+  private handleMemoryGraph(res: ServerResponse): void {
+    if (!this.config.memoryStore) {
+      this.sendJson(res, 503, { error: 'Memory store not available' });
+      return;
+    }
+    try {
+      const data = this.config.memoryStore.getGraphData('default');
+      this.sendJson(res, 200, data);
+    } catch (error) {
+      this.logger.error({ error: (error as Error).message }, 'Memory graph error');
+      this.sendJson(res, 500, { error: 'Failed to get memory graph data' });
     }
   }
 

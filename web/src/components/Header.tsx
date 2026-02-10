@@ -1,4 +1,5 @@
 import type { ConnectionStatus } from '../hooks/useWebSocket';
+import type { ViewMode } from '../App';
 
 interface HeaderProps {
   status: ConnectionStatus;
@@ -8,6 +9,8 @@ interface HeaderProps {
   creditsAvailable: boolean;
   hasSpend: boolean;
   creditsOpen: boolean;
+  currentView: ViewMode;
+  onViewChange: (view: ViewMode) => void;
 }
 
 const STATUS_CONFIG = {
@@ -24,6 +27,8 @@ export default function Header({
   creditsAvailable,
   hasSpend,
   creditsOpen,
+  currentView,
+  onViewChange,
 }: HeaderProps) {
   const { text, dotClass } = STATUS_CONFIG[status];
 
@@ -40,6 +45,30 @@ export default function Header({
             {text}
           </div>
         </div>
+      </div>
+
+      {/* View toggle */}
+      <div className="flex rounded-lg bg-gray-100 p-0.5">
+        <button
+          onClick={() => onViewChange('chat')}
+          className={`px-3 py-1 text-xs font-medium rounded-md transition-colors ${
+            currentView === 'chat'
+              ? 'bg-white text-gray-900 shadow-sm'
+              : 'text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          Chat
+        </button>
+        <button
+          onClick={() => onViewChange('memory-map')}
+          className={`px-3 py-1 text-xs font-medium rounded-md transition-colors ${
+            currentView === 'memory-map'
+              ? 'bg-white text-gray-900 shadow-sm'
+              : 'text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          Memory Map
+        </button>
       </div>
 
       <div className="flex items-center gap-3">

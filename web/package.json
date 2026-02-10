@@ -9,14 +9,19 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@react-three/drei": "^10.7.7",
+    "@react-three/fiber": "^9.5.0",
+    "@react-three/postprocessing": "^3.0.4",
     "marked": "^15.0.0",
     "react": "^19.1.0",
-    "react-dom": "^19.1.0"
+    "react-dom": "^19.1.0",
+    "three": "^0.182.0"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.1.0",
     "@types/react": "^19.1.0",
     "@types/react-dom": "^19.1.0",
+    "@types/three": "^0.182.0",
     "@vitejs/plugin-react": "^4.4.0",
     "tailwindcss": "^4.1.0",
     "typescript": "^5.7.0",
