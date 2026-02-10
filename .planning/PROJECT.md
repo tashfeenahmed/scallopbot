@@ -1,8 +1,8 @@
-# SmartBot v3: Research-Driven Intelligence
+# SmartBot v4: Bio-Inspired Cognitive Architecture
 
 ## What This Is
 
-A proactive personal AI agent running locally with CLI access, using a pure skills-based architecture and research-backed memory intelligence. All capabilities are defined as markdown skill files. Memory system features LLM re-ranking, relation classification, spreading activation retrieval, memory fusion, and behavioral profiling — informed by 60+ recent papers (SYNAPSE, FadeMem, A-MEM). Includes web UI, loop-until-done execution, and multi-channel trigger support (Telegram, Web, Cron).
+A proactive personal AI agent running locally with CLI access, using a pure skills-based architecture, research-backed memory intelligence, and bio-inspired cognitive features. All capabilities are defined as markdown skill files. Memory system features LLM re-ranking, relation classification, spreading activation retrieval, memory fusion, and behavioral profiling. Cognitive layer adds dream-based memory consolidation (NREM + REM), affect detection, self-reflection, proactive gap scanning, and inner thoughts with timing-aware delivery. Includes web UI, loop-until-done execution, and multi-channel trigger support (Telegram, Web, Cron).
 
 ## Core Value
 
@@ -34,9 +34,6 @@ A proactive personal AI agent running locally with CLI access, using a pure skil
   - ✓ Execute skill's script with arguments
   - ✓ Return result to agent
 - ✓ Kimi K2.5 thinking mode integration — v2.0
-  - ✓ Enable thinking mode via `enableThinking` flag
-  - ✓ Handle `reasoning_content` in responses
-  - ✓ Temperature constraints (1.0 for thinking, 0.6 for instant)
 - ✓ Web UI for local testing — v2.0
 - ✓ Loop-until-done execution with [DONE] marker — v2.0
 - ✓ TriggerSource abstraction for multi-channel dispatch — v2.0
@@ -44,28 +41,44 @@ A proactive personal AI agent running locally with CLI access, using a pure skil
 - ✓ Human-like messaging style — v2.0
 - ✓ Consolidated system prompt (60 lines) — v2.0
 - ✓ LLM-based search re-ranking — v3.0
-  - ✓ Score blending (40% original + 60% LLM) for improved recall
-  - ✓ Graceful fallback to original scores on LLM failure
-  - ✓ Opt-in rerankProvider via constructor
 - ✓ LLM-guided memory relations — v3.0
-  - ✓ Batch classification replacing regex-based relation detection
-  - ✓ Error signal detection with regex fallback
-  - ✓ Optional classifierProvider with backward compatibility
 - ✓ Spreading activation retrieval — v3.0
-  - ✓ ACT-R/SYNAPSE algorithm with typed edge weights
-  - ✓ Fan-out normalization and Gaussian noise for diversity
-  - ✓ Activation * prominence composition for temporal-spatial blending
 - ✓ Memory fusion engine — v3.0
-  - ✓ BFS cluster detection with category-boundary splitting
-  - ✓ LLM-guided content merging in BackgroundGardener deep tick
-  - ✓ maxProminence 0.7 cap, summary length validation
 - ✓ Behavioral profiling — v3.0
-  - ✓ EMA-smoothed signals (frequency, engagement, topic switching, response length)
-  - ✓ Cold start handling (null for < 10 messages)
-  - ✓ Natural-language formatting for LLM context
 - ✓ E2E WebSocket test suite — v3.0
-  - ✓ 11 tests covering all v3.0 features
-  - ✓ Direct-wired test harness with mock providers
+- ✓ 3-tier heartbeat system (light/deep/sleep) — v4.0
+  - ✓ Health monitoring and retrieval auditing
+  - ✓ Trust score computation via behavioral signals
+  - ✓ Goal deadline checks
+  - ✓ Tier 3 sleep infrastructure with wall-clock gating
+- ✓ Affect detection and context injection — v4.0
+  - ✓ AFINN-165 + VADER heuristic classifier
+  - ✓ Dual-EMA mood smoothing (fast 2h / slow 3d)
+  - ✓ Observation-only affect guard (per Mozikov et al.)
+- ✓ Dream cycle — v4.0
+  - ✓ NREM cross-category fusion consolidation
+  - ✓ REM stochastic exploration with LLM-judge validation
+  - ✓ Dream orchestrator coordinating NREM + REM phases
+- ✓ Utility-based forgetting — v4.0
+  - ✓ Utility score = prominence * log(1 + accessCount)
+  - ✓ Soft-archive then hard-prune pipeline
+  - ✓ Orphan relation pruning
+- ✓ Self-reflection — v4.0
+  - ✓ Composite insights extraction (Renze & Guven taxonomy)
+  - ✓ SOUL re-distillation with sentence-boundary truncation
+  - ✓ SOUL.md file I/O in sleepTick
+- ✓ Gap scanner — v4.0
+  - ✓ 3-stage PROBE pipeline (search → diagnose → act)
+  - ✓ Proactiveness dial gating (conservative/moderate/eager)
+  - ✓ Combined budget + hardCap enforcement
+- ✓ Inner thoughts & timing — v4.0
+  - ✓ Post-session proactive evaluation with cooldown + distress suppression
+  - ✓ 4-strategy delivery timing (urgent_now/next_morning/active_hours/next_active)
+  - ✓ Per-channel formatting (Telegram icon+footer, WebSocket structured JSON)
+  - ✓ Trust-calibrated feedback loop with engagement tracking
+- ✓ Comprehensive E2E cognitive test suite — v4.0
+  - ✓ 21 E2E tests validating full cognitive pipeline
+  - ✓ 1,501 total tests across 82 files
 
 ### Active
 
@@ -81,14 +94,16 @@ A proactive personal AI agent running locally with CLI access, using a pure skil
 
 ## Context
 
-**Current State (v3.0 shipped):**
-- ~68,777 lines of TypeScript (~59k v2.0 + ~9.7k v3.0 net additions)
+**Current State (v4.0 shipped):**
+- ~418k lines of TypeScript (~35.5k net additions in v4.0)
 - Skills-only architecture: bash, web_search, browser, memory_search, telegram_send
 - Memory intelligence: LLM re-ranking, relation classification, spreading activation, fusion, behavioral profiling
-- 1,080 tests passing (1,069 unit + 11 E2E) across 51 test files
+- Cognitive features: dreams (NREM+REM), affect detection, self-reflection, gap scanning, inner thoughts
+- 1,501 tests passing across 82 test files
 - Web UI available at localhost for testing alongside Telegram
 - Loop-until-done execution with [DONE] marker detection
 - TriggerSource abstraction for Telegram, Web, and Cron triggers
+- 3-tier heartbeat: light tick (5min), deep tick (30min), sleep tick (nightly)
 
 **Architecture:**
 - Each skill folder contains: `SKILL.md` (description + instructions) + `scripts/` (execution scripts)
@@ -97,7 +112,8 @@ A proactive personal AI agent running locally with CLI access, using a pure skil
 - Skill execution runs the appropriate script from `scripts/` folder
 - SkillExecutor handles spawning, output capture, timeouts, and graceful shutdown
 - Memory pipeline: BM25+semantic search → LLM re-ranking → spreading activation → result composition
-- Background gardener: decay processing → fusion clustering → behavioral signal inference
+- Background gardener: light tick (health/affect) → deep tick (decay/fusion/forgetting/inner thoughts) → sleep tick (dreams/reflection/gap scanning)
+- Cognitive pipeline: affect → dreams (NREM→REM) → reflection → gap scanning → inner thoughts → timing → delivery
 
 ## Constraints
 
@@ -122,8 +138,18 @@ A proactive personal AI agent running locally with CLI access, using a pure skil
 | Opt-in provider pattern | rerankProvider/classifierProvider/fusionProvider all optional — backward compatible | ✓ Good - v3.0 |
 | Reuse fast-tier provider | Same cheap LLM for reranking, classification, fusion | ✓ Good - v3.0 |
 | EMA halfLife 7 days | Smooths behavioral signals, responsive to recent patterns | ✓ Good - v3.0 |
-| _sig_ prefix in response_preferences | No schema migration needed for behavioral signals | ✓ Good - v3.0 |
 | Direct-wiring E2E pattern | Bypass Gateway class for testable component composition | ✓ Good - v3.0 |
+| 3-tier heartbeat (light/deep/sleep) | Separates real-time health checks from heavy cognitive processing | ✓ Good - v4.0 |
+| AFINN-165 + dual-EMA affect | Fast keyword heuristic, no API dependency, smooth mood tracking | ✓ Good - v4.0 |
+| Observation-only affect guard | Prevents LLM from acting on emotions, per Mozikov et al. | ✓ Good - v4.0 |
+| Dream orchestrator pattern | Sequential NREM→REM with per-phase error isolation | ✓ Good - v4.0 |
+| Utility-based forgetting | Better than prominence-only: tracks actual retrieval usage | ✓ Good - v4.0 |
+| SOUL re-distillation | Evolving personality snapshot from composite reflections | ✓ Good - v4.0 |
+| 3-stage PROBE pipeline | Separates signal detection, diagnosis, and action gating cleanly | ✓ Good - v4.0 |
+| Proactiveness dial | User-configurable conservative/moderate/eager thresholds | ✓ Good - v4.0 |
+| 4-strategy delivery timing | Respects quiet hours while enabling urgent bypass | ✓ Good - v4.0 |
+| Per-channel formatting | Telegram and WebSocket get appropriate formatting | ✓ Good - v4.0 |
+| Trust feedback loop | Engagement tracking calibrates future proactive behavior | ✓ Good - v4.0 |
 
 ---
-*Last updated: 2026-02-10 after v3.0 milestone*
+*Last updated: 2026-02-10 after v4.0 milestone*

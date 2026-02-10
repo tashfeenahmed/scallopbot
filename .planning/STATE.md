@@ -2,17 +2,17 @@
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-02-10 after v3.0 milestone)
+See: .planning/PROJECT.md (updated 2026-02-10 after v4.0 milestone)
 
 **Core value:** Skills-only execution: Every capability the agent has comes from a skill file that advertises itself to the agent.
-**Current focus:** v4.0 Bio-Inspired Cognitive Architecture
+**Current focus:** Planning next milestone
 
 ## Current Position
 
-Phase: 33 of 33 (E2E Cognitive Testing)
-Plan: 5 of 5 in current phase
-Status: Phase complete
-Last activity: 2026-02-10 — Completed 33-05-PLAN.md
+Phase: 33 of 33 (all phases complete)
+Plan: All complete
+Status: Ready to plan next milestone
+Last activity: 2026-02-10 — v4.0 milestone complete
 
 Progress: ██████████ 100%
 
@@ -23,8 +23,9 @@ Progress: ██████████ 100%
 | v1.0 Skills-Only Architecture | 1-7 | 11 | 2026-02-04 |
 | v2.0 Agent Polish & Enhanced Loop | 9-17 | 11 | 2026-02-04 |
 | v3.0 Research-Driven Intelligence | 18-23 | 13 | 2026-02-10 |
+| v4.0 Bio-Inspired Cognitive Architecture | 24-33 | 32 | 2026-02-10 |
 
-**Total:** 35 plans completed in 22 phases (v1+v2+v3)
+**Total:** 67 plans completed in 33 phases (v1+v2+v3+v4)
 
 ## Accumulated Context
 
@@ -34,8 +35,8 @@ Full decision log in PROJECT.md Key Decisions table.
 
 **v1.0:** Skills-only architecture, SKILL_ARGS JSON env var, 60s timeout
 **v2.0:** [DONE] marker, TriggerSource abstraction, 60-line system prompt
-**v3.0:** Stateless pure functions, opt-in provider pattern, fast-tier provider reuse, EMA behavioral signals, _sig_ prefix storage, direct-wiring E2E
-**v4.0 (in progress):** Plain keys (not _sig_ prefix) for trust/proactiveness behavioral patterns, dynamic import for cross-module tick dependencies, tick-counter with wall-clock gate for Tier 3 sleep scheduling, AFINN-165 + VADER heuristics + Russell circumplex for affect classification, dual-EMA (fast 2h / slow 3d) for mood smoothing with goal signal derivation, per-message affect classification wired into agent.processMessage, affect stored as plain keys in response_preferences JSON, observation-only affect guard in system prompt (per Mozikov et al.), formatProfileContext reuse in buildMemoryContext for full behavioral signal flow, crossCategory config flag for cross-category fusion clustering (conditional category-split bypass), relation-context-enriched NREM fusion with per-cluster error isolation and cross-category insight override, NREM uses fusionProvider (same as deep-tick) with learnedFrom 'nrem_consolidation' and prominence window [0.05, 0.8), REM stochastic exploration with noiseSigma 0.6, category-diverse seed sampling, bidirectional relation filtering, LLM connection judge with novelty/plausibility/usefulness scoring, dream.ts pure coordinator pattern (sequential NREM→REM with per-phase error isolation and skip flags), sleepTick wired to dream() orchestrator with EXTENDS relations for REM discoveries (shared fusionProvider for both NREM and REM), utility-based forgetting pipeline in deepTick (audit → soft-archive → hard-prune → orphan cleanup), db.deleteRelation for orphan pruning (not raw SQL), reflect() pure function with two-phase LLM pipeline (composite reflection + SOUL re-distillation), Renze & Guven Composite type for reflection, sentence-boundary truncation for bounded SOUL output, workspace-gated reflection in sleepTick with SOUL.md file I/O, sourceSessionIds in metadata instead of DERIVES relations for session summary traceability, GapSignal/GapScanInput types for 3-stage PROBE pipeline, sub-scanner + orchestrator pattern (scanStaleGoals/scanBehavioralAnomalies/scanUnresolvedThreads → scanForGaps), active-only goal filtering for staleness, overdue preempts weaker stale signals, cold-start guard for null behavioral signals, DiagnosedGap/UserContext types for Stage 2 LLM triage, prompt-builder+parser+orchestrator three-function pattern for LLM modules, fail-safe-to-not-actionable invariant (all error paths → not-actionable with confidence 0), JSON extraction regex for LLM response tolerance, DIAL_THRESHOLDS per-dial gating (conservative/moderate/eager), effectiveCap = min(budget, hardCap) for combined enforcement, local wordOverlap dedup to avoid cross-module coupling, null-safe behavioral patterns stub for cold-start gap scanning, gap scanner pipeline wired after self-reflection in sleepTick with nested per-user error isolation, InnerThoughtsInput/InnerThoughtsResult types for post-session proactive evaluation, 6-hour proactive cooldown + distress suppression + conservative-with-no-signals=skip pre-filter gating, fail-safe-to-skip invariant for inner thoughts (all error paths → skip decision), standalone isInQuietHours pure function (not imported from BackgroundGardener), 4-strategy priority chain for delivery timing (urgent_now > next_morning > active_hours > next_active), high urgency bypasses min gap but respects quiet hours, 15-min engagement window for proactive feedback (conservative — leave as 'fired' rather than false-positive), channel-decoupled formatting (formatters don't import channel implementations), 'acted' DB status for trust score feedback loop, inner thoughts wired into deepTick step 7 with 6h recency filter on session summaries, computeDeliveryTime replaces fixed 30-min delay in sleepTick gap scanner, severity-to-urgency mapping for gap timing, per-channel proactive formatting in UnifiedScheduler.sendFormattedMessage (Telegram icon+footer, WebSocket structured JSON), checkEngagement public method on UnifiedScheduler for trust feedback loop, 'proactive' WsResponse type in ApiChannel with structured JSON parsing
+**v3.0:** Stateless pure functions, opt-in provider pattern, fast-tier provider reuse, EMA behavioral signals, direct-wiring E2E
+**v4.0:** 3-tier heartbeat, AFINN-165 dual-EMA affect, observation-only affect guard, NREM+REM dream orchestrator, utility-based forgetting, SOUL re-distillation, 3-stage PROBE gap scanner, proactiveness dial, 4-strategy delivery timing, per-channel formatting, trust feedback loop
 
 ### Deferred Issues
 
@@ -50,11 +51,11 @@ None.
 - v1.0 shipped: Phases 1-7, 11 plans (2026-02-04)
 - v2.0 shipped: Phases 9-17, 11 plans (2026-02-04)
 - v3.0 shipped: Phases 18-23, 13 plans (2026-02-10)
-- Archives: .planning/milestones/v1.0-ROADMAP.md, v2.0-ROADMAP.md, v3.0-ROADMAP.md
-- Milestone v4.0 created: Bio-inspired cognitive architecture (dreams, emotions, heartbeat, proactive), 10 phases (Phase 24-33)
+- v4.0 shipped: Phases 24-33, 32 plans (2026-02-10)
+- Archives: .planning/milestones/v1.0-ROADMAP.md, v2.0-ROADMAP.md, v3.0-ROADMAP.md, v4.0-ROADMAP.md
 
 ## Session Continuity
 
 Last session: 2026-02-10
-Stopped at: Completed 33-05-PLAN.md (full cognitive cycle & channel formatting E2E — Phase 33 complete, v4.0 milestone ready)
+Stopped at: v4.0 milestone complete
 Resume file: None
