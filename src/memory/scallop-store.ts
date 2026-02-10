@@ -44,6 +44,8 @@ export interface ScallopMemoryStoreOptions {
   profileOptions?: ProfileUpdateOptions;
   /** Optional LLM provider for re-ranking search results */
   rerankProvider?: LLMProvider;
+  /** Optional LLM provider for LLM-based relation classification */
+  relationsProvider?: LLMProvider;
 }
 
 /**
@@ -120,7 +122,7 @@ export class ScallopMemoryStore {
 
     // Initialize components
     this.decayEngine = new DecayEngine(options.decayConfig);
-    this.relationGraph = new RelationGraph(this.db, this.embedder, options.relationOptions);
+    this.relationGraph = new RelationGraph(this.db, this.embedder, options.relationOptions, options.relationsProvider);
     this.profileManager = new ProfileManager(this.db, options.profileOptions);
     this.temporalExtractor = new TemporalExtractor();
 
