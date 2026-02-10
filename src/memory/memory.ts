@@ -3,8 +3,9 @@
  * Background gardener for ScallopMemory (SQLite)
  *
  * Tiered consolidation:
- * - Light tick (every 5 min): incremental decay + expire old scheduled items
- * - Deep tick (every 6 hours): full decay, session summaries, pruning, behavioral inference
+ * - Tier 1 — Light tick (every 5 min): incremental decay + expire old scheduled items
+ * - Tier 2 — Deep tick (every 6 hours): full decay, session summaries, pruning, behavioral inference
+ * - Tier 3 — Sleep tick (every 24 hours, quiet hours only): nightly cognitive processing (Phase 27+)
  */
 
 import type { Logger } from 'pino';
@@ -33,20 +34,25 @@ export interface BackgroundGardenerOptions {
   sessionSummarizer?: SessionSummarizer;
   /** Optional LLM provider for memory fusion (merging dormant clusters) */
   fusionProvider?: LLMProvider;
+  /** Quiet hours for sleep tick (default: 2-5 AM local time) */
+  quietHours?: { start: number; end: number };
 }
 
 /**
  * Background Gardener - runs tiered consolidation on memories
  *
- * Light tick (every interval, default 5 min):
+ * Tier 1 — Light tick (every interval, default 5 min):
  *   - Incremental decay (bounded set of recently-changed memories)
  *   - Expire old scheduled items
  *
- * Deep tick (every ~6 hours):
+ * Tier 2 — Deep tick (every ~6 hours):
  *   - Full decay scan (all memories)
  *   - Generate session summaries for old sessions
  *   - Prune old sessions + archived memories
  *   - Behavioral pattern inference
+ *
+ * Tier 3 — Sleep tick (every ~24 hours, quiet hours only):
+ *   - Nightly cognitive processing (Phase 27+: NREM, REM, self-reflection)
  */
 export class BackgroundGardener {
   private scallopStore: ScallopMemoryStore;
@@ -57,10 +63,16 @@ export class BackgroundGardener {
   private timer: NodeJS.Timeout | null = null;
   private running = false;
   private tickCount = 0;
+  private sleepTickCount = 0;
+  private quietHours: { start: number; end: number };
 
   /** Deep consolidation runs every DEEP_EVERY light ticks.
    *  With default 5-min interval: 72 ticks × 5 min = 6 hours */
   private static readonly DEEP_EVERY = 72;
+
+  /** Sleep consolidation runs every SLEEP_EVERY light ticks.
+   *  With default 5-min interval: 288 ticks × 5 min = 24 hours */
+  private static readonly SLEEP_EVERY = 288;
 
   constructor(options: BackgroundGardenerOptions) {
     this.scallopStore = options.scallopStore;
@@ -68,6 +80,7 @@ export class BackgroundGardener {
     this.interval = options.interval ?? 5 * 60 * 1000; // 5 minutes default
     this.sessionSummarizer = options.sessionSummarizer;
     this.fusionProvider = options.fusionProvider;
+    this.quietHours = options.quietHours ?? { start: 2, end: 5 };
   }
 
   start(): void {
@@ -130,6 +143,15 @@ export class BackgroundGardener {
       this.tickCount = 0;
       this.deepTick().catch(err => {
         this.logger.warn({ error: (err as Error).message }, 'Deep tick failed');
+      });
+    }
+
+    // Check if it's time for a sleep tick (quiet hours gated)
+    this.sleepTickCount++;
+    if (this.sleepTickCount >= BackgroundGardener.SLEEP_EVERY && this.isQuietHours()) {
+      this.sleepTickCount = 0;
+      this.sleepTick().catch(err => {
+        this.logger.warn({ error: (err as Error).message }, 'Sleep tick failed');
       });
     }
   }
@@ -392,6 +414,32 @@ export class BackgroundGardener {
     }
 
     this.logger.info('Deep tick complete');
+  }
+
+  /**
+   * Check if the current hour falls within configured quiet hours.
+   * Supports wrap-around ranges (e.g., start: 23, end: 5).
+   */
+  private isQuietHours(): boolean {
+    const hour = new Date().getHours();
+    if (this.quietHours.start < this.quietHours.end) {
+      return hour >= this.quietHours.start && hour < this.quietHours.end;
+    }
+    // Handle wrap-around (e.g., start: 23, end: 5)
+    return hour >= this.quietHours.start || hour < this.quietHours.end;
+  }
+
+  /**
+   * Sleep tick: nightly cognitive processing (Tier 3).
+   * Placeholder for Phase 27+ operations.
+   */
+  async sleepTick(): Promise<void> {
+    this.logger.info('Sleep tick: nightly cognitive processing starting');
+    // Placeholder for Phase 27+ operations:
+    // - NREM consolidation (Phase 27)
+    // - REM exploration (Phase 28)
+    // - Self-reflection (Phase 30)
+    this.logger.info('Sleep tick complete (no operations configured yet)');
   }
 
   /** Backward-compatible: processMemories calls lightTick */
