@@ -19,6 +19,10 @@ import type { ScallopMemoryStore } from './scallop-store.js';
 import type { SessionSummarizer } from './session-summary.js';
 import type { LLMProvider } from '../providers/types.js';
 import { findFusionClusters, fuseMemoryCluster } from './fusion.js';
+import { performHealthPing } from './health-ping.js';
+import { auditRetrievalHistory } from './retrieval-audit.js';
+import { computeTrustScore } from './trust-score.js';
+import { checkGoalDeadlines } from './goal-deadline-check.js';
 
 export interface BackgroundGardenerOptions {
   scallopStore: ScallopMemoryStore;
@@ -109,6 +113,15 @@ export class BackgroundGardener {
       db.expireOldScheduledItems();
     } catch (err) {
       this.logger.warn({ error: (err as Error).message }, 'Expire scheduled items failed');
+    }
+
+    // Health ping (sync — safe for lightTick)
+    try {
+      const db = this.scallopStore.getDatabase();
+      const health = performHealthPing(db);
+      this.logger.debug({ ...health }, 'Health ping');
+    } catch (err) {
+      this.logger.warn({ error: (err as Error).message }, 'Health ping failed');
     }
 
     // Check if it's time for a deep tick
@@ -305,6 +318,77 @@ export class BackgroundGardener {
       }
     } catch (err) {
       this.logger.warn({ error: (err as Error).message }, 'Behavioral inference failed');
+    }
+
+    // 5. Retrieval audit
+    try {
+      const auditResult = auditRetrievalHistory(db);
+      if (auditResult.neverRetrieved > 0 || auditResult.staleRetrieved > 0) {
+        this.logger.info({ ...auditResult, candidateCount: auditResult.candidatesForDecay.length }, 'Retrieval audit complete');
+      }
+    } catch (err) {
+      this.logger.warn({ error: (err as Error).message }, 'Retrieval audit failed');
+    }
+
+    // 6. Trust score update
+    try {
+      const profileManager = this.scallopStore.getProfileManager();
+      const sessionSummaries = db.getSessionSummariesByUser('default', 30);
+      const sessions = sessionSummaries
+        .filter(s => s.messageCount > 0)
+        .map(s => ({ messageCount: s.messageCount, durationMs: s.durationMs, startTime: s.createdAt }));
+      const rawScheduledItems = db.getScheduledItemsByUser('default');
+      const scheduledItems = rawScheduledItems
+        .filter(i => i.status !== 'expired')
+        .map(i => ({ status: i.status as 'pending' | 'fired' | 'acted' | 'dismissed', source: i.source, firedAt: i.firedAt ?? undefined }));
+      const existingPatterns = profileManager.getBehavioralPatterns('default');
+      const existingTrust = existingPatterns?.responsePreferences?._sig_trust as number | undefined;
+      const trustResult = computeTrustScore(sessions, scheduledItems, { existingScore: existingTrust });
+      if (trustResult) {
+        profileManager.updateBehavioralPatterns('default', {
+          responsePreferences: {
+            ...(existingPatterns?.responsePreferences ?? {}),
+            _sig_trust: trustResult.trustScore,
+            _sig_proactiveness_dial: trustResult.proactivenessDial,
+          },
+        });
+        this.logger.debug({ trustScore: trustResult.trustScore, dial: trustResult.proactivenessDial }, 'Trust score updated');
+      }
+    } catch (err) {
+      this.logger.warn({ error: (err as Error).message }, 'Trust score update failed');
+    }
+
+    // 7. Goal deadline check
+    try {
+      const GoalService = (await import('../goals/goal-service.js')).GoalService;
+      const goalService = new GoalService({ db, logger: this.logger });
+      const activeGoals = await goalService.listGoals('default', { status: 'active' });
+      const goalsWithDueDates = activeGoals.filter(g => g.metadata.dueDate != null);
+      if (goalsWithDueDates.length > 0) {
+        const pendingItems = db.getDueScheduledItems(Date.now() + 30 * 24 * 60 * 60 * 1000);
+        const existingReminders = pendingItems.map(item => ({ message: item.message }));
+        const deadlineResult = checkGoalDeadlines(goalsWithDueDates, existingReminders);
+        for (const notification of deadlineResult.notifications) {
+          if (!db.hasSimilarPendingScheduledItem(notification.userId, notification.message)) {
+            db.addScheduledItem({
+              userId: notification.userId,
+              message: notification.message,
+              triggerAt: Date.now(),
+              source: 'agent',
+              type: 'goal_checkin',
+              sessionId: null,
+              context: null,
+              recurring: null,
+              sourceMemoryId: notification.goalId,
+            });
+          }
+        }
+        if (deadlineResult.approaching.length > 0) {
+          this.logger.info({ approaching: deadlineResult.approaching.length, notifications: deadlineResult.notifications.length }, 'Goal deadline check complete');
+        }
+      }
+    } catch (err) {
+      this.logger.warn({ error: (err as Error).message }, 'Goal deadline check failed');
     }
 
     this.logger.info('Deep tick complete');

@@ -45,7 +45,7 @@ function makeGoal(overrides: {
       status: overrides.status ?? 'active',
       dueDate: overrides.dueDate,
     },
-  } as GoalItem;
+  } as unknown as GoalItem;
 }
 
 // ============ No Goals / Empty Input ============
