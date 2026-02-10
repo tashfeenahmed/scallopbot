@@ -125,7 +125,7 @@ export async function downloadPiperModel(
     return modelFile; // Already exists
   } catch {
     // Need to download
-    const baseUrl = 'https://huggingface.co/rhasspy/piper-voices/resolve/main';
+    const baseUrl = process.env.PIPER_MODEL_BASE_URL || 'https://huggingface.co/rhasspy/piper-voices/resolve/main';
     const [lang, region, name, quality] = voice.split(/[-_]/);
     const voicePath = `${lang}_${region}/${name}/${quality}`;
 

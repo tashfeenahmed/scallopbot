@@ -150,7 +150,7 @@ export async function downloadWhisperModel(
     return modelFile; // Already exists
   } catch {
     // Need to download
-    const baseUrl = 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main';
+    const baseUrl = process.env.WHISPER_MODEL_BASE_URL || 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main';
     const url = `${baseUrl}/${WHISPER_MODELS[model]}`;
 
     console.log(`Downloading whisper model: ${model}...`);

@@ -7,6 +7,7 @@ import type {
   ContentBlock,
   StreamEvent,
 } from './types.js';
+import { DEFAULT_MAX_RETRIES, RETRY_STATUS_CODES, RETRY_DELAY_MS } from './constants.js';
 
 /**
  * Claude Model IDs (as of 2025)
@@ -39,9 +40,6 @@ export const ANTHROPIC_MODELS = {
 
 const DEFAULT_MODEL = 'claude-sonnet-4-5-20250929';
 const DEFAULT_MAX_TOKENS = 8192;
-const DEFAULT_MAX_RETRIES = 3;
-const RETRY_STATUS_CODES = [429, 500, 503];
-const RETRY_DELAY_MS = 1000;
 
 export class AnthropicProvider implements LLMProvider {
   public readonly name = 'anthropic';

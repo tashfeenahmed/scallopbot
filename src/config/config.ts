@@ -4,6 +4,11 @@ import dotenv from 'dotenv';
 // Load environment variables from .env file
 dotenv.config();
 
+// Shared defaults (single source of truth)
+const DEFAULT_HOST = '127.0.0.1';
+const DEFAULT_OLLAMA_BASE_URL = 'http://localhost:11434';
+const DEFAULT_API_PORT = 3000;
+
 // Provider configuration schemas
 const anthropicProviderSchema = z.object({
   apiKey: z.string().default(''),
@@ -21,7 +26,7 @@ const groqProviderSchema = z.object({
 });
 
 const ollamaProviderSchema = z.object({
-  baseUrl: z.string().default('http://localhost:11434'),
+  baseUrl: z.string().default(DEFAULT_OLLAMA_BASE_URL),
   model: z.string().default('llama3.2'),
 });
 
@@ -46,7 +51,7 @@ const providersSchema = z.object({
   anthropic: anthropicProviderSchema,
   openai: openaiProviderSchema.default({ apiKey: '', model: 'gpt-4o' }),
   groq: groqProviderSchema.default({ apiKey: '', model: 'llama-3.3-70b-versatile' }),
-  ollama: ollamaProviderSchema.default({ baseUrl: 'http://localhost:11434', model: 'llama3.2' }),
+  ollama: ollamaProviderSchema.default({ baseUrl: DEFAULT_OLLAMA_BASE_URL, model: 'llama3.2' }),
   openrouter: openrouterProviderSchema.default({ apiKey: '', model: 'anthropic/claude-3.5-sonnet' }),
   moonshot: moonshotProviderSchema.default({ apiKey: '', model: 'kimi-k2.5', enableThinking: true }),
   xai: xaiProviderSchema.default({ apiKey: '', model: 'grok-4' }),
@@ -70,15 +75,15 @@ const discordChannelSchema = z.object({
 
 const apiChannelSchema = z.object({
   enabled: z.boolean().default(false),
-  port: z.number().int().positive().default(3000),
-  host: z.string().default('127.0.0.1'),
+  port: z.number().int().positive().default(DEFAULT_API_PORT),
+  host: z.string().default(DEFAULT_HOST),
   apiKey: z.string().optional(),
 });
 
 const channelsSchema = z.object({
   telegram: telegramChannelSchema,
   discord: discordChannelSchema.default({ enabled: false, botToken: '', applicationId: '' }),
-  api: apiChannelSchema.default({ enabled: false, port: 3000, host: '127.0.0.1' }),
+  api: apiChannelSchema.default({ enabled: false, port: DEFAULT_API_PORT, host: DEFAULT_HOST }),
 });
 
 // Agent configuration schema
@@ -125,8 +130,8 @@ const memorySchema = z.object({
 
 // Gateway configuration schema
 const gatewaySchema = z.object({
-  port: z.number().int().positive().default(3000),
-  host: z.string().default('127.0.0.1'),
+  port: z.number().int().positive().default(DEFAULT_API_PORT),
+  host: z.string().default(DEFAULT_HOST),
 });
 
 // Tailscale configuration schema
@@ -147,7 +152,7 @@ export const configSchema = z.object({
   cost: costSchema.default({ warningThreshold: 0.75 }),
   context: contextSchema.default({ hotWindowSize: 50, maxContextTokens: 128000, compressionThreshold: 0.7, maxToolOutputBytes: 30000 }),
   memory: memorySchema.default({ filePath: 'memories.jsonl', persist: true, dbPath: 'memories.db' }),
-  gateway: gatewaySchema.default({ port: 3000, host: '127.0.0.1' }),
+  gateway: gatewaySchema.default({ port: DEFAULT_API_PORT, host: DEFAULT_HOST }),
   tailscale: tailscaleSchema.default({ mode: 'off', resetOnExit: true }),
 });
 
@@ -198,7 +203,7 @@ export function loadConfig(): Config {
         model: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
       },
       ollama: {
-        baseUrl: process.env.OLLAMA_BASE_URL || 'http://localhost:11434',
+        baseUrl: process.env.OLLAMA_BASE_URL || DEFAULT_OLLAMA_BASE_URL,
         model: process.env.OLLAMA_MODEL || 'llama3.2',
       },
       openrouter: {
@@ -231,8 +236,8 @@ export function loadConfig(): Config {
       },
       api: {
         enabled: process.env.WEB_UI_ENABLED === 'true',
-        port: process.env.WEB_UI_PORT ? parseInt(process.env.WEB_UI_PORT, 10) : 3000,
-        host: process.env.WEB_UI_HOST || '127.0.0.1',
+        port: process.env.WEB_UI_PORT ? parseInt(process.env.WEB_UI_PORT, 10) : DEFAULT_API_PORT,
+        host: process.env.WEB_UI_HOST || DEFAULT_HOST,
         apiKey: process.env.WEB_UI_API_KEY || undefined,
       },
     },
@@ -268,8 +273,8 @@ export function loadConfig(): Config {
       dbPath: process.env.MEMORY_DB_PATH || 'memories.db',
     },
     gateway: {
-      port: process.env.GATEWAY_PORT ? parseInt(process.env.GATEWAY_PORT, 10) : 3000,
-      host: process.env.GATEWAY_HOST || '127.0.0.1',
+      port: process.env.GATEWAY_PORT ? parseInt(process.env.GATEWAY_PORT, 10) : DEFAULT_API_PORT,
+      host: process.env.GATEWAY_HOST || DEFAULT_HOST,
     },
     tailscale: {
       mode: (process.env.TAILSCALE_MODE as 'off' | 'serve' | 'funnel') || 'off',

@@ -6,12 +6,10 @@ import type {
   CompletionResponse,
   ContentBlock,
 } from './types.js';
+import { DEFAULT_MAX_RETRIES, RETRY_STATUS_CODES, RETRY_DELAY_MS } from './constants.js';
 
 const DEFAULT_MODEL = 'gpt-4o';
 const DEFAULT_MAX_TOKENS = 4096;
-const DEFAULT_MAX_RETRIES = 3;
-const RETRY_STATUS_CODES = [429, 500, 503];
-const RETRY_DELAY_MS = 1000;
 
 export interface ProviderCharacteristics {
   speed: 'fast' | 'standard' | 'slow';
