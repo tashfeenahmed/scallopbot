@@ -68,10 +68,11 @@ Plans:
 **Goal**: Extend the background gardener to detect and merge clusters of decaying related memories into single stronger summaries (FadeMem: 82% retention at 55% storage)
 **Depends on**: Phase 20
 **Research**: Unlikely (extending existing decay engine and gardener)
-**Plans**: TBD
+**Plans**: 2
 
 Plans:
-- [ ] 21-01: TBD
+- [ ] 21-01: Memory fusion engine TDD (findFusionClusters + fuseMemoryCluster pure functions)
+- [ ] 21-02: Wire fusion into deep tick + integration tests
 
 #### Phase 22: Per-Turn Model Routing
 
