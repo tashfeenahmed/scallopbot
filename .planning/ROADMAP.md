@@ -61,7 +61,7 @@ Plans:
 
 Plans:
 - [x] 20-01: Spreading activation TDD (spreadActivation function with typed edge weights and noise)
-- [ ] 20-02: TBD
+- [x] 20-02: Wire spreading activation into search pipeline
 
 #### Phase 21: Memory Fusion Engine
 
@@ -142,7 +142,7 @@ Plans:
 | v2.0 | Agent Polish & Enhanced Loop | 11/11 | Complete | 2026-02-04 |
 | 18. Retrieval Re-ranking | v3.0 | 2/2 | Complete | 2026-02-10 |
 | 19. LLM-Guided Memory Relations | v3.0 | 2/2 | Complete | 2026-02-10 |
-| 20. Spreading Activation | v3.0 | 1/2 | In progress | - |
+| 20. Spreading Activation | v3.0 | 2/2 | Complete | 2026-02-10 |
 | 21. Memory Fusion Engine | v3.0 | 0/? | Not started | - |
 | 22. Per-Turn Model Routing | v3.0 | 0/? | Not started | - |
 | 23. Token Budget Control | v3.0 | 0/? | Not started | - |

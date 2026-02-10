@@ -10,11 +10,11 @@ See: .planning/PROJECT.md (updated 2026-02-09 after v3.0 milestone creation)
 ## Current Position
 
 Phase: 20 of 27 (Spreading Activation)
-Plan: 1 of 2 in current phase
-Status: In progress
-Last activity: 2026-02-10 - Completed 20-01-PLAN.md
+Plan: 2 of 2 in current phase
+Status: Phase complete
+Last activity: 2026-02-10 - Completed 20-02-PLAN.md
 
-Progress: ███░░░░░░░ 30%
+Progress: ████░░░░░░ 33%
 
 ## Shipped Milestones
 
@@ -59,6 +59,8 @@ Full decision log in PROJECT.md Key Decisions table.
 - Reuse rerankProvider as relationsProvider — both need fast/cheap LLM tier
 - Pure function spreadActivation() with getRelations callback — stateless, testable
 - Activation * prominence composition for temporal-spatial relevance blending
+- ActivationConfig opt-in via ScallopMemoryStoreOptions constructor — same pattern as rerankProvider
+- ScallopSearchResult interface unchanged — activation scores internal to ranking
 
 ### Deferred Issues
 
@@ -78,5 +80,5 @@ None.
 ## Session Continuity
 
 Last session: 2026-02-10
-Stopped at: Completed 20-01-PLAN.md — Phase 20 in progress (1/2 plans done)
+Stopped at: Completed 20-02-PLAN.md — Phase 20 complete (2/2 plans done)
 Resume file: None
