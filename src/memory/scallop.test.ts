@@ -13,6 +13,7 @@ import {
   TemporalExtractor,
   TemporalQuery,
   ScallopMemoryStore,
+  BackgroundGardener,
   TFIDFEmbedder,
   PROMINENCE_THRESHOLDS,
   type ActivationConfig,
@@ -1146,6 +1147,253 @@ describe('ScallopMemoryStore activation-based related memories', () => {
     } finally {
       store.close();
       cleanupActivationDb();
+    }
+  });
+});
+
+describe('Scenario: Memory fusion in deep tick', () => {
+  const FUSION_DB_PATH = '/tmp/scallop-fusion-test.db';
+
+  function cleanupFusionDb() {
+    try {
+      fs.unlinkSync(FUSION_DB_PATH);
+      fs.unlinkSync(FUSION_DB_PATH + '-wal');
+      fs.unlinkSync(FUSION_DB_PATH + '-shm');
+    } catch {
+      // Ignore
+    }
+  }
+
+  /** Helper: add a memory directly via db.addMemory with old documentDate */
+  function addOldMemory(db: ScallopDatabase, content: string, opts?: { category?: 'fact' | 'preference' | 'event' | 'relationship' | 'insight'; memoryType?: 'regular' | 'derived'; ageDays?: number }) {
+    const ageDays = opts?.ageDays ?? 150;
+    return db.addMemory({
+      userId: 'default',
+      content,
+      category: opts?.category ?? 'fact',
+      memoryType: opts?.memoryType ?? 'regular',
+      importance: 5,
+      confidence: 0.8,
+      isLatest: true,
+      source: 'user',
+      documentDate: Date.now() - ageDays * 24 * 60 * 60 * 1000,
+      eventDate: null,
+      prominence: 1.0, // Will be recalculated by processFullDecay
+      lastAccessed: null,
+      accessCount: 0,
+      sourceChunk: null,
+      embedding: null,
+      metadata: null,
+      learnedFrom: 'conversation',
+      timesConfirmed: 1,
+      contradictionIds: null,
+    });
+  }
+
+  it('should fuse cluster of dormant related memories during deep tick', async () => {
+    cleanupFusionDb();
+
+    const embedder = new TFIDFEmbedder();
+    const store = new ScallopMemoryStore({
+      dbPath: FUSION_DB_PATH,
+      logger,
+      embedder,
+    });
+
+    try {
+      const db = store.getDatabase();
+
+      // Add 4 old memories (150 days ago) — decay will compute prominence ~0.67 (below 0.7 threshold)
+      const mem1 = addOldMemory(db, 'User enjoys hiking in the mountains on weekends');
+      const mem2 = addOldMemory(db, 'User likes trail running in nearby hills');
+      const mem3 = addOldMemory(db, 'User prefers outdoor activities over indoor sports');
+      const mem4 = addOldMemory(db, 'User goes camping every summer in national parks');
+
+      // Add EXTENDS relations connecting them in a chain (1->2, 2->3, 3->4)
+      db.addRelation(mem1.id, mem2.id, 'EXTENDS', 0.8);
+      db.addRelation(mem2.id, mem3.id, 'EXTENDS', 0.8);
+      db.addRelation(mem3.id, mem4.id, 'EXTENDS', 0.8);
+
+      // Create mock LLM fusionProvider
+      const mockFusionProvider: LLMProvider = {
+        name: 'mock-fusion',
+        isAvailable: () => true,
+        complete: vi.fn().mockResolvedValue({
+          content: [{ type: 'text', text: JSON.stringify({ summary: 'User is an outdoor enthusiast who enjoys hiking, trail running, and camping', importance: 7, category: 'fact' }) }],
+          stopReason: 'end_turn',
+          usage: { inputTokens: 100, outputTokens: 50 },
+          model: 'mock-model',
+        } satisfies CompletionResponse),
+      };
+
+      // Create gardener with fusionProvider
+      const gardener = new BackgroundGardener({
+        scallopStore: store,
+        logger,
+        fusionProvider: mockFusionProvider,
+      });
+
+      // Run deep tick (processFullDecay recalculates prominence from old documentDate)
+      await gardener.deepTick();
+
+      // Assert: A new memory with memoryType 'derived' exists
+      const derivedMemories = db.getMemoriesByUser('default', { memoryType: 'derived', includeAllSources: true });
+      expect(derivedMemories.length).toBe(1);
+
+      const fused = derivedMemories[0];
+      expect(fused.content).toContain('outdoor enthusiast');
+      expect(fused.learnedFrom).toBe('consolidation');
+      expect(fused.memoryType).toBe('derived');
+      expect(fused.isLatest).toBe(true);
+
+      // Assert: Source memories have isLatest: false
+      const sourceIds = [mem1.id, mem2.id, mem3.id, mem4.id];
+      for (const srcId of sourceIds) {
+        const srcMem = db.getMemory(srcId);
+        expect(srcMem).not.toBeNull();
+        expect(srcMem!.isLatest).toBe(false);
+        expect(srcMem!.memoryType).toBe('superseded');
+      }
+
+      // Assert: DERIVES relations exist from fused to sources
+      const fusedRelations = db.getRelations(fused.id);
+      const derivesRelations = fusedRelations.filter(r => r.relationType === 'DERIVES');
+      expect(derivesRelations.length).toBe(4);
+
+      // Assert: Fused memory's sourceChunk contains source content
+      expect(fused.sourceChunk).toContain('hiking');
+      expect(fused.sourceChunk).toContain('camping');
+    } finally {
+      store.close();
+      cleanupFusionDb();
+    }
+  });
+
+  it('should not fuse active or derived memories', async () => {
+    cleanupFusionDb();
+
+    const embedder = new TFIDFEmbedder();
+    const store = new ScallopMemoryStore({
+      dbPath: FUSION_DB_PATH,
+      logger,
+      embedder,
+    });
+
+    try {
+      const db = store.getDatabase();
+
+      // Create 2 recent memories (active - should not be fused, prominence stays ~0.90)
+      const active1 = await store.add({ userId: 'default', content: 'Active memory about work at Google', category: 'fact', detectRelations: false });
+      const active2 = await store.add({ userId: 'default', content: 'Active memory about project deadline', category: 'fact', detectRelations: false });
+
+      // Create 1 pre-existing derived memory (should not be fused)
+      const preExistingDerived = addOldMemory(db, 'Previously fused summary about coding', { memoryType: 'derived' });
+
+      // Create 3 old dormant memories (150 days ago — prominence ~0.67 after decay)
+      const dormant1 = addOldMemory(db, 'User likes reading science fiction novels');
+      const dormant2 = addOldMemory(db, 'User enjoys watching sci-fi movies');
+      const dormant3 = addOldMemory(db, 'User collects sci-fi book first editions');
+
+      // Add EXTENDS relations among the 3 dormant ones
+      db.addRelation(dormant1.id, dormant2.id, 'EXTENDS', 0.8);
+      db.addRelation(dormant2.id, dormant3.id, 'EXTENDS', 0.8);
+
+      // Create mock fusion provider
+      const mockFusionProvider: LLMProvider = {
+        name: 'mock-fusion',
+        isAvailable: () => true,
+        complete: vi.fn().mockResolvedValue({
+          content: [{ type: 'text', text: JSON.stringify({ summary: 'User is a sci-fi enthusiast', importance: 6, category: 'fact' }) }],
+          stopReason: 'end_turn',
+          usage: { inputTokens: 100, outputTokens: 50 },
+          model: 'mock-model',
+        } satisfies CompletionResponse),
+      };
+
+      const gardener = new BackgroundGardener({
+        scallopStore: store,
+        logger,
+        fusionProvider: mockFusionProvider,
+      });
+
+      await gardener.deepTick();
+
+      // Assert: Only 1 new derived memory was created (from the 3 dormant ones)
+      const allDerived = db.getMemoriesByUser('default', { memoryType: 'derived', includeAllSources: true });
+      // 1 pre-existing + 1 new = 2 total derived
+      expect(allDerived.length).toBe(2);
+
+      // Assert: Active memories still have isLatest: true
+      const activeCheck1 = db.getMemory(active1.id);
+      const activeCheck2 = db.getMemory(active2.id);
+      expect(activeCheck1!.isLatest).toBe(true);
+      expect(activeCheck2!.isLatest).toBe(true);
+      expect(activeCheck1!.memoryType).toBe('regular');
+      expect(activeCheck2!.memoryType).toBe('regular');
+
+      // Assert: Pre-existing derived memory is untouched
+      const derivedCheck = db.getMemory(preExistingDerived.id);
+      expect(derivedCheck!.memoryType).toBe('derived');
+      expect(derivedCheck!.content).toBe('Previously fused summary about coding');
+    } finally {
+      store.close();
+      cleanupFusionDb();
+    }
+  });
+
+  it('should handle LLM fusion failure gracefully', async () => {
+    cleanupFusionDb();
+
+    const embedder = new TFIDFEmbedder();
+    const store = new ScallopMemoryStore({
+      dbPath: FUSION_DB_PATH,
+      logger,
+      embedder,
+    });
+
+    try {
+      const db = store.getDatabase();
+
+      // Create 3 old dormant memories with relations (150 days ago)
+      const mem1 = addOldMemory(db, 'User works at a startup company in Dublin');
+      const mem2 = addOldMemory(db, 'User commutes by bike to the office daily');
+      const mem3 = addOldMemory(db, 'User has a standing desk at work');
+      db.addRelation(mem1.id, mem2.id, 'EXTENDS', 0.8);
+      db.addRelation(mem2.id, mem3.id, 'EXTENDS', 0.8);
+
+      // Create failing mock LLM
+      const failingProvider: LLMProvider = {
+        name: 'mock-failing-fusion',
+        isAvailable: () => true,
+        complete: vi.fn().mockRejectedValue(new Error('LLM service down')),
+      };
+
+      const gardener = new BackgroundGardener({
+        scallopStore: store,
+        logger,
+        fusionProvider: failingProvider,
+      });
+
+      // Run deep tick — should not crash
+      await gardener.deepTick();
+
+      // Assert: No derived memories created
+      const derivedMemories = db.getMemoriesByUser('default', { memoryType: 'derived', includeAllSources: true });
+      expect(derivedMemories.length).toBe(0);
+
+      // Assert: Source memories unchanged (still isLatest: true)
+      const check1 = db.getMemory(mem1.id);
+      const check2 = db.getMemory(mem2.id);
+      const check3 = db.getMemory(mem3.id);
+      expect(check1!.isLatest).toBe(true);
+      expect(check2!.isLatest).toBe(true);
+      expect(check3!.isLatest).toBe(true);
+
+      // Assert: Deep tick completed normally (provider was called)
+      expect(failingProvider.complete).toHaveBeenCalled();
+    } finally {
+      store.close();
+      cleanupFusionDb();
     }
   });
 });

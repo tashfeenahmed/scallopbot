@@ -153,20 +153,22 @@ export class BackgroundGardener {
             isLatest: true,
             includeAllSources: true,
           });
-          // Filter in JS: prominence < 0.5 and not static_profile or derived
+          // Filter in JS: prominence < 0.7 (naturally decayed) and not static_profile or derived
+          // Note: decay formula floor is ~0.52 for old low-importance memories,
+          // so 0.7 captures memories that have significantly decayed from initial ~0.9
           const dormantMemories = allMemories.filter(m =>
-            m.prominence < 0.5 &&
+            m.prominence < 0.7 &&
             m.memoryType !== 'static_profile' &&
             m.memoryType !== 'derived'
           );
 
           if (dormantMemories.length < 3) continue; // Need at least minClusterSize
 
-          // Find fusion clusters
+          // Find fusion clusters (maxProminence matches JS filter above)
           const clusters = findFusionClusters(
             dormantMemories,
             (id) => db.getRelations(id),
-            { minClusterSize: 3, maxClusters: 5 },
+            { minClusterSize: 3, maxClusters: 5, maxProminence: 0.7 },
           );
 
           // Fuse each cluster
