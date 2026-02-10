@@ -1316,7 +1316,7 @@ describe('Scenario: Memory fusion in deep tick', () => {
   }
 
   /** Helper: add a memory directly via db.addMemory with old documentDate */
-  function addOldMemory(db: ScallopDatabase, content: string, opts?: { category?: 'fact' | 'preference' | 'event' | 'relationship' | 'insight'; memoryType?: 'regular' | 'derived'; ageDays?: number }) {
+  function addOldMemory(db: ScallopDatabase, content: string, opts?: { category?: 'fact' | 'preference' | 'event' | 'relationship' | 'insight'; memoryType?: 'regular' | 'derived'; ageDays?: number; accessCount?: number }) {
     const ageDays = opts?.ageDays ?? 150;
     return db.addMemory({
       userId: 'default',
@@ -1331,7 +1331,7 @@ describe('Scenario: Memory fusion in deep tick', () => {
       eventDate: null,
       prominence: 1.0, // Will be recalculated by processFullDecay
       lastAccessed: null,
-      accessCount: 0,
+      accessCount: opts?.accessCount ?? 0,
       sourceChunk: null,
       embedding: null,
       metadata: null,
@@ -1438,12 +1438,14 @@ describe('Scenario: Memory fusion in deep tick', () => {
       const active2 = await store.add({ userId: 'default', content: 'Active memory about project deadline', category: 'fact', detectRelations: false });
 
       // Create 1 pre-existing derived memory (should not be fused)
-      const preExistingDerived = addOldMemory(db, 'Previously fused summary about coding', { memoryType: 'derived' });
+      // accessCount: 3 ensures it survives utility-based archival (utilityScore > 0.1)
+      const preExistingDerived = addOldMemory(db, 'Previously fused summary about coding', { memoryType: 'derived', accessCount: 1 });
 
       // Create 3 old dormant memories (150 days ago — prominence ~0.67 after decay)
-      const dormant1 = addOldMemory(db, 'User likes reading science fiction novels');
-      const dormant2 = addOldMemory(db, 'User enjoys watching sci-fi movies');
-      const dormant3 = addOldMemory(db, 'User collects sci-fi book first editions');
+      // accessCount: 3 ensures they survive utility-based archival but still qualify for fusion (prominence < 0.7)
+      const dormant1 = addOldMemory(db, 'User likes reading science fiction novels', { accessCount: 1 });
+      const dormant2 = addOldMemory(db, 'User enjoys watching sci-fi movies', { accessCount: 1 });
+      const dormant3 = addOldMemory(db, 'User collects sci-fi book first editions', { accessCount: 1 });
 
       // Add EXTENDS relations among the 3 dormant ones
       db.addRelation(dormant1.id, dormant2.id, 'EXTENDS', 0.8);
@@ -1506,9 +1508,10 @@ describe('Scenario: Memory fusion in deep tick', () => {
       const db = store.getDatabase();
 
       // Create 3 old dormant memories with relations (150 days ago)
-      const mem1 = addOldMemory(db, 'User works at a startup company in Dublin');
-      const mem2 = addOldMemory(db, 'User commutes by bike to the office daily');
-      const mem3 = addOldMemory(db, 'User has a standing desk at work');
+      // accessCount: 3 ensures they survive utility-based archival (utilityScore > 0.1)
+      const mem1 = addOldMemory(db, 'User works at a startup company in Dublin', { accessCount: 1 });
+      const mem2 = addOldMemory(db, 'User commutes by bike to the office daily', { accessCount: 1 });
+      const mem3 = addOldMemory(db, 'User has a standing desk at work', { accessCount: 1 });
       db.addRelation(mem1.id, mem2.id, 'EXTENDS', 0.8);
       db.addRelation(mem2.id, mem3.id, 'EXTENDS', 0.8);
 
