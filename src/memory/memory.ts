@@ -30,6 +30,9 @@ import { archiveLowUtilityMemories, pruneOrphanedRelations } from './utility-sco
 import { computeTrustScore } from './trust-score.js';
 import { checkGoalDeadlines } from './goal-deadline-check.js';
 import { reflect } from './reflection.js';
+import { scanForGaps } from './gap-scanner.js';
+import { diagnoseGaps } from './gap-diagnosis.js';
+import { createGapActions } from './gap-actions.js';
 
 export interface BackgroundGardenerOptions {
   scallopStore: ScallopMemoryStore;
@@ -704,6 +707,96 @@ export class BackgroundGardener {
         }
       } catch (err) {
         this.logger.warn({ error: (err as Error).message }, 'Self-reflection phase failed');
+      }
+    }
+
+    // Phase 31: Gap scanner
+    if (this.fusionProvider) {
+      try {
+        const users = db.raw<{ user_id: string }>('SELECT DISTINCT user_id FROM memories WHERE source != \'_cleaned_sentinel\'', []);
+
+        for (const { user_id: userId } of users) {
+          try {
+            // Gather Stage 1 inputs
+            const sessionSummaries = db.getSessionSummariesByUser(userId, 20);
+            const behavioralPatterns = db.getBehavioralPatterns(userId);
+            const existingItems = db.getScheduledItemsByUser(userId);
+
+            // Dynamic import GoalService (same pattern as deepTick step 7)
+            const GoalService = (await import('../goals/goal-service.js')).GoalService;
+            const goalService = new GoalService({ db, logger: this.logger });
+            const activeGoals = await goalService.listGoals(userId, { status: 'active' });
+
+            // Stage 1: Scan for gaps (pure, no LLM)
+            // behavioralPatterns may be null on cold start; scanBehavioralAnomalies
+            // guards against null messageFrequency, but the type requires non-null.
+            // Provide a minimal stub when null so stale-goal and unresolved-thread
+            // scanners still run.
+            const safeBehavioral = behavioralPatterns ?? {
+              userId,
+              communicationStyle: null,
+              expertiseAreas: [],
+              responsePreferences: {},
+              activeHours: [],
+              messageFrequency: null,
+              sessionEngagement: null,
+              topicSwitch: null,
+              responseLength: null,
+              affectState: null,
+              smoothedAffect: null,
+              updatedAt: 0,
+            };
+            const signals = scanForGaps({
+              activeGoals,
+              behavioralSignals: safeBehavioral,
+              sessionSummaries,
+            });
+
+            if (signals.length === 0) continue;
+
+            // Stage 2: LLM diagnosis
+            const dial = (safeBehavioral.responsePreferences?.proactivenessDial as string) ?? 'moderate';
+            const affect = safeBehavioral.smoothedAffect ?? null;
+            const recentTopics = sessionSummaries.slice(0, 5).flatMap(s => s.topics ?? []);
+
+            const diagnosed = await diagnoseGaps(
+              signals,
+              { affect, dial: dial as 'conservative' | 'moderate' | 'eager', recentTopics },
+              this.fusionProvider,
+            );
+
+            // Stage 3: Create gated actions
+            const pendingItems = existingItems.filter(i => i.status === 'pending');
+            const actions = createGapActions(
+              diagnosed,
+              dial as 'conservative' | 'moderate' | 'eager',
+              pendingItems.map(i => ({ message: i.message })),
+            );
+
+            // Insert scheduled items
+            for (const action of actions) {
+              db.addScheduledItem({
+                userId,
+                sessionId: null,
+                source: 'agent',
+                type: 'follow_up',
+                message: action.scheduledItem.message,
+                context: action.scheduledItem.context,
+                triggerAt: action.scheduledItem.triggerAt,
+                recurring: null,
+                sourceMemoryId: null,
+              });
+            }
+
+            if (actions.length > 0) {
+              this.logger.info({ userId, signalsFound: signals.length, actionsCreated: actions.length }, 'Gap scanner created actions');
+            }
+          } catch (err) {
+            this.logger.warn({ error: (err as Error).message, userId }, 'Gap scanner failed for user');
+          }
+        }
+      } catch (err) {
+        this.logger.warn({ error: (err as Error).message }, 'Gap scanner phase failed');
       }
     }
 

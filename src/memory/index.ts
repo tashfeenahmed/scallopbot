@@ -254,3 +254,29 @@ export {
   type ArchiveOptions,
   type ArchiveResult,
 } from './utility-score.js';
+
+// Gap Scanner (Stage 1: Signal Heuristics)
+export {
+  scanForGaps,
+  scanStaleGoals,
+  scanBehavioralAnomalies,
+  scanUnresolvedThreads,
+  type GapSignal,
+  type GapScanInput,
+} from './gap-scanner.js';
+
+// Gap Diagnosis (Stage 2: LLM Triage)
+export {
+  diagnoseGaps,
+  buildGapDiagnosisPrompt,
+  parseGapDiagnosis,
+  type DiagnosedGap,
+  type UserContext,
+} from './gap-diagnosis.js';
+
+// Gap Actions (Stage 3: Proactiveness-Gated Actions)
+export {
+  createGapActions,
+  DIAL_THRESHOLDS,
+  type GapAction,
+} from './gap-actions.js';
