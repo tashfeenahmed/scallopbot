@@ -23,6 +23,159 @@ import {
   type ExistingFact,
 } from './relation-classifier.js';
 
+// ============ Spreading Activation Types & Constants ============
+
+/**
+ * Configuration for spreading activation algorithm.
+ * All fields have sensible defaults.
+ */
+export interface ActivationConfig {
+  /** Maximum propagation steps (default: 3) */
+  maxSteps?: number;
+  /** Decay factor per hop (default: 0.5) */
+  decayFactor?: number;
+  /** Minimum activation to continue propagating (default: 0.01) */
+  activationThreshold?: number;
+  /** Gaussian noise sigma for retrieval diversity (default: 0.2, 0 = deterministic) */
+  noiseSigma?: number;
+  /** Minimum score to include in results (default: 0.05) */
+  resultThreshold?: number;
+  /** Maximum number of results (default: 10) */
+  maxResults?: number;
+}
+
+/** Resolved config with all defaults applied */
+interface ResolvedActivationConfig {
+  maxSteps: number;
+  decayFactor: number;
+  activationThreshold: number;
+  noiseSigma: number;
+  resultThreshold: number;
+  maxResults: number;
+}
+
+/** Default activation config values */
+const DEFAULT_ACTIVATION_CONFIG: ResolvedActivationConfig = {
+  maxSteps: 3,
+  decayFactor: 0.5,
+  activationThreshold: 0.01,
+  noiseSigma: 0.2,
+  resultThreshold: 0.05,
+  maxResults: 10,
+};
+
+/**
+ * Edge weights by relation type and direction.
+ * Based on ACT-R/SYNAPSE research:
+ * - UPDATES: strong bidirectional (0.9/0.9) — both versions highly relevant
+ * - EXTENDS: forward-weighted (0.7/0.5) — extension more informative than base
+ * - DERIVES: reverse-weighted (0.4/0.6) — sources more relevant than derivations
+ */
+export const EDGE_WEIGHTS: Record<RelationType, { forward: number; reverse: number }> = {
+  UPDATES: { forward: 0.9, reverse: 0.9 },
+  EXTENDS: { forward: 0.7, reverse: 0.5 },
+  DERIVES: { forward: 0.4, reverse: 0.6 },
+};
+
+/**
+ * Get the edge weight for a relation traversal from a given node.
+ * Multiplies directional weight by the relation's confidence.
+ */
+export function getEdgeWeight(relation: MemoryRelation, fromId: string): number {
+  const weights = EDGE_WEIGHTS[relation.relationType];
+  const isForward = relation.sourceId === fromId;
+  const directionWeight = isForward ? weights.forward : weights.reverse;
+  return directionWeight * relation.confidence;
+}
+
+/**
+ * Generate Gaussian noise using the Box-Muller transform.
+ * Returns 0 when sigma is 0 (deterministic mode).
+ */
+export function gaussianNoise(sigma: number): number {
+  if (sigma === 0) return 0;
+  const u1 = Math.random();
+  const u2 = Math.random();
+  return sigma * Math.sqrt(-2 * Math.log(Math.max(1e-10, u1))) * Math.cos(2 * Math.PI * u2);
+}
+
+/**
+ * Spreading activation algorithm for memory graph traversal.
+ *
+ * Pure function. Uses synchronous double-buffered propagation.
+ * Replaces unranked BFS with scored, decay-weighted activation propagation.
+ *
+ * @param seedId - Starting node ID
+ * @param getRelations - Function to get relations for a node
+ * @param config - Activation configuration
+ * @returns Map of nodeId → activation score (seed excluded)
+ */
+export function spreadActivation(
+  seedId: string,
+  getRelations: (id: string) => MemoryRelation[],
+  config: ActivationConfig = {},
+): Map<string, number> {
+  const cfg: ResolvedActivationConfig = {
+    ...DEFAULT_ACTIVATION_CONFIG,
+    ...config,
+  };
+  const retention = 1 - cfg.decayFactor;
+
+  let current = new Map<string, number>([[seedId, 1.0]]);
+
+  for (let step = 0; step < cfg.maxSteps; step++) {
+    const next = new Map<string, number>();
+
+    for (const [id, activation] of current) {
+      if (activation < cfg.activationThreshold) continue;
+
+      // Retention: node keeps some activation
+      next.set(id, Math.min(1.0, (next.get(id) ?? 0) + activation * retention));
+
+      // Spread to neighbors
+      const relations = getRelations(id);
+      const degree = relations.length || 1;
+
+      for (const rel of relations) {
+        const neighborId = rel.sourceId === id ? rel.targetId : rel.sourceId;
+        const edgeWeight = getEdgeWeight(rel, id);
+        const spread = activation * edgeWeight * cfg.decayFactor / degree;
+        next.set(neighborId, Math.min(1.0, (next.get(neighborId) ?? 0) + spread));
+      }
+    }
+
+    current = next;
+  }
+
+  // Remove seed from results
+  current.delete(seedId);
+
+  // Apply noise multiplicatively
+  if (cfg.noiseSigma > 0) {
+    for (const [id, score] of current) {
+      const noisy = score * (1 + gaussianNoise(cfg.noiseSigma));
+      current.set(id, Math.max(0, Math.min(1.0, noisy)));
+    }
+  }
+
+  // Filter by resultThreshold
+  for (const [id, score] of current) {
+    if (score < cfg.resultThreshold) {
+      current.delete(id);
+    }
+  }
+
+  // Limit to maxResults (keep highest scores)
+  if (current.size > cfg.maxResults) {
+    const sorted = [...current.entries()].sort((a, b) => b[1] - a[1]);
+    current = new Map(sorted.slice(0, cfg.maxResults));
+  }
+
+  return current;
+}
+
+// ============ End Spreading Activation ============
+
 /**
  * Options for relation detection
  */
@@ -549,6 +702,54 @@ export class RelationGraph {
     traverse(memoryId, 0);
 
     return related;
+  }
+
+  /**
+   * Get related memories using spreading activation.
+   *
+   * Replaces BFS with scored, decay-weighted activation propagation.
+   * Multiplies activation by memory prominence for final ranking.
+   * Filters to isLatest memories only.
+   * Falls back to getRelatedMemoriesForContext on any error.
+   *
+   * @param memoryId - Seed memory ID
+   * @param config - Optional activation configuration
+   * @returns ScallopMemoryEntry[] sorted by final score descending
+   */
+  getRelatedMemoriesWithActivation(
+    memoryId: string,
+    config?: ActivationConfig,
+  ): ScallopMemoryEntry[] {
+    try {
+      const activationMap = spreadActivation(
+        memoryId,
+        (id) => this.db.getRelations(id),
+        config,
+      );
+
+      // Score each memory: activation * prominence, filter to isLatest
+      const scored: Array<{ memory: ScallopMemoryEntry; score: number }> = [];
+
+      for (const [id, activation] of activationMap) {
+        const memory = this.db.getMemory(id);
+        if (!memory || !memory.isLatest) continue;
+
+        const score = activation * memory.prominence;
+        if (score >= (config?.resultThreshold ?? DEFAULT_ACTIVATION_CONFIG.resultThreshold)) {
+          scored.push({ memory, score });
+        }
+      }
+
+      // Sort by score descending
+      scored.sort((a, b) => b.score - a.score);
+
+      // Limit to maxResults
+      const maxResults = config?.maxResults ?? DEFAULT_ACTIVATION_CONFIG.maxResults;
+      return scored.slice(0, maxResults).map(s => s.memory);
+    } catch {
+      // Fall back to BFS-based retrieval on any error
+      return this.getRelatedMemoriesForContext(memoryId);
+    }
   }
 }
 
