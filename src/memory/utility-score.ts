@@ -16,6 +16,22 @@ import type { ScallopDatabase, ScallopMemoryType, MemoryCategory } from './db.js
 
 // ============ Types ============
 
+export interface ArchiveOptions {
+  /** Utility score threshold — memories below this are candidates (default: 0.1) */
+  utilityThreshold?: number;
+  /** Minimum age in days before eligible (default: 14) */
+  minAgeDays?: number;
+  /** Maximum memories to archive per run (default: 50) */
+  maxPerRun?: number;
+}
+
+export interface ArchiveResult {
+  /** Number of memories archived */
+  archived: number;
+  /** IDs of archived memories */
+  ids: string[];
+}
+
 export interface LowUtilityMemory {
   id: string;
   content: string;
@@ -131,4 +147,68 @@ export function findLowUtilityMemories(
   results.sort((a, b) => a.utilityScore - b.utilityScore);
 
   return results.slice(0, maxResults);
+}
+
+// ============ Archival Function ============
+
+/**
+ * Archive low-utility memories by setting is_latest=0 and memory_type='superseded'.
+ *
+ * Does NOT hard-delete — archived memories are later cleaned up by
+ * pruneArchivedMemories (prominence < 0.01 threshold).
+ *
+ * Calls findLowUtilityMemories to get candidates, then archives up to maxPerRun.
+ */
+export function archiveLowUtilityMemories(
+  db: ScallopDatabase,
+  options?: ArchiveOptions,
+): ArchiveResult {
+  const utilityThreshold = options?.utilityThreshold ?? 0.1;
+  const minAgeDays = options?.minAgeDays ?? 14;
+  const maxPerRun = options?.maxPerRun ?? 50;
+
+  const candidates = findLowUtilityMemories(db, {
+    utilityThreshold,
+    minAgeDays,
+    maxResults: maxPerRun,
+  });
+
+  const ids: string[] = [];
+
+  for (const candidate of candidates) {
+    const updated = db.updateMemory(candidate.id, {
+      isLatest: false,
+      memoryType: 'superseded',
+    });
+    if (updated) {
+      ids.push(candidate.id);
+    }
+  }
+
+  return { archived: ids.length, ids };
+}
+
+// ============ Orphan Pruning Function ============
+
+/**
+ * Delete orphaned relation edges where source_id or target_id no longer
+ * exists in the memories table.
+ *
+ * Returns the number of deleted relations.
+ */
+export function pruneOrphanedRelations(db: ScallopDatabase): number {
+  const orphans = db.raw<{ id: string }>(
+    `SELECT id FROM memory_relations
+     WHERE source_id NOT IN (SELECT id FROM memories)
+        OR target_id NOT IN (SELECT id FROM memories)`,
+    [],
+  );
+
+  if (orphans.length === 0) return 0;
+
+  for (const orphan of orphans) {
+    db.raw('DELETE FROM memory_relations WHERE id = ?', [orphan.id]);
+  }
+
+  return orphans.length;
 }
