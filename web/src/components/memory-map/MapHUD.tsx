@@ -4,6 +4,7 @@ import SearchBox from './SearchBox';
 import StatsBar from './StatsBar';
 import MemoryTooltip from './MemoryTooltip';
 import MemoryDetail from './MemoryDetail';
+import TimelinePlayer from './TimelinePlayer';
 
 interface MapHUDProps {
   filters: FilterState;
@@ -17,6 +18,10 @@ interface MapHUDProps {
   onHoverCategory: (cat: string | null) => void;
   onSearchChange: (q: string) => void;
   onCloseDetail: () => void;
+  minTime: number;
+  maxTime: number;
+  timelineCutoff: number;
+  onTimelineCutoff: (t: number) => void;
 }
 
 export default function MapHUD({
@@ -31,12 +36,17 @@ export default function MapHUD({
   onHoverCategory,
   onSearchChange,
   onCloseDetail,
+  minTime,
+  maxTime,
+  timelineCutoff,
+  onTimelineCutoff,
 }: MapHUDProps) {
   return (
     <div className="absolute inset-0 pointer-events-none">
       {/* Top bar */}
       <div className="absolute top-3 left-3 right-3 flex items-start gap-3 pointer-events-auto">
         <FilterBar categories={filters.categories} onToggle={onToggleCategory} onHoverCategory={onHoverCategory} />
+        <TimelinePlayer minTime={minTime} maxTime={maxTime} cutoff={timelineCutoff} onCutoffChange={onTimelineCutoff} />
         <SearchBox value={filters.searchQuery} onChange={onSearchChange} />
       </div>
 

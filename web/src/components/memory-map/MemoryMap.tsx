@@ -24,6 +24,21 @@ export default function MemoryMap() {
 
   const [hoveredCategory, setHoveredCategory] = useState<string | null>(null);
 
+  // Timeline: compute time bounds from data
+  const { minTime, maxTime } = useMemo(() => {
+    if (!data || data.memories.length === 0) return { minTime: 0, maxTime: 1 };
+    let min = Infinity, max = -Infinity;
+    for (const m of data.memories) {
+      if (m.createdAt < min) min = m.createdAt;
+      if (m.createdAt > max) max = m.createdAt;
+    }
+    return { minTime: min, maxTime: max };
+  }, [data]);
+
+  const [timelineCutoff, setTimelineCutoff] = useState<number | null>(null);
+  // Default cutoff to maxTime once data loads
+  const effectiveCutoff = timelineCutoff ?? maxTime;
+
   const nodes = useMemo<ProcessedNode[]>(() => {
     if (!data) return [];
     const searchLower = filters.searchQuery.toLowerCase();
@@ -54,6 +69,7 @@ export default function MemoryMap() {
         filters.categories.has(memory.category) &&
         memory.importance >= filters.minImportance &&
         memory.prominence >= filters.minProminence &&
+        memory.createdAt <= effectiveCutoff &&
         (!searchLower || memory.content.toLowerCase().includes(searchLower));
 
       // Relative opacity: spread actual prominence range across 0.12 – 1.0
@@ -70,7 +86,7 @@ export default function MemoryMap() {
         visible,
       };
     });
-  }, [data, filters]);
+  }, [data, filters, effectiveCutoff]);
 
   const edges = useMemo<ProcessedEdge[]>(() => {
     if (!data) return [];
@@ -115,6 +131,10 @@ export default function MemoryMap() {
 
   const handleHoverCategory = useCallback((cat: string | null) => {
     setHoveredCategory(cat);
+  }, []);
+
+  const handleTimelineCutoff = useCallback((t: number) => {
+    setTimelineCutoff(t);
   }, []);
 
   const allCategoriesActive = filters.categories.size === ALL_CATEGORIES.size;
@@ -173,6 +193,10 @@ export default function MemoryMap() {
         onHoverCategory={handleHoverCategory}
         onSearchChange={setSearchQuery}
         onCloseDetail={() => handleSelect(null)}
+        minTime={minTime}
+        maxTime={maxTime}
+        timelineCutoff={effectiveCutoff}
+        onTimelineCutoff={handleTimelineCutoff}
       />
     </div>
   );
