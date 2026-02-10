@@ -24,6 +24,7 @@ import { dream } from './dream.js';
 import type { DreamResult } from './dream.js';
 import { performHealthPing } from './health-ping.js';
 import { auditRetrievalHistory } from './retrieval-audit.js';
+import { archiveLowUtilityMemories, pruneOrphanedRelations } from './utility-score.js';
 import { computeTrustScore } from './trust-score.js';
 import { checkGoalDeadlines } from './goal-deadline-check.js';
 
@@ -286,19 +287,63 @@ export class BackgroundGardener {
       }
     }
 
-    // 3. Prune old sessions + archived memories
+    // 3. Enhanced forgetting pipeline (replaces old steps 3+5)
+    // 3a. Retrieval audit (moved from old step 5 to inform archival)
+    let auditNeverRetrieved = 0;
+    let auditStaleRetrieved = 0;
+    let auditCandidateCount = 0;
     try {
-      const sessionsDeleted = db.pruneOldSessions(30);
-      const memoriesDeleted = db.pruneArchivedMemories(0.01);
-      if (sessionsDeleted > 0 || memoriesDeleted > 0) {
-        this.logger.info(
-          { sessionsDeleted, memoriesDeleted },
-          'Deep pruning complete'
-        );
-      }
+      const auditResult = auditRetrievalHistory(db);
+      auditNeverRetrieved = auditResult.neverRetrieved;
+      auditStaleRetrieved = auditResult.staleRetrieved;
+      auditCandidateCount = auditResult.candidatesForDecay.length;
     } catch (err) {
-      this.logger.warn({ error: (err as Error).message }, 'Deep pruning failed');
+      this.logger.warn({ error: (err as Error).message }, 'Retrieval audit failed');
     }
+
+    // 3b. Utility-based archival of low-utility active memories
+    let archiveCount = 0;
+    try {
+      const archiveResult = archiveLowUtilityMemories(db, {
+        utilityThreshold: 0.1,
+        minAgeDays: 14,
+        maxPerRun: 50,
+      });
+      archiveCount = archiveResult.archived;
+    } catch (err) {
+      this.logger.warn({ error: (err as Error).message }, 'Utility-based archival failed');
+    }
+
+    // 3c. Hard prune truly dead memories (very low prominence + superseded)
+    let sessionsDeleted = 0;
+    let memoriesDeleted = 0;
+    try {
+      sessionsDeleted = db.pruneOldSessions(30);
+      memoriesDeleted = db.pruneArchivedMemories(0.01);
+    } catch (err) {
+      this.logger.warn({ error: (err as Error).message }, 'Hard pruning failed');
+    }
+
+    // 3d. Prune orphaned relation edges
+    let orphansDeleted = 0;
+    try {
+      orphansDeleted = pruneOrphanedRelations(db);
+    } catch (err) {
+      this.logger.warn({ error: (err as Error).message }, 'Orphan relation pruning failed');
+    }
+
+    this.logger.info(
+      {
+        auditNeverRetrieved,
+        auditStaleRetrieved,
+        auditCandidateCount,
+        archived: archiveCount,
+        memoriesDeleted,
+        sessionsDeleted,
+        orphansDeleted,
+      },
+      'Enhanced forgetting complete'
+    );
 
     // 4. Behavioral pattern inference
     try {
@@ -344,17 +389,7 @@ export class BackgroundGardener {
       this.logger.warn({ error: (err as Error).message }, 'Behavioral inference failed');
     }
 
-    // 5. Retrieval audit
-    try {
-      const auditResult = auditRetrievalHistory(db);
-      if (auditResult.neverRetrieved > 0 || auditResult.staleRetrieved > 0) {
-        this.logger.info({ ...auditResult, candidateCount: auditResult.candidatesForDecay.length }, 'Retrieval audit complete');
-      }
-    } catch (err) {
-      this.logger.warn({ error: (err as Error).message }, 'Retrieval audit failed');
-    }
-
-    // 6. Trust score update
+    // 5. Trust score update
     try {
       const profileManager = this.scallopStore.getProfileManager();
       const sessionSummaries = db.getSessionSummariesByUser('default', 30);
@@ -382,7 +417,7 @@ export class BackgroundGardener {
       this.logger.warn({ error: (err as Error).message }, 'Trust score update failed');
     }
 
-    // 7. Goal deadline check
+    // 6. Goal deadline check
     try {
       const GoalService = (await import('../goals/goal-service.js')).GoalService;
       const goalService = new GoalService({ db, logger: this.logger });

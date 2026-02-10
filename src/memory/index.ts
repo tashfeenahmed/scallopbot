@@ -231,3 +231,15 @@ export {
   EMOJI_VALENCE,
   N_SCALAR,
 } from './affect-lexicon.js';
+
+// Utility Score (Enhanced Forgetting)
+export {
+  computeUtilityScore,
+  findLowUtilityMemories,
+  archiveLowUtilityMemories,
+  pruneOrphanedRelations,
+  type LowUtilityMemory,
+  type FindLowUtilityOptions,
+  type ArchiveOptions,
+  type ArchiveResult,
+} from './utility-score.js';
