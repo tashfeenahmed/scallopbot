@@ -82,3 +82,15 @@
 .markdown-content strong {
   font-weight: 600;
 }
+
+/* Glass-morphism utilities for Memory Map */
+.glass {
+  background: rgba(17, 24, 39, 0.8);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(75, 85, 99, 0.3);
+}
+.glass-light {
+  background: rgba(17, 24, 39, 0.6);
+  backdrop-filter: blur(8px);
+  border: 1px solid rgba(75, 85, 99, 0.2);
+}

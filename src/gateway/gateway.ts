@@ -427,6 +427,7 @@ export class Gateway {
         sessionManager: this.sessionManager!,
         logger: this.logger,
         costTracker: this.costTracker || undefined,
+        memoryStore: this.scallopMemoryStore || undefined,
       });
       await this.apiChannel.start();
 

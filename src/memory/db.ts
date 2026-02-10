@@ -1049,6 +1049,15 @@ export class ScallopDatabase {
   }
 
   /**
+   * Get all relations
+   */
+  getAllRelations(): MemoryRelation[] {
+    const stmt = this.db.prepare('SELECT * FROM memory_relations');
+    const rows = stmt.all() as Record<string, unknown>[];
+    return rows.map((row) => this.rowToRelation(row));
+  }
+
+  /**
    * Delete a relation
    */
   deleteRelation(id: string): boolean {
