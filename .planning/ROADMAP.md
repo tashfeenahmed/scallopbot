@@ -45,10 +45,11 @@ Plans:
 **Goal**: Replace regex-based detectContradiction/detectEnrichment in relations.ts with LLM-based classification for more accurate relation typing and conflict resolution
 **Depends on**: Phase 18
 **Research**: Unlikely (extending existing LLM fact extractor pattern)
-**Plans**: TBD
+**Plans**: 2
 
 Plans:
-- [ ] 19-01: TBD
+- [x] 19-01: LLM-based classifyRelation with batch support and regex fallback (TDD)
+- [ ] 19-02: TBD
 
 #### Phase 20: Spreading Activation
 
@@ -139,7 +140,7 @@ Plans:
 | v1.0 | Skills-Only Architecture | 11/11 | Complete | 2026-02-04 |
 | v2.0 | Agent Polish & Enhanced Loop | 11/11 | Complete | 2026-02-04 |
 | 18. Retrieval Re-ranking | v3.0 | 2/2 | Complete | 2026-02-10 |
-| 19. LLM-Guided Memory Relations | v3.0 | 0/? | Not started | - |
+| 19. LLM-Guided Memory Relations | v3.0 | 1/2 | In progress | - |
 | 20. Spreading Activation | v3.0 | 0/? | Not started | - |
 | 21. Memory Fusion Engine | v3.0 | 0/? | Not started | - |
 | 22. Per-Turn Model Routing | v3.0 | 0/? | Not started | - |
