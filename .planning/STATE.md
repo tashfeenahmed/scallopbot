@@ -2,18 +2,19 @@
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-02-04 after v2.0 milestone)
+See: .planning/PROJECT.md (updated 2026-02-09 after v3.0 milestone creation)
 
 **Core value:** Skills-only execution: Every capability the agent has comes from a skill file that advertises itself to the agent.
-**Current focus:** Project operational — no active milestone
+**Current focus:** v3.0 Research-Driven Intelligence
 
 ## Current Position
 
-Phase: All complete (17 phases across 2 milestones)
-Status: Project operational
-Last activity: 2026-02-04 — v2.0 milestone archived
+Phase: 18 of 27 (Retrieval Re-ranking)
+Plan: Not started
+Status: Ready to plan
+Last activity: 2026-02-09 - Milestone v3.0 created
 
-Progress: ██████████ 100% (v1.0 + v2.0)
+Progress: ░░░░░░░░░░ 0%
 
 ## Shipped Milestones
 
@@ -40,6 +41,12 @@ Full decision log in PROJECT.md Key Decisions table.
 - TriggerSource abstraction for multi-channel
 - 60-line consolidated system prompt
 
+**v3.0 Context:**
+- Research survey of 60+ papers (late 2025/early 2026) completed
+- Key papers: SYNAPSE, FadeMem, A-MEM, TALE, FrugalGPT, EquiRouter, Dynamic Mix Precision, IEEE S&P 2026
+- Each phase includes WebSocket-based conversation testing
+- Goal: make memory/routing/tool-use feel human-like
+
 ### Deferred Issues
 
 - read, write, edit skills (for future milestone)
@@ -52,10 +59,11 @@ None.
 
 - v1.0 shipped: Phases 1-7, 11 plans (2026-02-04)
 - v2.0 shipped: Phases 9-17, 11 plans (2026-02-04)
+- v3.0 created: Phases 18-27, 10 phases — Research-Driven Intelligence (2026-02-09)
 - Archives: .planning/milestones/v1.0-ROADMAP.md, v2.0-ROADMAP.md
 
 ## Session Continuity
 
-Last session: 2026-02-04
-Stopped at: v2.0 milestone archived
+Last session: 2026-02-09
+Stopped at: Milestone v3.0 initialization
 Resume file: None
