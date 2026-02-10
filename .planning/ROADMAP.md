@@ -99,7 +99,8 @@ Plans:
 **Plans**: TBD
 
 Plans:
-- [ ] 30-01: TBD
+- [x] 30-01: Self-Reflection Module (TDD)
+- [ ] 30-02: Wire Reflection into sleepTick
 
 #### Phase 31: Gap Scanner
 
@@ -145,7 +146,7 @@ Plans:
 | 27. Dream NREM Consolidation | v4.0 | 3/3 | Complete | 2026-02-10 |
 | 28. Dream REM Exploration | v4.0 | 3/3 | Complete | 2026-02-10 |
 | 29. Enhanced Forgetting | v4.0 | 2/2 | Complete | 2026-02-10 |
-| 30. Self-Reflection | v4.0 | 0/? | Not started | - |
+| 30. Self-Reflection | v4.0 | 1/2 | In progress | - |
 | 31. Gap Scanner | v4.0 | 0/? | Not started | - |
 | 32. Inner Thoughts & Timing | v4.0 | 0/? | Not started | - |
 | 33. E2E Cognitive Testing | v4.0 | 0/? | Not started | - |
