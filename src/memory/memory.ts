@@ -20,7 +20,8 @@ import type { ScallopMemoryStore } from './scallop-store.js';
 import type { SessionSummarizer } from './session-summary.js';
 import type { LLMProvider } from '../providers/types.js';
 import { findFusionClusters, fuseMemoryCluster } from './fusion.js';
-import { nremConsolidate } from './nrem-consolidation.js';
+import { dream } from './dream.js';
+import type { DreamResult } from './dream.js';
 import { performHealthPing } from './health-ping.js';
 import { auditRetrievalHistory } from './retrieval-audit.js';
 import { computeTrustScore } from './trust-score.js';
@@ -433,18 +434,20 @@ export class BackgroundGardener {
   /**
    * Sleep tick: nightly cognitive processing (Tier 3).
    * Phase 27: NREM consolidation (wider prominence window, cross-category clustering)
+   * Phase 28: REM exploration (creative association discovery via EXTENDS relations)
    */
   async sleepTick(): Promise<void> {
     this.logger.info('Sleep tick: nightly cognitive processing starting');
 
     const db = this.scallopStore.getDatabase();
 
-    // Phase 27: NREM consolidation
+    // Phase 27+28: Dream cycle (NREM consolidation → REM exploration)
     if (this.fusionProvider) {
       try {
         const userRows = db.raw<{ user_id: string }>('SELECT DISTINCT user_id FROM memories WHERE source != \'_cleaned_sentinel\'', []);
         let totalFused = 0;
         let totalMerged = 0;
+        let totalDiscoveries = 0;
 
         for (const { user_id: userId } of userRows) {
           // Get memories with NREM's wider prominence window [0.05, 0.8)
@@ -462,79 +465,119 @@ export class BackgroundGardener {
 
           if (eligibleMemories.length < 3) continue;
 
-          // Run NREM consolidation (pure function — handles clustering, relation context, LLM fusion)
-          const nremResult = await nremConsolidate(
+          // Run dream cycle: NREM consolidation → REM exploration
+          // Reuse fusionProvider for both NREM and REM (same fast-tier LLM)
+          const dreamResult: DreamResult = await dream(
             eligibleMemories,
             (id) => db.getRelations(id),
             this.fusionProvider,
+            this.fusionProvider,
           );
 
-          // Store each fused result (same pattern as deep tick fusion)
-          for (const result of nremResult.fusionResults) {
-            try {
-              const fusedMemory = await this.scallopStore.add({
+          // ── Store NREM results (same pattern as before — unchanged) ──
+          if (dreamResult.nrem) {
+            for (const result of dreamResult.nrem.fusionResults) {
+              try {
+                const fusedMemory = await this.scallopStore.add({
+                  userId,
+                  content: result.summary,
+                  category: result.category,
+                  importance: result.importance,
+                  confidence: result.confidence,
+                  sourceChunk: result.sourceMemoryIds.join(' | '),
+                  metadata: {
+                    fusedAt: new Date().toISOString(),
+                    sourceCount: result.sourceMemoryIds.length,
+                    sourceIds: result.sourceMemoryIds,
+                    nrem: true,
+                  },
+                  learnedFrom: 'nrem_consolidation',
+                  detectRelations: false,
+                });
+
+                // Override memoryType to 'derived' (add() sets 'regular')
+                db.updateMemory(fusedMemory.id, { memoryType: 'derived' });
+
+                // Add DERIVES relations from fused memory to each source
+                for (const sourceId of result.sourceMemoryIds) {
+                  db.addRelation(fusedMemory.id, sourceId, 'DERIVES', 0.95);
+                }
+
+                // Mark sources as superseded
+                for (const sourceId of result.sourceMemoryIds) {
+                  this.scallopStore.update(sourceId, { isLatest: false });
+                  db.updateMemory(sourceId, { memoryType: 'superseded' });
+                }
+
+                // Set fused memory prominence
+                const sourceMemories = allMemories.filter(m => result.sourceMemoryIds.includes(m.id));
+                const maxProminence = Math.max(...sourceMemories.map(m => m.prominence));
+                const fusedProminence = Math.min(0.6, maxProminence + 0.1);
+                db.updateProminences([{ id: fusedMemory.id, prominence: fusedProminence }]);
+
+                totalFused++;
+                totalMerged += result.sourceMemoryIds.length;
+              } catch (err) {
+                this.logger.warn({ error: (err as Error).message, userId }, 'NREM cluster storage failed');
+              }
+            }
+
+            if (dreamResult.nrem.clustersProcessed > 0) {
+              this.logger.info({
                 userId,
-                content: result.summary,
-                category: result.category,
-                importance: result.importance,
-                confidence: result.confidence,
-                sourceChunk: result.sourceMemoryIds.join(' | '),
-                metadata: {
-                  fusedAt: new Date().toISOString(),
-                  sourceCount: result.sourceMemoryIds.length,
-                  sourceIds: result.sourceMemoryIds,
-                  nrem: true,
-                },
-                learnedFrom: 'nrem_consolidation',
-                detectRelations: false,
-              });
-
-              // Override memoryType to 'derived' (add() sets 'regular')
-              db.updateMemory(fusedMemory.id, { memoryType: 'derived' });
-
-              // Add DERIVES relations from fused memory to each source
-              for (const sourceId of result.sourceMemoryIds) {
-                db.addRelation(fusedMemory.id, sourceId, 'DERIVES', 0.95);
-              }
-
-              // Mark sources as superseded
-              for (const sourceId of result.sourceMemoryIds) {
-                this.scallopStore.update(sourceId, { isLatest: false });
-                db.updateMemory(sourceId, { memoryType: 'superseded' });
-              }
-
-              // Set fused memory prominence
-              const sourceMemories = allMemories.filter(m => result.sourceMemoryIds.includes(m.id));
-              const maxProminence = Math.max(...sourceMemories.map(m => m.prominence));
-              const fusedProminence = Math.min(0.6, maxProminence + 0.1);
-              db.updateProminences([{ id: fusedMemory.id, prominence: fusedProminence }]);
-
-              totalFused++;
-              totalMerged += result.sourceMemoryIds.length;
-            } catch (err) {
-              this.logger.warn({ error: (err as Error).message, userId }, 'NREM cluster storage failed');
+                clustersProcessed: dreamResult.nrem.clustersProcessed,
+                memoriesConsolidated: dreamResult.nrem.fusionResults.length,
+                failures: dreamResult.nrem.failures,
+              }, 'NREM consolidation complete for user');
             }
           }
 
-          if (nremResult.clustersProcessed > 0) {
-            this.logger.info({
-              userId,
-              clustersProcessed: nremResult.clustersProcessed,
-              memoriesConsolidated: nremResult.fusionResults.length,
-              failures: nremResult.failures,
-            }, 'NREM consolidation complete for user');
+          // ── Store REM results (EXTENDS relations only — no new memories) ──
+          if (dreamResult.rem) {
+            for (const discovery of dreamResult.rem.discoveries) {
+              try {
+                db.addRelation(
+                  discovery.seedId,
+                  discovery.neighborId,
+                  'EXTENDS',
+                  discovery.confidence,
+                );
+                this.logger.debug({
+                  seedId: discovery.seedId,
+                  neighborId: discovery.neighborId,
+                  connection: discovery.connectionDescription,
+                  confidence: discovery.confidence,
+                }, 'REM discovery: EXTENDS relation created');
+                totalDiscoveries++;
+              } catch (err) {
+                this.logger.warn({ error: (err as Error).message, userId }, 'REM discovery storage failed');
+              }
+            }
+
+            if (dreamResult.rem.seedsExplored > 0) {
+              this.logger.info({
+                userId,
+                seedsExplored: dreamResult.rem.seedsExplored,
+                candidatesEvaluated: dreamResult.rem.candidatesEvaluated,
+                discoveries: dreamResult.rem.discoveries.length,
+                failures: dreamResult.rem.failures,
+              }, 'REM exploration complete for user');
+            }
           }
         }
 
-        if (totalFused > 0) {
-          this.logger.info({ fused: totalFused, memoriesMerged: totalMerged }, 'NREM consolidation complete');
+        if (totalFused > 0 || totalDiscoveries > 0) {
+          this.logger.info({
+            nremFused: totalFused,
+            nremMemoriesMerged: totalMerged,
+            remDiscoveries: totalDiscoveries,
+          }, 'Dream cycle complete');
         }
       } catch (err) {
-        this.logger.warn({ error: (err as Error).message }, 'NREM consolidation failed');
+        this.logger.warn({ error: (err as Error).message }, 'Dream cycle failed');
       }
     }
 
-    // Phase 28: REM exploration (placeholder)
     // Phase 30: Self-reflection (placeholder)
 
     this.logger.info('Sleep tick complete');
