@@ -200,8 +200,8 @@ export class ScallopMemoryStore {
     if (embedding) {
       const existing = this.db.getMemoriesByUser(userId, {
         isLatest: true,
-        minProminence: PROMINENCE_THRESHOLDS.DORMANT,
-        limit: 100,
+        minProminence: 0, // Include all memories for dedup — even decayed ones
+        limit: 200,
         includeAllSources: false,
       });
 
@@ -210,7 +210,7 @@ export class ScallopMemoryStore {
       for (const mem of existing) {
         if (!mem.embedding) continue;
         const sim = cosineSimilarity(embedding, mem.embedding);
-        if (sim >= 0.85 && sim > bestSim) {
+        if (sim >= 0.82 && sim > bestSim) {
           bestSim = sim;
           bestMatch = mem;
         }
@@ -480,9 +480,13 @@ export class ScallopMemoryStore {
       }
     }
 
-    // Sort by score and limit
+    // Sort by score and over-fetch for re-ranking.
+    // The LLM reranker is much better at judging semantic relevance than
+    // lexical/vector scoring alone, so give it a wider candidate pool (limit * 4)
+    // and let it pick the best `limit` results.
     results.sort((a, b) => b.score - a.score);
-    let topResults = results.slice(0, limit);
+    const rerankPoolSize = this.rerankProvider ? limit * 4 : limit;
+    let topResults = results.slice(0, rerankPoolSize);
 
     // LLM re-ranking: refine top results using semantic relevance scoring
     if (this.rerankProvider && topResults.length > 0) {
@@ -495,15 +499,16 @@ export class ScallopMemoryStore {
 
         const reranked = await rerankResults(query, candidates, this.rerankProvider, { maxCandidates: 20 });
 
-        // Map re-ranked scores back to search results
+        // Map re-ranked scores back to search results, then trim to requested limit
         const rerankedMap = new Map(reranked.map(r => [r.id, r.finalScore]));
         topResults = topResults
           .filter(r => rerankedMap.has(r.memory.id))
           .map(r => ({ ...r, score: rerankedMap.get(r.memory.id)! }))
-          .sort((a, b) => b.score - a.score);
+          .sort((a, b) => b.score - a.score)
+          .slice(0, limit);
       } catch (err) {
         this.logger.warn({ error: (err as Error).message }, 'LLM re-ranking failed, using original scores');
-        // Fall through with original topResults unchanged
+        topResults = topResults.slice(0, limit);
       }
     }
 
