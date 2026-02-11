@@ -292,7 +292,7 @@ export async function runEval(
           const smoothed = getSmoothedAffect(affectState);
           const profileManager = store.getProfileManager();
           profileManager.updateBehavioralPatterns(USER_ID, {
-            affectState: { valence: smoothed.valence, arousal: smoothed.arousal },
+            affectState,
             smoothedAffect: smoothed,
           });
         } catch { /* ignore */ }
