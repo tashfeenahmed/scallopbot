@@ -516,7 +516,7 @@ describe('findFusionClusters with crossCategory', () => {
 
 describe('DEFAULT_FUSION_CONFIG', () => {
   it('has expected default values', () => {
-    expect(DEFAULT_FUSION_CONFIG.minClusterSize).toBe(3);
+    expect(DEFAULT_FUSION_CONFIG.minClusterSize).toBe(2);
     expect(DEFAULT_FUSION_CONFIG.maxClusters).toBe(5);
     expect(DEFAULT_FUSION_CONFIG.minProminence).toBeCloseTo(0.1, 2); // DORMANT
     expect(DEFAULT_FUSION_CONFIG.maxProminence).toBeCloseTo(0.5, 2); // ACTIVE

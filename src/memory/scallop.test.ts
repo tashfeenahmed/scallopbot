@@ -1039,15 +1039,31 @@ describe('ScallopMemoryStore LLM relation classification', () => {
     });
 
     try {
-      // Store first memory
-      const mem1 = await store.add({
+      // Seed first memory directly via DB with embedding: null so the
+      // dedup loop in store.add() skips it (dedup checks `if (!mem.embedding) continue`).
+      // This ensures the second store.add() proceeds past dedup to relation detection.
+      const db = store.getDatabase();
+      const mem1 = db.addMemory({
         userId: 'user1',
         content: 'Lives in Dublin',
         category: 'fact',
-        detectRelations: true,
+        memoryType: 'regular',
+        importance: 5,
+        confidence: 0.8,
+        isLatest: true,
+        source: 'user',
+        documentDate: Date.now(),
+        eventDate: null,
+        prominence: 1.0,
+        lastAccessed: null,
+        accessCount: 0,
+        sourceChunk: null,
+        embedding: null,
+        metadata: null,
       });
 
-      // Store second memory with similar content — should trigger LLM classification
+      // Store second memory via store.add() — dedup skips mem1 (no embedding),
+      // so this reaches the relation detection code which calls the LLM classifier
       const mem2 = await store.add({
         userId: 'user1',
         content: 'Lives in Cork',
@@ -1059,7 +1075,6 @@ describe('ScallopMemoryStore LLM relation classification', () => {
       expect(mockComplete).toHaveBeenCalled();
 
       // Verify UPDATES relation was created between the memories
-      const db = store.getDatabase();
       const relations = db.getRelations(mem2.id);
       expect(relations.length).toBeGreaterThan(0);
 
@@ -1091,16 +1106,28 @@ describe('ScallopMemoryStore LLM relation classification', () => {
     });
 
     try {
-      // Store first memory
-      const mem1 = await store.add({
+      // Seed first memory directly via DB with embedding: null to bypass dedup
+      const db = store.getDatabase();
+      const mem1 = db.addMemory({
         userId: 'user1',
         content: 'Lives in Dublin',
         category: 'fact',
-        detectRelations: true,
+        memoryType: 'regular',
+        importance: 5,
+        confidence: 0.8,
+        isLatest: true,
+        source: 'user',
+        documentDate: Date.now(),
+        eventDate: null,
+        prominence: 1.0,
+        lastAccessed: null,
+        accessCount: 0,
+        sourceChunk: null,
+        embedding: null,
+        metadata: null,
       });
 
       // Store second memory — LLM will fail, should fall back to regex
-      // Regex detects "lives in X" vs "lives in Y" as UPDATES
       const mem2 = await store.add({
         userId: 'user1',
         content: 'Lives in Cork',
@@ -1112,7 +1139,6 @@ describe('ScallopMemoryStore LLM relation classification', () => {
       expect(failingProvider.complete).toHaveBeenCalled();
 
       // Verify relation was still detected via regex fallback
-      const db = store.getDatabase();
       const relations = db.getRelations(mem2.id);
       expect(relations.length).toBeGreaterThan(0);
 

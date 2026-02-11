@@ -189,26 +189,23 @@ describe('E2E Cognitive Dream Cycle', () => {
 
       const mockEmbedder = createMockEmbeddingProvider();
 
-      // fusionProvider returns responses in sequence (cycles):
-      // 1. NREM fusion response (for any clusters that form)
-      // 2. REM judge response (positive — above threshold, avg = (4+4+4)/3 = 4.0 >= 3.0)
-      // Cycle these so both NREM calls and REM calls get appropriate responses
-      const fusionProvider = createMockLLMProvider([
-        // NREM may attempt fusion for within-group clusters
-        JSON.stringify({
-          summary: 'Travel and cultural exploration experiences',
-          importance: 6,
-          category: 'insight',
-        }),
-        // REM judge: high scores (above threshold)
-        JSON.stringify({
-          novelty: 4,
-          plausibility: 4,
-          usefulness: 4,
-          connection: 'Both involve capturing cultural experiences from different perspectives',
-          confidence: 0.75,
-        }),
-      ]);
+      // Use a "dual-valid" response that both NREM's parseFusionResponse and
+      // REM's parseJudgeResponse accept. NREM and REM share one provider, and
+      // NREM consumes responses before REM. With dual-valid responses, the call
+      // order doesn't matter — every response works for both phases.
+      const dualResponse = JSON.stringify({
+        // NREM fusion fields (parseFusionResponse extracts summary/importance/category)
+        summary: 'Combined experiences connecting travel, culture, and photography',
+        importance: 6,
+        category: 'insight',
+        // REM judge fields (parseJudgeResponse extracts novelty/plausibility/usefulness)
+        novelty: 4,
+        plausibility: 4,
+        usefulness: 4,
+        connection: 'Both involve capturing cultural experiences from different perspectives',
+        confidence: 0.75,
+      });
+      const fusionProvider = createMockLLMProvider([dualResponse]);
 
       scallopStore = new ScallopMemoryStore({
         dbPath,
