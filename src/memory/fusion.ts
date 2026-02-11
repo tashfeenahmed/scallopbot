@@ -15,6 +15,7 @@
 import type { ScallopMemoryEntry, MemoryRelation, MemoryCategory } from './db.js';
 import type { LLMProvider, CompletionRequest } from '../providers/types.js';
 import { PROMINENCE_THRESHOLDS } from './decay.js';
+import { cosineSimilarity } from './embeddings.js';
 
 // ============ Types ============
 
@@ -30,6 +31,8 @@ export interface FusionConfig {
   maxProminence: number;
   /** Allow clusters to span multiple categories (default: false). When true, BFS components are used directly without category splitting. */
   crossCategory?: boolean;
+  /** Cosine similarity threshold for embedding-based fallback clustering (default: 0.7) */
+  embeddingSimilarityThreshold?: number;
 }
 
 /** Result of fusing a memory cluster via LLM */
@@ -46,11 +49,12 @@ export interface FusionResult {
 
 /** Default fusion configuration */
 export const DEFAULT_FUSION_CONFIG: FusionConfig = {
-  minClusterSize: 3,
+  minClusterSize: 2,
   maxClusters: 5,
   minProminence: PROMINENCE_THRESHOLDS.DORMANT, // 0.1
   maxProminence: PROMINENCE_THRESHOLDS.ACTIVE,  // 0.5
   crossCategory: false,
+  embeddingSimilarityThreshold: 0.6,
 };
 
 // ============ Cluster Detection ============
@@ -132,6 +136,20 @@ export function findFusionClusters(
     }
   }
 
+  // Step 2b: Embedding-similarity fallback
+  // If BFS produced only singleton components (no relation edges connected
+  // any eligible memories), fall back to greedy embedding-similarity clustering.
+  const allSingletons = components.every(c => c.length === 1);
+  if (allSingletons && eligible.length >= config.minClusterSize) {
+    const simThreshold = config.embeddingSimilarityThreshold ?? 0.7;
+    const embeddingClusters = clusterByEmbeddingSimilarity(eligible, simThreshold, config.minClusterSize);
+    if (embeddingClusters.length > 0) {
+      // Replace singleton BFS components with embedding-based clusters
+      components.length = 0;
+      components.push(...embeddingClusters);
+    }
+  }
+
   // Step 3: Optionally split each component by category into sub-clusters
   let categoryClusters: ScallopMemoryEntry[][];
 
@@ -162,6 +180,59 @@ export function findFusionClusters(
   filtered.sort((a, b) => b.length - a.length);
 
   return filtered.slice(0, config.maxClusters);
+}
+
+// ============ Embedding Similarity Clustering ============
+
+/**
+ * Greedy clustering by embedding cosine similarity.
+ * Used as fallback when BFS finds no relation edges among eligible memories.
+ *
+ * Algorithm: iterate through memories; for each unassigned memory, find all
+ * other unassigned memories with cosine similarity >= threshold, form a cluster.
+ * Only returns clusters that meet minClusterSize.
+ */
+function clusterByEmbeddingSimilarity(
+  memories: ScallopMemoryEntry[],
+  threshold: number,
+  minClusterSize: number,
+): ScallopMemoryEntry[][] {
+  // Filter to memories that have embeddings
+  const withEmbeddings = memories.filter(m => m.embedding && m.embedding.length > 0);
+  if (withEmbeddings.length < minClusterSize) {
+    return [];
+  }
+
+  const assigned = new Set<string>();
+  const clusters: ScallopMemoryEntry[][] = [];
+
+  for (const seed of withEmbeddings) {
+    if (assigned.has(seed.id)) continue;
+
+    const cluster: ScallopMemoryEntry[] = [seed];
+    assigned.add(seed.id);
+
+    for (const candidate of withEmbeddings) {
+      if (assigned.has(candidate.id)) continue;
+
+      const sim = cosineSimilarity(seed.embedding!, candidate.embedding!);
+      if (sim >= threshold) {
+        cluster.push(candidate);
+        assigned.add(candidate.id);
+      }
+    }
+
+    if (cluster.length >= minClusterSize) {
+      clusters.push(cluster);
+    } else {
+      // Release memories back to unassigned pool
+      for (const m of cluster) {
+        assigned.delete(m.id);
+      }
+    }
+  }
+
+  return clusters;
 }
 
 // ============ LLM Fusion ============

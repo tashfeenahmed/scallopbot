@@ -244,9 +244,9 @@ describe('Scenario 1: Fact storage, embedding cache & search weights', () => {
 
   it('should use shared SEARCH_WEIGHTS for scoring', () => {
     // Validate the shared weights constant exists and has expected shape
-    expect(SEARCH_WEIGHTS.keyword).toBe(0.4);
-    expect(SEARCH_WEIGHTS.semantic).toBe(0.4);
-    expect(SEARCH_WEIGHTS.prominence).toBe(0.2);
+    expect(SEARCH_WEIGHTS.keyword).toBe(0.5);
+    expect(SEARCH_WEIGHTS.semantic).toBe(0.5);
+    expect(SEARCH_WEIGHTS.prominence).toBe(0.0);
   });
 });
 

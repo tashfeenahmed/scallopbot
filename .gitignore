@@ -62,3 +62,6 @@ pdf/
 
 # Web UI
 web/node_modules/
+
+# Website
+website/

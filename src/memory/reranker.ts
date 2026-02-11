@@ -190,14 +190,26 @@ export function parseRerankResponse(responseText: string): Map<number, number> |
     }
 
     const scores = new Map<number, number>();
-    for (const entry of parsed) {
-      if (
-        typeof entry.index === 'number' &&
-        typeof entry.score === 'number' &&
-        entry.score >= 0 &&
-        entry.score <= 1
-      ) {
-        scores.set(entry.index, entry.score);
+
+    // Detect if LLM returned 1-based indices (prompt numbers candidates 1-based).
+    // If the minimum index is >= 1 and no index is 0, assume 1-based and convert.
+    const validEntries = parsed.filter(
+      (e): e is { index: number; score: number } =>
+        typeof e.index === 'number' &&
+        typeof e.score === 'number' &&
+        e.score >= 0 &&
+        e.score <= 1,
+    );
+
+    if (validEntries.length === 0) return null;
+
+    const minIndex = Math.min(...validEntries.map(e => e.index));
+    const isOneBased = minIndex >= 1;
+
+    for (const entry of validEntries) {
+      const idx = isOneBased ? entry.index - 1 : entry.index;
+      if (idx >= 0) {
+        scores.set(idx, entry.score);
       }
     }
 

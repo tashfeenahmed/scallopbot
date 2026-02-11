@@ -148,11 +148,15 @@ export class DaemonManager {
 
   async uninstall(): Promise<OperationResult> {
     try {
-      // Stop service
-      await this.exec(`sudo systemctl stop ${this.serviceName}`).catch(() => {});
+      // Stop service (may fail if not running)
+      await this.exec(`sudo systemctl stop ${this.serviceName}`).catch((err) => {
+        this.logger.warn({ error: (err as Error).message }, 'Failed to stop service (may not be running)');
+      });
 
-      // Disable service
-      await this.exec(`sudo systemctl disable ${this.serviceName}`).catch(() => {});
+      // Disable service (may fail if not enabled)
+      await this.exec(`sudo systemctl disable ${this.serviceName}`).catch((err) => {
+        this.logger.warn({ error: (err as Error).message }, 'Failed to disable service (may not be enabled)');
+      });
 
       // Remove unit file
       await this.exec(`sudo rm /etc/systemd/system/${this.serviceName}.service`);

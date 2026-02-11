@@ -7,9 +7,9 @@
  * keyword + semantic + prominence must sum to 1.0.
  */
 export const SEARCH_WEIGHTS = {
-  keyword: 0.4,
-  semantic: 0.4,
-  prominence: 0.2,
+  keyword: 0.5,
+  semantic: 0.5,
+  prominence: 0.0,
 } as const;
 
 export interface BM25Options {

@@ -196,6 +196,45 @@ export class ScallopMemoryStore {
       }
     }
 
+    // Ingestion-time deduplication: check for semantically near-identical existing memory
+    if (embedding) {
+      const existing = this.db.getMemoriesByUser(userId, {
+        isLatest: true,
+        minProminence: PROMINENCE_THRESHOLDS.DORMANT,
+        limit: 100,
+        includeAllSources: false,
+      });
+
+      let bestMatch: ScallopMemoryEntry | null = null;
+      let bestSim = 0;
+      for (const mem of existing) {
+        if (!mem.embedding) continue;
+        const sim = cosineSimilarity(embedding, mem.embedding);
+        if (sim >= 0.85 && sim > bestSim) {
+          bestSim = sim;
+          bestMatch = mem;
+        }
+      }
+
+      if (bestMatch) {
+        // If new content is meaningfully longer (>10%), update the existing memory's content
+        if (content.length > bestMatch.content.length * 1.1) {
+          this.db.updateMemory(bestMatch.id, { content });
+          this.logger.debug(
+            { existingId: bestMatch.id, similarity: bestSim },
+            'Dedup: updated existing memory with longer content'
+          );
+        } else {
+          this.db.recordAccess(bestMatch.id);
+          this.logger.debug(
+            { existingId: bestMatch.id, similarity: bestSim },
+            'Dedup: boosted existing memory access count'
+          );
+        }
+        return this.db.getMemory(bestMatch.id)!;
+      }
+    }
+
     // Add memory to database
     const memory = this.db.addMemory({
       userId,
@@ -363,8 +402,7 @@ export class ScallopMemoryStore {
       return [];
     }
 
-    // Score each candidate
-    const results: ScallopSearchResult[] = [];
+    // Score each candidate using two-pass min-max BM25 normalization
     const queryLower = query.toLowerCase();
 
     // Use pre-computed query embedding if provided, otherwise compute it
@@ -389,26 +427,43 @@ export class ScallopMemoryStore {
       docFreq,
     };
 
-    for (const memory of candidates) {
-      let score = 0;
-      let matchType: 'semantic' | 'keyword' | 'hybrid' = 'keyword';
-
-      // Keyword score (proper BM25)
-      const keywordScore = calculateBM25Score(queryLower, memory.content.toLowerCase(), bm25Options);
-
-      // Semantic score
+    // Pass 1: Compute raw BM25 + semantic scores for all candidates
+    const rawScores = candidates.map(memory => {
+      const rawBM25 = calculateBM25Score(queryLower, memory.content.toLowerCase(), bm25Options);
       let semanticScore = 0;
       if (queryEmbedding && memory.embedding) {
         semanticScore = cosineSimilarity(queryEmbedding, memory.embedding);
+      }
+      return { memory, rawBM25, semanticScore };
+    });
+
+    // Min-max normalize BM25 values across the candidate pool
+    let minBM25 = Infinity;
+    let maxBM25 = -Infinity;
+    for (const s of rawScores) {
+      if (s.rawBM25 < minBM25) minBM25 = s.rawBM25;
+      if (s.rawBM25 > maxBM25) maxBM25 = s.rawBM25;
+    }
+    const bm25Range = maxBM25 - minBM25;
+
+    // Pass 2: Normalize and combine scores
+    const results: ScallopSearchResult[] = [];
+    for (const { memory, rawBM25, semanticScore } of rawScores) {
+      // Min-max normalized BM25 (preserves full discriminative range)
+      const keywordScore = bm25Range > 0 ? (rawBM25 - minBM25) / bm25Range : 0;
+
+      let matchType: 'semantic' | 'keyword' | 'hybrid' = 'keyword';
+      if (semanticScore > 0) {
         matchType = keywordScore > semanticScore ? 'keyword' : 'semantic';
-        if (keywordScore > 0 && semanticScore > 0) {
+        if (rawBM25 > 0 && semanticScore > 0) {
           matchType = 'hybrid';
         }
       }
 
-      // Combine scores: prominence is a tiebreaker, not a baseline
+      // Combine scores with multiplicative prominence
       const relevanceScore = keywordScore * SEARCH_WEIGHTS.keyword + semanticScore * SEARCH_WEIGHTS.semantic;
-      score = relevanceScore > 0 ? relevanceScore + memory.prominence * SEARCH_WEIGHTS.prominence : 0;
+      const prominenceMultiplier = 0.5 + 0.5 * memory.prominence;
+      let score = relevanceScore * prominenceMultiplier;
 
       // Boost for exact matches
       if (memory.content.toLowerCase().includes(queryLower)) {
