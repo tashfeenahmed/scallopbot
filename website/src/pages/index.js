@@ -870,8 +870,9 @@ export default function IndexPage() {
 
         .bench-vs {
           display: inline-block;
-          margin-left: 0.6rem;
-          padding: 0.1rem 0.45rem;
+          margin-top: 0.5rem;
+          margin-left: 7.25rem;
+          padding: 0.15rem 0.55rem;
           font-family: 'JetBrains Mono', monospace;
           font-size: 0.7rem;
           font-weight: 500;
@@ -879,7 +880,6 @@ export default function IndexPage() {
           background: #e8f5e9;
           border-radius: 3px;
           letter-spacing: -0.01em;
-          vertical-align: middle;
         }
 
         /* Mobile */
@@ -890,7 +890,7 @@ export default function IndexPage() {
           .benchmarks-stats { grid-template-columns: 1fr; }
           .bench-bar-row { grid-template-columns: 5.5rem 1fr auto; gap: 0.5rem; }
           .bench-bar-name { font-size: 0.8rem; }
-          .bench-vs { display: none; }
+          .bench-vs { margin-left: 6rem; }
         }
       `}</style>
 
@@ -1109,13 +1109,11 @@ export default function IndexPage() {
                       <div className="bench-bar-track">
                         <div className="bench-bar-fill" style={{ width: `${s.value * 100}%` }} />
                       </div>
-                      <div className="bench-bar-val">
-                        {s.value.toFixed(2)}
-                        {s.vs && <span className="bench-vs">{s.vs}</span>}
-                      </div>
+                      <div className="bench-bar-val">{s.value.toFixed(2)}</div>
                     </div>
                   ))}
                 </div>
+                {m.systems[0].vs && <div className="bench-vs">{m.systems[0].vs}</div>}
               </div>
             ))}
           </div>
