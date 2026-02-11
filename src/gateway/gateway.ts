@@ -406,6 +406,9 @@ export class Gateway {
         allowedUsers: this.config.channels.telegram.allowedUsers,
         enableVoiceReply: this.config.channels.telegram.enableVoiceReply,
         voiceManager: this.voiceManager || undefined, // Share voice manager
+        onUserMessage: (prefixedUserId: string) => {
+          this.unifiedScheduler?.checkEngagement(prefixedUserId);
+        },
       });
       await this.telegramChannel.start();
 
@@ -466,13 +469,7 @@ export class Gateway {
   private registerTelegramTriggerSource(channel: TelegramChannel): void {
     const triggerSource: TriggerSource = {
       sendMessage: async (userId: string, message: string): Promise<boolean> => {
-        try {
-          await channel.sendMessage(userId, message);
-          return true;
-        } catch (error) {
-          this.logger.error({ userId, error: (error as Error).message }, 'Telegram trigger sendMessage failed');
-          return false;
-        }
+        return channel.sendMessage(userId, message);
       },
       sendFile: async (userId: string, filePath: string, caption?: string): Promise<boolean> => {
         return channel.sendFile(userId, filePath, caption);
@@ -817,8 +814,7 @@ export class Gateway {
     }
 
     try {
-      await triggerSource.sendMessage(rawUserId, message);
-      return true;
+      return await triggerSource.sendMessage(rawUserId, message);
     } catch (error) {
       this.logger.error({ userId, error: (error as Error).message }, 'Failed to send proactive message');
       return false;

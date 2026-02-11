@@ -22,6 +22,8 @@ export interface TelegramChannelOptions {
   allowedUsers?: string[]; // Empty = allow all
   enableVoiceReply?: boolean;
   voiceManager?: VoiceManager; // Optional shared voice manager
+  /** Called when a user sends a message (for engagement detection) */
+  onUserMessage?: (prefixedUserId: string) => void;
 }
 
 export function formatMarkdownToHtml(text: string): string {
@@ -105,6 +107,7 @@ export class TelegramChannel {
   private enableVoiceReply: boolean;
   private workspacePath: string;
   private db: ScallopDatabase;
+  private onUserMessage?: (prefixedUserId: string) => void;
   // Buffer for collecting media group photos (multiple photos sent at once)
   private mediaGroupBuffer: Map<string, {
     photos: Array<{ buffer: Buffer; mimeType: string }>;
@@ -125,6 +128,7 @@ export class TelegramChannel {
     this.enableVoiceReply = options.enableVoiceReply ?? false;
     this.voiceManager = options.voiceManager || null;
     this.db = options.db;
+    this.onUserMessage = options.onUserMessage;
 
     this.setupHandlers();
     this.initVoice();
@@ -677,6 +681,11 @@ export class TelegramChannel {
 
     this.logger.info({ userId }, 'Received voice message');
 
+    // Notify engagement detector (proactive feedback loop)
+    if (this.onUserMessage) {
+      this.onUserMessage(`telegram:${userId}`);
+    }
+
     const typingInterval = this.startTypingIndicator(ctx);
     this.activeProcessing.add(userId);
 
@@ -754,6 +763,11 @@ export class TelegramChannel {
     }
 
     this.logger.info({ userId, fileName: document.file_name, mimeType: document.mime_type }, 'Received document');
+
+    // Notify engagement detector (proactive feedback loop)
+    if (this.onUserMessage) {
+      this.onUserMessage(`telegram:${userId}`);
+    }
 
     const typingInterval = this.startTypingIndicator(ctx);
     this.activeProcessing.add(userId);
@@ -841,6 +855,11 @@ export class TelegramChannel {
     const caption = ctx.message?.caption || '';
 
     this.logger.info({ userId, width: photo.width, height: photo.height, mediaGroupId }, 'Received photo');
+
+    // Notify engagement detector (proactive feedback loop)
+    if (this.onUserMessage) {
+      this.onUserMessage(`telegram:${userId}`);
+    }
 
     try {
       // Download the photo
@@ -997,6 +1016,11 @@ export class TelegramChannel {
     const fullMessage = this.buildMessageWithReplyContext(ctx, messageText);
 
     this.logger.info({ userId, message: messageText.substring(0, 100), hasReply: fullMessage !== messageText }, 'Received message');
+
+    // Notify engagement detector (proactive feedback loop)
+    if (this.onUserMessage) {
+      this.onUserMessage(`telegram:${userId}`);
+    }
 
     const typingInterval = this.startTypingIndicator(ctx);
     this.activeProcessing.add(userId);
@@ -1242,10 +1266,10 @@ export class TelegramChannel {
    * Send a proactive message to a user (not as a reply)
    * Used for reminders and scheduled notifications
    */
-  async sendMessage(chatId: string | number, message: string): Promise<void> {
+  async sendMessage(chatId: string | number, message: string): Promise<boolean> {
     if (!this.isRunning) {
       this.logger.warn({ chatId }, 'Cannot send message - bot not running');
-      return;
+      return false;
     }
 
     try {
@@ -1257,8 +1281,10 @@ export class TelegramChannel {
       }
 
       this.logger.debug({ chatId, length: message.length }, 'Sent proactive message');
+      return true;
     } catch (error) {
       this.logger.error({ chatId, error: (error as Error).message }, 'Failed to send proactive message');
+      return false;
     }
   }
 
