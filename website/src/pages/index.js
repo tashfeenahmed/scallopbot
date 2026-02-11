@@ -132,20 +132,38 @@ const researchDomains = [
 
 const benchmarkStats = [
   { value: "0.68", label: "Precision@5", detail: "+45% vs OpenClaw, +79% vs Mem0" },
-  { value: "318", label: "Cognitive LLM calls", detail: "Background reasoning over 30 days" },
-  { value: "$0.06", label: "Estimated daily cost", detail: "Full cognitive pipeline included" },
+  { value: "0.90", label: "MRR", detail: "Top result relevant 90% of the time" },
+  { value: "$0.06", label: "Daily cost", detail: "Full cognitive pipeline at ~10 LLM calls/day" },
 ]
 
-const benchmarkRows = [
-  { metric: "Precision@5", openclaw: "0.47", mem0: "0.38", scallopbot: "0.68" },
-  { metric: "Recall", openclaw: "0.81", mem0: "0.47", scallopbot: "0.85" },
-  { metric: "MRR", openclaw: "0.65", mem0: "0.75", scallopbot: "0.90" },
-  { metric: "Memory count", openclaw: "85", mem0: "126", scallopbot: "132" },
-  { metric: "Fusions", openclaw: "\u2014", mem0: "\u2014", scallopbot: "32" },
-  { metric: "Relations", openclaw: "\u2014", mem0: "\u2014", scallopbot: "44" },
-  { metric: "SOUL words", openclaw: "\u2014", mem0: "\u2014", scallopbot: "589" },
-  { metric: "Gap signals", openclaw: "\u2014", mem0: "\u2014", scallopbot: "1" },
-  { metric: "LLM calls", openclaw: "0", mem0: "219", scallopbot: "318" },
+const benchmarkMetrics = [
+  {
+    metric: "Precision@5",
+    desc: "Fraction of top-5 results containing ground truth",
+    systems: [
+      { name: "ScallopBot", value: 0.68, highlight: true, vs: "+45% vs next best" },
+      { name: "OpenClaw", value: 0.47 },
+      { name: "Mem0", value: 0.38 },
+    ],
+  },
+  {
+    metric: "Mean Reciprocal Rank",
+    desc: "How high the first relevant result ranks (1.0 = always first)",
+    systems: [
+      { name: "ScallopBot", value: 0.90, highlight: true, vs: "+20% vs next best" },
+      { name: "Mem0", value: 0.75 },
+      { name: "OpenClaw", value: 0.65 },
+    ],
+  },
+  {
+    metric: "Recall",
+    desc: "Fraction of expected facts found anywhere in top-5",
+    systems: [
+      { name: "ScallopBot", value: 0.85, highlight: true, vs: "+5% vs next best" },
+      { name: "OpenClaw", value: 0.81 },
+      { name: "Mem0", value: 0.47 },
+    ],
+  },
 ]
 
 export default function IndexPage() {
@@ -762,46 +780,7 @@ export default function IndexPage() {
           gap: 0.5rem;
         }
 
-        .bench-table-wrap {
-          overflow-x: auto;
-          margin-bottom: 2rem;
-        }
-
-        .bench-table {
-          width: 100%;
-          border-collapse: collapse;
-          border: 1px solid #e5e5e5;
-        }
-
-        .bench-table th,
-        .bench-table td {
-          font-family: 'Cormorant Garamond', Garamond, serif;
-          font-size: 0.95rem;
-          padding: 0.75rem 1rem;
-          text-align: left;
-          border-bottom: 1px solid #f0f0f0;
-        }
-
-        .bench-table th {
-          font-weight: 600;
-          color: #111;
-          background: #fafafa;
-          border-bottom: 1px solid #e5e5e5;
-        }
-
-        .bench-table td {
-          color: #555;
-        }
-
-        .bench-table td:first-child {
-          font-weight: 600;
-          color: #111;
-        }
-
-        .bench-highlight {
-          color: #111 !important;
-          font-weight: 600;
-        }
+        /* (table styles removed — replaced by bar chart visualization) */
 
         .bench-note {
           font-family: 'Cormorant Garamond', Garamond, serif;
@@ -811,12 +790,107 @@ export default function IndexPage() {
           max-width: 700px;
         }
 
+        .bench-metrics {
+          display: grid;
+          grid-template-columns: 1fr;
+          gap: 2.75rem;
+          margin: 2.5rem 0;
+        }
+
+        .bench-metric-title {
+          font-family: 'Cormorant Garamond', Garamond, serif;
+          font-size: 1.2rem;
+          font-weight: 600;
+          color: #111;
+          margin-bottom: 0.15rem;
+        }
+
+        .bench-metric-desc {
+          font-family: 'Cormorant Garamond', Garamond, serif;
+          font-size: 0.9rem;
+          color: #999;
+          margin-bottom: 1rem;
+        }
+
+        .bench-bars {
+          display: flex;
+          flex-direction: column;
+          gap: 0.65rem;
+        }
+
+        .bench-bar-row {
+          display: grid;
+          grid-template-columns: 6.5rem 1fr auto;
+          align-items: center;
+          gap: 0.75rem;
+        }
+
+        .bench-bar-name {
+          font-family: 'Cormorant Garamond', Garamond, serif;
+          font-size: 0.9rem;
+          color: #aaa;
+          text-align: right;
+        }
+
+        .bench-bar-highlight .bench-bar-name {
+          color: #111;
+          font-weight: 600;
+        }
+
+        .bench-bar-track {
+          height: 16px;
+          background: #f3f3f3;
+          border-radius: 8px;
+          overflow: hidden;
+        }
+
+        .bench-bar-fill {
+          height: 100%;
+          background: #d8d8d8;
+          border-radius: 8px;
+          transition: width 1s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        .bench-bar-highlight .bench-bar-fill {
+          background: #111;
+        }
+
+        .bench-bar-val {
+          font-family: 'JetBrains Mono', monospace;
+          font-size: 0.85rem;
+          color: #aaa;
+          text-align: right;
+          min-width: 2.5rem;
+        }
+
+        .bench-bar-highlight .bench-bar-val {
+          color: #111;
+          font-weight: 500;
+        }
+
+        .bench-vs {
+          display: inline-block;
+          margin-left: 0.6rem;
+          padding: 0.1rem 0.45rem;
+          font-family: 'JetBrains Mono', monospace;
+          font-size: 0.7rem;
+          font-weight: 500;
+          color: #2e7d32;
+          background: #e8f5e9;
+          border-radius: 3px;
+          letter-spacing: -0.01em;
+          vertical-align: middle;
+        }
+
         /* Mobile */
         @media (max-width: 768px) {
           .nav-links a:not(.nav-github) { display: none; }
           .navbar { padding: 0.75rem 1.5rem; }
           .features-grid { grid-template-columns: 1fr; }
           .benchmarks-stats { grid-template-columns: 1fr; }
+          .bench-bar-row { grid-template-columns: 5.5rem 1fr auto; gap: 0.5rem; }
+          .bench-bar-name { font-size: 0.8rem; }
+          .bench-vs { display: none; }
         }
       `}</style>
 
@@ -1023,35 +1097,34 @@ export default function IndexPage() {
             <BarChart3 size={16} strokeWidth={1.25} />
             Day 30 Results
           </div>
-          <div className="bench-table-wrap">
-            <table className="bench-table">
-              <thead>
-                <tr>
-                  <th>Metric</th>
-                  <th>OpenClaw</th>
-                  <th>Mem0</th>
-                  <th>ScallopBot</th>
-                </tr>
-              </thead>
-              <tbody>
-                {benchmarkRows.map((r) => (
-                  <tr key={r.metric}>
-                    <td>{r.metric}</td>
-                    <td>{r.openclaw}</td>
-                    <td>{r.mem0}</td>
-                    <td className="bench-highlight">{r.scallopbot}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <div className="bench-metrics">
+            {benchmarkMetrics.map((m) => (
+              <div key={m.metric}>
+                <div className="bench-metric-title">{m.metric}</div>
+                <div className="bench-metric-desc">{m.desc}</div>
+                <div className="bench-bars">
+                  {m.systems.map((s) => (
+                    <div key={s.name} className={`bench-bar-row${s.highlight ? ' bench-bar-highlight' : ''}`}>
+                      <div className="bench-bar-name">{s.name}</div>
+                      <div className="bench-bar-track">
+                        <div className="bench-bar-fill" style={{ width: `${s.value * 100}%` }} />
+                      </div>
+                      <div className="bench-bar-val">
+                        {s.value.toFixed(2)}
+                        {s.vs && <span className="bench-vs">{s.vs}</span>}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
           </div>
           <p className="bench-note">
-            Real embeddings (Ollama nomic-embed-text) and real LLM (Moonshot
-            kimi-k2.5). ScallopBot&rsquo;s cognitive pipeline &mdash; fusion,
-            reflection, SOUL distillation, gap scanning &mdash; runs 318 LLM
-            calls over 30 days (~10.6/day) at roughly $0.06/day. The 32
-            memory fusions and 44 typed relations create compounding retrieval
-            advantages that widen over time.
+            30-day benchmark with real embeddings (Ollama nomic-embed-text) and
+            real LLM (Moonshot kimi-k2.5). ScallopBot&rsquo;s cognitive
+            pipeline &mdash; memory fusion, reflection, SOUL distillation, gap
+            scanning &mdash; creates compounding retrieval advantages that widen
+            over time.
           </p>
         </div>
       </section>
