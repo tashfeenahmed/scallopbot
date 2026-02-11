@@ -102,11 +102,20 @@ export class BackgroundGardener {
     if (this.running) return;
 
     this.running = true;
-    this.timer = setInterval(() => {
-      this.lightTick();
-    }, this.interval);
+    try {
+      this.timer = setInterval(() => {
+        this.lightTick();
+      }, this.interval);
 
-    this.logger.info({ intervalMs: this.interval }, 'Background gardener started (tiered consolidation)');
+      this.logger.info({ intervalMs: this.interval }, 'Background gardener started (tiered consolidation)');
+    } catch (error) {
+      this.running = false;
+      if (this.timer) {
+        clearInterval(this.timer);
+        this.timer = null;
+      }
+      throw error;
+    }
   }
 
   stop(): void {
@@ -212,13 +221,13 @@ export class BackgroundGardener {
             m.memoryType !== 'derived'
           );
 
-          if (dormantMemories.length < 3) continue; // Need at least minClusterSize
+          if (dormantMemories.length < 2) continue; // Need at least minClusterSize
 
           // Find fusion clusters (maxProminence matches JS filter above)
           const clusters = findFusionClusters(
             dormantMemories,
             (id) => db.getRelations(id),
-            { minClusterSize: 3, maxClusters: 5, maxProminence: 0.7 },
+            { minClusterSize: 2, maxClusters: 5, maxProminence: 0.7 },
           );
 
           // Fuse each cluster

@@ -75,6 +75,9 @@ export class SignalChannel implements Channel, VoiceChannel {
   private readline: Interface | null = null;
   private userSessions: Map<string, string> = new Map();
   private running = false;
+  private reconnectAttempts = 0;
+  private static readonly MAX_RECONNECT_ATTEMPTS = 10;
+  private static readonly BASE_RECONNECT_DELAY = 5000;
   private voiceManager: VoiceManager | null = null;
   private status: ChannelStatus = {
     connected: false,
@@ -153,8 +156,19 @@ export class SignalChannel implements Channel, VoiceChannel {
       this.logger.info({ code }, 'signal-cli process closed');
       this.status.connected = false;
       if (this.running) {
-        // Attempt to restart after a delay
-        setTimeout(() => this.start(), 5000);
+        if (this.reconnectAttempts >= SignalChannel.MAX_RECONNECT_ATTEMPTS) {
+          this.logger.error({ attempts: this.reconnectAttempts }, 'Max reconnect attempts reached, giving up');
+          this.status.error = 'Max reconnect attempts reached';
+          this.running = false;
+          return;
+        }
+        const delay = Math.min(
+          SignalChannel.BASE_RECONNECT_DELAY * Math.pow(2, this.reconnectAttempts),
+          300_000,
+        );
+        this.reconnectAttempts++;
+        this.logger.info({ attempt: this.reconnectAttempts, delayMs: delay }, 'Reconnecting...');
+        setTimeout(() => this.start(), delay);
       }
     });
 
@@ -182,6 +196,7 @@ export class SignalChannel implements Channel, VoiceChannel {
 
     this.status.connected = true;
     this.status.authenticated = true;
+    this.reconnectAttempts = 0;
     this.logger.info('Signal channel started');
   }
 

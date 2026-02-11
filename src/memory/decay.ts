@@ -119,12 +119,19 @@ export class DecayEngine {
     // Age-based decay
     const ageDecay = Math.pow(decayRate, ageDays);
 
-    // Access boost: 1 + (0.1 × min(access_count, 10))
+    // Access boost: scales with how often the memory has been retrieved.
+    // Never-accessed memories (accessCount=0) get a reduced baseline — a memory
+    // that was stored but never retrieved is less valuable than one the system
+    // has actively used in responses.
     const accessCount = Math.min(memory.accessCount, this.config.maxAccessCount);
-    const accessBoost = 1 + (this.config.accessBoostMultiplier * accessCount);
+    const accessBoost = accessCount === 0
+      ? 0.5
+      : 1 + (this.config.accessBoostMultiplier * accessCount);
 
-    // Recency of access boost
-    let recencyBoost = 1.0;
+    // Recency of access boost.
+    // Never-accessed memories get a low baseline — the absence of any retrieval
+    // means there's no recency signal to boost.
+    let recencyBoost = 0.5;
     if (memory.lastAccessed) {
       const lastAccessAgeDays = (now - memory.lastAccessed) / (1000 * 60 * 60 * 24);
       // Boost decays over 7 days

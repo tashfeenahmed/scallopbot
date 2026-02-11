@@ -402,6 +402,13 @@ export class UnifiedScheduler {
     const userDay = parseInt(getPart('day'), 10);
     const userHour = parseInt(getPart('hour'), 10);
     const userMinute = parseInt(getPart('minute'), 10);
+
+    // Guard against NaN from unexpected Intl.DateTimeFormat output
+    if ([userYear, userMonth, userDay, userHour, userMinute].some(Number.isNaN)) {
+      this.logger.warn({ tz }, 'Failed to parse timezone date parts, falling back to system time');
+      return now.getTime() + 24 * 60 * 60 * 1000;
+    }
+
     const dayNames: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
     const userDayOfWeek = dayNames[getPart('weekday')] ?? now.getDay();
 

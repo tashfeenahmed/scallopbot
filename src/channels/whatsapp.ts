@@ -63,6 +63,9 @@ export class WhatsAppChannel implements Channel, VoiceChannel {
   private socket: any = null;
   private userSessions: Map<string, string> = new Map();
   private running = false;
+  private reconnectAttempts = 0;
+  private static readonly MAX_RECONNECT_ATTEMPTS = 10;
+  private static readonly BASE_RECONNECT_DELAY = 3000;
   private voiceManager: VoiceManager | null = null;
   private status: ChannelStatus = {
     connected: false,
@@ -149,8 +152,19 @@ export class WhatsAppChannel implements Channel, VoiceChannel {
         this.status.connected = false;
 
         if (shouldReconnect && this.running) {
-          // Reconnect after a delay
-          setTimeout(() => this.start(), 3000);
+          if (this.reconnectAttempts >= WhatsAppChannel.MAX_RECONNECT_ATTEMPTS) {
+            this.logger.error({ attempts: this.reconnectAttempts }, 'Max reconnect attempts reached, giving up');
+            this.status.error = 'Max reconnect attempts reached';
+            this.running = false;
+            return;
+          }
+          const delay = Math.min(
+            WhatsAppChannel.BASE_RECONNECT_DELAY * Math.pow(2, this.reconnectAttempts),
+            300_000,
+          );
+          this.reconnectAttempts++;
+          this.logger.info({ attempt: this.reconnectAttempts, delayMs: delay }, 'Reconnecting...');
+          setTimeout(() => this.start(), delay);
         } else if (reason === DisconnectReason.loggedOut) {
           this.status.authenticated = false;
           this.status.error = 'Logged out from WhatsApp';
@@ -160,6 +174,7 @@ export class WhatsAppChannel implements Channel, VoiceChannel {
         this.status.connected = true;
         this.status.authenticated = true;
         this.status.error = undefined;
+        this.reconnectAttempts = 0;
       }
     });
 

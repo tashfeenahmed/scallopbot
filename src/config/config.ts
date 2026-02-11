@@ -255,10 +255,10 @@ export function loadConfig(): Config {
       enableComplexityAnalysis: process.env.ENABLE_COMPLEXITY_ANALYSIS !== 'false',
     },
     cost: {
-      dailyBudget: process.env.DAILY_BUDGET ? parseFloat(process.env.DAILY_BUDGET) : undefined,
-      monthlyBudget: process.env.MONTHLY_BUDGET ? parseFloat(process.env.MONTHLY_BUDGET) : undefined,
+      dailyBudget: process.env.DAILY_BUDGET ? parseFloat(process.env.DAILY_BUDGET) || undefined : undefined,
+      monthlyBudget: process.env.MONTHLY_BUDGET ? parseFloat(process.env.MONTHLY_BUDGET) || undefined : undefined,
       warningThreshold: process.env.BUDGET_WARNING_THRESHOLD
-        ? parseFloat(process.env.BUDGET_WARNING_THRESHOLD)
+        ? parseFloat(process.env.BUDGET_WARNING_THRESHOLD) || 0.75
         : 0.75,
     },
     context: {

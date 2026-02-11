@@ -222,9 +222,10 @@ async function searchMemories(
       semanticScore = cosineSimilarity(tfidfQueryEmbedding, memEmbedding);
     }
 
-    // Combined: use shared weights with prominence factor
+    // Combined: use shared weights with multiplicative prominence
     const relevanceScore = keywordScore * SEARCH_WEIGHTS.keyword + semanticScore * SEARCH_WEIGHTS.semantic;
-    const withProminence = relevanceScore > 0 ? relevanceScore + memory.prominence * SEARCH_WEIGHTS.prominence : 0;
+    const prominenceMultiplier = 0.5 + 0.5 * memory.prominence;
+    const withProminence = relevanceScore * prominenceMultiplier;
 
     // Boost for exact substring match
     const boostedScore = memory.content.toLowerCase().includes(query.toLowerCase())

@@ -1731,6 +1731,7 @@ export class ScallopDatabase {
     }
 
     params.push(id);
+    // SAFETY: Column names in `sets` are hardcoded strings from the conditionals above, never user-derived
     const stmt = this.db.prepare(`UPDATE scheduled_items SET ${sets.join(', ')} WHERE id = ?`);
     const result = stmt.run(...params);
     return result.changes > 0;
