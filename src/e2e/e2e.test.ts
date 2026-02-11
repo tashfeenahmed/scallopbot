@@ -135,9 +135,10 @@ describe('E2E WebSocket Integration', () => {
   // Test 4: Memory retrieval in follow-up message
   // --------------------------------------------------------------------------
   it('should retrieve memories in follow-up messages', async () => {
-    // Pre-seed a fact into the memory store for reliable retrieval
-    ctx.scallopStore.add({
-      content: 'User lives in Tokyo',
+    // Pre-seed a unique fact (avoid overlap with Test 3's Tokyo fact
+    // which would trigger ingestion-time dedup)
+    await ctx.scallopStore.add({
+      content: 'User works as a robotics engineer at SpaceX headquarters in Hawthorne',
       userId: 'default',
       category: 'fact',
       importance: 8,
@@ -147,7 +148,7 @@ describe('E2E WebSocket Integration', () => {
     // Send a follow-up question that should trigger memory search
     client.send({
       type: 'chat',
-      message: 'Where do I live?',
+      message: 'What is my job?',
     });
 
     const messages = await client.collectUntilResponse(15000);
@@ -167,8 +168,8 @@ describe('E2E WebSocket Integration', () => {
     // The system prompt should contain our pre-seeded memory
     const systemPrompt = lastRequest!.system || '';
     const hasMemoryInContext =
-      systemPrompt.includes('Tokyo') ||
-      systemPrompt.includes('lives in');
+      systemPrompt.includes('SpaceX') ||
+      systemPrompt.includes('robotics');
     expect(hasMemoryInContext).toBe(true);
   }, 30000);
 });
