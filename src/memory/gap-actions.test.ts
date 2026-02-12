@@ -16,6 +16,7 @@ import {
   DIAL_THRESHOLDS,
   type GapAction,
   type DialConfig,
+  type ExistingItemForDedup,
 } from './gap-actions.js';
 
 // ============ Test Helpers ============
@@ -61,7 +62,7 @@ describe('DIAL_THRESHOLDS', () => {
     expect(c.minSeverity).toBe('high');
     expect(c.minConfidence).toBe(0.7);
     expect(c.maxDailyNotifications).toBe(1);
-    expect(c.allowedTypes).toEqual(['approaching_deadline', 'stale_goal']);
+    expect(c.allowedTypes).toEqual(['stale_goal']);
   });
 
   it('moderate: minSeverity=medium, minConfidence=0.5, maxDailyNotifications=3', () => {
@@ -70,7 +71,6 @@ describe('DIAL_THRESHOLDS', () => {
     expect(m.minConfidence).toBe(0.5);
     expect(m.maxDailyNotifications).toBe(3);
     expect(m.allowedTypes).toEqual([
-      'approaching_deadline',
       'stale_goal',
       'unresolved_thread',
     ]);
@@ -82,7 +82,6 @@ describe('DIAL_THRESHOLDS', () => {
     expect(e.minConfidence).toBe(0.3);
     expect(e.maxDailyNotifications).toBe(5);
     expect(e.allowedTypes).toEqual([
-      'approaching_deadline',
       'stale_goal',
       'unresolved_thread',
       'behavioral_anomaly',
@@ -97,7 +96,7 @@ describe('createGapActions — filtering', () => {
     const diagnosed = [
       makeDiagnosed({ actionable: false, confidence: 0.9 }),
     ];
-    const result = createGapActions(diagnosed, 'moderate', [], { now: NOW });
+    const result = createGapActions(diagnosed, 'moderate', [], 'user-1', { now: NOW });
     expect(result).toEqual([]);
   });
 
@@ -105,7 +104,7 @@ describe('createGapActions — filtering', () => {
     const diagnosed = [
       makeDiagnosed({ confidence: 0.4 }), // moderate minConfidence=0.5
     ];
-    const result = createGapActions(diagnosed, 'moderate', [], { now: NOW });
+    const result = createGapActions(diagnosed, 'moderate', [], 'user-1', { now: NOW });
     expect(result).toEqual([]);
   });
 
@@ -117,7 +116,7 @@ describe('createGapActions — filtering', () => {
       }),
     ];
     // conservative only allows approaching_deadline and stale_goal
-    const result = createGapActions(diagnosed, 'conservative', [], {
+    const result = createGapActions(diagnosed, 'conservative', [], 'user-1', {
       now: NOW,
     });
     expect(result).toEqual([]);
@@ -131,7 +130,7 @@ describe('createGapActions — filtering', () => {
         confidence: 0.9,
       }),
     ];
-    const result = createGapActions(diagnosed, 'conservative', [], {
+    const result = createGapActions(diagnosed, 'conservative', [], 'user-1', {
       now: NOW,
     });
     expect(result).toEqual([]);
@@ -146,7 +145,7 @@ describe('createGapActions — filtering', () => {
         suggestedAction: 'Follow up on goal progress',
       }),
     ];
-    const result = createGapActions(diagnosed, 'conservative', [], {
+    const result = createGapActions(diagnosed, 'conservative', [], 'user-1', {
       now: NOW,
     });
     expect(result).toHaveLength(1);
@@ -167,6 +166,7 @@ describe('createGapActions — filtering', () => {
       [lowSeverity, mediumSeverity],
       'moderate',
       [],
+      'user-1',
       { now: NOW },
     );
     // low severity should be filtered out by moderate (minSeverity=medium)
@@ -189,7 +189,7 @@ describe('createGapActions — deduplication', () => {
       { message: 'Ask about progress on Learn Rust goal soon' },
     ];
 
-    const result = createGapActions(diagnosed, 'moderate', existingItems, {
+    const result = createGapActions(diagnosed, 'moderate', existingItems, 'user-1', {
       now: NOW,
     });
     expect(result).toEqual([]);
@@ -206,7 +206,91 @@ describe('createGapActions — deduplication', () => {
       { message: 'Ask about progress on Learn Rust goal' },
     ];
 
-    const result = createGapActions(diagnosed, 'moderate', existingItems, {
+    const result = createGapActions(diagnosed, 'moderate', existingItems, 'user-1', {
+      now: NOW,
+    });
+    expect(result).toHaveLength(1);
+  });
+
+  it('skips gaps whose sourceId matches an existing item context sourceId', () => {
+    const diagnosed = [
+      makeDiagnosed({
+        signal: makeSignal({ sourceId: 'goal-1' }),
+        suggestedAction: 'A completely different wording about the goal',
+        confidence: 0.8,
+      }),
+    ];
+    const existingItems = [
+      {
+        message: 'How is your Rust learning going?',
+        context: JSON.stringify({ sourceId: 'goal-1' }),
+      },
+    ];
+
+    const result = createGapActions(diagnosed, 'moderate', existingItems, 'user-1', {
+      now: NOW,
+    });
+    expect(result).toEqual([]);
+  });
+
+  it('skips gaps whose sourceId matches an existing item gapSourceIds array', () => {
+    const diagnosed = [
+      makeDiagnosed({
+        signal: makeSignal({ sourceId: 'goal-2' }),
+        suggestedAction: 'Totally unique message about goal two',
+        confidence: 0.8,
+      }),
+    ];
+    const existingItems = [
+      {
+        message: 'I noticed some goals need attention',
+        context: JSON.stringify({
+          source: 'inner_thoughts',
+          gapSourceIds: ['goal-2', 'goal-3'],
+        }),
+      },
+    ];
+
+    const result = createGapActions(diagnosed, 'moderate', existingItems, 'user-1', {
+      now: NOW,
+    });
+    expect(result).toEqual([]);
+  });
+
+  it('allows gaps whose sourceId does not match any existing item context', () => {
+    const diagnosed = [
+      makeDiagnosed({
+        signal: makeSignal({ sourceId: 'goal-99' }),
+        suggestedAction: 'Follow up on completely new goal',
+        confidence: 0.8,
+      }),
+    ];
+    const existingItems = [
+      {
+        message: 'How is your Rust learning going?',
+        context: JSON.stringify({ sourceId: 'goal-1' }),
+      },
+    ];
+
+    const result = createGapActions(diagnosed, 'moderate', existingItems, 'user-1', {
+      now: NOW,
+    });
+    expect(result).toHaveLength(1);
+  });
+
+  it('handles existing items with null or missing context gracefully', () => {
+    const diagnosed = [
+      makeDiagnosed({
+        suggestedAction: 'Follow up on new topic entirely',
+        confidence: 0.8,
+      }),
+    ];
+    const existingItems = [
+      { message: 'Some old reminder', context: null },
+      { message: 'Another reminder' },
+    ];
+
+    const result = createGapActions(diagnosed, 'moderate', existingItems, 'user-1', {
       now: NOW,
     });
     expect(result).toHaveLength(1);
@@ -231,7 +315,7 @@ describe('createGapActions — budget and hard cap', () => {
       }),
     ];
 
-    const result = createGapActions(diagnosed, 'conservative', [], {
+    const result = createGapActions(diagnosed, 'conservative', [], 'user-1', {
       now: NOW,
     });
     expect(result).toHaveLength(1);
@@ -247,7 +331,7 @@ describe('createGapActions — budget and hard cap', () => {
       }),
     );
 
-    const result = createGapActions(diagnosed, 'eager', [], { now: NOW });
+    const result = createGapActions(diagnosed, 'eager', [], 'user-1', { now: NOW });
     expect(result).toHaveLength(3);
   });
 
@@ -261,7 +345,7 @@ describe('createGapActions — budget and hard cap', () => {
       }),
     );
 
-    const result = createGapActions(diagnosed, 'moderate', [], { now: NOW });
+    const result = createGapActions(diagnosed, 'moderate', [], 'user-1', { now: NOW });
     expect(result).toHaveLength(3);
   });
 });
@@ -282,7 +366,7 @@ describe('createGapActions — output shape', () => {
       }),
     ];
 
-    const result = createGapActions(diagnosed, 'conservative', [], {
+    const result = createGapActions(diagnosed, 'conservative', [], 'user-1', {
       now: NOW,
     });
 
@@ -298,7 +382,7 @@ describe('createGapActions — output shape', () => {
     expect(item.source).toBe('agent');
     expect(item.type).toBe('follow_up');
     expect(item.message).toBe('Follow up on goal progress for Rust');
-    expect(typeof item.userId).toBe('string');
+    expect(item.userId).toBe('user-1');
     expect(item.triggerAt).toBe(NOW + THIRTY_MINUTES_MS);
 
     // context is JSON string with gapType and sourceId
@@ -315,7 +399,7 @@ describe('createGapActions — output shape', () => {
       }),
     ];
 
-    const result = createGapActions(diagnosed, 'conservative', [], {
+    const result = createGapActions(diagnosed, 'conservative', [], 'user-1', {
       now: NOW,
     });
     expect(result[0].scheduledItem.triggerAt).toBe(NOW + THIRTY_MINUTES_MS);
@@ -330,7 +414,7 @@ describe('createGapActions — output shape', () => {
       }),
     ];
 
-    const result = createGapActions(diagnosed, 'conservative', [], {
+    const result = createGapActions(diagnosed, 'conservative', [], 'user-1', {
       now: NOW,
     });
     expect(result[0].scheduledItem.message).toBe(
@@ -343,7 +427,7 @@ describe('createGapActions — output shape', () => {
 
 describe('createGapActions — edge cases', () => {
   it('returns empty array for empty diagnosed input', () => {
-    const result = createGapActions([], 'moderate', [], { now: NOW });
+    const result = createGapActions([], 'moderate', [], 'user-1', { now: NOW });
     expect(result).toEqual([]);
   });
 
@@ -363,7 +447,7 @@ describe('createGapActions — edge cases', () => {
     ];
 
     // conservative filters all: not actionable, low confidence, wrong type
-    const result = createGapActions(diagnosed, 'conservative', [], {
+    const result = createGapActions(diagnosed, 'conservative', [], 'user-1', {
       now: NOW,
     });
     expect(result).toEqual([]);
@@ -380,7 +464,7 @@ describe('createGapActions — edge cases', () => {
       { message: 'Ask about progress on Learn Rust goal' },
     ];
 
-    const result = createGapActions(diagnosed, 'moderate', existingItems, {
+    const result = createGapActions(diagnosed, 'moderate', existingItems, 'user-1', {
       now: NOW,
     });
     expect(result).toEqual([]);
@@ -396,7 +480,7 @@ describe('createGapActions — edge cases', () => {
       }),
     );
 
-    const result = createGapActions(diagnosed, 'conservative', [], {
+    const result = createGapActions(diagnosed, 'conservative', [], 'user-1', {
       now: NOW,
     });
     expect(result).toHaveLength(1);
@@ -411,7 +495,7 @@ describe('createGapActions — edge cases', () => {
     ];
 
     const before = Date.now();
-    const result = createGapActions(diagnosed, 'conservative', []);
+    const result = createGapActions(diagnosed, 'conservative', [], 'user-1');
     const after = Date.now();
 
     expect(result).toHaveLength(1);

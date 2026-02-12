@@ -37,6 +37,13 @@ export interface DialConfig {
   allowedTypes: string[];
 }
 
+/** Existing item for deduplication (message + optional context) */
+export interface ExistingItemForDedup {
+  message: string;
+  /** Optional JSON context string (may contain sourceId or gapSourceIds) */
+  context?: string | null;
+}
+
 /** Options for createGapActions */
 export interface GapActionsOptions {
   now?: number;
@@ -69,20 +76,19 @@ export const DIAL_THRESHOLDS: Record<
     minSeverity: 'high',
     minConfidence: 0.7,
     maxDailyNotifications: 1,
-    allowedTypes: ['approaching_deadline', 'stale_goal'],
+    allowedTypes: ['stale_goal'],
   },
   moderate: {
     minSeverity: 'medium',
     minConfidence: 0.5,
     maxDailyNotifications: 3,
-    allowedTypes: ['approaching_deadline', 'stale_goal', 'unresolved_thread'],
+    allowedTypes: ['stale_goal', 'unresolved_thread'],
   },
   eager: {
     minSeverity: 'low',
     minConfidence: 0.3,
     maxDailyNotifications: 5,
     allowedTypes: [
-      'approaching_deadline',
       'stale_goal',
       'unresolved_thread',
       'behavioral_anomaly',
@@ -117,15 +123,45 @@ function wordOverlap(a: string, b: string): number {
 }
 
 /**
- * Check if a message is a duplicate of any existing item
- * based on word overlap >= threshold.
+ * Extract sourceIds from an existing item's context JSON.
+ * Handles both single `sourceId` and array `gapSourceIds` fields.
+ */
+function extractSourceIds(context: string | null | undefined): Set<string> {
+  const ids = new Set<string>();
+  if (!context) return ids;
+  try {
+    const parsed = JSON.parse(context) as Record<string, unknown>;
+    if (typeof parsed.sourceId === 'string') {
+      ids.add(parsed.sourceId);
+    }
+    if (Array.isArray(parsed.gapSourceIds)) {
+      for (const id of parsed.gapSourceIds) {
+        if (typeof id === 'string') ids.add(id);
+      }
+    }
+  } catch {
+    // Not valid JSON — no sourceIds to extract
+  }
+  return ids;
+}
+
+/**
+ * Check if a gap is a duplicate of any existing item
+ * based on word overlap >= threshold OR matching sourceId.
  */
 function isDuplicate(
   message: string,
-  existingItems: Array<{ message: string }>,
+  sourceId: string,
+  existingItems: ExistingItemForDedup[],
 ): boolean {
   for (const item of existingItems) {
+    // Word overlap check (original mechanism)
     if (wordOverlap(message, item.message) >= DEDUP_OVERLAP_THRESHOLD) {
+      return true;
+    }
+    // SourceId check: if the gap's sourceId appears in an existing item's context
+    const existingIds = extractSourceIds(item.context);
+    if (existingIds.has(sourceId)) {
       return true;
     }
   }
@@ -162,7 +198,8 @@ function severityRank(severity: string): number {
 export function createGapActions(
   diagnosed: DiagnosedGap[],
   dial: 'conservative' | 'moderate' | 'eager',
-  existingItems: Array<{ message: string }>,
+  existingItems: ExistingItemForDedup[],
+  userId: string,
   options?: GapActionsOptions,
 ): GapAction[] {
   const now = options?.now ?? Date.now();
@@ -188,14 +225,14 @@ export function createGapActions(
     // Filter: severity below minimum
     if (severityRank(gap.signal.severity) < minSeverityRank) continue;
 
-    // Dedup: word overlap with existing items
-    if (isDuplicate(gap.suggestedAction, existingItems)) continue;
+    // Dedup: word overlap or sourceId match with existing items
+    if (isDuplicate(gap.suggestedAction, gap.signal.sourceId, existingItems)) continue;
 
     // Build action
     actions.push({
       gap,
       scheduledItem: {
-        userId: gap.signal.sourceId,
+        userId,
         source: 'agent',
         type: 'follow_up',
         message: gap.suggestedAction,
