@@ -7,10 +7,46 @@
  * keyword + semantic + prominence must sum to 1.0.
  */
 export const SEARCH_WEIGHTS = {
-  keyword: 0.5,
-  semantic: 0.5,
+  keyword: 0.3,
+  semantic: 0.7,
   prominence: 0.0,
 } as const;
+
+/**
+ * Common English stop words + question words that waste BM25 weight.
+ * Filtering these sharpens keyword discrimination for queries like
+ * "What did Caroline research?" → ["caroline", "research"].
+ */
+const STOP_WORDS = new Set([
+  // Articles & determiners
+  'a', 'an', 'the', 'this', 'that', 'these', 'those',
+  // Pronouns
+  'i', 'me', 'my', 'we', 'our', 'you', 'your', 'he', 'him', 'his',
+  'she', 'her', 'it', 'its', 'they', 'them', 'their',
+  // Prepositions
+  'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'from', 'as',
+  'into', 'about', 'between', 'through', 'after', 'before', 'during',
+  'above', 'below', 'up', 'down', 'out', 'off', 'over', 'under',
+  // Conjunctions
+  'and', 'or', 'but', 'nor', 'so', 'yet',
+  // Auxiliary / common verbs
+  'is', 'am', 'are', 'was', 'were', 'be', 'been', 'being',
+  'have', 'has', 'had', 'do', 'does', 'did',
+  'will', 'would', 'shall', 'should', 'may', 'might', 'can', 'could',
+  // Question words
+  'what', 'which', 'who', 'whom', 'whose', 'where', 'when', 'why', 'how',
+  // Other function words
+  'not', 'no', 'if', 'then', 'than', 'too', 'very', 'just',
+  'also', 'there', 'here', 'all', 'each', 'every', 'both', 'few',
+  'more', 'most', 'other', 'some', 'such', 'only', 'own', 'same',
+]);
+
+/** Filter tokens by removing stop words */
+function removeStopWords(tokens: string[]): string[] {
+  const filtered = tokens.filter(t => !STOP_WORDS.has(t));
+  // If ALL tokens are stop words, return original to avoid empty queries
+  return filtered.length > 0 ? filtered : tokens;
+}
 
 export interface BM25Options {
   avgDocLength: number;
@@ -28,7 +64,7 @@ export interface BM25Options {
 export function buildDocFreqMap(documents: string[]): Map<string, number> {
   const docFreq = new Map<string, number>();
   for (const doc of documents) {
-    const uniqueTerms = new Set(doc.toLowerCase().replace(/[^\w\s]/g, ' ').split(/\s+/).filter(t => t.length > 0));
+    const uniqueTerms = new Set(removeStopWords(doc.toLowerCase().replace(/[^\w\s]/g, ' ').split(/\s+/).filter(t => t.length > 0)));
     for (const term of uniqueTerms) {
       docFreq.set(term, (docFreq.get(term) || 0) + 1);
     }
@@ -47,8 +83,8 @@ export function calculateBM25Score(
   const k1 = options.k1 ?? 1.2;
   const b = options.b ?? 0.75;
 
-  const queryTerms = query.toLowerCase().replace(/[^\w\s]/g, ' ').split(/\s+/).filter(t => t.length > 0);
-  const docTerms = document.toLowerCase().replace(/[^\w\s]/g, ' ').split(/\s+/).filter(t => t.length > 0);
+  const queryTerms = removeStopWords(query.toLowerCase().replace(/[^\w\s]/g, ' ').split(/\s+/).filter(t => t.length > 0));
+  const docTerms = removeStopWords(document.toLowerCase().replace(/[^\w\s]/g, ' ').split(/\s+/).filter(t => t.length > 0));
   const docLength = docTerms.length;
 
   // Calculate term frequencies

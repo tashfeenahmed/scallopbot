@@ -45,7 +45,7 @@ const ORIGINAL_WEIGHT = 0.4;
 const LLM_WEIGHT = 0.6;
 
 /** Minimum finalScore to keep a result */
-const SCORE_THRESHOLD = 0.05;
+const SCORE_THRESHOLD = 0.15;
 
 /** Default maximum candidates to send to the LLM */
 const DEFAULT_MAX_CANDIDATES = 20;
@@ -142,6 +142,7 @@ Rules:
 - 0.0 = completely irrelevant
 - Score based on semantic relevance, not just keyword overlap
 - Consider whether the memory would be useful context when answering the query
+- If NONE of the memories are relevant, score ALL 0.0. Be strict: tangential content should score below 0.3
 
 Respond with a JSON array only: [{ "index": number, "score": number }, ...]`;
 

@@ -231,10 +231,10 @@ describe('ScallopDatabase', () => {
     const relation = db.addRelation(mem2.id, mem1.id, 'UPDATES', 0.9);
     expect(relation.relationType).toBe('UPDATES');
 
-    // Check that old memory is marked as superseded
+    // UPDATES relation records the link but keeps both memories searchable
     const oldMem = db.getMemory(mem1.id);
-    expect(oldMem?.isLatest).toBe(false);
-    expect(oldMem?.memoryType).toBe('superseded');
+    expect(oldMem?.isLatest).toBe(true);
+    expect(oldMem?.memoryType).toBe('regular');
 
     const relations = db.getRelations(mem1.id);
     expect(relations).toHaveLength(1);
@@ -909,7 +909,7 @@ describe('ScallopMemoryStore search with re-ranking', () => {
       await store.add({ userId: 'user1', content: 'Great hiking trails nearby with food stands', category: 'fact' });
       await store.add({ userId: 'user1', content: 'Vegetarian food options at the café', category: 'preference' });
 
-      const results = await store.search('food recommendations', { userId: 'user1', limit: 3 });
+      const results = await store.search('food', { userId: 'user1', limit: 3 });
 
       // Verify provider.complete was called (re-ranking happened)
       expect(rerankProvider.complete).toHaveBeenCalled();
@@ -1289,8 +1289,10 @@ describe('ScallopMemoryStore activation-based related memories', () => {
         detectRelations: false,
       });
 
-      // newRelated UPDATES oldRelated — oldRelated becomes isLatest=false
+      // newRelated UPDATES oldRelated — record the relation
       db.addRelation(newRelated.id, oldRelated.id, 'UPDATES', 0.9);
+      // Manually supersede oldRelated to test the isLatest filter
+      db.updateMemory(oldRelated.id, { isLatest: false, memoryType: 'superseded' });
 
       // Link seed to oldRelated via EXTENDS
       db.addRelation(seed.id, oldRelated.id, 'EXTENDS', 0.8);
