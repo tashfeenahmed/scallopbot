@@ -101,6 +101,7 @@ export class UnifiedScheduler {
   private intervalHandle: ReturnType<typeof setInterval> | null = null;
   private isRunning = false;
   private evaluating = false;
+  private pendingEvaluation = false;
 
   constructor(options: UnifiedSchedulerOptions) {
     this.db = options.db;
@@ -169,9 +170,10 @@ export class UnifiedScheduler {
    */
   async evaluate(): Promise<void> {
     // Prevent overlapping evaluations — if a previous tick is still processing
-    // (e.g. waiting on LLM), skip this tick entirely to avoid duplicate firings
+    // (e.g. waiting on LLM), defer this tick so it runs after the current one finishes
     if (this.evaluating) {
-      this.logger.debug('Skipping scheduler tick — previous evaluation still running');
+      this.pendingEvaluation = true;
+      this.logger.debug('Deferring scheduler tick — previous evaluation still running');
       return;
     }
     this.evaluating = true;
@@ -206,6 +208,18 @@ export class UnifiedScheduler {
       }
     } finally {
       this.evaluating = false;
+
+      // If a tick was deferred while we were evaluating, run it now
+      if (this.pendingEvaluation) {
+        this.pendingEvaluation = false;
+        this.logger.debug('Running deferred scheduler evaluation');
+        // Use setImmediate to avoid deep recursion under sustained load
+        setImmediate(() => {
+          this.evaluate().catch(err => {
+            this.logger.error({ error: (err as Error).message }, 'Deferred scheduler evaluation failed');
+          });
+        });
+      }
     }
   }
 
@@ -344,6 +358,11 @@ export class UnifiedScheduler {
     if (item.recurring) {
       const nextTriggerAt = this.calculateNextOccurrence(item.recurring, item.userId);
       if (nextTriggerAt) {
+        // Skip reschedule if a similar item already exists (prevents duplication)
+        if (this.db.hasSimilarPendingScheduledItem(item.userId, item.message)) {
+          this.logger.debug({ itemId: item.id }, 'Skipping reschedule - similar item already pending');
+          return;
+        }
         // Create a new item for the next occurrence
         this.db.addScheduledItem({
           userId: item.userId,

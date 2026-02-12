@@ -288,7 +288,7 @@ export class BackgroundGardener {
     // 2. Generate session summaries for old sessions before pruning
     if (this.sessionSummarizer) {
       try {
-        const cutoffDays = 30;
+        const cutoffDays = 1;
         const cutoff = Date.now() - cutoffDays * 24 * 60 * 60 * 1000;
         // Find sessions that are about to be pruned
         const oldSessions = db.raw<{ id: string }>(
@@ -419,9 +419,26 @@ export class BackgroundGardener {
     try {
       const profileManager = this.scallopStore.getProfileManager();
       const sessionSummaries = db.getSessionSummariesByUser('default', 30);
-      const sessions = sessionSummaries
+      let sessions = sessionSummaries
         .filter(s => s.messageCount > 0)
         .map(s => ({ messageCount: s.messageCount, durationMs: s.durationMs, startTime: s.createdAt }));
+
+      // Fallback: if fewer than 5 session summaries, use raw sessions from the sessions table
+      if (sessions.length < 5) {
+        const rawSessions = db.listSessions(30);
+        const fallbackSessions = rawSessions.map(s => {
+          const msgs = db.getSessionMessages(s.id);
+          return {
+            messageCount: msgs.length,
+            durationMs: s.updatedAt - s.createdAt,
+            startTime: s.createdAt,
+          };
+        }).filter(s => s.messageCount > 0);
+        if (fallbackSessions.length > sessions.length) {
+          sessions = fallbackSessions;
+        }
+      }
+
       const rawScheduledItems = db.getScheduledItemsByUser('default');
       const scheduledItems = rawScheduledItems
         .filter(i => i.status !== 'expired')
@@ -540,6 +557,12 @@ export class BackgroundGardener {
             }, this.fusionProvider);
 
             if (result.decision === 'proact' && result.message) {
+              // Skip if a similar item already exists (prevents duplication)
+              if (db.hasSimilarPendingScheduledItem(userId, result.message)) {
+                this.logger.debug({ userId }, 'Skipping inner thoughts item - similar already pending');
+                continue;
+              }
+
               // Compute delivery time using timing model
               const currentHour = new Date().getHours();
               const timing = computeDeliveryTime({
@@ -557,7 +580,12 @@ export class BackgroundGardener {
                 source: 'agent',
                 type: 'follow_up',
                 message: result.message,
-                context: JSON.stringify({ source: 'inner_thoughts', reason: result.reason, urgency: result.urgency }),
+                context: JSON.stringify({
+                  source: 'inner_thoughts',
+                  reason: result.reason,
+                  urgency: result.urgency,
+                  gapSourceIds: gapSignals.map(s => s.sourceId),
+                }),
                 triggerAt: timing.deliverAt,
                 recurring: null,
                 sourceMemoryId: null,
@@ -876,12 +904,13 @@ export class BackgroundGardener {
               this.fusionProvider,
             );
 
-            // Stage 3: Create gated actions
-            const pendingItems = existingItems.filter(i => i.status === 'pending');
+            // Stage 3: Create gated actions (pass context for sourceId-based dedup)
+            const pendingItems = existingItems.filter(i => i.status === 'pending' || i.status === 'fired');
             const actions = createGapActions(
               diagnosed,
               dial as 'conservative' | 'moderate' | 'eager',
-              pendingItems.map(i => ({ message: i.message })),
+              pendingItems.map(i => ({ message: i.message, context: i.context })),
+              userId,
             );
 
             // Insert scheduled items with timing model (replaces fixed 30-min delay)

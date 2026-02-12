@@ -26,6 +26,7 @@ import {
   BackgroundGardener,
   OllamaEmbedder,
   LLMFactExtractor,
+  SessionSummarizer,
   ScallopMemoryStore,
   type EmbeddingProvider,
 } from '../memory/index.js';
@@ -150,14 +151,6 @@ export class Gateway {
     });
     this.logger.debug('Goal service initialized');
 
-    // Background gardener processes ScallopMemory decay
-    this.backgroundGardener = new BackgroundGardener({
-      scallopStore: this.scallopMemoryStore,
-      logger: this.logger,
-      interval: 60000, // 1 minute
-      fusionProvider: rerankProvider,
-    });
-
     // Initialize LLM-based fact extractor
     // Use a chat-capable provider (not Ollama which may only have embedding models)
     // This runs asynchronously and doesn't block the main conversation
@@ -177,6 +170,20 @@ export class Gateway {
       });
       this.logger.debug({ provider: factExtractionProvider.name }, 'LLM fact extractor initialized');
     }
+
+    // Background gardener processes ScallopMemory decay
+    // Created after factExtractionProvider so SessionSummarizer can use a chat-capable LLM
+    const sessionSummarizer = factExtractionProvider
+      ? new SessionSummarizer({ provider: factExtractionProvider, logger: this.logger, embedder })
+      : undefined;
+    this.backgroundGardener = new BackgroundGardener({
+      scallopStore: this.scallopMemoryStore,
+      logger: this.logger,
+      interval: 60000, // 1 minute
+      fusionProvider: rerankProvider,
+      sessionSummarizer,
+      workspace: this.config.agent.workspace,
+    });
 
     this.logger.debug('Memory system initialized');
 
