@@ -263,8 +263,9 @@ export class OpenRouterProvider implements LLMProvider {
         // Retry on rate limit
         if (response.status === 429) {
           const retryAfter = response.headers.get('retry-after');
-          const delay = retryAfter
-            ? parseInt(retryAfter, 10) * 1000
+          const retryAfterSecs = retryAfter ? parseInt(retryAfter, 10) : NaN;
+          const delay = !isNaN(retryAfterSecs)
+            ? retryAfterSecs * 1000
             : RETRY_DELAY_MS * Math.pow(2, attempt);
           await this.delay(delay);
           continue;

@@ -545,8 +545,12 @@ export class ScallopDatabase {
       if (!hasSourceColumn) {
         this.db.exec("ALTER TABLE memories ADD COLUMN source TEXT DEFAULT 'user'");
       }
-    } catch {
-      // Column might already exist or table might not exist yet
+    } catch (error) {
+      // Column might already exist or table might not exist yet — log for visibility
+      if (error instanceof Error && !error.message.includes('duplicate column')) {
+        // eslint-disable-next-line no-console
+        console.warn(`[migration] migrateAddSourceColumn: ${error.message}`);
+      }
     }
   }
 
@@ -561,8 +565,11 @@ export class ScallopDatabase {
       if (!hasTimezoneColumn) {
         this.db.exec("ALTER TABLE bot_config ADD COLUMN timezone TEXT NOT NULL DEFAULT 'UTC'");
       }
-    } catch {
-      // Column might already exist or table might not exist yet
+    } catch (error) {
+      if (error instanceof Error && !error.message.includes('duplicate column')) {
+        // eslint-disable-next-line no-console
+        console.warn(`[migration] migrateAddTimezoneColumn: ${error.message}`);
+      }
     }
   }
 
@@ -585,8 +592,11 @@ export class ScallopDatabase {
           "UPDATE user_profiles SET user_id = 'default' WHERE user_id != 'default'"
         ).run();
       }
-    } catch {
-      // Tables might not exist yet on fresh DB
+    } catch (error) {
+      if (error instanceof Error) {
+        // eslint-disable-next-line no-console
+        console.warn(`[migration] migrateConsolidateMemoryUserIds: ${error.message}`);
+      }
     }
   }
 
@@ -607,8 +617,11 @@ export class ScallopDatabase {
       if (!columns.has('contradiction_ids')) {
         this.db.exec("ALTER TABLE memories ADD COLUMN contradiction_ids TEXT DEFAULT NULL");
       }
-    } catch {
-      // Columns might already exist or table might not exist yet
+    } catch (error) {
+      if (error instanceof Error && !error.message.includes('duplicate column')) {
+        // eslint-disable-next-line no-console
+        console.warn(`[migration] migrateAddSourceMemoryColumns: ${error.message}`);
+      }
     }
   }
 
@@ -704,8 +717,12 @@ export class ScallopDatabase {
         // eslint-disable-next-line no-console
         console.log(`[memory-cleanup] Archived ${total} polluted entries: ${skillResult.changes} skill outputs, ${assistantResult.changes} long assistant responses, ${proactiveResult.changes} proactive messages, ${questionResult.changes} questions, ${longResult.changes} oversized entries`);
       }
-    } catch {
-      // Migration failure is non-fatal
+    } catch (error) {
+      // Migration failure is non-fatal but log for debugging
+      if (error instanceof Error) {
+        // eslint-disable-next-line no-console
+        console.warn(`[migration] migrateCleanPollutedMemories: ${error.message}`);
+      }
     }
   }
 
@@ -1784,22 +1801,22 @@ export class ScallopDatabase {
       byUser.set(row.user_id, list);
     }
 
-    const toDelete: string[] = [];
+    const toDelete = new Set<string>();
     const deleteStmt = this.db.prepare('DELETE FROM scheduled_items WHERE id = ?');
 
     for (const items of byUser.values()) {
       const kept = new Set<number>(); // indices we've already decided to keep
       for (let i = 0; i < items.length; i++) {
-        if (toDelete.includes(items[i].id)) continue;
+        if (toDelete.has(items[i].id)) continue;
         kept.add(i);
         const wordsI = normalizeText(items[i].message);
         for (let j = i + 1; j < items.length; j++) {
-          if (toDelete.includes(items[j].id)) continue;
+          if (toDelete.has(items[j].id)) continue;
           // Only compare items within 7 days of each other
           if (Math.abs(items[i].trigger_at - items[j].trigger_at) > 7 * 24 * 60 * 60 * 1000) continue;
           const wordsJ = normalizeText(items[j].message);
           if (isSimilar(wordsI, wordsJ)) {
-            toDelete.push(items[j].id); // keep earlier (i), remove later (j)
+            toDelete.add(items[j].id); // keep earlier (i), remove later (j)
           }
         }
       }
@@ -1809,7 +1826,7 @@ export class ScallopDatabase {
       deleteStmt.run(id);
     }
 
-    return toDelete.length;
+    return toDelete.size;
   }
 
   /**
