@@ -476,11 +476,11 @@ export class MoonshotProvider implements LLMProvider {
           }
 
           // Rotate API key on auth errors (401, 403)
+          // Cap total rotations to one full cycle through all keys
           if ((error.status === 401 || error.status === 403) && keyRotationAttempts < maxKeyRotations) {
             keyRotationAttempts++;
             if (this.rotateApiKey()) {
-              attempt--; // Don't count this as a retry attempt
-              continue;
+              continue; // Count as a retry attempt to prevent infinite loops
             }
           }
         }

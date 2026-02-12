@@ -215,18 +215,18 @@ export class SignalChannel implements Channel, VoiceChannel {
   private handleLine(line: string): void {
     if (!line.trim()) return;
 
+    let data: { jsonrpc?: string; method?: string; params?: SignalMessage };
     try {
-      const data = JSON.parse(line);
-
-      // Handle JSON-RPC responses
-      if (data.jsonrpc === '2.0') {
-        if (data.method === 'receive') {
-          this.handleMessage(data.params);
-        }
-      }
+      data = JSON.parse(line);
     } catch {
       // Not JSON, might be status message
-      this.logger.debug({ line }, 'Non-JSON line from signal-cli');
+      this.logger.debug({ line: line.slice(0, 200) }, 'Non-JSON line from signal-cli');
+      return;
+    }
+
+    // Handle JSON-RPC responses
+    if (data.jsonrpc === '2.0' && data.method === 'receive' && data.params) {
+      this.handleMessage(data.params);
     }
   }
 

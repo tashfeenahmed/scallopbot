@@ -792,7 +792,8 @@ export class TelegramChannel {
       await mkdir(receivedDir, { recursive: true });
 
       const timestamp = Date.now();
-      const safeName = (document.file_name || 'file').replace(/[^a-zA-Z0-9.-]/g, '_');
+      const { basename } = await import('path');
+      const safeName = basename(document.file_name || 'file').replace(/[^a-zA-Z0-9.-]/g, '_');
       const savedPath = join(receivedDir, `${timestamp}_${safeName}`);
 
       await writeFile(savedPath, fileBuffer);
@@ -1006,11 +1007,12 @@ export class TelegramChannel {
       return;
     }
 
-    // Reject if already processing for this user (prevents double agent calls)
+    // Atomically check-and-set to prevent race between concurrent messages
     if (this.activeProcessing.has(userId)) {
       await ctx.reply('Still working on your previous message... Send /stop to cancel it.');
       return;
     }
+    this.activeProcessing.add(userId);
 
     // Extract reply context if user is replying to a previous message
     const fullMessage = this.buildMessageWithReplyContext(ctx, messageText);
@@ -1023,7 +1025,6 @@ export class TelegramChannel {
     }
 
     const typingInterval = this.startTypingIndicator(ctx);
-    this.activeProcessing.add(userId);
 
     try {
       const sessionId = await this.getOrCreateSession(userId);

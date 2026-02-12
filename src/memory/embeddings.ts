@@ -543,6 +543,7 @@ export class FallbackEmbedder implements EmbeddingProvider {
   private fallback: TFIDFEmbedder;
   private usingFallback = false;
   private consecutiveFailures = 0;
+  private recoveryTimer: ReturnType<typeof setTimeout> | null = null;
   private static readonly MAX_FAILURES_BEFORE_FALLBACK = 3;
 
   constructor(primary: EmbeddingProvider, fallback?: TFIDFEmbedder) {
@@ -569,14 +570,7 @@ export class FallbackEmbedder implements EmbeddingProvider {
     } catch {
       this.consecutiveFailures++;
       if (this.consecutiveFailures >= FallbackEmbedder.MAX_FAILURES_BEFORE_FALLBACK) {
-        this.usingFallback = true;
-        this.dimension = this.fallback.dimension;
-        // Schedule a retry of the primary after 5 minutes
-        setTimeout(() => {
-          this.usingFallback = false;
-          this.consecutiveFailures = 0;
-          this.dimension = this.primary.dimension;
-        }, 5 * 60 * 1000);
+        this.switchToFallback();
       }
       return this.fallback.embed(text);
     }
@@ -594,16 +588,26 @@ export class FallbackEmbedder implements EmbeddingProvider {
     } catch {
       this.consecutiveFailures++;
       if (this.consecutiveFailures >= FallbackEmbedder.MAX_FAILURES_BEFORE_FALLBACK) {
-        this.usingFallback = true;
-        this.dimension = this.fallback.dimension;
-        setTimeout(() => {
-          this.usingFallback = false;
-          this.consecutiveFailures = 0;
-          this.dimension = this.primary.dimension;
-        }, 5 * 60 * 1000);
+        this.switchToFallback();
       }
       return this.fallback.embedBatch(texts);
     }
+  }
+
+  /** Switch to fallback and schedule a recovery attempt */
+  private switchToFallback(): void {
+    this.usingFallback = true;
+    this.dimension = this.fallback.dimension;
+    // Clear any existing recovery timer before scheduling a new one
+    if (this.recoveryTimer) {
+      clearTimeout(this.recoveryTimer);
+    }
+    this.recoveryTimer = setTimeout(() => {
+      this.recoveryTimer = null;
+      this.usingFallback = false;
+      this.consecutiveFailures = 0;
+      this.dimension = this.primary.dimension;
+    }, 5 * 60 * 1000);
   }
 
   /** Check if currently using fallback */
@@ -613,9 +617,21 @@ export class FallbackEmbedder implements EmbeddingProvider {
 
   /** Reset to try primary again */
   resetFallback(): void {
+    if (this.recoveryTimer) {
+      clearTimeout(this.recoveryTimer);
+      this.recoveryTimer = null;
+    }
     this.usingFallback = false;
     this.consecutiveFailures = 0;
     this.dimension = this.primary.dimension;
+  }
+
+  /** Clean up timers. Call when destroying the embedder. */
+  destroy(): void {
+    if (this.recoveryTimer) {
+      clearTimeout(this.recoveryTimer);
+      this.recoveryTimer = null;
+    }
   }
 }
 

@@ -367,8 +367,11 @@ export class Tailscale {
 export function createTailscaleFromEnv(logger?: Logger): Tailscale {
   const mode = (process.env.TAILSCALE_MODE || 'off') as 'off' | 'serve' | 'funnel';
   const hostname = process.env.TAILSCALE_HOSTNAME;
-  const port = process.env.TAILSCALE_PORT
+  const parsedPort = process.env.TAILSCALE_PORT
     ? parseInt(process.env.TAILSCALE_PORT, 10)
+    : NaN;
+  const port = !isNaN(parsedPort) && parsedPort > 0 && parsedPort <= 65535
+    ? parsedPort
     : undefined;
   const resetOnExit = process.env.TAILSCALE_RESET_ON_EXIT !== 'false';
 

@@ -9,6 +9,7 @@ import json
 import argparse
 import tempfile
 import os
+import subprocess
 import logging
 
 # Suppress all logging from kokoro-onnx and other libraries
@@ -136,7 +137,10 @@ def main():
             # Convert to opus if requested
             if args.format == 'opus':
                 opus_file = args.output.replace('.wav', '.opus')
-                os.system(f'ffmpeg -y -i {args.output} -c:a libopus -b:a 32k {opus_file} 2>/dev/null')
+                subprocess.run(
+                    ['ffmpeg', '-y', '-i', args.output, '-c:a', 'libopus', '-b:a', '32k', opus_file],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True,
+                )
                 os.unlink(args.output)
                 args.output = opus_file
 
