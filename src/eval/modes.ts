@@ -18,7 +18,7 @@ import { calculateBM25Score, buildDocFreqMap } from '../memory/bm25.js';
 
 export type ModeSearchFn = (query: string, limit: number) => Promise<ScallopSearchResult[]>;
 
-export type EvalModeName = 'openclaw' | 'mem0' | 'scallopbot';
+export type EvalModeName = 'openclaw' | 'mem0' | 'scallopbot' | 'scallopbot-tuned';
 
 export interface EvalModeConfig {
   name: EvalModeName;
@@ -103,7 +103,7 @@ export const MEM0_MODE: EvalModeConfig = {
 export const SCALLOPBOT_MODE: EvalModeConfig = {
   name: 'scallopbot',
   label: 'ScallopBot',
-  searchWeights: { keyword: 0.5, semantic: 0.5, prominence: 0.0 },
+  searchWeights: { keyword: 0.3, semantic: 0.7, prominence: 0.0 },
   enableDecay: true,
   enableFusion: true,
   enableDreams: true,
@@ -112,6 +112,34 @@ export const SCALLOPBOT_MODE: EvalModeConfig = {
   enableFactExtraction: false,
   enableLLMDedup: false,
   enableReranking: true,
+  decayOverrides: {
+    categoryDecayRates: EVAL_CATEGORY_DECAY_RATES,
+  },
+};
+
+/**
+ * ScallopBot Tuned mode: same cognitive pipeline (fusion, NREM, decay)
+ * but with optimized search that removes the production scoring penalties.
+ *
+ * Changes from production ScallopBot search:
+ *   1. No prominence multiplier (prominence already gates active/dormant/archived)
+ *   2. 0.7 semantic / 0.3 keyword (semantic dominance like OpenClaw)
+ *   3. All memories as candidates (no candidateLimit)
+ *   4. Min score threshold 0.35 (was 0.01 — reduces noise)
+ *   5. Rank-based BM25 normalization (dampens keyword-heavy results)
+ */
+export const SCALLOPBOT_TUNED_MODE: EvalModeConfig = {
+  name: 'scallopbot-tuned',
+  label: 'ScallopBot-Tuned',
+  searchWeights: { keyword: 0.3, semantic: 0.7, prominence: 0.0 },
+  enableDecay: true,
+  enableFusion: true,
+  enableDreams: true,
+  enableReflection: true,
+  enableProactive: true,
+  enableFactExtraction: false,
+  enableLLMDedup: false,
+  enableReranking: false,
   decayOverrides: {
     categoryDecayRates: EVAL_CATEGORY_DECAY_RATES,
   },
@@ -225,6 +253,59 @@ export function createModeSearch(
 
       scored.sort((a, b) => b.score - a.score);
       return scored.slice(0, limit);
+    };
+  }
+
+  if (mode.name === 'scallopbot-tuned') {
+    // ScallopBot-Tuned: same memory store as ScallopBot (with fusion/NREM/decay)
+    // but with optimized retrieval: no prominence multiplier, 0.7 semantic,
+    // rank-based BM25, minScore=0.35, all candidates.
+    return async (query: string, limit: number) => {
+      const minScore = 0.35;
+      const candidates = db.getMemoriesByUser('default', {
+        isLatest: true,
+        includeAllSources: true,
+      });
+      if (candidates.length === 0) return [];
+
+      const queryEmbedding = await embedder.embed(query);
+
+      // Build BM25 corpus stats
+      const docs = candidates.map(m => m.content);
+      const docFreq = buildDocFreqMap(docs);
+      const avgDocLen = docs.reduce((sum, d) => sum + d.split(/\s+/).length, 0) / docs.length;
+
+      const withBM25 = candidates
+        .filter(m => m.embedding != null)
+        .map(m => ({
+          memory: m,
+          cosine: cosineSimilarity(queryEmbedding, m.embedding!),
+          bm25Raw: calculateBM25Score(query, m.content, {
+            avgDocLength: avgDocLen,
+            docCount: candidates.length,
+            docFreq,
+          }),
+        }));
+
+      // Rank-based BM25 normalization (compresses keyword influence)
+      const bm25Sorted = [...withBM25].sort((a, b) => b.bm25Raw - a.bm25Raw);
+      const bm25RankMap = new Map<string, number>();
+      bm25Sorted.forEach((item, rank) => {
+        bm25RankMap.set(item.memory.id, rank);
+      });
+
+      // Fuse: 0.7 * cosine + 0.3 * rankBM25 — NO prominence multiplier
+      const scored = withBM25.map(item => {
+        const bm25Rank = bm25RankMap.get(item.memory.id) ?? withBM25.length;
+        const bm25RankScore = 1 / (1 + bm25Rank);
+        const score = 0.7 * item.cosine + 0.3 * bm25RankScore;
+        return { memory: item.memory, score, sourceChunk: item.memory.sourceChunk, matchType: 'hybrid' as const };
+      });
+
+      scored.sort((a, b) => b.score - a.score);
+      return scored
+        .filter(r => r.score >= minScore)
+        .slice(0, limit);
     };
   }
 
