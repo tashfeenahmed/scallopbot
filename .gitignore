@@ -46,6 +46,7 @@ data/
 
 # Specs/planning
 specs/
+.planning/
 
 # SSH keys
 hetzner-server
