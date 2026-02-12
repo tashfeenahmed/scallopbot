@@ -150,18 +150,19 @@ describe('E2E Cognitive Dream Cycle', () => {
       // Assert fused memory prominence <= 0.6 (capped)
       expect(fusedMemory!.prominence).toBeLessThanOrEqual(0.6);
 
-      // Assert original 4 memories are marked superseded
-      const supersededMemories = db.raw<{
+      // Assert original 4 memories are kept searchable (not superseded)
+      // Fused memory is supplementary — originals retain specific details for multi-hop retrieval
+      const activeMemories = db.raw<{
         id: string;
         memory_type: string;
         is_latest: number;
       }>(
-        "SELECT id, memory_type, is_latest FROM memories WHERE user_id = 'default' AND memory_type = 'superseded' AND is_latest = 0",
+        "SELECT id, memory_type, is_latest FROM memories WHERE user_id = 'default' AND memory_type = 'regular' AND is_latest = 1",
         []
       );
-      const supersededIds = new Set(supersededMemories.map(m => m.id));
+      const activeIds = new Set(activeMemories.map(m => m.id));
       for (const srcId of sourceMemoryIds) {
-        expect(supersededIds.has(srcId)).toBe(true);
+        expect(activeIds.has(srcId)).toBe(true);
       }
 
       // Assert DERIVES relations exist from fused memory to each source

@@ -62,6 +62,10 @@ test-vision*.ts
 
 # PDFs
 pdf/
+*.pdf
+
+# Evals
+evals/
 
 # Web UI
 web/node_modules/
