@@ -210,7 +210,7 @@ export class ScallopMemoryStore {
       for (const mem of existing) {
         if (!mem.embedding) continue;
         const sim = cosineSimilarity(embedding, mem.embedding);
-        if (sim >= 0.82 && sim > bestSim) {
+        if (sim >= 0.93 && sim > bestSim) {
           bestSim = sim;
           bestMatch = mem;
         }
@@ -364,21 +364,19 @@ export class ScallopMemoryStore {
       documentDateRange,
     } = options;
 
-    // Get candidate memories - use a large pool so BM25 can find keyword matches
-    // even when they're not the highest-prominence memories
-    const candidateLimit = Math.max(limit * 5, 200);
+    // Get ALL candidate memories so BM25 and semantic search
+    // score the full corpus — no artificial cap that could exclude relevant matches
     let candidates: ScallopMemoryEntry[];
     if (userId) {
       candidates = this.db.getMemoriesByUser(userId, {
         category,
         minProminence,
         isLatest,
-        limit: candidateLimit,
-        includeAllSources: false, // Exclude skill outputs and system pollution
+        includeAllSources: true,
       });
     } else {
       this.logger.warn('Search called without userId - searching ALL users. This may leak memories across users in multi-user deployments.');
-      candidates = this.db.getAllMemories({ minProminence, limit: candidateLimit });
+      candidates = this.db.getAllMemories({ minProminence });
     }
 
     // Apply date filters
@@ -437,20 +435,20 @@ export class ScallopMemoryStore {
       return { memory, rawBM25, semanticScore };
     });
 
-    // Min-max normalize BM25 values across the candidate pool
-    let minBM25 = Infinity;
-    let maxBM25 = -Infinity;
-    for (const s of rawScores) {
-      if (s.rawBM25 < minBM25) minBM25 = s.rawBM25;
-      if (s.rawBM25 > maxBM25) maxBM25 = s.rawBM25;
-    }
-    const bm25Range = maxBM25 - minBM25;
+    // Rank-based BM25 normalization: sort by raw BM25 descending, assign ranks,
+    // normalize as 1/(1+rank). This compresses keyword influence and prevents
+    // keyword-heavy memories from dominating over semantic matches.
+    const bm25Sorted = [...rawScores].sort((a, b) => b.rawBM25 - a.rawBM25);
+    const bm25RankMap = new Map<string, number>();
+    bm25Sorted.forEach((item, rank) => {
+      bm25RankMap.set(item.memory.id, rank);
+    });
 
-    // Pass 2: Normalize and combine scores
+    // Pass 2: Combine scores with rank-based BM25
     const results: ScallopSearchResult[] = [];
     for (const { memory, rawBM25, semanticScore } of rawScores) {
-      // Min-max normalized BM25 (preserves full discriminative range)
-      const keywordScore = bm25Range > 0 ? (rawBM25 - minBM25) / bm25Range : 0;
+      const bm25Rank = bm25RankMap.get(memory.id) ?? rawScores.length;
+      const keywordScore = 1 / (1 + bm25Rank);
 
       let matchType: 'semantic' | 'keyword' | 'hybrid' = 'keyword';
       if (semanticScore > 0) {
@@ -460,17 +458,19 @@ export class ScallopMemoryStore {
         }
       }
 
-      // Combine scores with multiplicative prominence
       const relevanceScore = keywordScore * SEARCH_WEIGHTS.keyword + semanticScore * SEARCH_WEIGHTS.semantic;
-      const prominenceMultiplier = 0.5 + 0.5 * memory.prominence;
-      let score = relevanceScore * prominenceMultiplier;
+
+      // Prominence already gates visibility via minProminence threshold
+      // (active/dormant/archived). No additional scoring penalty needed —
+      // decay handles long-term forgetting, search should rank purely by relevance.
+      let score = relevanceScore;
 
       // Boost for exact matches
       if (memory.content.toLowerCase().includes(queryLower)) {
         score *= 1.5;
       }
 
-      if (score > 0.01) {
+      if (score >= 0.35) {
         results.push({
           memory,
           score,
