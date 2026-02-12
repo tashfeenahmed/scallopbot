@@ -49,6 +49,8 @@ export interface BackgroundGardenerOptions {
   quietHours?: { start: number; end: number };
   /** Workspace directory for SOUL.md I/O (optional — reflection skipped if not provided) */
   workspace?: string;
+  /** Disable utility-based archival in deepTick (for eval — batch ingestion has no retrieval) */
+  disableArchival?: boolean;
 }
 
 /**
@@ -79,6 +81,7 @@ export class BackgroundGardener {
   private sleepTickCount = 0;
   private quietHours: { start: number; end: number };
   private workspace?: string;
+  private disableArchival: boolean;
 
   /** Deep consolidation runs every DEEP_EVERY light ticks.
    *  With default 5-min interval: 72 ticks × 5 min = 6 hours */
@@ -96,6 +99,7 @@ export class BackgroundGardener {
     this.fusionProvider = options.fusionProvider;
     this.quietHours = options.quietHours ?? { start: 2, end: 5 };
     this.workspace = options.workspace;
+    this.disableArchival = options.disableArchival ?? false;
   }
 
   start(): void {
@@ -260,11 +264,8 @@ export class BackgroundGardener {
               db.addRelation(fusedMemory.id, source.id, 'DERIVES', 0.95);
             }
 
-            // Mark sources as superseded
-            for (const source of cluster) {
-              this.scallopStore.update(source.id, { isLatest: false });
-              db.updateMemory(source.id, { memoryType: 'superseded' });
-            }
+            // Keep originals searchable — fused memory is supplementary, not a replacement
+            // (Superseding loses specific details that multi-hop retrieval needs)
 
             // Set fused memory prominence
             const maxProminence = Math.max(...cluster.map(m => m.prominence));
@@ -324,25 +325,29 @@ export class BackgroundGardener {
 
     // 3b. Utility-based archival of low-utility active memories
     let archiveCount = 0;
-    try {
-      const archiveResult = archiveLowUtilityMemories(db, {
-        utilityThreshold: 0.1,
-        minAgeDays: 14,
-        maxPerRun: 50,
-      });
-      archiveCount = archiveResult.archived;
-    } catch (err) {
-      this.logger.warn({ error: (err as Error).message }, 'Utility-based archival failed');
+    if (!this.disableArchival) {
+      try {
+        const archiveResult = archiveLowUtilityMemories(db, {
+          utilityThreshold: 0.1,
+          minAgeDays: 14,
+          maxPerRun: 50,
+        });
+        archiveCount = archiveResult.archived;
+      } catch (err) {
+        this.logger.warn({ error: (err as Error).message }, 'Utility-based archival failed');
+      }
     }
 
     // 3c. Hard prune truly dead memories (very low prominence + superseded)
     let sessionsDeleted = 0;
     let memoriesDeleted = 0;
-    try {
-      sessionsDeleted = db.pruneOldSessions(30);
-      memoriesDeleted = db.pruneArchivedMemories(0.01);
-    } catch (err) {
-      this.logger.warn({ error: (err as Error).message }, 'Hard pruning failed');
+    if (!this.disableArchival) {
+      try {
+        sessionsDeleted = db.pruneOldSessions(30);
+        memoriesDeleted = db.pruneArchivedMemories(0.01);
+      } catch (err) {
+        this.logger.warn({ error: (err as Error).message }, 'Hard pruning failed');
+      }
     }
 
     // 3d. Prune orphaned relation edges
@@ -658,11 +663,8 @@ export class BackgroundGardener {
                   db.addRelation(fusedMemory.id, sourceId, 'DERIVES', 0.95);
                 }
 
-                // Mark sources as superseded
-                for (const sourceId of result.sourceMemoryIds) {
-                  this.scallopStore.update(sourceId, { isLatest: false });
-                  db.updateMemory(sourceId, { memoryType: 'superseded' });
-                }
+                // Keep originals searchable — fused memory is supplementary, not a replacement
+                // (Superseding loses specific details that multi-hop retrieval needs)
 
                 // Set fused memory prominence
                 const sourceMemories = allMemories.filter(m => result.sourceMemoryIds.includes(m.id));

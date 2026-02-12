@@ -40,7 +40,7 @@ dotenv.config({ path: path.resolve(import.meta.dirname, '../../.env') });
  * Wraps a real LLMProvider with call logging for metrics collection.
  * Same interface as CognitiveMockProvider so metrics.ts works unchanged.
  */
-interface TrackedProvider extends LLMProvider {
+export interface TrackedProvider extends LLMProvider {
   callLog: CognitiveCallLogEntry[];
   callCount: number;
 }
@@ -59,7 +59,7 @@ function detectOperationType(request: CompletionRequest): string {
   return 'default';
 }
 
-function createTrackedProvider(inner: LLMProvider): TrackedProvider {
+export function createTrackedProvider(inner: LLMProvider): TrackedProvider {
   return {
     name: inner.name,
     callLog: [],
@@ -81,7 +81,7 @@ interface EvalProviders {
   llmProvider: TrackedProvider;
 }
 
-function createEvalProviders(): EvalProviders {
+export function createEvalProviders(): EvalProviders {
   const moonshotKey = process.env.MOONSHOT_API_KEY;
   if (!moonshotKey) {
     throw new Error('MOONSHOT_API_KEY not found in environment. Add it to .env in the project root.');
@@ -404,7 +404,7 @@ export async function runEval(
 /**
  * Simple rule-based message categorization.
  */
-function categorizeMessage(content: string): 'preference' | 'fact' | 'event' | 'relationship' | 'insight' {
+export function categorizeMessage(content: string): 'preference' | 'fact' | 'event' | 'relationship' | 'insight' {
   const lower = content.toLowerCase();
   if (lower.includes('favorite') || lower.includes('prefer') || lower.includes('love') || lower.includes('hobby')) {
     return 'preference';
@@ -422,7 +422,7 @@ function categorizeMessage(content: string): 'preference' | 'fact' | 'event' | '
 /**
  * Simple rule-based importance estimation (1-10 scale).
  */
-function estimateImportance(content: string): number {
+export function estimateImportance(content: string): number {
   const lower = content.toLowerCase();
   let score = 5;
   // Identity/preference facts need importance >= 8 for decay protection
@@ -462,7 +462,7 @@ function extractTopics(text: string): string[] {
  * facts, preferences, and biographical details from conversational text.
  * Accepts a session's worth of messages batched together.
  */
-async function extractFactsWithLLM(provider: LLMProvider, messages: string): Promise<string[]> {
+export async function extractFactsWithLLM(provider: LLMProvider, messages: string): Promise<string[]> {
   const response = await provider.complete({
     system: [
       'You are a Personal Information Organizer, specialized in accurately storing facts, user memories, and preferences.',
@@ -502,7 +502,7 @@ interface Mem0Action {
   index?: number; // index into the existing memories array
 }
 
-async function decideMem0Action(
+export async function decideMem0Action(
   provider: LLMProvider,
   newFact: string,
   existingMemories: string[],

@@ -76,7 +76,7 @@
   #v(0.15cm)
   #text(size: 9.5pt, fill: luma(80))[
     Independent Researcher \
-    Vienna, Austria
+    Dublin, Ireland
   ]
   #v(0.3cm)
   #line(length: 30%, stroke: 0.4pt + luma(160))
@@ -93,7 +93,7 @@
   radius: 2pt,
 )[
   #text(weight: "bold", size: 10pt)[Abstract.]
-  The proliferation of open-source personal AI agents---exemplified by OpenClaw's 145,000-star trajectory---has produced increasingly capable task-execution frameworks. However, as noted in recent critical analysis, these systems remain "amazing hands for a brain that doesn't yet exist" (Goertzel, 2026): they excel at tool orchestration but lack genuine cognitive depth in memory management, self-reflection, and autonomous reasoning. This paper presents ScallopBot, a bio-inspired cognitive architecture implemented in ~45,000 lines of TypeScript that addresses this cognition gap while maintaining full compatibility with the OpenClaw skill ecosystem. ScallopBot introduces six architectural contributions: (1) hybrid memory retrieval combining BM25, semantic embeddings, and LLM re-ranking; (2) a complete memory lifecycle with exponential decay, BFS-clustered fusion, and utility-based forgetting; (3) spreading activation over typed relation graphs; (4) a two-phase dream cycle implementing NREM consolidation and REM stochastic exploration; (5) affect-aware interaction with dual-EMA mood tracking and observation-only prompt injection; and (6) trust-calibrated proactive intelligence with a three-stage gap scanner and engagement feedback loop. We validate each contribution against 30 research works from 2023--2026 across six domains, demonstrating that the system independently converged on patterns now recognised as state-of-the-art. The architecture operates at an estimated \$0.06--0.10 per day through strategic multi-provider LLM routing, demonstrating that principled application-level engineering---without model training or fine-tuning---can bridge the gap between reactive tool execution and genuine cognitive agency.
+  Open-source personal AI agents such as OpenClaw have achieved widespread adoption through tool orchestration and multi-platform connectivity, yet they lack genuine cognitive depth: no memory lifecycle, no self-reflection, and no autonomous reasoning. We present ScallopBot, a bio-inspired cognitive architecture that addresses this gap while maintaining full compatibility with the OpenClaw skill ecosystem. The architecture comprises six subsystems: (1) three-signal hybrid retrieval combining BM25, semantic embeddings, and LLM re-ranking; (2) a complete memory lifecycle with exponential decay, BFS-clustered fusion, and utility-based forgetting; (3) spreading activation over typed relation graphs; (4) a two-phase dream cycle modelling NREM consolidation and REM stochastic exploration; (5) affect-aware interaction via dual-EMA mood tracking with an observation-only prompt guard; and (6) trust-calibrated proactive intelligence with gap scanning and engagement feedback. We evaluate ScallopBot through a 30-day empirical benchmark using real embedding and LLM providers, achieving Precision\@5 of 0.68 compared with 0.47 (OpenClaw) and 0.38 (Mem0), and validate each subsystem against 30 research works from 2023--2026 spanning six domains. The full cognitive pipeline operates at an estimated \$0.06--0.10 per day, demonstrating that principled application-level engineering---without model training or fine-tuning---can bridge the gap between reactive tool execution and cognitive agency.
 
   #v(0.5em)
   #text(weight: "bold", size: 9pt)[Keywords:] #text(size: 9pt)[cognitive architecture, personal AI agents, bio-inspired computing, memory systems, spreading activation, dream consolidation, proactive agents, OpenClaw, agent memory lifecycle]
@@ -138,46 +138,6 @@ This paper makes the following contributions:
 
 + We present a cost analysis demonstrating that the full cognitive pipeline operates at \$0.06--0.10 per day through strategic provider routing, challenging the assumption that cognitive capabilities require expensive compute.
 
-== Paper Organisation
-
-The remainder of this paper is organised as follows. @sec-background surveys related work across agent memory, cognitive architectures, and proactive AI. @sec-architecture presents the system architecture and its OpenClaw integration. @sec-memory details the hybrid memory engine and its lifecycle. @sec-cognitive describes the cognitive layer: dreams, affect, reflection, and proactive intelligence. @sec-evaluation presents our validation methodology and research alignment analysis. @sec-discussion examines convergence patterns, limitations, and implications. @sec-conclusion concludes with directions for future work.
-
-
-// ════════════════════════════════════════════════════════════════
-= Background and Related Work <sec-background>
-// ════════════════════════════════════════════════════════════════
-
-== Personal AI Agent Frameworks
-
-The landscape of personal AI agents has evolved rapidly since ChatGPT's release in late 2022. Early frameworks focused on single-turn instruction following, but the field has progressively moved toward persistent, multi-session agents with tool-use capabilities.
-
-*OpenClaw* (formerly Clawdbot, then Moltbot) represents the current state-of-the-art in open-source agent deployment #cite(<openclaw-github>). Built as a Node.js message router, it connects to 15+ messaging platforms and provides an AgentSkills system with 100+ preconfigured modules. Its memory architecture uses a file-first, Markdown-driven approach with two layers: daily logs (`memory/YYYY-MM-DD.md`) for ephemeral session context and a curated `MEMORY.md` for stable long-term knowledge. Search uses hybrid vector embeddings (via `sqlite-vec`) and SQLite FTS5 full-text search #cite(<openclaw-memory>). Notable features include automatic memory flush before context compaction and a Heartbeat system for proactive wake-up. However, OpenClaw lacks memory lifecycle management (no decay, fusion, or forgetting), self-reflection, affect detection, and trust-calibrated proactive delivery---limitations explicitly identified by Goertzel #cite(<goertzel-hands>).
-
-*MemGPT* (Packer et al., 2023) draws an explicit analogy between LLM agents and operating systems, introducing hierarchical memory tiers and interrupt-driven control flow #cite(<memgpt>). This OS-inspired framing influenced ScallopBot's BackgroundGardener design, which serves as a persistent process managing memory across tiers with tiered scheduling.
-
-*CoALA* (Sumers et al., 2024) proposes Cognitive Architectures for Language Agents, drawing on SOAR and ACT-R to argue for autonomous cognitive loops that run between user messages #cite(<coala>). ScallopBot's three-tier heartbeat directly implements CoALA's recommendation for continuous internal reasoning.
-
-== Agent Memory Systems
-
-Memory has emerged as the critical differentiator between stateless assistants and persistent agents. Hu et al. (2025) present the most comprehensive survey to date, with 47 co-authors cataloguing memory forms, functions, and dynamics #cite(<hu-memory-survey>). Their taxonomy identifies hybrid retrieval---combining keyword, semantic, and metadata signals---as the emerging standard, finding that "utility-based deletion strategies yield up to 10% performance gains over naive approaches."
-
-*Mem0* (Chhikara et al., 2025) demonstrates that a scalable memory architecture with dynamic extraction, consolidation, and retrieval achieves a 26% accuracy improvement over baseline OpenAI memory, with 91% lower latency and 90% token savings #cite(<mem0>). *SeCom* (Pan et al., 2025) at ICLR 2025 shows that memory granularity matters: turn-level, session-level, and summarisation-based methods have distinct trade-offs, and prompt compression serves as an effective denoising mechanism #cite(<secom>).
-
-Yang et al. (2026) present a taxonomy of graph-based agent memory, identifying typed relation graphs with consolidation operations as a key capability #cite(<yang-graph-memory>). Alqithami (2025) introduces the Memory-Aware Retention Schema (MaRS) framework, benchmarking six forgetting policies and finding that hybrid forgetting---combining recency, frequency, and importance---achieves a composite score of 0.911 #cite(<alqithami-mars>). Li et al. (2025) propose MemOS, a memory operating system providing "unified scheduling and lifecycle management" #cite(<memos>). Latimer et al. (2025) present Hindsight, organising memory into four epistemically-distinct networks with explicit retain/recall/reflect operations #cite(<hindsight>).
-
-== Bio-Inspired Cognitive Architectures
-
-The connection between neuroscience and AI agent design has strengthened considerably in 2025--2026. Zhang (2026) provides a computational account of dreaming, modelling how stochastic hippocampal activation during sleep serves dual functions: consolidating existing memories and generating novel learning through "controlled stochastic replay" #cite(<zhang-dreaming>). This work provides direct theoretical grounding for implementing dream-inspired offline consolidation in agent systems.
-
-Pavlović et al. (2025) validate spreading activation for document retrieval in knowledge-graph-based RAG systems, demonstrating improvements over standard approaches #cite(<pavlovic-spreading>). Their framework applies the same algorithm---spreading activation over automatically constructed knowledge graphs---that cognitive architectures like ACT-R have used for decades.
-
-In the affect domain, Mozikov et al. (2024) demonstrate at NeurIPS that LLMs exhibit measurable behavioural shifts when prompted with emotional context #cite(<mozikov-emotional>). Lu & Li (2025) introduce Dynamic Affective Memory Management with Bayesian-inspired updates #cite(<lu-affective-memory>), and Chandra et al. (2025) provide longitudinal evidence (149 participants, five weeks) for the importance of emotional AI interaction #cite(<chandra-longitudinal>).
-
-== Proactive Conversational AI
-
-Deng et al. (2025) present the most comprehensive survey of proactive conversational AI in _ACM Transactions on Information Systems_, identifying three core capabilities: topic planning, strategy planning, and knowledge planning #cite(<deng-proactive-survey>). Liu et al. (2025) introduce the Inner Thoughts framework at CHI 2025, giving agents "a continuous, covert train of thoughts in parallel to the overt communication process" #cite(<liu-inner-thoughts>). Pasternak et al. (2025) decompose proactivity into three stages in PROBE: searching for issues, identifying bottlenecks, and executing resolutions #cite(<pasternak-probe>). Critically, Diebel et al. (2025) provide a counterpoint: proactive help leads to higher loss of users' competence-based self-esteem, motivating the need for trust-calibrated delivery mechanisms #cite(<diebel-proactive>).
-
-Sun et al. (2025) from CMU introduce the PPP framework (Productivity, Proactivity, Personalization), demonstrating that optimising these three dimensions jointly produces agents that outperform GPT-5 by 21.6 points #cite(<sun-ppp>). This work validates the integration of proactivity with personalization---precisely the combination ScallopBot implements through its gap scanner, trust feedback loop, and SOUL evolution.
 
 
 // ════════════════════════════════════════════════════════════════
@@ -227,24 +187,7 @@ The architectural significance of this compatibility is that it decouples _cogni
 
 == Multi-Provider LLM Routing
 
-ScallopBot routes LLM requests across seven providers (Anthropic, OpenAI, Groq, Moonshot/Kimi, xAI, Ollama, OpenRouter) with task-appropriate allocation:
-
-#table(
-  columns: (1.5fr, 1fr, 2fr),
-  inset: 6pt,
-  stroke: 0.4pt + luma(180),
-  table.header([*Task*], [*Provider Tier*], [*Rationale*]),
-  [Primary conversation], [Capable (Anthropic)], [Best reasoning quality],
-  [Memory re-ranking], [Fast (Groq)], [Low latency, low cost, high volume],
-  [Relation classification], [Fast (Groq)], [High throughput needed],
-  [Memory fusion], [Standard / Capable], [Quality matters for summaries],
-  [Dream REM judge], [Fast (Groq)], [Many calls per cycle, cost-sensitive],
-  [Self-reflection], [Capable (Anthropic)], [Nuanced analysis required],
-  [Gap scanner diagnosis], [Standard], [Balance of cost and quality],
-  [Affect classification], [Local (AFINN-165)], [Zero API cost, sub-ms latency],
-)
-
-Each subsystem specifies its provider through an opt-in provider pattern: a `rerankProvider`, `classifierProvider`, `fusionProvider`, etc., all optional with graceful fallback. This enables fine-grained cost--quality optimisation without architectural coupling, addressing RQ3.
+ScallopBot routes LLM requests across seven providers (Anthropic, OpenAI, Groq, Moonshot/Kimi, xAI, Ollama, OpenRouter) following a simple principle: high-reasoning tasks (primary conversation, self-reflection, memory fusion) use capable-tier providers (Anthropic); high-volume, low-complexity tasks (re-ranking, relation classification, REM dream judging) use fast-tier providers (Groq); and affect classification uses a local AFINN-165 lexicon at zero API cost. Each subsystem specifies its provider through an opt-in pattern (`rerankProvider`, `classifierProvider`, `fusionProvider`, etc.), all optional with graceful fallback, enabling fine-grained cost--quality optimisation without architectural coupling.
 
 == Architecture Overview
 
@@ -431,7 +374,7 @@ Memories decay exponentially with type-specific and category-specific rates. The
 
 Category-specific half-lives range from 14 days (events) to 346 days (relationships), calibrated to match the expected persistence of different information types. Three prominence thresholds partition the memory space: ACTIVE ($> 0.5$), DORMANT ($0.1$--$0.5$), and ARCHIVED ($< 0.1$).
 
-This multi-factor approach independently converged on the design recommended by Alqithami's MaRS framework #cite(<alqithami-mars>), which benchmarked six forgetting policies and found that hybrid forgetting---combining recency, frequency, and importance---achieved a composite score of 0.911 across narrative coherence, goal completion, and privacy preservation.
+This multi-factor approach aligns with the design recommended by Alqithami's MaRS framework #cite(<alqithami-mars>), which benchmarked six forgetting policies and found that hybrid forgetting---combining recency, frequency, and importance---achieved a composite score of 0.911 across narrative coherence, goal completion, and privacy preservation.
 
 === BFS-Clustered Fusion
 
@@ -493,7 +436,7 @@ The cognitive layer provides autonomous background processing through a three-ti
   caption: [Three-tier heartbeat scheduling. Lighter operations run more frequently; heavy cognitive processing is batched into nightly sleep ticks.],
 ) <tab-heartbeat>
 
-This tiered design mirrors biological circadian rhythms: continuous background monitoring (analogous to autonomic function), periodic maintenance (analogous to short rest), and deep cognitive processing during quiescent periods (analogous to sleep). The design aligns with Li et al.'s MemOS recommendation for "priority-driven scheduling" of memory operations #cite(<memos>).
+This tiered design mirrors biological circadian rhythms: continuous background monitoring (analogous to autonomic function), periodic maintenance (analogous to short rest), and deep cognitive processing during quiescent periods (analogous to sleep). The design aligns with Li et al.'s MemOS recommendation for "priority-driven scheduling" of memory operations #cite(<memos>) and extends the OS-inspired framing of MemGPT #cite(<memgpt>), which drew an analogy between LLM agents and operating systems with hierarchical memory tiers and interrupt-driven control flow. CoALA #cite(<coala>) provides additional theoretical grounding, arguing from SOAR and ACT-R traditions for autonomous cognitive loops that run between user messages.
 
 == Bio-Inspired Dream Cycle <sec-dreams>
 
@@ -528,7 +471,7 @@ ScallopBot's affect pipeline (`affect.ts`, `affect-lexicon.ts`) implements emoti
 + *VADER-style heuristics*: negation handling, booster words, emoji valence
 + *Russell circumplex mapping*: Valence $times$ arousal $arrow.r$ discrete emotion labels (happy, excited, calm, content, sad, angry, anxious, frustrated, neutral)
 
-This produces a zero-cost, sub-millisecond affect classification that runs on every message. Scores are smoothed via *dual-EMA*: a fast component (2-hour half-life) tracks session-level mood shifts, while a slow component (3-day half-life) tracks baseline mood trends. The divergence between fast and slow EMAs serves as a distress signal: if the fast EMA drops significantly below the slow baseline, the system infers acute negative affect.
+This produces a zero-cost, sub-millisecond affect classification that runs on every message. Scores are smoothed via *dual-EMA*: a fast component (2-hour half-life) tracks session-level mood shifts, while a slow component (3-day half-life) tracks baseline mood trends. The divergence between fast and slow EMAs serves as a distress signal: if the fast EMA drops significantly below the slow baseline, the system infers acute negative affect. This dual-timescale approach aligns with Lu & Li's (2025) Dynamic Affective Memory Management #cite(<lu-affective-memory>), and is motivated by longitudinal evidence from Chandra et al. (2025) showing that emotional AI interaction significantly impacts user engagement over multi-week deployments #cite(<chandra-longitudinal>).
 
 Critically, affect signals are injected into the system prompt as an *observation-only* context block. The *affect guard* ensures that emotional signals inform agent _awareness_ without contaminating _instruction_---the agent knows the user seems frustrated but is not instructed to act differently because of it. This design decision was motivated by Mozikov et al.'s (2024) finding that emotional prompting causes measurable behavioural shifts in LLMs #cite(<mozikov-emotional>): without the guard, affect injection could introduce systematic reasoning bias.
 
@@ -556,34 +499,19 @@ This pattern enables continuous self-improvement without model modification: the
 
 == Proactive Intelligence <sec-proactive>
 
-ScallopBot's proactive system spans four components that collectively address the challenge of appropriate autonomous action:
+ScallopBot's proactive system addresses the challenge of appropriate autonomous action, operating within the broader framework surveyed by Deng et al. #cite(<deng-proactive-survey>) who identify topic planning, strategy planning, and knowledge planning as core proactive capabilities.
 
-=== Three-Stage Gap Scanner
+=== Gap Scanner and Delivery Pipeline
 
 The gap scanner implements the PROBE three-stage pipeline #cite(<pasternak-probe>):
 
-+ *Search* (zero LLM cost): Database queries scan for unresolved questions, approaching deadlines, stale scheduled items, and behavioural anomalies. This phase is purely computational---no LLM calls.
++ *Search* (zero LLM cost): Database queries scan for unresolved questions, approaching deadlines, stale scheduled items, and behavioural anomalies.
 
 + *Diagnose*: An LLM call receives candidate signals alongside user profile and affect state, producing ranked `{gap, urgency, suggestion}` objects with justifications.
 
-+ *Act*: Delivery is gated by a configurable *proactiveness dial* with three settings:
-  - *Conservative*: Only urgent items (approaching deadlines, explicit user-set reminders)
-  - *Moderate*: Adds information gaps and stale items
-  - *Eager*: Includes speculative suggestions and pattern-based observations
++ *Act*: Delivery is gated by a configurable *proactiveness dial* (conservative, moderate, or eager), controlling whether only urgent items, information gaps, or speculative suggestions are surfaced.
 
-=== Inner Thoughts
-
-Post-session evaluation generates proactive thoughts with cooldown and distress suppression. After each conversation, the system evaluates whether the interaction surface revealed gaps, unmet needs, or follow-up opportunities. Thoughts are queued rather than immediately delivered, respecting the timing model.
-
-=== Timing Model
-
-Four delivery strategies determine when queued thoughts reach the user:
-- *urgent\_now*: Immediate delivery regardless of time
-- *next\_morning*: Queued for the first active hour after sleep
-- *active\_hours*: Delivered during detected active windows
-- *next\_active*: Held until the user next initiates conversation
-
-Quiet hours are respected by default, with only the urgent strategy capable of override. Per-channel formatting adapts presentation: Telegram receives icon+footer formatting, WebSocket receives structured JSON.
+The gap scanner is complemented by *post-session inner thoughts*: after each conversation, the system evaluates whether the interaction revealed gaps, unmet needs, or follow-up opportunities. Thoughts are queued rather than immediately delivered, with four delivery strategies---`urgent_now` (immediate), `next_morning`, `active_hours`, and `next_active` (held until user-initiated contact)---that respect quiet hours by default. Per-channel formatting adapts presentation to each platform. Sun et al. (2025) validate this integration of proactivity with personalisation through the PPP framework, demonstrating that joint optimisation of productivity, proactivity, and personalisation produces significant improvements #cite(<sun-ppp>).
 
 === Trust Feedback Loop
 
@@ -642,26 +570,7 @@ Ground-truth queries (e.g.~"What's my favorite food?" $arrow.r$ expected substri
 
 === Retrieval Quality
 
-@tab-retrieval shows Precision\@5 (fraction of top-5 results containing a ground-truth substring) across the three architectures at key time points.
-
-#figure(
-  table(
-    columns: (0.6fr, 1fr, 1fr, 1fr),
-    inset: 6pt,
-    stroke: 0.4pt + luma(180),
-    table.header([*Day*], [*OpenClaw*], [*Mem0*], [*ScallopBot*]),
-    [1],  [0.20], [0.00], [0.40],
-    [5],  [0.30], [0.15], [0.45],
-    [10], [0.27], [0.13], [0.47],
-    [15], [0.34], [0.26], [0.54],
-    [20], [0.44], [0.26], [0.60],
-    [25], [0.52], [0.35], [0.68],
-    [30], [0.47], [0.38], [*0.68*],
-  ),
-  caption: [Precision\@5 over 30 simulated days at key checkpoints. ScallopBot maintains the highest precision throughout, reaching 0.68 by Day~25 and holding steady. OpenClaw's two-signal hybrid peaks at Day~25 (0.52) then declines as the store grows. Mem0's cosine-over-extracted-facts improves gradually but plateaus at 0.38.],
-) <tab-retrieval>
-
-@fig-p5 visualises the full 30-day P\@5 trajectory. The divergence between architectures becomes apparent from Day~3 onward and widens progressively.
+@fig-p5 shows the full 30-day Precision\@5 trajectory. The divergence between architectures becomes apparent from Day~3 onward and widens progressively.
 
 #figure(
   cetz.canvas({
@@ -691,36 +600,7 @@ Ground-truth queries (e.g.~"What's my favorite food?" $arrow.r$ expected substri
   caption: [Precision\@5 across 30 simulated days with real Ollama embeddings and Moonshot LLM. ScallopBot (purple) pulls ahead from Day~5 onward, reaching P\@5~$=$~0.68 by Day~25. OpenClaw (blue) grows steadily but peaks at 0.52 before declining. Mem0 (orange, dashed) improves gradually through LLM-extracted facts but plateaus at 0.38.],
 ) <fig-p5>
 
-@fig-mrr shows the Mean Reciprocal Rank (MRR) trajectory. MRR captures how high the _first_ relevant result appears (1.0~=~first position, 0.5~=~second, etc.), making it more sensitive to ranking quality than P\@5.
-
-#figure(
-  cetz.canvas({
-    import cetz.draw: *
-
-    let openclaw-mrr = ((1,1.00),(2,1.00),(3,1.00),(4,1.00),(5,1.00),(6,1.00),(7,1.00),(8,1.00),(9,1.00),(10,0.92),(11,0.83),(12,0.79),(13,0.79),(14,0.79),(15,0.68),(16,0.64),(17,0.61),(18,0.61),(19,0.60),(20,0.65),(21,0.64),(22,0.63),(23,0.63),(24,0.63),(25,0.63),(26,0.61),(27,0.61),(28,0.61),(29,0.61),(30,0.65))
-    let mem0-mrr = ((1,0.00),(2,0.67),(3,0.67),(4,0.50),(5,0.50),(6,0.50),(7,0.50),(8,0.67),(9,0.67),(10,0.67),(11,0.58),(12,0.64),(13,0.64),(14,0.64),(15,0.64),(16,0.63),(17,0.63),(18,0.56),(19,0.61),(20,0.65),(21,0.73),(22,0.75),(23,0.75),(24,0.75),(25,0.75),(26,0.75),(27,0.75),(28,0.75),(29,0.75),(30,0.75))
-    let sb-mrr = ((1,1.00),(2,1.00),(3,1.00),(4,1.00),(5,1.00),(6,1.00),(7,1.00),(8,1.00),(9,1.00),(10,0.92),(11,0.92),(12,0.93),(13,0.93),(14,0.93),(15,0.93),(16,0.85),(17,0.94),(18,0.94),(19,0.94),(20,0.95),(21,0.95),(22,0.96),(23,0.96),(24,0.96),(25,0.96),(26,0.96),(27,0.96),(28,0.92),(29,0.96),(30,0.90))
-
-    plot.plot(
-      size: (12, 6),
-      x-label: [Simulated Day],
-      y-label: [Mean Reciprocal Rank],
-      x-tick-step: 5,
-      x-min: 1, x-max: 30,
-      y-min: 0, y-max: 1.05,
-      y-tick-step: 0.2,
-      legend: "inner-south-west",
-      {
-        plot.add(openclaw-mrr, label: [OpenClaw], style: (stroke: (paint: rgb("#2980b9"), thickness: 1.8pt)))
-        plot.add(mem0-mrr, label: [Mem0], style: (stroke: (paint: rgb("#e67e22"), thickness: 1.8pt, dash: "dashed")))
-        plot.add(sb-mrr, label: [ScallopBot], style: (stroke: (paint: rgb("#8e44ad"), thickness: 2.2pt)))
-      }
-    )
-  }),
-  caption: [Mean Reciprocal Rank over 30 days. ScallopBot (purple) maintains MRR~$>$~0.90 throughout, meaning the LLM reranker consistently places the most relevant memory at or near position~1. OpenClaw (blue) starts strong but declines to~0.65 as store dilution degrades ranking. Mem0 (orange, dashed) stabilises at~0.75 from Day~21 onward.],
-) <fig-mrr>
-
-Three patterns emerge from the 30-day trajectory. First, *search formula matters at scale*: ScallopBot's prominence-weighted hybrid retrieval with LLM reranking (P\@5~$=$~0.68, MRR~$=$~0.90) consistently outperforms both OpenClaw's two-signal hybrid (P\@5~$=$~0.47, MRR~$=$~0.65) and Mem0's cosine-over-extracted-facts (P\@5~$=$~0.38, MRR~$=$~0.75). The reranker over-fetch strategy---sending 4$times$ the requested limit to the LLM reranker---was the single highest-impact design decision, allowing the reranker to select from a wider pool of candidates. Second, *Mem0's LLM-based approach provides better MRR than OpenClaw despite lower P\@5*: Mem0's fact extraction produces semantically cleaner memory entries, which helps the first relevant result rank higher (MRR~0.75 vs~0.65) even though overall precision is lower. Third, *cognitive processing creates compounding advantages*: ScallopBot's fusion pipeline consolidates related memories into denser summaries, improving retrieval density over time---the P\@5 gap between ScallopBot and OpenClaw widens from +0.15 at Day~5 to +0.21 at Day~30.
+Three patterns emerge from the 30-day trajectory. First, *search formula matters at scale*: ScallopBot's prominence-weighted hybrid retrieval with LLM reranking reaches P\@5~$=$~0.68 and Mean Reciprocal Rank (MRR)~$=$~0.90, consistently outperforming both OpenClaw (P\@5~$=$~0.47, MRR~$=$~0.65) and Mem0 (P\@5~$=$~0.38, MRR~$=$~0.75). The reranker over-fetch strategy---sending 4$times$ the requested limit to the LLM reranker---was the single highest-impact design decision. Second, *Mem0's LLM-based approach provides better MRR than OpenClaw despite lower P\@5*, as fact extraction produces semantically cleaner entries that rank the first relevant result higher. Third, *cognitive processing creates compounding advantages*: ScallopBot's fusion pipeline consolidates related memories into denser summaries, widening the P\@5 gap from +0.15 at Day~5 to +0.21 at Day~30.
 
 @tab-improvement summarises the Day~30 improvement of ScallopBot relative to each competitor.
 
@@ -737,55 +617,9 @@ Three patterns emerge from the 30-day trajectory. First, *search formula matters
   caption: [Day~30 improvement of ScallopBot relative to each baseline. ScallopBot's higher memory count reflects derived memories from cognitive processing (fusions, reflections, gap diagnoses), which contribute to retrieval density rather than representing unbounded growth.],
 ) <tab-improvement>
 
-=== Memory Growth and Cognitive Activity
+=== Cognitive Activity
 
-#figure(
-  table(
-    columns: (0.6fr, 1fr, 1fr, 1fr),
-    inset: 6pt,
-    stroke: 0.4pt + luma(180),
-    table.header([*Day*], [*OpenClaw*], [*Mem0*], [*ScallopBot*]),
-    [1],  [3],  [5],   [6],
-    [5],  [14], [23],  [29],
-    [10], [27], [45],  [57],
-    [15], [41], [62],  [80],
-    [20], [56], [82],  [98],
-    [25], [71], [108], [111],
-    [30], [85], [126], [132],
-  ),
-  caption: [Total live memory count over 30 days. OpenClaw grows linearly via append-only storage. Mem0 accumulates the most memories due to LLM fact extraction producing multiple entries per message, partially offset by dedup. ScallopBot falls between the two due to cognitive-derived memories (fusions, reflections) adding to the base count.],
-) <tab-memory-count>
-
-@fig-memory-growth visualises the memory accumulation trajectories.
-
-#figure(
-  cetz.canvas({
-    import cetz.draw: *
-
-    let openclaw-mem = ((1,3),(2,6),(3,8),(4,11),(5,14),(6,17),(7,19),(8,22),(9,24),(10,27),(11,30),(12,33),(13,36),(14,38),(15,41),(16,44),(17,47),(18,50),(19,53),(20,56),(21,59),(22,62),(23,65),(24,68),(25,71),(26,74),(27,77),(28,80),(29,83),(30,85))
-    let mem0-mem = ((1,5),(2,10),(3,13),(4,18),(5,23),(6,29),(7,32),(8,38),(9,40),(10,45),(11,50),(12,56),(13,60),(14,62),(15,62),(16,66),(17,69),(18,74),(19,78),(20,82),(21,89),(22,91),(23,95),(24,102),(25,108),(26,111),(27,116),(28,119),(29,126),(30,126))
-    let sb-mem = ((1,6),(2,11),(3,17),(4,23),(5,29),(6,36),(7,42),(8,48),(9,51),(10,57),(11,59),(12,62),(13,69),(14,74),(15,80),(16,84),(17,87),(18,89),(19,93),(20,98),(21,102),(22,103),(23,106),(24,109),(25,111),(26,115),(27,120),(28,122),(29,128),(30,132))
-
-    plot.plot(
-      size: (12, 6),
-      x-label: [Simulated Day],
-      y-label: [Total Live Memories],
-      x-tick-step: 5,
-      x-min: 1, x-max: 30,
-      y-min: 0, y-max: 140,
-      y-tick-step: 20,
-      legend: "inner-north-west",
-      {
-        plot.add(openclaw-mem, label: [OpenClaw], style: (stroke: (paint: rgb("#2980b9"), thickness: 1.8pt)))
-        plot.add(mem0-mem, label: [Mem0], style: (stroke: (paint: rgb("#e67e22"), thickness: 1.8pt, dash: "dashed")))
-        plot.add(sb-mem, label: [ScallopBot], style: (stroke: (paint: rgb("#8e44ad"), thickness: 2.2pt)))
-      }
-    )
-  }),
-  caption: [Memory count growth over 30 simulated days. OpenClaw (blue) grows linearly at~2.8 memories/day. Mem0 (orange, dashed) grows fastest due to LLM fact extraction producing multiple entries per message, reaching 126 by Day~30. ScallopBot (purple) tracks between the two, with cognitive-derived memories (fusions, reflections) partially offset by dedup at ingestion.],
-) <fig-memory-growth>
-
-@tab-cognitive shows Day~30 cognitive feature activity across all three architectures.
+By Day~30, memory counts reach 85 (OpenClaw, linear growth), 126 (Mem0, LLM fact extraction producing multiple entries per message), and 132 (ScallopBot, base memories plus cognitive-derived fusions and reflections). @tab-cognitive shows cognitive feature activity across all three architectures.
 
 #figure(
   table(
@@ -833,35 +667,9 @@ Despite these limitations, the benchmark demonstrates that *the mode-specific se
 
 == Research Alignment Analysis (RQ1)
 
-We mapped each ScallopBot subsystem to the body of 2025--2026 literature and identified 30 research works across six domains that validate the system's design decisions. @tab-convergence summarises the key convergence patterns.
+We mapped each ScallopBot subsystem to 2025--2026 literature, identifying 30 research works across six domains that validate the system's design decisions. As detailed throughout the preceding technical sections, each subsystem aligns with specific research recommendations: hybrid retrieval with Hu et al. #cite(<hu-memory-survey>) and Hong & He #cite(<hong-cross-attention>); LLM re-ranking with Pan et al.'s SeCom #cite(<secom>); memory lifecycle with Alqithami's MaRS #cite(<alqithami-mars>) and Yang et al.'s graph memory taxonomy #cite(<yang-graph-memory>); the heartbeat daemon with Li et al.'s MemOS scheduling #cite(<memos>); spreading activation with Pavlović et al. #cite(<pavlovic-spreading>); dream cycles with Zhang's computational account of dreaming #cite(<zhang-dreaming>); affect with Mozikov et al. #cite(<mozikov-emotional>) and Lu & Li #cite(<lu-affective-memory>); self-reflection with Renze & Guven #cite(<renze-reflection>) and Shinn et al. #cite(<shinn-reflexion>); and proactive intelligence with Pasternak et al. #cite(<pasternak-probe>), Liu et al. #cite(<liu-inner-thoughts>), and Diebel et al. #cite(<diebel-proactive>).
 
-#figure(
-  table(
-    columns: (2fr, 2fr, 1.5fr),
-    inset: 6pt,
-    stroke: 0.4pt + luma(180),
-    table.header([*ScallopBot Feature*], [*Research Recommendation*], [*Source*]),
-    [3-signal hybrid retrieval], [Multi-signal retrieval outperforms single-signal], [Hong & He '25],
-    [LLM re-ranking (0.4/0.6)], [Prompt compression as denoising mechanism], [Pan et al. '25],
-    [4-factor exponential decay], [Hybrid forgetting achieves 0.911 composite], [Alqithami '25],
-    [BFS-clustered fusion], [Merge fragmented traces into coherent schemas], [Yang et al. '26],
-    [3-tier heartbeat daemon], [Priority-driven memory scheduling], [Li et al. '25],
-    [Spreading activation], [Graph activation for knowledge retrieval], [Pavlović et al. '25],
-    [NREM cross-category consolidation], [Consolidation as critical memory dynamic], [Hu et al. '25],
-    [REM stochastic exploration], [Stochastic replay discovers novel connections], [Zhang '26],
-    [Observation-only affect guard], [Emotional prompting changes LLM behaviour], [Mozikov et al. '24],
-    [Dual-EMA mood tracking], [Track affect over time, not just per-message], [Lu & Li '25],
-    [Composite self-reflection], [Process reflection yields strongest gains], [Renze & Guven '24],
-    [SOUL re-distillation], [Verbal self-reflection improves performance], [Shinn et al. '23],
-    [Post-session inner thoughts], [Continuous covert reasoning], [Liu et al. '25],
-    [3-stage gap scanner], [Search → diagnose → act decomposition], [Pasternak et al. '25],
-    [Trust-calibrated delivery], [Proactive help risks competence self-esteem], [Diebel et al. '25],
-    [OpenClaw SKILL.md format], [Modular capability interfaces for agents], [OpenClaw ecosystem],
-  ),
-  caption: [Convergence between ScallopBot design decisions and 2025--2026 research recommendations. Each row represents an independent convergence: the feature was implemented before the validating research was published or discovered.],
-) <tab-convergence>
-
-This convergence is not coincidental. Both the research community and ScallopBot's development drew on shared intellectual foundations: cognitive science (ACT-R, SOAR), neuroscience (sleep stages, spreading activation), and software engineering principles (separation of concerns, pure functions). However, the breadth of convergence---spanning six distinct research domains---suggests that these foundations provide reliable guidance for agent architecture design, supporting an affirmative answer to RQ1.
+This breadth of alignment---spanning six distinct research domains---is not coincidental. Both the research community and ScallopBot's development drew on shared intellectual foundations: cognitive science (ACT-R, SOAR), neuroscience (sleep stages, spreading activation), and information retrieval principles (BM25, semantic embeddings). These foundations provide reliable design heuristics for agent architecture, supporting an affirmative answer to RQ1.
 
 == Cognition Gap Coverage (RQ2)
 
@@ -923,66 +731,40 @@ Shirkavand et al.'s (2025) Cost-Spectrum Contrastive Routing #cite(<shirkavand-c
 = Discussion <sec-discussion>
 // ════════════════════════════════════════════════════════════════
 
-== Independent Convergence and Its Implications
+== Convergence, Complementarity, and Implications
 
 The most striking finding of this analysis is the breadth of independent convergence between ScallopBot's engineering decisions and the research community's subsequent recommendations. Across six research domains---memory retrieval, lifecycle management, associative reasoning, sleep-inspired consolidation, affect modelling, and proactive intelligence---the system anticipated patterns that would later be validated in peer-reviewed venues including ICLR, NeurIPS, CHI, and ACM TOIS.
 
-We attribute this convergence to two factors. First, both the engineering effort and the research community drew on the same foundational disciplines: cognitive science (ACT-R's spreading activation, SOAR's cognitive cycles), neuroscience (sleep-stage models, hippocampal replay), and information retrieval (BM25, TF-IDF, semantic embeddings). These foundations provide reliable design heuristics for agent architecture. Second, the constraints of personal AI agents---limited budget, single-user focus, need for reliability---naturally push implementations toward the same design patterns that research identifies as optimal: hybrid retrieval outperforms any single signal; lifecycle management prevents unbounded growth; pure functions enable testability.
+We attribute this convergence to two factors. First, both the engineering effort and the research community drew on the same foundational disciplines: cognitive science (ACT-R's spreading activation, SOAR's cognitive cycles), neuroscience (sleep-stage models, hippocampal replay), and information retrieval (BM25, TF-IDF, semantic embeddings). Second, the constraints of personal AI agents---limited budget, single-user focus, need for reliability---naturally push implementations toward the same design patterns that research identifies as optimal: hybrid retrieval outperforms any single signal; lifecycle management prevents unbounded growth; pure functions enable testability. For well-constrained domains, principled engineering grounded in established cognitive science can _anticipate_ rather than merely _follow_ research recommendations.
 
-This suggests a broader insight: for well-constrained domains, principled engineering grounded in established cognitive science can _anticipate_ rather than merely _follow_ research recommendations. This has implications for practitioners building agent systems who may not have access to the latest research but do have access to the foundational literature.
+The capability comparison (@tab-comparison) further reveals a pattern we term _cognitive complementarity_: OpenClaw optimises for execution breadth (15+ platforms, 3,000+ community skills) while ScallopBot optimises for cognitive depth (memory lifecycle, autonomous reasoning, self-improvement). The shared SKILL.md format enables their composition, mirroring layered architectures proven successful in operating systems and web applications---cognition and execution can be cleanly separated and independently evolved. This cognitive depth also has security implications: OpenClaw's 40,000+ exposed instances and malicious ClawHub skills #cite(<openclaw-security>) suggest that a reflective agent's behavioural profiling infrastructure could detect anomalous skill behaviour---an avenue for future work.
 
-== The Cognitive Complementarity Thesis
-
-Our comparison between OpenClaw and ScallopBot (@tab-comparison) reveals an architectural pattern we term _cognitive complementarity_: the execution layer and the cognitive layer can be developed independently and composed through a shared interface (in this case, the SKILL.md format).
-
-OpenClaw optimises for the execution layer: it connects to 15+ platforms, offers 3,000+ community skills, and provides robust message routing. ScallopBot optimises for the cognitive layer: it provides memory lifecycle management, autonomous reasoning, and self-improvement. Neither system is complete on its own, but their composition---enabled by the shared skill format---could yield an agent that is both broadly capable and cognitively sophisticated.
-
-This pattern mirrors the layered architecture that has proven successful in other domains: operating systems separate kernel services from user-space applications; web applications separate business logic from data access. The contribution here is demonstrating that the same principle applies to agent intelligence: _cognition_ and _execution_ can be cleanly separated and independently evolved.
-
-== OpenClaw's Security Concerns and Cognitive Safeguards
-
-The security challenges facing OpenClaw---over 40,000 exposed instances, malicious ClawHub skills performing data exfiltration #cite(<openclaw-security>)---highlight an underappreciated benefit of cognitive architecture: a reflective agent can potentially detect and respond to anomalous skill behaviour. While ScallopBot does not currently implement skill-level anomaly detection, its behavioural profiling and gap scanning infrastructure provides the foundation for such capabilities. An agent that monitors its own behavioural patterns could, in principle, detect when a newly-installed skill causes anomalous data access patterns---an avenue for future work.
-
-== Threats to Validity
+== Threats to Validity and Limitations
 
 *Internal validity.* The research alignment analysis relies on our interpretation of how closely each ScallopBot feature matches research recommendations. Independent replication with different evaluators could yield different alignment assessments.
 
 *External validity.* ScallopBot is designed for single-user personal assistance. Its cognitive features---particularly the trust model and behavioural profiling---may not transfer directly to multi-user or enterprise contexts where user models must be isolated and scaled.
 
-*Construct validity.* We evaluate primarily through research alignment and test coverage rather than standardised benchmarks. While the 1,501-test suite provides confidence in correctness, it does not directly measure cognitive capability in the way that benchmarks like LOCOMO, FiFA, or EmoBench would. Future work should include formal benchmark evaluation.
+*Construct validity.* We evaluate primarily through research alignment, a 30-day empirical benchmark, and test coverage rather than standardised benchmarks. While the 1,501-test suite and benchmark provide confidence in correctness, they do not directly measure cognitive capability in the way that benchmarks like LOCOMO, FiFA, or EmoBench would. Future work should include formal benchmark evaluation.
 
 *Reliability.* The system has been deployed and operational since early 2026, but we do not present long-term reliability metrics. The pure-function architecture and error isolation between cognitive phases mitigate reliability concerns but do not eliminate them.
 
-== Limitations
-
-Several limitations merit acknowledgement:
-
-- *No learned routing*: Unlike CSCR #cite(<shirkavand-cscr>), provider selection is manual rather than learned from prompt characteristics. Learned routing could improve cost efficiency for heterogeneous workloads.
-
-- *Flat memory with typed relations*: Unlike full knowledge graphs (Mem0's enhanced variant, Graphiti), ScallopBot uses typed relations on flat memory entries. A proper knowledge graph would enable richer reasoning but at the cost of significantly increased complexity.
-
-- *No formal benchmark evaluation*: The system's effectiveness is assessed through unit/integration tests and research alignment rather than standardised evaluation benchmarks.
-
-- *Single-user focus*: The architecture does not address multi-user scaling, tenant isolation, or collaborative memory.
-
-- *Lexicon-based affect*: The AFINN-165 approach, while cost-free and fast, lacks the nuance of LLM-based emotion detection. Sabour et al.'s EmoBench #cite(<sabour-emobench>) provides a framework for future evaluation.
+Beyond threats to validity, several technical limitations merit acknowledgement. Provider routing is manual rather than learned from prompt characteristics; unlike CSCR #cite(<shirkavand-cscr>), learned routing could improve cost efficiency for heterogeneous workloads. ScallopBot uses typed relations on flat memory entries rather than a full knowledge graph (as in Mem0's enhanced variant or Graphiti), which would enable richer reasoning at significantly increased complexity. The AFINN-165 affect approach, while cost-free and fast, lacks the nuance of LLM-based emotion detection---Sabour et al.'s EmoBench #cite(<sabour-emobench>) provides a framework for future evaluation. Finally, the architecture does not address multi-user scaling, tenant isolation, or collaborative memory.
 
 
 // ════════════════════════════════════════════════════════════════
 = Conclusion and Future Work <sec-conclusion>
 // ════════════════════════════════════════════════════════════════
 
-This paper has presented ScallopBot, a bio-inspired cognitive architecture for personal AI agents that addresses the cognition gap in existing frameworks such as OpenClaw. Through 142 TypeScript source files, 33 development phases, and 1,501 tests, we have demonstrated that principled application-level engineering---consuming LLMs via API without model training---can produce cognitive capabilities that the research community has independently validated as effective across six domains.
+This paper has presented ScallopBot, a bio-inspired cognitive architecture for personal AI agents that addresses the cognition gap in existing frameworks such as OpenClaw. Our three research questions receive the following answers:
 
-Our three research questions receive the following answers:
+*RQ1*: Yes---application-level architectural design can produce cognitive capabilities aligned with state-of-the-art research. ScallopBot's design decisions align with 30 works from 2023--2026 across six research domains, validated in venues including ICLR, NeurIPS, CHI, and ACM TOIS.
 
-*RQ1*: Yes---application-level architectural design can produce cognitive capabilities aligned with state-of-the-art research. ScallopBot independently converged on 16 design patterns subsequently validated by 30 works from 2023--2026 venues including ICLR, NeurIPS, CHI, and ACM TOIS.
+*RQ2*: A bio-inspired cognitive layer substantially addresses the cognition gap. ScallopBot provides capabilities across every dimension identified as lacking in OpenClaw, while maintaining full skill format compatibility through _cognitive complementarity_---composing cognition and execution via shared interfaces.
 
-*RQ2*: A bio-inspired cognitive layer substantially addresses the cognition gap. ScallopBot provides capabilities across every dimension identified as lacking in OpenClaw (memory lifecycle, self-reflection, affect, proactive intelligence), while maintaining full skill format compatibility. The concept of _cognitive complementarity_ suggests these layers can be composed through shared interfaces.
+*RQ3*: The full cognitive pipeline operates at \$0.06--0.10 per day through zero-cost lexicon-based affect detection, fast-tier provider routing, and nightly batching of expensive cognitive processing.
 
-*RQ3*: The full cognitive pipeline operates at \$0.06--0.10 per day through three strategies: zero-cost lexicon-based affect detection, fast-tier provider routing for high-volume operations, and nightly batching of expensive cognitive processing.
-
-The system demonstrates that the boundary between "reactive assistant" and "cognitive agent" is not a matter of model sophistication but of *architectural design*: the right scheduling, memory lifecycle, and feedback loops can transform commodity LLM APIs into a system that consolidates, reflects, feels, and anticipates.
+The boundary between "reactive assistant" and "cognitive agent" is not a matter of model sophistication but of *architectural design*: the right scheduling, memory lifecycle, and feedback loops can transform commodity LLM APIs into a system that consolidates, reflects, feels, and anticipates.
 
 == Future Work
 

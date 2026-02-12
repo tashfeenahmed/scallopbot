@@ -169,13 +169,13 @@ describe('BackgroundGardener NREM integration', () => {
     expect(fused.metadata!.nrem).toBe(true);
     expect(fused.metadata!.sourceCount).toBeGreaterThanOrEqual(3);
 
-    // Assert: sources marked superseded
+    // Assert: sources remain searchable (NREM creates supplementary fused memory)
     const sourceIds = fused.metadata!.sourceIds as string[];
     for (const sid of sourceIds) {
       const source = db.getMemory(sid);
       expect(source).not.toBeNull();
-      expect(source!.memoryType).toBe('superseded');
-      expect(source!.isLatest).toBe(false);
+      expect(source!.memoryType).toBe('regular');
+      expect(source!.isLatest).toBe(true);
     }
 
     // Assert: DERIVES relations created
