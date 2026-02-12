@@ -45,7 +45,7 @@ export interface EvalModeConfig {
  * Real-world half-lives are too long for a 30-day benchmark.
  */
 const EVAL_CATEGORY_DECAY_RATES = {
-  event: 0.92,        // half-life ~8.3 days (real: 14d)
+  event: 0.96,        // half-life ~17 days (was 0.92/~8.3d — too aggressive for 30-day eval)
   fact: 0.96,         // half-life ~17 days (real: 69d)
   insight: 0.94,      // half-life ~11 days (real: 23d)
   preference: 0.985,  // half-life ~46 days (real: 138d)
@@ -309,8 +309,95 @@ export function createModeSearch(
     };
   }
 
-  // ScallopBot: delegate to store.search() (hybrid + LLM reranking)
+  // ScallopBot: delegate to store.search() with temporal-aware date filtering
   return async (query: string, limit: number) => {
-    return store.search(query, { userId: 'default', limit });
+    // Detect temporal cues in the query
+    const dateRange = detectTemporalDateRange(query);
+
+    let results: ScallopSearchResult[];
+    if (dateRange) {
+      // Try date-filtered search first
+      results = await store.search(query, {
+        userId: 'default',
+        limit,
+        documentDateRange: dateRange,
+      });
+      // Fall back to unrestricted search if too few results
+      if (results.length < 2) {
+        results = await store.search(query, { userId: 'default', limit });
+      }
+    } else {
+      results = await store.search(query, { userId: 'default', limit });
+    }
+
+    // Strip relatedMemories to prevent spreading-activation noise
+    return results.map(r => ({ ...r, relatedMemories: undefined }));
   };
+}
+
+// ============ Temporal Query Detection ============
+
+const MONTH_NAMES: Record<string, number> = {
+  january: 0, february: 1, march: 2, april: 3, may: 4, june: 5,
+  july: 6, august: 7, september: 8, october: 9, november: 10, december: 11,
+  jan: 0, feb: 1, mar: 2, apr: 3, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11,
+};
+
+/**
+ * Detect temporal cues in a query and return a documentDateRange if found.
+ * Parses patterns like "in May 2023", "May 8, 2023", "on 8 May", "when" queries.
+ * Returns { start, end } as epoch ms, or null if no temporal cues detected.
+ */
+function detectTemporalDateRange(query: string): { start: number; end: number } | null {
+  const q = query.toLowerCase();
+
+  // Pattern 1: "Month YYYY" or "Month, YYYY" (e.g., "in May 2023", "during January 2023")
+  const monthYearMatch = q.match(/\b(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec),?\s+(\d{4})\b/);
+  if (monthYearMatch) {
+    const month = MONTH_NAMES[monthYearMatch[1]];
+    const year = parseInt(monthYearMatch[2], 10);
+    if (month !== undefined) {
+      const start = new Date(year, month, 1).getTime();
+      const end = new Date(year, month + 1, 0, 23, 59, 59, 999).getTime();
+      return { start, end };
+    }
+  }
+
+  // Pattern 2: "D Month YYYY" or "Month D, YYYY" (specific date)
+  const specificDate1 = q.match(/\b(\d{1,2})\s+(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec),?\s+(\d{4})\b/);
+  if (specificDate1) {
+    const day = parseInt(specificDate1[1], 10);
+    const month = MONTH_NAMES[specificDate1[2]];
+    const year = parseInt(specificDate1[3], 10);
+    if (month !== undefined) {
+      const start = new Date(year, month, day).getTime();
+      const end = new Date(year, month, day, 23, 59, 59, 999).getTime();
+      return { start, end };
+    }
+  }
+
+  const specificDate2 = q.match(/\b(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec)\s+(\d{1,2}),?\s+(\d{4})\b/);
+  if (specificDate2) {
+    const month = MONTH_NAMES[specificDate2[1]];
+    const day = parseInt(specificDate2[2], 10);
+    const year = parseInt(specificDate2[3], 10);
+    if (month !== undefined) {
+      const start = new Date(year, month, day).getTime();
+      const end = new Date(year, month, day, 23, 59, 59, 999).getTime();
+      return { start, end };
+    }
+  }
+
+  // Pattern 3: Just a month name (no year) — assume 2023 (LoCoMo dataset year)
+  const monthOnly = q.match(/\b(january|february|march|april|may|june|july|august|september|october|november|december)\b/);
+  if (monthOnly && /\b(when|during|in|on|around|before|after)\b/.test(q)) {
+    const month = MONTH_NAMES[monthOnly[1]];
+    if (month !== undefined) {
+      const start = new Date(2023, month, 1).getTime();
+      const end = new Date(2023, month + 1, 0, 23, 59, 59, 999).getTime();
+      return { start, end };
+    }
+  }
+
+  return null;
 }

@@ -312,16 +312,20 @@ export function buildFusionPrompt(cluster: ScallopMemoryEntry[]): CompletionRequ
 Rules:
 1. The summary MUST be shorter than all memories combined
 2. Preserve ALL distinct facts — do not drop any unique information
-3. Use natural language, not a list
-4. The summary should read as a single coherent memory entry
-5. Set importance to the highest importance among source memories
-6. Set category to the most common category
+3. Preserve ALL dates, times, and temporal references mentioned in the memories
+4. Use natural language, not a list
+5. The summary should read as a single coherent memory entry
+6. Set importance to the highest importance among source memories
+7. Set category to the most common category
 
 Respond with JSON only:
 {"summary": "...", "importance": 1-10, "category": "preference|fact|event|relationship|insight"}`;
 
   const memoryLines = cluster
-    .map((m, i) => `${i + 1}. [${m.category}] "${m.content}" (importance: ${m.importance})`)
+    .map((m, i) => {
+      const dateStr = m.documentDate ? ` (date: ${new Date(m.documentDate).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })})` : '';
+      return `${i + 1}. [${m.category}]${dateStr} "${m.content}" (importance: ${m.importance})`;
+    })
     .join('\n');
 
   const userMessage = `MEMORIES TO MERGE:
