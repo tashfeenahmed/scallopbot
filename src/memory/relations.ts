@@ -302,14 +302,11 @@ export class RelationGraph {
     const memory = this.db.getMemory(memoryId);
     if (!memory) return null;
 
-    // If already latest, return it
-    if (memory.isLatest) return memory;
-
-    // Find what updates this memory
+    // Follow UPDATES chain to find the most recent version
     const incoming = this.db.getIncomingRelations(memoryId, 'UPDATES');
     if (incoming.length === 0) return memory;
 
-    // Recursively find latest
+    // Recursively find latest via UPDATES chain
     return this.getLatestVersion(incoming[0].sourceId);
   }
 

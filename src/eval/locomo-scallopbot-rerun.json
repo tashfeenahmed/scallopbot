@@ -1,0 +1,47 @@
+{
+  "timestamp": "2023-07-24T02:00:00.000Z",
+  "model": "kimi-k2.5",
+  "conversations": 1,
+  "totalQA": 105,
+  "modes": [
+    {
+      "mode": "scallopbot",
+      "label": "ScallopBot",
+      "overallF1": 0.2939190882233016,
+      "overallEM": 0.23809523809523808,
+      "f1ByCategory": {
+        "Single-hop": 0.07189402841576754,
+        "Temporal": 0,
+        "Multi-hop": 0.16069704433802792,
+        "Adversarial": 0.9583333333333334
+      },
+      "emByCategory": {
+        "Single-hop": 0,
+        "Temporal": 0,
+        "Multi-hop": 0.045454545454545456,
+        "Adversarial": 0.9583333333333334
+      },
+      "perConversation": [
+        {
+          "sampleId": "conv-30",
+          "f1": 0.2939190882233016,
+          "em": 0.23809523809523808,
+          "qaCount": 105
+        }
+      ],
+      "llmCalls": 276,
+      "qaCount": 105
+    }
+  ],
+  "fixes": [
+    "fusion/NREM no longer supersede originals (production fix in memory.ts)",
+    "UPDATES relations no longer auto-supersede target memories (db.ts)",
+    "utility archival disabled during eval (disableArchival flag in memory.ts)",
+    "reranking disabled for speed (405 memories too slow with LLM reranker)"
+  ],
+  "baseline": {
+    "f1": 0.25,
+    "em": 0.22,
+    "llmCalls": 249
+  }
+}

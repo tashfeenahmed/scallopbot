@@ -991,13 +991,8 @@ export class ScallopDatabase {
 
     stmt.run(id, sourceId, targetId, relationType, confidence, now);
 
-    // If this is an UPDATES relation, mark the target as superseded
-    if (relationType === 'UPDATES') {
-      this.db.prepare(`
-        UPDATE memories SET is_latest = 0, memory_type = 'superseded', updated_at = ?
-        WHERE id = ?
-      `).run(now, targetId);
-    }
+    // UPDATES relation records the link but keeps both memories searchable.
+    // Superseding loses specific details that retrieval needs.
 
     return { id, sourceId, targetId, relationType, confidence, createdAt: now };
   }

@@ -27,6 +27,9 @@ npm-debug.log*
 # Test coverage
 coverage/
 
+# Eval results
+results/
+
 # Sessions data (local dev)
 sessions/
 

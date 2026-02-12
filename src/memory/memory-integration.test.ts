@@ -244,8 +244,8 @@ describe('Scenario 1: Fact storage, embedding cache & search weights', () => {
 
   it('should use shared SEARCH_WEIGHTS for scoring', () => {
     // Validate the shared weights constant exists and has expected shape
-    expect(SEARCH_WEIGHTS.keyword).toBe(0.5);
-    expect(SEARCH_WEIGHTS.semantic).toBe(0.5);
+    expect(SEARCH_WEIGHTS.keyword).toBe(0.3);
+    expect(SEARCH_WEIGHTS.semantic).toBe(0.7);
     expect(SEARCH_WEIGHTS.prominence).toBe(0.0);
   });
 });
@@ -392,11 +392,8 @@ describe('Scenario 3: Corrections and contradiction tracking', () => {
     expect(oldMemory.contradictionIds).toContain(newFact.id);
     expect(newMemory.contradictionIds).toContain(oldFact.id);
 
-    // Old fact should be superseded
-    expect(oldMemory.isLatest).toBe(false);
-    expect(oldMemory.memoryType).toBe('superseded');
-
-    // New fact should be latest
+    // Both memories remain searchable (UPDATES records the link, doesn't supersede)
+    expect(oldMemory.isLatest).toBe(true);
     expect(newMemory.isLatest).toBe(true);
 
     // Verify learnedFrom values
@@ -440,9 +437,9 @@ describe('Scenario 3: Corrections and contradiction tracking', () => {
     db.addContradiction(v3.id, v2.id);
     store.addUpdatesRelation(v3.id, v2.id);
 
-    // v1 and v2 should both be superseded
-    expect(db.getMemory(v1.id)!.isLatest).toBe(false);
-    expect(db.getMemory(v2.id)!.isLatest).toBe(false);
+    // All versions remain searchable (UPDATES records links, doesn't supersede)
+    expect(db.getMemory(v1.id)!.isLatest).toBe(true);
+    expect(db.getMemory(v2.id)!.isLatest).toBe(true);
     expect(db.getMemory(v3.id)!.isLatest).toBe(true);
 
     // v2 should have contradictions pointing to both v1 and v3
