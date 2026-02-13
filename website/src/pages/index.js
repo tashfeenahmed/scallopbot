@@ -310,7 +310,7 @@ const capabilities = [
     icon: Brain,
     title: "Hybrid Memory Engine",
     desc: "BM25 + semantic search with relationship graphs, memory decay, and automatic fact extraction. Your assistant remembers context across every conversation.",
-    research: "ScallopBot retrieves memories through three signals\u2014BM25 keyword matching, semantic embeddings, and a prominence score reflecting each memory\u2019s decay state\u2014then re-ranks the top candidates with an LLM call. This hybrid, retrieve-then-rerank pipeline is what the field is converging on.",
+    research: "ScallopBot retrieves memories through BM25 keyword matching and semantic embeddings, then re-ranks top candidates with an LLM call. On the LoCoMo benchmark (1,049 QA items), this achieves F1 0.51 vs OpenClaw\u2019s 0.39\u2014a 31% improvement\u2014with temporal questions showing a 4\u00d7 gain.",
     papers: [
       { title: "Memory in the Age of AI Agents: A Survey", id: "2512.13564", cite: "Hu et al., 2025" },
       { title: "Mem0: Scalable Long-Term Memory for AI Agents", id: "2504.19413", cite: "Chhikara et al., 2025" },
@@ -409,37 +409,42 @@ const channels = [
 ]
 
 const benchmarkStats = [
-  { value: "0.68", label: "Precision@5", detail: "+45% vs OpenClaw, +79% vs Mem0" },
-  { value: "0.90", label: "MRR", detail: "Top result relevant 90% of the time" },
-  { value: "$0.06", label: "Daily cost", detail: "Full cognitive pipeline at ~10 LLM calls/day" },
+  { value: "0.51", label: "F1 Score", detail: "+31% vs OpenClaw on 1,049 QA items" },
+  { value: "4×", label: "Temporal Gain", detail: "F1 0.39 vs 0.10 on time-based questions" },
+  { value: "$0.06", label: "Daily cost", detail: "Full cognitive pipeline, 7 LLM providers" },
 ]
 
 const benchmarkMetrics = [
   {
-    metric: "Precision@5",
-    desc: "Fraction of top-5 results containing ground truth",
+    metric: "Overall F1",
+    desc: "Token-level F1 across all 1,049 QA items (5 conversations, 138 sessions)",
     systems: [
-      { name: "ScallopBot", value: 0.68, highlight: true, vs: "+45% vs next best" },
-      { name: "OpenClaw", value: 0.47 },
-      { name: "Mem0", value: 0.38 },
+      { name: "ScallopBot", value: 0.51, highlight: true, vs: "+31% relative improvement" },
+      { name: "OpenClaw", value: 0.39 },
     ],
   },
   {
-    metric: "Mean Reciprocal Rank",
-    desc: "How high the first relevant result ranks (1.0 = always first)",
+    metric: "Temporal Questions",
+    desc: "Questions requiring time-based reasoning across sessions",
     systems: [
-      { name: "ScallopBot", value: 0.90, highlight: true, vs: "+20% vs next best" },
-      { name: "Mem0", value: 0.75 },
-      { name: "OpenClaw", value: 0.65 },
+      { name: "ScallopBot", value: 0.39, highlight: true, vs: "4\u00d7 improvement over OpenClaw" },
+      { name: "OpenClaw", value: 0.10 },
     ],
   },
   {
-    metric: "Recall",
-    desc: "Fraction of expected facts found anywhere in top-5",
+    metric: "Single-hop Questions",
+    desc: "Direct factual recall from a single conversation session",
     systems: [
-      { name: "ScallopBot", value: 0.85, highlight: true, vs: "+5% vs next best" },
-      { name: "OpenClaw", value: 0.81 },
-      { name: "Mem0", value: 0.47 },
+      { name: "ScallopBot", value: 0.23, highlight: true, vs: "+92% relative improvement" },
+      { name: "OpenClaw", value: 0.12 },
+    ],
+  },
+  {
+    metric: "Multi-hop Questions",
+    desc: "Questions requiring synthesis of facts across multiple sessions",
+    systems: [
+      { name: "ScallopBot", value: 0.47, highlight: true, vs: "+38% relative improvement" },
+      { name: "OpenClaw", value: 0.34 },
     ],
   },
 ]
@@ -1384,8 +1389,9 @@ export default function IndexPage() {
             <em>self-hosted.</em>
           </h1>
           <p className="hero-sub">
-            Intelligent cost optimization, persistent memory, and multi-channel
-            deployment &mdash; all running on your own server.
+            Bio-inspired cognition, persistent memory, and multi-channel
+            deployment &mdash; validated against 30 research works, running on
+            your own server.
           </p>
           <div className="hero-buttons">
             <a href={GITHUB_URL} className="btn-primary">
@@ -1534,15 +1540,15 @@ export default function IndexPage() {
       <section id="benchmarks" className="benchmarks-section">
         <div className="benchmarks-inner">
           <div className="section-label">Benchmarks</div>
-          <h2>30-day cognitive pipeline evaluation</h2>
+          <h2>LoCoMo benchmark evaluation</h2>
             <p className="benchmarks-intro">
-            We ran a 30-day benchmark with real providers (Ollama embeddings,
-            Moonshot LLM) across three architectures: OpenClaw, Mem0, and
-            ScallopBot. Each started from identical empty state with its own
-            search algorithm. ScallopBot&rsquo;s prominence-weighted hybrid
-            retrieval with LLM reranking pulls ahead from Day&nbsp;5 and the gap
-            widens over time &mdash; the cognitive pipeline (fusion, reflection,
-            gap scanning) creates compounding advantages that grow with scale.
+            Evaluated on <a href="https://arxiv.org/abs/2402.09691" target="_blank" rel="noopener noreferrer" className="research-link" style={{color: '#bbb', textDecoration: 'underline', textDecorationColor: '#555'}}>LoCoMo</a> &mdash;
+            a standardized long-conversation memory benchmark with 1,049 QA items
+            across 5 conversations and 138 sessions. Both systems use identical
+            models (Moonshot kimi-k2.5) and embeddings (Ollama nomic-embed-text).
+            ScallopBot&rsquo;s hybrid retrieval with LLM reranking, temporal query
+            detection, and score-gated context achieves F1&nbsp;0.51 vs
+            OpenClaw&rsquo;s 0.39 &mdash; a 31% relative improvement.
           </p>
 
           <div className="benchmarks-stats">
@@ -1557,7 +1563,7 @@ export default function IndexPage() {
 
           <div className="bench-table-label">
             <BarChart3 size={16} strokeWidth={1.25} />
-            Day 30 Results
+            LoCoMo Results by Category
           </div>
           <div className="bench-metrics">
             {benchmarkMetrics.map((m) => (
@@ -1580,11 +1586,13 @@ export default function IndexPage() {
             ))}
           </div>
           <p className="bench-note">
-            30-day benchmark with real embeddings (Ollama nomic-embed-text) and
-            real LLM (Moonshot kimi-k2.5). ScallopBot&rsquo;s cognitive
-            pipeline &mdash; memory fusion, reflection, SOUL distillation, gap
-            scanning &mdash; creates compounding retrieval advantages that widen
-            over time.
+            Standardized benchmark with real embeddings (Ollama nomic-embed-text,
+            768-dim) and real LLM (Moonshot kimi-k2.5). Temporal gains driven by
+            date-embedded memories and regex-based temporal query detection.
+            Multi-hop gains from memory fusion, NREM dream consolidation, and
+            increased retrieval depth. Full cognitive pipeline adds ~$0.02/day
+            to base conversation cost. Design validated against 30 research
+            works from 2023&ndash;2026 across six domains.
           </p>
         </div>
       </section>
