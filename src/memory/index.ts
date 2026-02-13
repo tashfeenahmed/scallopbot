@@ -290,3 +290,8 @@ export {
   type InnerThoughtsInput,
   type InnerThoughtsResult,
 } from './inner-thoughts.js';
+
+// Gardener shared helpers
+export { type GardenerContext, safeBehavioralPatterns } from './gardener-context.js';
+export { scheduleProactiveItem, getLastProactiveAt } from './gardener-scheduling.js';
+export { storeFusedMemory } from './gardener-fusion-storage.js';
