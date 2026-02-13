@@ -1,8 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import {
-  BackgroundGardener,
-  calculateBM25Score,
-} from './memory.js';
+import { BackgroundGardener } from './memory.js';
+import { calculateBM25Score } from './bm25.js';
 import type { Logger } from 'pino';
 
 describe('BackgroundGardener', () => {
