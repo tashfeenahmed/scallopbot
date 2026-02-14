@@ -179,9 +179,9 @@ export class Agent {
       throw new Error(`Session not found: ${sessionId}`);
     }
 
-    // Single-user bot: always use canonical userId for memory operations.
-    // Channel-prefixed userId (e.g. "telegram:12345") is kept only for tool/routing via session metadata.
-    const resolvedUserId = 'default';
+    // Use channel-prefixed userId from session metadata for memory operations.
+    // This ensures proactive messages can be routed back to the correct channel.
+    const resolvedUserId = (session.metadata?.userId as string) || 'default';
 
     // Check budget before processing
     if (this.costTracker) {
