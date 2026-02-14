@@ -17,6 +17,8 @@ export interface GardenerContext {
   quietHours: { start: number; end: number };
   workspace?: string;
   disableArchival: boolean;
+  /** Resolve IANA timezone for a user (defaults to server timezone) */
+  getTimezone?: (userId: string) => string;
 }
 
 /**

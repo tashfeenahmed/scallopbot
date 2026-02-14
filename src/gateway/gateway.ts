@@ -183,6 +183,7 @@ export class Gateway {
       fusionProvider: rerankProvider,
       sessionSummarizer,
       workspace: this.config.agent.workspace,
+      getTimezone: (userId: string) => this.configManager!.getUserTimezone(userId),
     });
 
     this.logger.debug('Memory system initialized');

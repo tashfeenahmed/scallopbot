@@ -46,6 +46,8 @@ export interface BackgroundGardenerOptions {
   workspace?: string;
   /** Disable utility-based archival in deepTick (for eval — batch ingestion has no retrieval) */
   disableArchival?: boolean;
+  /** Resolve IANA timezone for a user (defaults to server timezone) */
+  getTimezone?: (userId: string) => string;
 }
 
 /**
@@ -77,6 +79,7 @@ export class BackgroundGardener {
   private quietHours: { start: number; end: number };
   private workspace?: string;
   private disableArchival: boolean;
+  private getTimezone: (userId: string) => string;
 
   /** Deep consolidation runs every DEEP_EVERY light ticks.
    *  With default 5-min interval: 72 ticks × 5 min = 6 hours */
@@ -95,6 +98,7 @@ export class BackgroundGardener {
     this.quietHours = options.quietHours ?? { start: 2, end: 5 };
     this.workspace = options.workspace;
     this.disableArchival = options.disableArchival ?? false;
+    this.getTimezone = options.getTimezone ?? (() => Intl.DateTimeFormat().resolvedOptions().timeZone);
   }
 
   start(): void {
@@ -189,6 +193,7 @@ export class BackgroundGardener {
       quietHours: this.quietHours,
       workspace: this.workspace,
       disableArchival: this.disableArchival,
+      getTimezone: this.getTimezone,
     };
   }
 
@@ -213,10 +218,33 @@ export class BackgroundGardener {
 
   /**
    * Check if the current hour falls within configured quiet hours.
+   * Uses the first known user's timezone (single-user system) instead of server time.
    * Supports wrap-around ranges (e.g., start: 23, end: 5).
    */
   private isQuietHours(): boolean {
-    const hour = new Date().getHours();
+    let hour: number;
+    try {
+      // Resolve timezone from first known user
+      const db = this.scallopStore.getDatabase();
+      const userRows = db.raw<{ user_id: string }>('SELECT DISTINCT user_id FROM memories WHERE source != \'_cleaned_sentinel\' LIMIT 1', []);
+      const userId = userRows.length > 0 ? userRows[0].user_id : null;
+      if (userId) {
+        const tz = this.getTimezone(userId);
+        const parts = new Intl.DateTimeFormat('en-US', {
+          timeZone: tz,
+          hour: 'numeric',
+          hour12: false,
+        }).formatToParts(new Date());
+        const hourPart = parts.find(p => p.type === 'hour');
+        const h = parseInt(hourPart?.value ?? '', 10);
+        hour = isNaN(h) ? new Date().getHours() : h % 24;
+      } else {
+        hour = new Date().getHours();
+      }
+    } catch {
+      hour = new Date().getHours();
+    }
+
     if (this.quietHours.start < this.quietHours.end) {
       return hour >= this.quietHours.start && hour < this.quietHours.end;
     }
