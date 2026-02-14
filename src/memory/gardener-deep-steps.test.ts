@@ -162,7 +162,10 @@ describe('gardener-deep-steps', () => {
       expect(result.summarized).toBe(0);
     });
 
-    it('finds old sessions and calls summarizeBatch', async () => {
+    it('finds old sessions and calls summarizeBatch with resolved userId', async () => {
+      // Seed a memory so the user can be resolved
+      seedMemory(db, { userId: 'telegram:123', content: 'test', category: 'fact', prominence: 0.5 });
+
       // Create a session with old updated_at
       const session = db.createSession('old-session-1');
       const twoDaysAgo = Date.now() - 2 * 24 * 60 * 60 * 1000;
@@ -176,7 +179,7 @@ describe('gardener-deep-steps', () => {
       const ctx = buildCtx(store, db, { sessionSummarizer: mockSummarizer as any });
       const result = await runSessionSummarization(ctx);
 
-      expect(mockSummarizer.summarizeBatch).toHaveBeenCalledWith(db, ['old-session-1']);
+      expect(mockSummarizer.summarizeBatch).toHaveBeenCalledWith(db, ['old-session-1'], 'telegram:123');
       expect(result.summarized).toBe(1);
     });
   });
@@ -210,6 +213,9 @@ describe('gardener-deep-steps', () => {
 
   describe('runBehavioralInference', () => {
     it('gathers messages and calls inferBehavioralPatterns', () => {
+      // Seed a memory so the user is discoverable
+      seedMemory(db, { userId: 'telegram:123', content: 'test', category: 'fact', prominence: 0.5 });
+
       // Create a session with user messages
       const session = db.createSession('session-1');
       db.addSessionMessage(session.id, 'user', 'Hello, how are you?');

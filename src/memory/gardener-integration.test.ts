@@ -108,6 +108,14 @@ describe('BackgroundGardener integration', () => {
       const now = Date.now();
       const DAY_MS = 24 * 60 * 60 * 1000;
 
+      // Seed a memory so user 'default' is discoverable by gardener
+      db.addMemory({
+        userId: 'default', content: 'test', category: 'fact', memoryType: 'regular',
+        importance: 5, confidence: 0.8, isLatest: true, source: 'user',
+        documentDate: now, eventDate: null, prominence: 0.5, lastAccessed: null,
+        accessCount: 0, sourceChunk: null, embedding: null, metadata: null, learnedFrom: null,
+      });
+
       // Seed 6 session summaries (above cold start threshold of 5)
       // Must create sessions first (foreign key constraint)
       for (let i = 0; i < 6; i++) {
