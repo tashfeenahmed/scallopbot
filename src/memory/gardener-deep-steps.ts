@@ -144,14 +144,29 @@ export async function runSessionSummarization(ctx: GardenerContext): Promise<Ses
   try {
     const cutoffDays = 1;
     const cutoff = Date.now() - cutoffDays * 24 * 60 * 60 * 1000;
-    const oldSessions = ctx.db.raw<{ id: string }>(
-      'SELECT id FROM sessions WHERE updated_at < ? LIMIT 20',
+    const oldSessions = ctx.db.raw<{ id: string; metadata: string | null }>(
+      'SELECT id, metadata FROM sessions WHERE updated_at < ? LIMIT 20',
       [cutoff]
     );
     if (oldSessions.length > 0) {
+      // Resolve userId from session metadata (falls back to first known user)
+      let resolvedUserId = 'default';
+      for (const s of oldSessions) {
+        if (s.metadata) {
+          try {
+            const meta = JSON.parse(s.metadata);
+            if (meta.userId) { resolvedUserId = meta.userId; break; }
+          } catch { /* ignore */ }
+        }
+      }
+      if (resolvedUserId === 'default') {
+        const userRows = ctx.db.raw<{ user_id: string }>('SELECT DISTINCT user_id FROM memories WHERE source != \'_cleaned_sentinel\' LIMIT 1', []);
+        if (userRows.length > 0) resolvedUserId = userRows[0].user_id;
+      }
       const summarized = await ctx.sessionSummarizer.summarizeBatch(
         ctx.db,
-        oldSessions.map(s => s.id)
+        oldSessions.map(s => s.id),
+        resolvedUserId
       );
       if (summarized > 0) {
         ctx.logger.info({ summarized, total: oldSessions.length }, 'Session summaries generated');
@@ -248,41 +263,47 @@ export async function runEnhancedForgetting(ctx: GardenerContext): Promise<Forge
 export function runBehavioralInference(ctx: GardenerContext): BehavioralInferenceResult {
   try {
     const profileManager = ctx.scallopStore.getProfileManager();
-    const recentSessions = ctx.db.listSessions(5);
-    const allMessages: Array<{ content: string; timestamp: number }> = [];
-    for (const session of recentSessions) {
-      const messages = ctx.db.getSessionMessages(session.id);
-      for (const msg of messages) {
-        if (msg.role === 'user') {
-          allMessages.push({ content: msg.content, timestamp: msg.createdAt });
+    const userRows = ctx.db.raw<{ user_id: string }>('SELECT DISTINCT user_id FROM memories WHERE source != \'_cleaned_sentinel\'', []);
+    let totalMessages = 0;
+
+    for (const { user_id: userId } of userRows) {
+      const recentSessions = ctx.db.listSessions(5);
+      const allMessages: Array<{ content: string; timestamp: number }> = [];
+      for (const session of recentSessions) {
+        const messages = ctx.db.getSessionMessages(session.id);
+        for (const msg of messages) {
+          if (msg.role === 'user') {
+            allMessages.push({ content: msg.content, timestamp: msg.createdAt });
+          }
         }
       }
-    }
-    if (allMessages.length > 0) {
-      const sessionSummaries = ctx.db.getSessionSummariesByUser('default', 20);
-      const sessions = sessionSummaries
-        .filter(s => s.messageCount > 0)
-        .map(s => ({
-          messageCount: s.messageCount,
-          durationMs: s.durationMs,
-          startTime: s.createdAt,
-        }));
+      if (allMessages.length > 0) {
+        const sessionSummaries = ctx.db.getSessionSummariesByUser(userId, 20);
+        const sessions = sessionSummaries
+          .filter(s => s.messageCount > 0)
+          .map(s => ({
+            messageCount: s.messageCount,
+            durationMs: s.durationMs,
+            startTime: s.createdAt,
+          }));
 
-      const userMemories = ctx.db.getMemoriesByUser('default', { isLatest: true, limit: 100 });
-      const messageEmbeddings = userMemories
-        .filter(m => m.embedding != null)
-        .map(m => ({
-          content: m.content,
-          embedding: m.embedding!,
-        }));
+        const userMemories = ctx.db.getMemoriesByUser(userId, { isLatest: true, limit: 100 });
+        const messageEmbeddings = userMemories
+          .filter(m => m.embedding != null)
+          .map(m => ({
+            content: m.content,
+            embedding: m.embedding!,
+          }));
 
-      profileManager.inferBehavioralPatterns('default', allMessages, {
-        sessions: sessions.length > 0 ? sessions : undefined,
-        messageEmbeddings: messageEmbeddings.length > 0 ? messageEmbeddings : undefined,
-      });
-      ctx.logger.debug({ messageCount: allMessages.length }, 'Behavioral patterns updated');
+        profileManager.inferBehavioralPatterns(userId, allMessages, {
+          sessions: sessions.length > 0 ? sessions : undefined,
+          messageEmbeddings: messageEmbeddings.length > 0 ? messageEmbeddings : undefined,
+        });
+        ctx.logger.debug({ userId, messageCount: allMessages.length }, 'Behavioral patterns updated');
+        totalMessages += allMessages.length;
+      }
     }
-    return { messageCount: allMessages.length };
+    return { messageCount: totalMessages };
   } catch (err) {
     ctx.logger.warn({ error: (err as Error).message }, 'Behavioral inference failed');
     return { messageCount: 0 };
@@ -295,46 +316,51 @@ export function runBehavioralInference(ctx: GardenerContext): BehavioralInferenc
 export function runTrustScoreUpdate(ctx: GardenerContext): TrustScoreStepResult {
   try {
     const profileManager = ctx.scallopStore.getProfileManager();
-    const sessionSummaries = ctx.db.getSessionSummariesByUser('default', 30);
-    let sessions = sessionSummaries
-      .filter(s => s.messageCount > 0)
-      .map(s => ({ messageCount: s.messageCount, durationMs: s.durationMs, startTime: s.createdAt }));
+    const userRows = ctx.db.raw<{ user_id: string }>('SELECT DISTINCT user_id FROM memories WHERE source != \'_cleaned_sentinel\'', []);
+    let lastResult: TrustScoreStepResult = {};
 
-    // Fallback: if fewer than 5 session summaries, use raw sessions
-    if (sessions.length < 5) {
-      const rawSessions = ctx.db.listSessions(30);
-      const fallbackSessions = rawSessions.map(s => {
-        const msgs = ctx.db.getSessionMessages(s.id);
-        return {
-          messageCount: msgs.length,
-          durationMs: s.updatedAt - s.createdAt,
-          startTime: s.createdAt,
-        };
-      }).filter(s => s.messageCount > 0);
-      if (fallbackSessions.length > sessions.length) {
-        sessions = fallbackSessions;
+    for (const { user_id: userId } of userRows) {
+      const sessionSummaries = ctx.db.getSessionSummariesByUser(userId, 30);
+      let sessions = sessionSummaries
+        .filter(s => s.messageCount > 0)
+        .map(s => ({ messageCount: s.messageCount, durationMs: s.durationMs, startTime: s.createdAt }));
+
+      // Fallback: if fewer than 5 session summaries, use raw sessions
+      if (sessions.length < 5) {
+        const rawSessions = ctx.db.listSessions(30);
+        const fallbackSessions = rawSessions.map(s => {
+          const msgs = ctx.db.getSessionMessages(s.id);
+          return {
+            messageCount: msgs.length,
+            durationMs: s.updatedAt - s.createdAt,
+            startTime: s.createdAt,
+          };
+        }).filter(s => s.messageCount > 0);
+        if (fallbackSessions.length > sessions.length) {
+          sessions = fallbackSessions;
+        }
+      }
+
+      const rawScheduledItems = ctx.db.getScheduledItemsByUser(userId);
+      const scheduledItems = rawScheduledItems
+        .filter(i => i.status !== 'expired')
+        .map(i => ({ status: i.status as 'pending' | 'fired' | 'acted' | 'dismissed', source: i.source, firedAt: i.firedAt ?? undefined }));
+      const existingPatterns = profileManager.getBehavioralPatterns(userId);
+      const existingTrust = existingPatterns?.responsePreferences?.trustScore as number | undefined;
+      const trustResult = computeTrustScore(sessions, scheduledItems, { existingScore: existingTrust });
+      if (trustResult) {
+        profileManager.updateBehavioralPatterns(userId, {
+          responsePreferences: {
+            ...(existingPatterns?.responsePreferences ?? {}),
+            trustScore: trustResult.trustScore,
+            proactivenessDial: trustResult.proactivenessDial,
+          },
+        });
+        ctx.logger.debug({ userId, trustScore: trustResult.trustScore, dial: trustResult.proactivenessDial }, 'Trust score updated');
+        lastResult = { trustScore: trustResult.trustScore, proactivenessDial: trustResult.proactivenessDial };
       }
     }
-
-    const rawScheduledItems = ctx.db.getScheduledItemsByUser('default');
-    const scheduledItems = rawScheduledItems
-      .filter(i => i.status !== 'expired')
-      .map(i => ({ status: i.status as 'pending' | 'fired' | 'acted' | 'dismissed', source: i.source, firedAt: i.firedAt ?? undefined }));
-    const existingPatterns = profileManager.getBehavioralPatterns('default');
-    const existingTrust = existingPatterns?.responsePreferences?.trustScore as number | undefined;
-    const trustResult = computeTrustScore(sessions, scheduledItems, { existingScore: existingTrust });
-    if (trustResult) {
-      profileManager.updateBehavioralPatterns('default', {
-        responsePreferences: {
-          ...(existingPatterns?.responsePreferences ?? {}),
-          trustScore: trustResult.trustScore,
-          proactivenessDial: trustResult.proactivenessDial,
-        },
-      });
-      ctx.logger.debug({ trustScore: trustResult.trustScore, dial: trustResult.proactivenessDial }, 'Trust score updated');
-      return { trustScore: trustResult.trustScore, proactivenessDial: trustResult.proactivenessDial };
-    }
-    return {};
+    return lastResult;
   } catch (err) {
     ctx.logger.warn({ error: (err as Error).message }, 'Trust score update failed');
     return {};
@@ -348,33 +374,40 @@ export async function runGoalDeadlineCheck(ctx: GardenerContext): Promise<GoalDe
   try {
     const GoalService = (await import('../goals/goal-service.js')).GoalService;
     const goalService = new GoalService({ db: ctx.db, logger: ctx.logger });
-    const activeGoals = await goalService.listGoals('default', { status: 'active' });
-    const goalsWithDueDates = activeGoals.filter(g => g.metadata.dueDate != null);
-    if (goalsWithDueDates.length > 0) {
-      const pendingItems = ctx.db.getDueScheduledItems(Date.now() + 30 * 24 * 60 * 60 * 1000);
-      const existingReminders = pendingItems.map(item => ({ message: item.message }));
-      const deadlineResult = checkGoalDeadlines(goalsWithDueDates, existingReminders);
-      for (const notification of deadlineResult.notifications) {
-        if (!ctx.db.hasSimilarPendingScheduledItem(notification.userId, notification.message)) {
-          ctx.db.addScheduledItem({
-            userId: notification.userId,
-            message: notification.message,
-            triggerAt: Date.now(),
-            source: 'agent',
-            type: 'goal_checkin',
-            sessionId: null,
-            context: null,
-            recurring: null,
-            sourceMemoryId: notification.goalId,
-          });
+    const userRows = ctx.db.raw<{ user_id: string }>('SELECT DISTINCT user_id FROM memories WHERE source != \'_cleaned_sentinel\'', []);
+    let totalApproaching = 0;
+    let totalNotifications = 0;
+
+    for (const { user_id: userId } of userRows) {
+      const activeGoals = await goalService.listGoals(userId, { status: 'active' });
+      const goalsWithDueDates = activeGoals.filter(g => g.metadata.dueDate != null);
+      if (goalsWithDueDates.length > 0) {
+        const pendingItems = ctx.db.getDueScheduledItems(Date.now() + 30 * 24 * 60 * 60 * 1000);
+        const existingReminders = pendingItems.map(item => ({ message: item.message }));
+        const deadlineResult = checkGoalDeadlines(goalsWithDueDates, existingReminders);
+        for (const notification of deadlineResult.notifications) {
+          if (!ctx.db.hasSimilarPendingScheduledItem(notification.userId, notification.message)) {
+            ctx.db.addScheduledItem({
+              userId: notification.userId,
+              message: notification.message,
+              triggerAt: Date.now(),
+              source: 'agent',
+              type: 'goal_checkin',
+              sessionId: null,
+              context: null,
+              recurring: null,
+              sourceMemoryId: notification.goalId,
+            });
+          }
         }
+        if (deadlineResult.approaching.length > 0) {
+          ctx.logger.info({ userId, approaching: deadlineResult.approaching.length, notifications: deadlineResult.notifications.length }, 'Goal deadline check complete');
+        }
+        totalApproaching += deadlineResult.approaching.length;
+        totalNotifications += deadlineResult.notifications.length;
       }
-      if (deadlineResult.approaching.length > 0) {
-        ctx.logger.info({ approaching: deadlineResult.approaching.length, notifications: deadlineResult.notifications.length }, 'Goal deadline check complete');
-      }
-      return { approaching: deadlineResult.approaching.length, notifications: deadlineResult.notifications.length };
     }
-    return { approaching: 0, notifications: 0 };
+    return { approaching: totalApproaching, notifications: totalNotifications };
   } catch (err) {
     ctx.logger.warn({ error: (err as Error).message }, 'Goal deadline check failed');
     return { approaching: 0, notifications: 0 };

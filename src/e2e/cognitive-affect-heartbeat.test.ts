@@ -183,6 +183,14 @@ describe('E2E Cognitive Affect & Heartbeat', () => {
       const db = scallopStore.getDatabase();
       const now = Date.now();
 
+      // Seed a memory so user 'default' is discoverable by gardener
+      db.addMemory({
+        userId: 'default', content: 'test', category: 'fact', memoryType: 'regular',
+        importance: 5, confidence: 0.8, isLatest: true, source: 'user',
+        documentDate: now, eventDate: null, prominence: 0.5, lastAccessed: null,
+        accessCount: 0, sourceChunk: null, embedding: null, metadata: null, learnedFrom: null,
+      });
+
       // Seed 6+ session summaries to exceed cold-start threshold of 5
       for (let i = 0; i < 7; i++) {
         const sessionId = `trust-session-${i}`;
