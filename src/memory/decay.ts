@@ -95,7 +95,8 @@ export class DecayEngine {
   /**
    * Calculate prominence for a single memory
    *
-   * Formula: prominence = base × decay_rate^age_days × access_boost × importance_weight
+   * Additive weighted sum of age decay, access frequency, recency of access, and importance.
+   * Each factor is normalized to [0, 1] before weighting to prevent saturation.
    */
   calculateProminence(memory: ScallopMemoryEntry): number {
     // Static profile memories never decay
@@ -108,6 +109,12 @@ export class DecayEngine {
     // Age factor
     const ageMs = now - memory.documentDate;
     const ageDays = ageMs / (1000 * 60 * 60 * 24);
+
+    // Grace period: memories less than 1 day old with no access history
+    // start at full prominence — they need time to be discovered by search.
+    if (ageDays < 1 && memory.accessCount === 0) {
+      return 1.0;
+    }
 
     // Get decay rate (combine type and category rates)
     const typeRate = this.config.typeDecayRates[memory.memoryType] ?? this.config.baseDecayRate;
@@ -129,9 +136,10 @@ export class DecayEngine {
       : 1 + (this.config.accessBoostMultiplier * accessCount);
 
     // Recency of access boost.
-    // Never-accessed memories get a low baseline — the absence of any retrieval
-    // means there's no recency signal to boost.
-    let recencyBoost = 0.5;
+    // Never-accessed memories get a neutral baseline (1.0) — the absence of any
+    // retrieval means there's no recency signal, but shouldn't double-penalize
+    // since accessBoost already handles the "never accessed" signal.
+    let recencyBoost = 1.0;
     if (memory.lastAccessed) {
       const lastAccessAgeDays = (now - memory.lastAccessed) / (1000 * 60 * 60 * 24);
       // Boost decays over 7 days
@@ -141,11 +149,19 @@ export class DecayEngine {
     // Importance weight: importance / 10
     const importanceWeight = memory.importance / 10;
 
-    // Calculate weighted prominence
+    // Normalize access factors to [0, 1] so weighted sum can't exceed 1.0.
+    // This prevents high-access memories from saturating at prominence=1.0
+    // and preserves meaningful differentiation across the full range.
+    const maxAccessBoost = 1 + (this.config.accessBoostMultiplier * this.config.maxAccessCount);
+    const maxRecencyBoost = 1.3; // 1 + 0.3 (recency coefficient)
+    const normalizedAccess = accessBoost / maxAccessBoost;
+    const normalizedRecency = recencyBoost / maxRecencyBoost;
+
+    // Calculate weighted prominence (each factor in [0, 1], weights sum to 1.0)
     const prominence =
       ageDecay * DECAY_WEIGHTS.age +
-      accessBoost * DECAY_WEIGHTS.accessFrequency +
-      recencyBoost * DECAY_WEIGHTS.recencyOfAccess +
+      normalizedAccess * DECAY_WEIGHTS.accessFrequency +
+      normalizedRecency * DECAY_WEIGHTS.recencyOfAccess +
       importanceWeight * DECAY_WEIGHTS.semanticImportance;
 
     // High-importance identity facts (importance >= 8) get moderate protection.
@@ -212,7 +228,7 @@ export class DecayEngine {
    * Full decay scan (for deep consolidation). Processes ALL non-static memories.
    */
   calculateFullDecay(db: ScallopDatabase): Array<{ id: string; prominence: number }> {
-    const memories = db.getAllMemories();
+    const memories = db.getAllMemories({ minProminence: 0.01 });
     const updates: Array<{ id: string; prominence: number }> = [];
 
     for (const memory of memories) {

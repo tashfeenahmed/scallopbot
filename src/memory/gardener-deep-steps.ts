@@ -65,11 +65,16 @@ export interface InnerThoughtsStepResult {
  * B1: Full decay scan (all memories)
  */
 export function runFullDecay(ctx: GardenerContext): FullDecayResult {
-  const result = ctx.scallopStore.processFullDecay();
-  if (result.updated > 0) {
-    ctx.logger.info({ updated: result.updated, archived: result.archived }, 'Full decay processed');
+  try {
+    const result = ctx.scallopStore.processFullDecay();
+    if (result.updated > 0) {
+      ctx.logger.info({ updated: result.updated, archived: result.archived }, 'Full decay processed');
+    }
+    return result;
+  } catch (err) {
+    ctx.logger.warn({ error: (err as Error).message }, 'Full decay failed');
+    return { updated: 0, archived: 0 };
   }
-  return result;
 }
 
 /**
@@ -118,6 +123,7 @@ export async function runMemoryFusion(ctx: GardenerContext): Promise<FusionStepR
           sourceMemoryIds: cluster.map(m => m.id),
           sourceChunk: cluster.map(m => m.content).join(' | '),
           learnedFrom: 'consolidation',
+          supersedeSources: true,
         }, allMemories);
 
         totalFused++;
@@ -192,12 +198,29 @@ export async function runEnhancedForgetting(ctx: GardenerContext): Promise<Forge
   let memoriesDeleted = 0;
   let orphansDeleted = 0;
 
-  // 3a. Retrieval audit
+  // 3a. Retrieval audit — apply small prominence penalty to never/stale-retrieved active memories
   try {
     const auditResult = auditRetrievalHistory(ctx.db);
     auditNeverRetrieved = auditResult.neverRetrieved;
     auditStaleRetrieved = auditResult.staleRetrieved;
     auditCandidateCount = auditResult.candidatesForDecay.length;
+
+    // Demote audit candidates: 5% prominence reduction per deep tick.
+    // This nudges never/stale-retrieved active memories toward dormancy
+    // so the system gradually forgets memories it never actually uses.
+    if (auditResult.candidatesForDecay.length > 0) {
+      const demotions: Array<{ id: string; prominence: number }> = [];
+      for (const id of auditResult.candidatesForDecay) {
+        const mem = ctx.db.getMemory(id);
+        if (mem && mem.prominence > 0.1) {
+          demotions.push({ id, prominence: mem.prominence * 0.95 });
+        }
+      }
+      if (demotions.length > 0) {
+        ctx.db.updateProminences(demotions);
+        ctx.logger.debug({ demoted: demotions.length }, 'Audit candidates demoted');
+      }
+    }
   } catch (err) {
     ctx.logger.warn({ error: (err as Error).message }, 'Retrieval audit failed');
   }
