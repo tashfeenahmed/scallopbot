@@ -179,9 +179,10 @@ export class Agent {
       throw new Error(`Session not found: ${sessionId}`);
     }
 
-    // Use channel-prefixed userId from session metadata for memory operations.
-    // This ensures proactive messages can be routed back to the correct channel.
-    const resolvedUserId = (session.metadata?.userId as string) || 'default';
+    // Single-user bot: use canonical 'default' userId for all memory operations.
+    // This keeps memories unified across channels (Telegram, WebSocket, etc.).
+    // Channel routing for proactive delivery is handled by the scheduler's resolveTriggerSource fallback.
+    const resolvedUserId = 'default';
 
     // Check budget before processing
     if (this.costTracker) {

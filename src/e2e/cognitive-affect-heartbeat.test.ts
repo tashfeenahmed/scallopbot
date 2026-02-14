@@ -14,6 +14,7 @@ import * as fs from 'fs';
 import pino from 'pino';
 import { ScallopMemoryStore } from '../memory/scallop-store.js';
 import { BackgroundGardener } from '../memory/memory.js';
+import { runEnhancedForgetting } from '../memory/gardener-deep-steps.js';
 import { GoalService } from '../goals/goal-service.js';
 import {
   createE2EGateway,
@@ -357,9 +358,8 @@ describe('E2E Cognitive Affect & Heartbeat', () => {
   // ---------------------------------------------------------------------------
   // Suite 5: Utility-based forgetting via deepTick
   // ---------------------------------------------------------------------------
-  describe('utility-based forgetting via deepTick', () => {
+  describe('utility-based forgetting via runEnhancedForgetting', () => {
     let scallopStore: ScallopMemoryStore;
-    let gardener: BackgroundGardener;
     let dbPath: string;
     let lowUtilityIds: string[];
     let highAccessId: string;
@@ -380,7 +380,7 @@ describe('E2E Cognitive Affect & Heartbeat', () => {
 
       lowUtilityIds = [];
 
-      // Seed 3 old memories with zero access count (low utility: prominence * ln(1+0) = 0)
+      // Seed 3 old memories with zero access count (low utility: 0.1 * ln(2+0) ≈ 0.069 < 0.1 threshold)
       for (let i = 0; i < 3; i++) {
         const embedding = await mockEmbedder.embed(`Low utility forgotten memory ${i}`);
         const mem = db.addMemory({
@@ -394,7 +394,7 @@ describe('E2E Cognitive Affect & Heartbeat', () => {
           source: 'user',
           documentDate: oldDate,
           eventDate: null,
-          prominence: 0.3,
+          prominence: 0.1,
           lastAccessed: null,
           accessCount: 0,
           sourceChunk: null,
@@ -404,7 +404,7 @@ describe('E2E Cognitive Affect & Heartbeat', () => {
         lowUtilityIds.push(mem.id);
       }
 
-      // Seed 1 old memory with high access count (should survive — utility = 0.5 * ln(1+20) ≈ 1.52)
+      // Seed 1 old memory with high access count (should survive — utility = 0.5 * ln(2+20) ≈ 1.55)
       const highAccessEmbedding = await mockEmbedder.embed('High access important memory');
       const highAccessMem = db.addMemory({
         userId: 'default',
@@ -425,12 +425,6 @@ describe('E2E Cognitive Affect & Heartbeat', () => {
         metadata: null,
       });
       highAccessId = highAccessMem.id;
-
-      // Create BackgroundGardener
-      gardener = new BackgroundGardener({
-        scallopStore,
-        logger: testLogger,
-      });
     }, 30000);
 
     afterAll(() => {
@@ -441,9 +435,16 @@ describe('E2E Cognitive Affect & Heartbeat', () => {
     });
 
     it('should archive low-utility memories and preserve high-access ones', async () => {
-      await gardener.deepTick();
-
+      // Call runEnhancedForgetting directly (not deepTick) so that full decay
+      // doesn't recalculate prominence — this isolates the forgetting test.
       const db = scallopStore.getDatabase();
+      await runEnhancedForgetting({
+        scallopStore,
+        db,
+        logger: testLogger,
+        quietHours: { start: 2, end: 5 },
+        disableArchival: false,
+      });
 
       // Check that low-utility memories are archived (is_latest=0, memory_type='superseded')
       for (const id of lowUtilityIds) {
