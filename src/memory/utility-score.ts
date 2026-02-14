@@ -4,12 +4,13 @@
  * Replaces simple prominence-threshold pruning with access-history-weighted
  * utility scoring per Hu et al.
  *
- * Formula: utilityScore = prominence × log(1 + accessCount)
+ * Formula: utilityScore = prominence × log(2 + accessCount)
  *
- * Memories with high prominence but zero access get low utility;
- * frequently-accessed memories get boosted. This is a SEPARATE metric
- * from prominence — prominence drives decay/ranking, utility score
- * drives deletion decisions.
+ * The log(2 + x) base ensures never-accessed memories (accessCount=0) still
+ * get a prominence-proportional utility (~prominence × 0.69) rather than
+ * collapsing to zero. Frequently-accessed memories get logarithmically
+ * boosted. This is a SEPARATE metric from prominence — prominence drives
+ * decay/ranking, utility score drives deletion decisions.
  */
 
 import type { ScallopDatabase, ScallopMemoryType, MemoryCategory } from './db.js';
@@ -74,14 +75,14 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 /**
  * Compute utility score for a memory.
  *
- * Formula: prominence × ln(1 + accessCount)
+ * Formula: prominence × ln(2 + accessCount)
  *
  * - prominence=0, any access → 0 (zero prominence = zero utility)
- * - any prominence, accessCount=0 → 0 (never accessed = zero utility)
+ * - any prominence, accessCount=0 → prominence × 0.69 (baseline from prominence)
  * - Higher access count logarithmically boosts utility
  */
 export function computeUtilityScore(prominence: number, accessCount: number): number {
-  return prominence * Math.log(1 + accessCount);
+  return prominence * Math.log(2 + accessCount);
 }
 
 // ============ Query Function ============

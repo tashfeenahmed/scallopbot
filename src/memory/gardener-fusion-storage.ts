@@ -21,6 +21,8 @@ export interface StoreFusedMemoryInput {
   learnedFrom: string;
   /** Extra metadata to include (e.g., nrem: true) */
   extraMetadata?: Record<string, unknown>;
+  /** Mark source memories as superseded (default: false). Set true for deepTick consolidation. */
+  supersedeSources?: boolean;
 }
 
 export interface StoreFusedMemoryResult {
@@ -59,6 +61,14 @@ export async function storeFusedMemory(
   // Add DERIVES relations from fused memory to each source
   for (const sourceId of input.sourceMemoryIds) {
     input.db.addRelation(fusedMemory.id, sourceId, 'DERIVES', 0.95);
+  }
+
+  // Mark source memories as superseded when consolidating (deepTick),
+  // but not for supplementary fusion (NREM sleepTick)
+  if (input.supersedeSources) {
+    for (const sourceId of input.sourceMemoryIds) {
+      input.db.updateMemory(sourceId, { isLatest: false, memoryType: 'superseded' });
+    }
   }
 
   // Set fused memory prominence capped at 0.6

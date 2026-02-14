@@ -1,7 +1,7 @@
 /**
  * Tests for utility score computation (Phase 29 enhanced forgetting).
  *
- * Formula: utilityScore = prominence × log(1 + accessCount)
+ * Formula: utilityScore = prominence × log(2 + accessCount)
  * Combines memory freshness (prominence) with retrieval frequency (accessCount)
  * to produce a single metric for deletion decisions.
  *
@@ -68,9 +68,9 @@ afterEach(() => {
 // ============ computeUtilityScore Tests ============
 
 describe('computeUtilityScore', () => {
-  it('returns 0 when accessCount is 0 (never accessed = zero utility)', () => {
-    // prominence=0.5, accessCount=0 → 0.5 × log(1) = 0.0
-    expect(computeUtilityScore(0.5, 0)).toBeCloseTo(0.0, 5);
+  it('returns prominence-based baseline when accessCount is 0 (never accessed)', () => {
+    // prominence=0.5, accessCount=0 → 0.5 × log(2) ≈ 0.347
+    expect(computeUtilityScore(0.5, 0)).toBeCloseTo(0.5 * Math.log(2), 5);
   });
 
   it('returns 0 when prominence is 0 (zero prominence = zero utility)', () => {
@@ -79,23 +79,23 @@ describe('computeUtilityScore', () => {
   });
 
   it('computes correctly for prominence=0.5, accessCount=1', () => {
-    // 0.5 × log(2) ≈ 0.347
-    expect(computeUtilityScore(0.5, 1)).toBeCloseTo(0.5 * Math.log(2), 5);
+    // 0.5 × log(3) ≈ 0.549
+    expect(computeUtilityScore(0.5, 1)).toBeCloseTo(0.5 * Math.log(3), 5);
   });
 
   it('computes correctly for prominence=0.8, accessCount=5', () => {
-    // 0.8 × log(6) ≈ 1.433
-    expect(computeUtilityScore(0.8, 5)).toBeCloseTo(0.8 * Math.log(6), 5);
+    // 0.8 × log(7) ≈ 1.556
+    expect(computeUtilityScore(0.8, 5)).toBeCloseTo(0.8 * Math.log(7), 5);
   });
 
   it('computes correctly for prominence=0.3, accessCount=3', () => {
-    // 0.3 × log(4) ≈ 0.416
-    expect(computeUtilityScore(0.3, 3)).toBeCloseTo(0.3 * Math.log(4), 5);
+    // 0.3 × log(5) ≈ 0.483
+    expect(computeUtilityScore(0.3, 3)).toBeCloseTo(0.3 * Math.log(5), 5);
   });
 
-  it('computes correctly for prominence=1.0, accessCount=0 (never accessed)', () => {
-    // 1.0 × log(1) = 0.0
-    expect(computeUtilityScore(1.0, 0)).toBeCloseTo(0.0, 5);
+  it('returns prominence × log(2) for accessCount=0', () => {
+    // 1.0 × log(2) ≈ 0.693 — never-accessed memories get a non-zero baseline
+    expect(computeUtilityScore(1.0, 0)).toBeCloseTo(Math.log(2), 5);
   });
 });
 
@@ -145,13 +145,14 @@ describe('findLowUtilityMemories', () => {
     expect(result).toEqual([]);
   });
 
-  it('includes old memory with zero access count (utility = 0)', () => {
+  it('includes old memory with zero access and low prominence (utility < threshold)', () => {
     const database = createTestDb();
     const now = Date.now();
 
+    // prominence=0.1, accessCount=0 → utility = 0.1 × log(2) ≈ 0.069 < threshold 0.1
     const id = seedMemory(database, {
       content: 'old unaccessed memory that should be forgotten',
-      prominence: 0.3,
+      prominence: 0.1,
       accessCount: 0,
       documentDate: now - 30 * DAY_MS,
     });
@@ -160,8 +161,8 @@ describe('findLowUtilityMemories', () => {
 
     expect(result.length).toBe(1);
     expect(result[0].id).toBe(id);
-    expect(result[0].utilityScore).toBeCloseTo(0.0, 5);
-    expect(result[0].prominence).toBe(0.3);
+    expect(result[0].utilityScore).toBeCloseTo(0.1 * Math.log(2), 5);
+    expect(result[0].prominence).toBe(0.1);
     expect(result[0].accessCount).toBe(0);
   });
 
@@ -204,7 +205,7 @@ describe('findLowUtilityMemories', () => {
     const database = createTestDb();
     const now = Date.now();
 
-    // Memory A: prominence=0.2, accessCount=1 → utility = 0.2 × log(2) ≈ 0.139
+    // Memory A: prominence=0.2, accessCount=1 → utility = 0.2 × log(3) ≈ 0.220
     seedMemory(database, {
       content: 'memory A slightly accessed',
       prominence: 0.2,
@@ -212,7 +213,7 @@ describe('findLowUtilityMemories', () => {
       documentDate: now - 30 * DAY_MS,
     });
 
-    // Memory B: prominence=0.1, accessCount=0 → utility = 0.0
+    // Memory B: prominence=0.1, accessCount=0 → utility = 0.1 × log(2) ≈ 0.069
     seedMemory(database, {
       content: 'memory B never accessed',
       prominence: 0.1,
@@ -220,10 +221,10 @@ describe('findLowUtilityMemories', () => {
       documentDate: now - 30 * DAY_MS,
     });
 
-    const result = findLowUtilityMemories(database, { utilityThreshold: 0.2 });
+    const result = findLowUtilityMemories(database, { utilityThreshold: 0.25 });
 
     expect(result.length).toBe(2);
-    // B (0.0) should come before A (0.139)
+    // B (0.069) should come before A (0.220)
     expect(result[0].utilityScore).toBeLessThan(result[1].utilityScore);
     expect(result[0].accessCount).toBe(0);
     expect(result[1].accessCount).toBe(1);
@@ -233,11 +234,11 @@ describe('findLowUtilityMemories', () => {
     const database = createTestDb();
     const now = Date.now();
 
-    // Seed 5 memories with zero access
+    // Seed 5 memories with low prominence + zero access → utility below threshold
     for (let i = 0; i < 5; i++) {
       seedMemory(database, {
         content: `forgettable memory ${i}`,
-        prominence: 0.05,
+        prominence: 0.05,  // utility = 0.05 × log(2) ≈ 0.035 < 0.1
         accessCount: 0,
         documentDate: now - 30 * DAY_MS,
       });
@@ -252,7 +253,7 @@ describe('findLowUtilityMemories', () => {
     const database = createTestDb();
     const now = Date.now();
 
-    // prominence=0.3, accessCount=1 → utility = 0.3 × log(2) ≈ 0.208
+    // prominence=0.3, accessCount=1 → utility = 0.3 × log(3) ≈ 0.330
     seedMemory(database, {
       content: 'moderately useful memory',
       prominence: 0.3,
@@ -264,8 +265,8 @@ describe('findLowUtilityMemories', () => {
     const lowResult = findLowUtilityMemories(database, { utilityThreshold: 0.1 });
     expect(lowResult.length).toBe(0);
 
-    // With threshold 0.3 it SHOULD appear
-    const highResult = findLowUtilityMemories(database, { utilityThreshold: 0.3 });
+    // With threshold 0.35 it SHOULD appear
+    const highResult = findLowUtilityMemories(database, { utilityThreshold: 0.35 });
     expect(highResult.length).toBe(1);
   });
 
@@ -273,10 +274,11 @@ describe('findLowUtilityMemories', () => {
     const database = createTestDb();
     const now = Date.now();
 
-    // Created 5 days ago, zero access
+    // Created 5 days ago, zero access, low prominence
+    // utility = 0.1 × log(2) ≈ 0.069 < 0.1
     seedMemory(database, {
       content: 'five day old memory',
-      prominence: 0.3,
+      prominence: 0.1,
       accessCount: 0,
       documentDate: now - 5 * DAY_MS,
     });
@@ -295,7 +297,7 @@ describe('findLowUtilityMemories', () => {
     const longContent = 'A'.repeat(120);
     seedMemory(database, {
       content: longContent,
-      prominence: 0.3,
+      prominence: 0.1,  // utility = 0.1 × log(2) ≈ 0.069 < 0.1
       accessCount: 0,
       documentDate: now - 30 * DAY_MS,
     });
@@ -312,7 +314,7 @@ describe('findLowUtilityMemories', () => {
 
     seedMemory(database, {
       content: 'month old memory',
-      prominence: 0.3,
+      prominence: 0.1,  // utility = 0.1 × log(2) ≈ 0.069 < 0.1
       accessCount: 0,
       documentDate: now - 30 * DAY_MS,
     });

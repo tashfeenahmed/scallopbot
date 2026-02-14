@@ -3,7 +3,7 @@
  *
  * Audits active memories (prominence >= 0.5, is_latest = 1) to identify
  * never-retrieved and stale-retrieved entries. Audit-only: no mutation.
- * Phase 29 will consume candidatesForDecay.
+ * candidatesForDecay is consumed by runEnhancedForgetting to apply prominence penalties.
  */
 
 import type { ScallopDatabase } from './db.js';
