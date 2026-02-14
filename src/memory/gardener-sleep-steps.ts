@@ -314,6 +314,7 @@ export async function runGapScanner(ctx: GardenerContext): Promise<GapScannerSte
             activeHours: gapActiveHours,
             lastProactiveAt,
             urgency: timingUrgency,
+            timezone: ctx.getTimezone?.(userId),
           });
         }
 

@@ -155,8 +155,8 @@ export async function runSessionSummarization(ctx: GardenerContext): Promise<Ses
       [cutoff]
     );
     if (oldSessions.length > 0) {
-      // Resolve userId from session metadata (falls back to first known user)
-      let resolvedUserId = 'default';
+      // Resolve userId from session metadata, then fall back to first known user from DB
+      let resolvedUserId: string | null = null;
       for (const s of oldSessions) {
         if (s.metadata) {
           try {
@@ -165,9 +165,13 @@ export async function runSessionSummarization(ctx: GardenerContext): Promise<Ses
           } catch { /* ignore */ }
         }
       }
-      if (resolvedUserId === 'default') {
+      if (!resolvedUserId) {
         const userRows = ctx.db.raw<{ user_id: string }>('SELECT DISTINCT user_id FROM memories WHERE source != \'_cleaned_sentinel\' LIMIT 1', []);
         if (userRows.length > 0) resolvedUserId = userRows[0].user_id;
+      }
+      if (!resolvedUserId) {
+        ctx.logger.debug('No user found for session summarization, skipping');
+        return { summarized: 0 };
       }
       const summarized = await ctx.sessionSummarizer.summarizeBatch(
         ctx.db,
@@ -505,6 +509,7 @@ export async function runInnerThoughts(ctx: GardenerContext): Promise<InnerThoug
             activeHours,
             lastProactiveAt,
             urgency: result.urgency,
+            timezone: ctx.getTimezone?.(userId),
           });
 
           ctx.logger.info({ userId, urgency: result.urgency, reason: result.reason }, 'Inner thoughts created proactive item');

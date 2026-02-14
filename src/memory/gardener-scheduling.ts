@@ -19,6 +19,8 @@ export interface ScheduleProactiveItemInput {
   sourceMemoryId?: string | null;
   /** Injectable now for deterministic timing in tests */
   now?: number;
+  /** IANA timezone for the user (e.g. 'Europe/Dublin'). Falls back to server local time. */
+  timezone?: string;
 }
 
 export interface ScheduleProactiveItemResult {
@@ -31,7 +33,7 @@ export interface ScheduleProactiveItemResult {
  */
 export function scheduleProactiveItem(input: ScheduleProactiveItemInput): ScheduleProactiveItemResult {
   const now = input.now ?? Date.now();
-  const currentHour = new Date(now).getHours();
+  const currentHour = getHourInTimezone(now, input.timezone);
 
   const timing = computeDeliveryTime({
     userActiveHours: input.activeHours,
@@ -67,4 +69,25 @@ export function getLastProactiveAt(db: ScallopDatabase, userId: string): number 
     .filter(i => i.source === 'agent' && i.firedAt != null)
     .sort((a, b) => (b.firedAt ?? 0) - (a.firedAt ?? 0));
   return lastFiredAgent.length > 0 ? lastFiredAgent[0].firedAt : null;
+}
+
+/**
+ * Get the current hour (0-23) in the given IANA timezone.
+ * Falls back to server local time if timezone is not provided or invalid.
+ */
+function getHourInTimezone(nowMs: number, timezone?: string): number {
+  if (!timezone) return new Date(nowMs).getHours();
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: timezone,
+      hour: 'numeric',
+      hour12: false,
+    }).formatToParts(new Date(nowMs));
+    const hourPart = parts.find(p => p.type === 'hour');
+    // Intl hour12:false returns '24' for midnight in some locales — normalize to 0
+    const h = parseInt(hourPart?.value ?? '', 10);
+    return isNaN(h) ? new Date(nowMs).getHours() : h % 24;
+  } catch {
+    return new Date(nowMs).getHours();
+  }
 }
