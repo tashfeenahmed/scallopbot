@@ -4,6 +4,7 @@ import { CATEGORY_COLORS, CATEGORY_COLORS_LIGHT, RELATION_COLORS, RELATION_COLOR
 import type { ProcessedNode, ProcessedEdge, FilterState, MapInteractionState } from './types';
 import GraphScene from './GraphScene';
 import MapHUD from './MapHUD';
+import { computeForceLayout } from './forceLayout';
 
 const ALL_CATEGORIES = new Set(Object.keys(CATEGORY_COLORS));
 
@@ -46,6 +47,18 @@ export default function MemoryMap({ darkMode }: MemoryMapProps) {
   const catColors = darkMode ? CATEGORY_COLORS : CATEGORY_COLORS_LIGHT;
   const relColors = darkMode ? RELATION_COLORS : RELATION_COLORS_LIGHT;
 
+  // Compute positions: use force-directed layout when relations exist,
+  // otherwise fall back to server positions (PCA from embeddings)
+  const layoutPositions = useMemo(() => {
+    if (!data) return null;
+    // If we have relations, force layout produces better clustering
+    // than random server fallback (PCA only works with embeddings)
+    if (data.relations.length > 0) {
+      return computeForceLayout(data.memories, data.relations);
+    }
+    return data.positions;
+  }, [data]);
+
   const nodes = useMemo<ProcessedNode[]>(() => {
     if (!data) return [];
     const searchLower = filters.searchQuery.toLowerCase();
@@ -59,18 +72,11 @@ export default function MemoryMap({ darkMode }: MemoryMapProps) {
     const promRange = maxProm - minProm || 1;
 
     return data.memories.map((memory, index) => {
-      let position = data.positions?.[memory.id];
-      if (!position) {
-        // Random point on a sphere
-        const theta = Math.random() * 2 * Math.PI;
-        const phi = Math.acos(2 * Math.random() - 1);
-        const r = 8 + Math.random() * 2;
-        position = [
-          r * Math.sin(phi) * Math.cos(theta),
-          r * Math.sin(phi) * Math.sin(theta),
-          r * Math.cos(phi),
-        ];
-      }
+      const position = layoutPositions?.[memory.id] ?? [
+        (Math.random() - 0.5) * 16,
+        (Math.random() - 0.5) * 16,
+        (Math.random() - 0.5) * 16,
+      ] as [number, number, number];
       const color = catColors[memory.category] || '#9ca3af';
       const visible =
         filters.categories.has(memory.category) &&

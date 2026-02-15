@@ -18,19 +18,16 @@ export default function FilterBar({ categories, onToggle, onHoverCategory, darkM
             onClick={() => onToggle(cat)}
             onMouseEnter={() => onHoverCategory(cat)}
             onMouseLeave={() => onHoverCategory(null)}
-            className="px-2.5 py-1 rounded-full text-xs font-medium transition-all"
+            className="px-2.5 py-1 rounded-full text-xs font-medium transition-all flex items-center gap-1.5"
             style={{
-              backgroundColor: active
-                ? color + '30'
-                : darkMode ? 'rgba(17,24,39,0.7)' : 'rgba(255,255,255,0.85)',
-              color: active ? color : darkMode ? '#6b7280' : '#6b7280',
-              border: `1px solid ${active ? color + '60' : darkMode ? 'rgba(75,85,99,0.3)' : 'rgba(209,213,219,0.8)'}`,
-              backdropFilter: 'blur(8px)',
+              backgroundColor: active ? 'rgba(255,255,255,0.1)' : 'rgba(255,255,255,0.05)',
+              color: active ? 'rgba(255,255,255,0.9)' : 'rgba(255,255,255,0.4)',
+              border: 'none',
             }}
           >
             <span
-              className="inline-block w-2 h-2 rounded-full mr-1.5"
-              style={{ backgroundColor: active ? color : darkMode ? '#4b5563' : '#9ca3af' }}
+              className="inline-block w-2 h-2 rounded-full shrink-0"
+              style={{ backgroundColor: active ? color : 'rgba(255,255,255,0.3)' }}
             />
             {CATEGORY_LABELS[cat] || cat}
           </button>

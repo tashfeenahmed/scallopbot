@@ -63,56 +63,41 @@ export default function TimelinePlayer({ minTime, maxTime, cutoff, onCutoffChang
     return () => cancelAnimationFrame(rafRef.current);
   }, []);
 
-  const sliderPercent = ((cutoff - minTime) / range) * 100;
-
   return (
     <div className="flex items-center gap-2" style={{ minWidth: 180 }}>
       <button
         onClick={handlePlay}
-        className="w-7 h-7 rounded-full flex items-center justify-center shrink-0 transition-all"
-        style={{
-          backgroundColor: playing
-            ? 'rgba(239,68,68,0.25)'
-            : darkMode ? 'rgba(96,165,250,0.25)' : 'rgba(107,114,128,0.15)',
-          border: `1px solid ${playing
-            ? 'rgba(239,68,68,0.5)'
-            : darkMode ? 'rgba(96,165,250,0.5)' : 'rgba(107,114,128,0.3)'}`,
-          backdropFilter: 'blur(8px)',
-        }}
+        className="flex items-center justify-center shrink-0 transition-opacity hover:opacity-100"
+        style={{ opacity: 0.85, background: 'none', border: 'none', padding: 0, cursor: 'pointer' }}
       >
         {playing ? (
-          <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor" className="text-red-400">
+          <svg width="14" height="14" viewBox="0 0 10 10" fill="white">
             <rect x="1" y="1" width="3" height="8" rx="0.5" />
             <rect x="6" y="1" width="3" height="8" rx="0.5" />
           </svg>
         ) : (
-          <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor" className={darkMode ? 'text-blue-400' : 'text-gray-600'}>
+          <svg width="14" height="14" viewBox="0 0 10 10" fill="white">
             <polygon points="2,1 9,5 2,9" />
           </svg>
         )}
       </button>
 
-      <div className="flex-1 flex flex-col gap-0.5">
-        <input
-          type="range"
-          min={minTime}
-          max={maxTime}
-          value={cutoff}
-          onChange={(e) => {
-            if (playing) {
-              cancelAnimationFrame(rafRef.current);
-              setPlaying(false);
-            }
-            onCutoffChange(Number(e.target.value));
-          }}
-          className="timeline-slider w-full"
-          style={{
-            height: 4,
-            accentColor: darkMode ? '#60a5fa' : '#6b7280',
-          }}
-        />
-        <span className={`text-[10px] leading-none ${darkMode ? 'text-gray-500' : 'text-gray-500'}`}>{formatDate(cutoff)}</span>
-      </div>
+      <input
+        type="range"
+        min={minTime}
+        max={maxTime}
+        value={cutoff}
+        onChange={(e) => {
+          if (playing) {
+            cancelAnimationFrame(rafRef.current);
+            setPlaying(false);
+          }
+          onCutoffChange(Number(e.target.value));
+        }}
+        className="timeline-slider flex-1"
+        style={{ height: 4 }}
+      />
+      <span style={{ fontSize: 10, lineHeight: 1, color: 'rgba(255,255,255,0.4)', whiteSpace: 'nowrap' }}>{formatDate(cutoff)}</span>
     </div>
   );
 }
