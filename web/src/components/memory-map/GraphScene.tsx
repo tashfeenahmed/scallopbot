@@ -13,11 +13,12 @@ interface GraphSceneProps {
   selectedIndex: number | null;
   hoveredCategory: string | null;
   allCategoriesActive: boolean;
+  highlightIds: Set<string> | null;
   onHover: (index: number | null) => void;
   onSelect: (index: number | null) => void;
 }
 
-export default function GraphScene({ nodes, edges, hoveredIndex, selectedIndex, hoveredCategory, allCategoriesActive, onHover, onSelect }: GraphSceneProps) {
+export default function GraphScene({ nodes, edges, hoveredIndex, selectedIndex, hoveredCategory, allCategoriesActive, highlightIds, onHover, onSelect }: GraphSceneProps) {
   return (
     <Canvas
       camera={{ position: [0, 0, 25], fov: 60 }}
@@ -36,10 +37,11 @@ export default function GraphScene({ nodes, edges, hoveredIndex, selectedIndex, 
         selectedIndex={selectedIndex}
         hoveredCategory={hoveredCategory}
         allCategoriesActive={allCategoriesActive}
+        highlightIds={highlightIds}
         onHover={onHover}
         onSelect={onSelect}
       />
-      <RelationEdges edges={edges} />
+      <RelationEdges edges={edges} highlightIds={highlightIds} />
       <AmbientParticles />
 
       <OrbitControls enableDamping dampingFactor={0.05} minDistance={5} maxDistance={60} />
