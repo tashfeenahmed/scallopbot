@@ -26,6 +26,7 @@ import {
   runTrustScoreUpdate,
   runGoalDeadlineCheck,
   runInnerThoughts,
+  runSubAgentCleanup,
 } from './gardener-deep-steps.js';
 import {
   runDreamCycle,
@@ -214,6 +215,7 @@ export class BackgroundGardener {
     runTrustScoreUpdate(ctx);
     await runGoalDeadlineCheck(ctx);
     await runInnerThoughts(ctx);
+    runSubAgentCleanup(ctx);
 
     // Clean up stale agent-generated files
     if (this.workspace) {

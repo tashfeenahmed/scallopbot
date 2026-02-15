@@ -22,6 +22,8 @@ import type { Attachment } from '../channels/types.js';
 import { analyzeComplexity } from '../routing/complexity.js';
 import type { GoalService } from '../goals/index.js';
 import type { BotConfigManager } from '../channels/bot-config.js';
+import type { AnnounceQueue } from '../subagent/announce-queue.js';
+import type { SubAgentExecutor } from '../subagent/executor.js';
 
 export interface AgentOptions {
   provider: LLMProvider;
@@ -42,6 +44,10 @@ export interface AgentOptions {
   systemPrompt?: string;
   /** Enable extended thinking for supported providers (e.g., Kimi K2.5) */
   enableThinking?: boolean;
+  /** Announce queue for receiving sub-agent results (main agent only) */
+  announceQueue?: AnnounceQueue;
+  /** Sub-agent executor for cancellation propagation (main agent only) */
+  subAgentExecutor?: SubAgentExecutor;
 }
 
 export interface AgentResult {
@@ -139,6 +145,10 @@ export class Agent {
   private lastAssistantResponses: Map<string, string> = new Map();
   /** Enable extended thinking for supported providers */
   private enableThinking: boolean;
+  /** Announce queue for receiving sub-agent results */
+  private announceQueue: AnnounceQueue | null;
+  /** Sub-agent executor for cancellation propagation */
+  private subAgentExecutor: SubAgentExecutor | null;
 
   constructor(options: AgentOptions) {
     this.provider = options.provider;
@@ -158,6 +168,8 @@ export class Agent {
     this.maxIterations = options.maxIterations;
     this.baseSystemPrompt = options.systemPrompt || DEFAULT_SYSTEM_PROMPT;
     this.enableThinking = options.enableThinking ?? false;
+    this.announceQueue = options.announceQueue || null;
+    this.subAgentExecutor = options.subAgentExecutor || null;
 
     this.logger.info({ enableThinking: this.enableThinking }, 'Agent thinking mode configured');
   }
@@ -329,8 +341,34 @@ export class Agent {
       // Check if user requested stop
       if (shouldStop && shouldStop()) {
         this.logger.info({ sessionId, iteration: iterations }, 'User requested stop');
+        // Cancel any running sub-agents for this session
+        if (this.subAgentExecutor) {
+          this.subAgentExecutor.cancelForParent(sessionId);
+        }
         finalResponse = 'Stopped by user request.';
         break;
+      }
+
+      // Drain completed sub-agent results
+      if (this.announceQueue?.hasPending(sessionId)) {
+        const entries = this.announceQueue.drain(sessionId);
+        for (const entry of entries) {
+          const truncated = entry.result.response.length > 2000
+            ? entry.result.response.substring(0, 2000) + `\n...(truncated, ${entry.result.response.length} chars total)`
+            : entry.result.response;
+
+          const announceMsg = [
+            `[Sub-agent "${entry.label}" completed — ${entry.result.iterationsUsed} iterations, ${entry.tokenUsage.inputTokens + entry.tokenUsage.outputTokens} tokens]`,
+            '',
+            truncated,
+          ].join('\n');
+
+          await this.sessionManager.addMessage(sessionId, {
+            role: 'user',
+            content: announceMsg,
+          });
+        }
+        this.logger.debug({ sessionId, drained: entries.length }, 'Sub-agent results injected into context');
       }
 
       // Check budget before each iteration
@@ -482,6 +520,10 @@ export class Agent {
       // Check if user requested stop after tool execution (don't wait for next iteration's LLM call)
       if (shouldStop && shouldStop()) {
         this.logger.info({ sessionId, iteration: iterations }, 'User requested stop after tool execution');
+        // Cancel any running sub-agents for this session
+        if (this.subAgentExecutor) {
+          this.subAgentExecutor.cancelForParent(sessionId);
+        }
         finalResponse = 'Stopped by user request.';
         break;
       }

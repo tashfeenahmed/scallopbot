@@ -142,6 +142,18 @@ const tailscaleSchema = z.object({
   resetOnExit: z.boolean().default(true),
 });
 
+// Sub-agent configuration schema
+const subagentSchema = z.object({
+  maxConcurrentPerSession: z.number().int().positive().default(3),
+  maxConcurrentGlobal: z.number().int().positive().default(5),
+  defaultTimeoutSeconds: z.number().int().positive().default(120),
+  maxTimeoutSeconds: z.number().int().positive().default(300),
+  defaultModelTier: z.enum(['fast', 'standard', 'capable']).default('fast'),
+  maxIterations: z.number().int().positive().default(20),
+  cleanupAfterSeconds: z.number().int().positive().default(3600),
+  allowMemoryWrites: z.boolean().default(false),
+});
+
 // Main configuration schema
 export const configSchema = z.object({
   providers: providersSchema,
@@ -154,6 +166,16 @@ export const configSchema = z.object({
   memory: memorySchema.default({ filePath: 'memories.jsonl', persist: true, dbPath: 'memories.db' }),
   gateway: gatewaySchema.default({ port: DEFAULT_API_PORT, host: DEFAULT_HOST }),
   tailscale: tailscaleSchema.default({ mode: 'off', resetOnExit: true }),
+  subagent: subagentSchema.default({
+    maxConcurrentPerSession: 3,
+    maxConcurrentGlobal: 5,
+    defaultTimeoutSeconds: 120,
+    maxTimeoutSeconds: 300,
+    defaultModelTier: 'fast' as const,
+    maxIterations: 20,
+    cleanupAfterSeconds: 3600,
+    allowMemoryWrites: false,
+  }),
 });
 
 // Type inference from schema
@@ -168,6 +190,7 @@ export type ContextConfig = z.infer<typeof contextSchema>;
 export type MemoryConfig = z.infer<typeof memorySchema>;
 export type GatewayConfig = z.infer<typeof gatewaySchema>;
 export type TailscaleConfig = z.infer<typeof tailscaleSchema>;
+export type SubagentConfig = z.infer<typeof subagentSchema>;
 
 /**
  * Load configuration from environment variables
@@ -281,6 +304,16 @@ export function loadConfig(): Config {
       hostname: process.env.TAILSCALE_HOSTNAME || undefined,
       port: process.env.TAILSCALE_PORT ? parseInt(process.env.TAILSCALE_PORT, 10) : undefined,
       resetOnExit: process.env.TAILSCALE_RESET_ON_EXIT !== 'false',
+    },
+    subagent: {
+      maxConcurrentPerSession: process.env.SUBAGENT_MAX_CONCURRENT_PER_SESSION ? parseInt(process.env.SUBAGENT_MAX_CONCURRENT_PER_SESSION, 10) : 3,
+      maxConcurrentGlobal: process.env.SUBAGENT_MAX_CONCURRENT_GLOBAL ? parseInt(process.env.SUBAGENT_MAX_CONCURRENT_GLOBAL, 10) : 5,
+      defaultTimeoutSeconds: process.env.SUBAGENT_DEFAULT_TIMEOUT ? parseInt(process.env.SUBAGENT_DEFAULT_TIMEOUT, 10) : 120,
+      maxTimeoutSeconds: process.env.SUBAGENT_MAX_TIMEOUT ? parseInt(process.env.SUBAGENT_MAX_TIMEOUT, 10) : 300,
+      defaultModelTier: (process.env.SUBAGENT_MODEL_TIER as 'fast' | 'standard' | 'capable') || 'fast',
+      maxIterations: process.env.SUBAGENT_MAX_ITERATIONS ? parseInt(process.env.SUBAGENT_MAX_ITERATIONS, 10) : 20,
+      cleanupAfterSeconds: process.env.SUBAGENT_CLEANUP_AFTER ? parseInt(process.env.SUBAGENT_CLEANUP_AFTER, 10) : 3600,
+      allowMemoryWrites: process.env.SUBAGENT_ALLOW_MEMORY_WRITES === 'true',
     },
   };
 

@@ -37,6 +37,7 @@ import { type TriggerSource, type TriggerSourceRegistry, parseUserIdPrefix } fro
 import { UnifiedScheduler } from '../proactive/index.js';
 import { BotConfigManager } from '../channels/bot-config.js';
 import { GoalService } from '../goals/index.js';
+import { SubAgentRegistry, SubAgentExecutor, AnnounceQueue } from '../subagent/index.js';
 
 export interface GatewayOptions {
   config: Config;
@@ -65,6 +66,9 @@ export class Gateway {
   private telegramChannel: TelegramChannel | null = null;
   private apiChannel: ApiChannel | null = null;
   private unifiedScheduler: UnifiedScheduler | null = null;
+  private subAgentRegistry: SubAgentRegistry | null = null;
+  private subAgentExecutor: SubAgentExecutor | null = null;
+  private announceQueue: AnnounceQueue | null = null;
 
   /** Registry of active trigger sources for multi-channel message dispatch */
   private triggerSources: TriggerSourceRegistry = new Map();
@@ -239,11 +243,66 @@ export class Gateway {
     this.sessionManager = new SessionManager(this.scallopMemoryStore!.getDatabase());
     this.logger.debug('Session manager initialized (SQLite)');
 
+    // Initialize sub-agent infrastructure
+    const subagentConfig = this.config.subagent;
+    this.announceQueue = new AnnounceQueue({ maxQueueSize: 20, logger: this.logger });
+    this.subAgentRegistry = new SubAgentRegistry({ config: subagentConfig, logger: this.logger });
+
+    // Recover orphaned sub-agent runs from SQLite on startup
+    if (this.scallopMemoryStore) {
+      const db = this.scallopMemoryStore.getDatabase();
+      const activeRows = db.getActiveSubAgentRuns();
+      if (activeRows.length > 0) {
+        const orphaned = this.subAgentRegistry.loadFromPersistence(
+          activeRows.map(row => ({
+            id: row.id,
+            parentSessionId: row.parentSessionId,
+            childSessionId: row.childSessionId,
+            task: row.task,
+            label: row.label,
+            status: row.status as 'pending' | 'running',
+            allowedSkills: row.allowedSkills ? row.allowedSkills.split(',') : [],
+            modelTier: row.modelTier as 'fast' | 'standard' | 'capable',
+            timeoutMs: row.timeoutMs,
+            tokenUsage: { inputTokens: row.inputTokens, outputTokens: row.outputTokens },
+            createdAt: row.createdAt,
+            startedAt: row.startedAt ?? undefined,
+            completedAt: row.completedAt ?? undefined,
+          }))
+        );
+        // Mark orphaned runs as failed in SQLite too
+        for (const row of activeRows) {
+          db.updateSubAgentRun(row.id, { status: 'failed', error: 'Process restarted', completedAt: Date.now() });
+        }
+        this.logger.info({ orphaned, total: activeRows.length }, 'Recovered orphaned sub-agent runs');
+      }
+    }
+
     // Initialize agent
     const provider = this.providerRegistry.getDefaultProvider();
     if (!provider) {
       throw new Error('No LLM provider available. Please configure at least one provider.');
     }
+
+    // SubAgentExecutor needs the session manager, so create it before Agent
+    this.subAgentExecutor = new SubAgentExecutor({
+      registry: this.subAgentRegistry,
+      announceQueue: this.announceQueue,
+      sessionManager: this.sessionManager,
+      skillRegistry: this.skillRegistry!,
+      skillExecutor: this.skillExecutor!,
+      router: this.router!,
+      costTracker: this.costTracker || undefined,
+      scallopStore: this.scallopMemoryStore || undefined,
+      contextManager: this.contextManager || undefined,
+      workspace: this.config.agent.workspace,
+      logger: this.logger,
+      config: subagentConfig,
+    });
+
+    // Register spawn_agent and check_agents skills
+    this.registerSubAgentSkills();
+    this.logger.debug('Sub-agent system initialized');
 
     this.agent = new Agent({
       provider,
@@ -262,6 +321,8 @@ export class Gateway {
       logger: this.logger,
       maxIterations: this.config.agent.maxIterations,
       enableThinking: this.config.providers.moonshot.enableThinking,
+      announceQueue: this.announceQueue,
+      subAgentExecutor: this.subAgentExecutor,
     });
     this.logger.debug('Agent initialized');
 
@@ -772,6 +833,130 @@ export class Gateway {
       })
       .build();
     this.skillRegistry.registerSkill(memoryGetSkill.skill);
+  }
+
+  /**
+   * Register spawn_agent and check_agents native skills for sub-agent system
+   */
+  private registerSubAgentSkills(): void {
+    if (!this.skillRegistry || !this.subAgentRegistry || !this.subAgentExecutor) return;
+
+    const registry = this.subAgentRegistry;
+    const executor = this.subAgentExecutor;
+    const logger = this.logger;
+
+    // spawn_agent skill
+    const spawnAgentSkill = defineSkill(
+      'spawn_agent',
+      'Delegate a task to a focused sub-agent that runs independently. Use for parallel research, data gathering, or analysis that does not need your direct attention.'
+    )
+      .userInvocable(false)
+      .inputSchema({
+        type: 'object',
+        properties: {
+          task: { type: 'string', description: 'Clear description of what the sub-agent should accomplish' },
+          label: { type: 'string', description: 'Short label for tracking (e.g., "weather-check")' },
+          skills: { type: 'string', description: 'Comma-separated skill names to allow (empty = auto-select)' },
+          model_tier: { type: 'string', description: 'fast (default/cheapest), standard, or capable' },
+          timeout_seconds: { type: 'number', description: 'Timeout in seconds (default: 120, max: 300)' },
+          wait: { type: 'boolean', description: 'Wait for result inline (default: false = async)' },
+        },
+        required: ['task'],
+      })
+      .onNativeExecute(async (ctx) => {
+        const task = ctx.args.task as string;
+        if (!task || task.trim().length < 5) {
+          return { success: false, output: '', error: 'Task description must be at least 5 characters' };
+        }
+
+        const skillsStr = ctx.args.skills as string | undefined;
+        const skills = skillsStr ? skillsStr.split(',').map(s => s.trim()).filter(Boolean) : [];
+        const modelTier = (ctx.args.model_tier as 'fast' | 'standard' | 'capable') || undefined;
+        const timeoutSeconds = ctx.args.timeout_seconds as number | undefined;
+        const wait = ctx.args.wait as boolean | undefined;
+
+        // Check concurrency
+        const session = await this.sessionManager!.getSession(ctx.sessionId);
+        const canSpawn = registry.canSpawn(ctx.sessionId, session?.metadata as Record<string, unknown> | undefined);
+        if (!canSpawn.allowed) {
+          return { success: false, output: '', error: canSpawn.reason || 'Cannot spawn sub-agent' };
+        }
+
+        const input = {
+          task: task.trim(),
+          label: (ctx.args.label as string) || undefined,
+          skills,
+          modelTier,
+          timeoutSeconds,
+          waitForResult: wait,
+        };
+
+        try {
+          if (wait) {
+            // Synchronous: block until result
+            const result = await executor.spawnAndWait(ctx.sessionId, input);
+            return {
+              success: true,
+              output: result.response,
+            };
+          } else {
+            // Asynchronous: return immediately
+            const { runId, childSessionId } = await executor.spawn(ctx.sessionId, input);
+            return {
+              success: true,
+              output: `Sub-agent "${input.label || runId.slice(0, 8)}" spawned (run: ${runId}). Results will appear when complete.`,
+            };
+          }
+        } catch (error) {
+          logger.error({ error: (error as Error).message, task }, 'spawn_agent failed');
+          return { success: false, output: '', error: `Failed to spawn sub-agent: ${(error as Error).message}` };
+        }
+      })
+      .build();
+    this.skillRegistry.registerSkill(spawnAgentSkill.skill);
+
+    // check_agents skill
+    const checkAgentsSkill = defineSkill(
+      'check_agents',
+      'Check the status of running or recently completed sub-agents.'
+    )
+      .userInvocable(false)
+      .inputSchema({
+        type: 'object',
+        properties: {},
+        required: [],
+      })
+      .onNativeExecute(async (ctx) => {
+        const runs = registry.getRunsForParent(ctx.sessionId);
+        if (runs.length === 0) {
+          return { success: true, output: 'No sub-agents found for this session.' };
+        }
+
+        const lines: string[] = [];
+        for (const run of runs) {
+          const elapsed = run.startedAt
+            ? `${((Date.now() - run.startedAt) / 1000).toFixed(0)}s`
+            : 'not started';
+          let line = `- **${run.label}** [${run.status}] (${elapsed})`;
+          if (run.result) {
+            const snippet = run.result.response.length > 100
+              ? run.result.response.substring(0, 100) + '...'
+              : run.result.response;
+            line += `: ${snippet}`;
+          }
+          if (run.error) {
+            line += ` — Error: ${run.error}`;
+          }
+          lines.push(line);
+        }
+
+        return {
+          success: true,
+          output: `Sub-agents for this session (${runs.length}):\n${lines.join('\n')}`,
+        };
+      })
+      .build();
+    this.skillRegistry.registerSkill(checkAgentsSkill.skill);
   }
 
   /**
