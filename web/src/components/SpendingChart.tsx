@@ -16,7 +16,7 @@ export default function SpendingChart({ dailyHistory }: SpendingChartProps) {
 
   return (
     <div className="mt-2.5">
-      <div className="text-[11px] text-gray-500 uppercase tracking-wide mb-1.5">
+      <div className="text-[11px] text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-1.5">
         Daily Spend (last {data.length}d)
       </div>
       <div className="flex items-end gap-[3px] h-16">
@@ -30,7 +30,7 @@ export default function SpendingChart({ dailyHistory }: SpendingChartProps) {
             >
               <div
                 className={`w-full rounded-sm transition-all duration-300 ${
-                  isToday ? 'bg-blue-500' : 'bg-blue-300'
+                  isToday ? 'bg-gray-100 dark:bg-gray-200' : 'bg-gray-400 dark:bg-gray-600'
                 }`}
                 style={{ height: `${Math.max(height, 2)}%` }}
                 title={`${d.date}: ${formatCost(d.cost)} (${d.requests} req)`}
@@ -43,7 +43,7 @@ export default function SpendingChart({ dailyHistory }: SpendingChartProps) {
         {data.map((d) => (
           <div
             key={d.date}
-            className="flex-1 text-center text-[8px] text-gray-400 truncate"
+            className="flex-1 text-center text-[8px] text-gray-400 dark:text-gray-500 truncate"
           >
             {d.date.slice(5)}
           </div>

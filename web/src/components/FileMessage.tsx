@@ -9,9 +9,9 @@ export default function FileMessage({ filePath, caption }: FileMessageProps) {
 
   return (
     <div className="self-start max-w-[65%] max-md:max-w-[85%] animate-[fade-in_0.15s_ease-out]">
-      <div className="flex items-center gap-2 px-3 py-2.5 bg-blue-50 border border-blue-100 rounded-lg">
+      <div className="flex items-center gap-2 px-3 py-2.5 bg-blue-50 dark:bg-gray-800 border border-blue-100 dark:border-gray-700 rounded-lg">
         <span className="text-lg">📄</span>
-        <span className="flex-1 font-medium text-gray-900 text-sm break-all">{fileName}</span>
+        <span className="flex-1 font-medium text-gray-900 dark:text-gray-100 text-sm break-all">{fileName}</span>
         <a
           href={'/api/files?path=' + encodeURIComponent(filePath)}
           download={fileName}
@@ -22,7 +22,7 @@ export default function FileMessage({ filePath, caption }: FileMessageProps) {
           Download
         </a>
       </div>
-      {caption && <div className="mt-1 text-sm text-gray-500">{caption}</div>}
+      {caption && <div className="mt-1 text-sm text-gray-500 dark:text-gray-400">{caption}</div>}
     </div>
   );
 }

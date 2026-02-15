@@ -22,6 +22,7 @@ interface MapHUDProps {
   maxTime: number;
   timelineCutoff: number;
   onTimelineCutoff: (t: number) => void;
+  darkMode: boolean;
 }
 
 export default function MapHUD({
@@ -40,13 +41,14 @@ export default function MapHUD({
   maxTime,
   timelineCutoff,
   onTimelineCutoff,
+  darkMode,
 }: MapHUDProps) {
   return (
     <div className="absolute inset-0 pointer-events-none">
       {/* Top bar */}
       <div className="absolute top-3 left-3 right-3 flex items-start gap-3 pointer-events-auto">
-        <FilterBar categories={filters.categories} onToggle={onToggleCategory} onHoverCategory={onHoverCategory} />
-        <TimelinePlayer minTime={minTime} maxTime={maxTime} cutoff={timelineCutoff} onCutoffChange={onTimelineCutoff} />
+        <FilterBar categories={filters.categories} onToggle={onToggleCategory} onHoverCategory={onHoverCategory} darkMode={darkMode} />
+        <TimelinePlayer minTime={minTime} maxTime={maxTime} cutoff={timelineCutoff} onCutoffChange={onTimelineCutoff} darkMode={darkMode} />
         <SearchBox value={filters.searchQuery} onChange={onSearchChange} />
       </div>
 

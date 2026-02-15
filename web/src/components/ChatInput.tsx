@@ -31,7 +31,7 @@ export default function ChatInput({ onSend, onStop, isWaiting, disabled, inputRe
   };
 
   return (
-    <footer className="px-[10%] py-2 border-t border-gray-200 bg-white max-md:px-3">
+    <footer className="px-[10%] py-2 border-t border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 max-md:px-3">
       <form onSubmit={handleSubmit} className="flex gap-2 items-center max-w-3xl mx-auto">
         <input
           ref={inputRef}
@@ -42,7 +42,7 @@ export default function ChatInput({ onSend, onStop, isWaiting, disabled, inputRe
           placeholder="Message..."
           disabled={disabled}
           autoComplete="off"
-          className="flex-1 px-4 py-3 text-sm bg-gray-50 border border-gray-200 rounded-full text-gray-900 outline-none focus:border-blue-300 focus:bg-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed placeholder:text-gray-400"
+          className="flex-1 px-4 py-3 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-full text-gray-900 dark:text-gray-100 outline-none focus:border-blue-300 dark:focus:border-blue-500 focus:bg-white dark:focus:bg-gray-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed placeholder:text-gray-400 dark:placeholder:text-gray-500"
         />
         <button
           type="submit"

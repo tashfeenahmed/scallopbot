@@ -4,7 +4,11 @@ import * as THREE from 'three';
 
 const PARTICLE_COUNT = 200;
 
-export default function AmbientParticles() {
+interface AmbientParticlesProps {
+  darkMode: boolean;
+}
+
+export default function AmbientParticles({ darkMode }: AmbientParticlesProps) {
   const ref = useRef<THREE.Points>(null);
 
   const positions = useMemo(() => {
@@ -27,7 +31,7 @@ export default function AmbientParticles() {
       <bufferGeometry>
         <bufferAttribute attach="attributes-position" args={[positions, 3]} />
       </bufferGeometry>
-      <pointsMaterial size={0.05} color="#60a5fa" transparent opacity={0.3} sizeAttenuation />
+      <pointsMaterial size={0.05} color={darkMode ? '#60a5fa' : '#94a3b8'} transparent opacity={darkMode ? 0.3 : 0.15} sizeAttenuation />
     </points>
   );
 }

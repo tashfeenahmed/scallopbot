@@ -1,14 +1,26 @@
-import { lazy, Suspense, useCallback, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { useWebSocket, type WsMessage } from './hooks/useWebSocket';
 import { useCosts } from './hooks/useCosts';
-import Header from './components/Header';
+import Sidebar from './components/Sidebar';
 import CreditsPanel from './components/CreditsPanel';
 import ChatContainer from './components/ChatContainer';
 import ChatInput from './components/ChatInput';
 
 const MemoryMap = lazy(() => import('./components/memory-map/MemoryMap'));
 
-export type ViewMode = 'chat' | 'memory-map';
+export type ViewMode = 'chat' | 'memory-map' | 'costs';
+
+function pathToView(pathname: string): ViewMode {
+  if (pathname === '/memory') return 'memory-map';
+  if (pathname === '/costs') return 'costs';
+  return 'chat';
+}
+
+function viewToPath(view: ViewMode): string {
+  if (view === 'memory-map') return '/memory';
+  if (view === 'costs') return '/costs';
+  return '/';
+}
 
 export interface ChatMessage {
   id: number;
@@ -31,11 +43,36 @@ let messageIdCounter = 0;
 export default function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [debugMode, setDebugMode] = useState(false);
-  const [creditsOpen, setCreditsOpen] = useState(false);
   const [isWaiting, setIsWaiting] = useState(false);
-  const [currentView, setCurrentView] = useState<ViewMode>('chat');
+  const [currentView, setCurrentView] = useState<ViewMode>(() => pathToView(window.location.pathname));
+  const [darkMode, setDarkMode] = useState(() => {
+    const stored = localStorage.getItem('darkMode');
+    return stored ? stored === 'true' : true;
+  });
   const { costs, refetch: refetchCosts } = useCosts();
   const inputRef = useRef<HTMLInputElement>(null);
+
+  // Sync view changes to browser URL
+  const handleViewChange = useCallback((view: ViewMode) => {
+    setCurrentView(view);
+    const path = viewToPath(view);
+    if (window.location.pathname !== path) {
+      window.history.pushState(null, '', path);
+    }
+  }, []);
+
+  // Listen for browser back/forward
+  useEffect(() => {
+    const onPopState = () => {
+      setCurrentView(pathToView(window.location.pathname));
+    };
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem('darkMode', String(darkMode));
+  }, [darkMode]);
 
   const addMessage = useCallback((msg: Omit<ChatMessage, 'id'>) => {
     setMessages((prev) => [...prev, { ...msg, id: ++messageIdCounter }]);
@@ -58,13 +95,11 @@ export default function App() {
             setMessages((prev) => {
               const last = prev[prev.length - 1];
               if (last && last.type === 'assistant' && last.isMarkdown && !last.label) {
-                // Append to the last assistant streaming message
                 return [
                   ...prev.slice(0, -1),
                   { ...last, content: last.content + data.content },
                 ];
               }
-              // Start a new streaming message
               return [
                 ...prev,
                 {
@@ -187,39 +222,50 @@ export default function App() {
   }, [addMessage, sendStop]);
 
   return (
-    <div className="flex flex-col h-screen bg-white">
-      <Header
-        status={status}
-        debugMode={debugMode}
-        onDebugToggle={setDebugMode}
-        onCreditsToggle={() => setCreditsOpen((o) => !o)}
-        creditsAvailable={costs !== null}
-        hasSpend={costs !== null && costs.daily.spent > 0}
-        creditsOpen={creditsOpen}
-        currentView={currentView}
-        onViewChange={setCurrentView}
-      />
-      {creditsOpen && costs && <CreditsPanel costs={costs} />}
-      {currentView === 'chat' ? (
-        <>
-          <ChatContainer messages={messages} debugMode={debugMode} isWaiting={isWaiting} />
-          <ChatInput
-            onSend={handleSend}
-            onStop={handleStop}
-            isWaiting={isWaiting}
-            disabled={status !== 'connected'}
-            inputRef={inputRef}
-          />
-        </>
-      ) : (
-        <Suspense fallback={
-          <div className="flex-1 flex items-center justify-center bg-gray-950 text-gray-400">
-            <div className="w-8 h-8 border-2 border-blue-400 border-t-transparent rounded-full animate-spin" />
-          </div>
-        }>
-          <MemoryMap />
-        </Suspense>
-      )}
+    <div className={`${darkMode ? 'dark' : ''}`}>
+      <div className="flex h-screen bg-white dark:bg-gray-950 text-gray-900 dark:text-gray-100">
+        <Sidebar
+          status={status}
+          currentView={currentView}
+          onViewChange={handleViewChange}
+          darkMode={darkMode}
+          onDarkModeToggle={() => setDarkMode((d) => !d)}
+          debugMode={debugMode}
+          onDebugToggle={setDebugMode}
+          costsAvailable={costs !== null}
+          hasSpend={costs !== null && costs.daily.spent > 0}
+        />
+        <div className="flex flex-col flex-1 min-w-0">
+          {currentView === 'costs' ? (
+            costs ? (
+              <CreditsPanel costs={costs} />
+            ) : (
+              <div className="flex-1 flex items-center justify-center text-gray-500 dark:text-gray-400">
+                <p>No cost data available</p>
+              </div>
+            )
+          ) : currentView === 'chat' ? (
+            <>
+              <ChatContainer messages={messages} debugMode={debugMode} isWaiting={isWaiting} />
+              <ChatInput
+                onSend={handleSend}
+                onStop={handleStop}
+                isWaiting={isWaiting}
+                disabled={status !== 'connected'}
+                inputRef={inputRef}
+              />
+            </>
+          ) : (
+            <Suspense fallback={
+              <div className="flex-1 flex items-center justify-center bg-gray-100 dark:bg-gray-950 text-gray-500 dark:text-gray-400">
+                <div className="w-8 h-8 border-2 border-gray-400 dark:border-blue-400 border-t-transparent rounded-full animate-spin" />
+              </div>
+            }>
+              <MemoryMap darkMode={darkMode} />
+            </Suspense>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
