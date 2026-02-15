@@ -169,6 +169,19 @@ export default function MemoryMap() {
   const hoveredNode = interaction.hoveredIndex !== null ? nodes[interaction.hoveredIndex] : null;
   const selectedNode = interaction.selectedIndex !== null ? nodes[interaction.selectedIndex] : null;
 
+  // Compute neighbor set for hover highlighting (node IDs adjacent to hovered node)
+  const highlightIds = useMemo<Set<string> | null>(() => {
+    if (interaction.hoveredIndex === null) return null;
+    const hovered = nodes[interaction.hoveredIndex];
+    if (!hovered) return null;
+    const ids = new Set<string>([hovered.memory.id]);
+    for (const edge of edges) {
+      if (edge.relation.sourceId === hovered.memory.id) ids.add(edge.relation.targetId);
+      else if (edge.relation.targetId === hovered.memory.id) ids.add(edge.relation.sourceId);
+    }
+    return ids;
+  }, [interaction.hoveredIndex, nodes, edges]);
+
   return (
     <div className="flex-1 relative bg-gray-950 overflow-hidden">
       <GraphScene
@@ -178,6 +191,7 @@ export default function MemoryMap() {
         selectedIndex={interaction.selectedIndex}
         hoveredCategory={hoveredCategory}
         allCategoriesActive={allCategoriesActive}
+        highlightIds={highlightIds}
         onHover={handleHover}
         onSelect={handleSelect}
       />
