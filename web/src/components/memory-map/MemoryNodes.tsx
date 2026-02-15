@@ -45,10 +45,7 @@ function MemoryNode({
     ? (isHovered || isSelected ? 1.2 : 0.4 + node.opacity * 0.6)
     : (isHovered || isSelected ? 0.4 : 0.1 + node.opacity * 0.15);
 
-  // In light mode: nodes should be more opaque to stand out
-  const targetOpacity = dimmed
-    ? 0.06
-    : darkMode ? node.opacity : Math.max(node.opacity, 0.7);
+  const targetOpacity = dimmed ? 0.06 : 1;
 
   const targetEmissive = dimmed
     ? 0.05
@@ -98,7 +95,7 @@ function MemoryNode({
         transparent
         opacity={0.01}
         toneMapped={!darkMode}
-        depthWrite={node.opacity > 0.5}
+        depthWrite
       />
     </mesh>
   );
