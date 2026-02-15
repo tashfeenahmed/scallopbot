@@ -219,7 +219,6 @@ Notes:
 - Set confidence based on how certain the extraction is (0.9+ for explicit statements, 0.6-0.8 for inferred facts)
 - If no facts can be extracted, return EMPTY facts array — this is the CORRECT response for greetings, questions, small talk, and messages with no factual content
 - If nothing time-sensitive found, return empty proactive_triggers array
-- NEVER store questions the user asked (e.g., "what do you know about me") — those are queries, not facts
 - NEVER store greetings or filler ("hey", "hi", "thanks", "good morning")
 - Each fact should be a concise statement under 100 characters
 - CRITICAL: trigger_time MUST include a specific time (hour:minute), not just a date!
