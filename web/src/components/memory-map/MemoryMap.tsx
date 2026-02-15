@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback } from 'react';
+import { useState, useMemo, useCallback, useRef, useEffect } from 'react';
 import { useMemoryGraph } from '../../hooks/useMemoryGraph';
 import { CATEGORY_COLORS, CATEGORY_COLORS_LIGHT, RELATION_COLORS, RELATION_COLORS_LIGHT, nodeSize } from './constants';
 import type { ProcessedNode, ProcessedEdge, FilterState, MapInteractionState } from './types';
@@ -160,6 +160,40 @@ export default function MemoryMap({ darkMode }: MemoryMapProps) {
     return ids;
   }, [interaction.hoveredIndex, nodes, edges]);
 
+  // --- Flash memory node during timeline playback ---
+  const [flashNode, setFlashNode] = useState<ProcessedNode | null>(null);
+  const prevCutoffRef = useRef(effectiveCutoff);
+  const lastFlashTimeRef = useRef(0);
+  const flashTimerRef = useRef<number>(0);
+
+  useEffect(() => {
+    const prevCutoff = prevCutoffRef.current;
+    prevCutoffRef.current = effectiveCutoff;
+
+    const now = Date.now();
+    if (timelineCutoff === null || effectiveCutoff <= prevCutoff || !data || now - lastFlashTimeRef.current < 1800) return;
+
+    const appeared = data.memories.filter(m =>
+      m.createdAt > prevCutoff && m.createdAt <= effectiveCutoff &&
+      filters.categories.has(m.category)
+    );
+
+    if (appeared.length > 0) {
+      const latest = appeared.reduce((a, b) => a.createdAt > b.createdAt ? a : b);
+      const node = nodes.find(n => n.memory.id === latest.id);
+      if (node) {
+        setFlashNode(node);
+        lastFlashTimeRef.current = now;
+        clearTimeout(flashTimerRef.current);
+        flashTimerRef.current = window.setTimeout(() => setFlashNode(null), 2000);
+      }
+    }
+  }, [effectiveCutoff, data, filters, nodes]);
+
+  useEffect(() => {
+    return () => clearTimeout(flashTimerRef.current);
+  }, []);
+
   if (state === 'loading') {
     return (
       <div className="flex-1 flex items-center justify-center bg-gray-100 dark:bg-gray-950 text-gray-500 dark:text-gray-400">
@@ -203,6 +237,7 @@ export default function MemoryMap({ darkMode }: MemoryMapProps) {
         onHover={handleHover}
         onSelect={handleSelect}
         darkMode={darkMode}
+        flashNode={flashNode}
       />
       <MapHUD
         filters={filters}

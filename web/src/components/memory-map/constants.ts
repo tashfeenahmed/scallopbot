@@ -17,15 +17,15 @@ export const CATEGORY_COLORS_LIGHT: Record<string, string> = {
 
 export const RELATION_COLORS: Record<string, string> = {
   UPDATES: '#ef4444',
-  EXTENDS: '#22d3ee',
-  DERIVES: '#a855f7',
+  EXTENDS: '#a6a6a6',
+  DERIVES: '#facc15',
 };
 
 /** Deeper variants for light backgrounds */
 export const RELATION_COLORS_LIGHT: Record<string, string> = {
   UPDATES: '#991b1b',
-  EXTENDS: '#155e75',
-  DERIVES: '#5b21b6',
+  EXTENDS: '#d1d5db',
+  DERIVES: '#ca8a04',
 };
 
 export const CATEGORY_LABELS: Record<string, string> = {

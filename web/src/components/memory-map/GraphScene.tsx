@@ -1,7 +1,8 @@
 import { Canvas } from '@react-three/fiber';
-import { OrbitControls, Stars } from '@react-three/drei';
+import { OrbitControls, Stars, Html } from '@react-three/drei';
 import { EffectComposer, Bloom, Vignette } from '@react-three/postprocessing';
 import type { ProcessedNode, ProcessedEdge } from './types';
+import type { CSSProperties } from 'react';
 import MemoryNodes from './MemoryNodes';
 import RelationEdges from './RelationEdges';
 import AmbientParticles from './AmbientParticles';
@@ -17,9 +18,10 @@ interface GraphSceneProps {
   onHover: (index: number | null) => void;
   onSelect: (index: number | null) => void;
   darkMode: boolean;
+  flashNode?: ProcessedNode | null;
 }
 
-export default function GraphScene({ nodes, edges, hoveredIndex, selectedIndex, hoveredCategory, allCategoriesActive, highlightIds, onHover, onSelect, darkMode }: GraphSceneProps) {
+export default function GraphScene({ nodes, edges, hoveredIndex, selectedIndex, hoveredCategory, allCategoriesActive, highlightIds, onHover, onSelect, darkMode, flashNode }: GraphSceneProps) {
   return (
     <Canvas
       camera={{ position: [0, 0, 25], fov: 60 }}
@@ -45,6 +47,46 @@ export default function GraphScene({ nodes, edges, hoveredIndex, selectedIndex, 
       />
       <RelationEdges edges={edges} highlightIds={highlightIds} darkMode={darkMode} />
       <AmbientParticles darkMode={darkMode} />
+
+      {flashNode && (
+        <group position={flashNode.position}>
+          <Html
+            center={false}
+            style={{ pointerEvents: 'none', whiteSpace: 'nowrap' } as CSSProperties}
+          >
+            <div
+              key={flashNode.memory.id}
+              className="memory-flash"
+              style={{
+                position: 'relative',
+                marginLeft: 8,
+                padding: '5px 12px',
+                borderRadius: 8,
+                backgroundColor: darkMode ? 'rgba(0,0,0,0.75)' : 'rgba(255,255,255,0.88)',
+                backdropFilter: 'blur(8px)',
+                maxWidth: 420,
+                whiteSpace: 'nowrap',
+              }}
+            >
+              <p
+                style={{
+                  margin: 0,
+                  fontSize: 14,
+                  lineHeight: 1.3,
+                  color: darkMode ? '#e5e7eb' : '#374151',
+                  fontFamily: "'SF Mono', Monaco, 'Cascadia Code', monospace",
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                }}
+              >
+                {flashNode.memory.content.length > 160
+                  ? flashNode.memory.content.slice(0, 160) + '...'
+                  : flashNode.memory.content}
+              </p>
+            </div>
+          </Html>
+        </group>
+      )}
 
       <OrbitControls enableDamping dampingFactor={0.05} minDistance={5} maxDistance={60} />
 
