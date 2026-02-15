@@ -563,9 +563,8 @@ export class Agent {
 
     // Add file sending instructions
     prompt += `\n\n## FILE SENDING
-ALWAYS use **send_file** after creating any file (PDFs, images, documents, scripts, plans, etc.). Never just tell the user the file path — they can't access your filesystem. You MUST call send_file to deliver it.
-- Works on Telegram (sends as document attachment) and web (sends as download link)
-- Do NOT paste file contents into chat — use send_file to deliver the actual file
+For **text content** (posts, emails, summaries, replies, drafts), type it directly in the chat — NEVER write it to a .txt or .md file just to send it.
+Only use write_file + send_file for **binary/generated files** (PDFs, images, archives, diagrams). Save them under the **output/** subdirectory (e.g., output/report.pdf), not the workspace root. Never just tell the user a file path — call send_file to deliver it.
 - For text updates along the way, use **send_message**`;
 
     // Add skills prompt if registry is available

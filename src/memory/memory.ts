@@ -9,6 +9,8 @@
  */
 
 import type { Logger } from 'pino';
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
 
 import type { ScallopMemoryStore } from './scallop-store.js';
 import type { SessionSummarizer } from './session-summary.js';
@@ -213,7 +215,41 @@ export class BackgroundGardener {
     await runGoalDeadlineCheck(ctx);
     await runInnerThoughts(ctx);
 
+    // Clean up stale agent-generated files
+    if (this.workspace) {
+      await this.cleanupOutputDir(this.workspace);
+    }
+
     this.logger.info('Deep tick complete');
+  }
+
+  /**
+   * Delete files older than 24h from the output/ directory to prevent workspace pollution.
+   */
+  private async cleanupOutputDir(workspace: string): Promise<void> {
+    const outputDir = path.join(workspace, 'output');
+    try {
+      const entries = await fs.readdir(outputDir);
+      const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+      let removed = 0;
+      for (const entry of entries) {
+        const filePath = path.join(outputDir, entry);
+        try {
+          const stat = await fs.stat(filePath);
+          if (stat.isFile() && stat.mtimeMs < cutoff) {
+            await fs.unlink(filePath);
+            removed++;
+          }
+        } catch {
+          // Skip files that can't be stat'd or deleted
+        }
+      }
+      if (removed > 0) {
+        this.logger.info({ removed, dir: outputDir }, 'Cleaned up stale output files');
+      }
+    } catch {
+      // output/ directory doesn't exist yet — nothing to clean
+    }
   }
 
   /**
