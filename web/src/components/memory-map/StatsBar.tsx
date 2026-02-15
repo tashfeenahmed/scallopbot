@@ -7,10 +7,10 @@ interface StatsBarProps {
 
 export default function StatsBar({ visibleCount, totalCount }: StatsBarProps) {
   return (
-    <div className="rounded-lg bg-gray-900/80 border border-gray-700/50 backdrop-blur-sm px-3 py-2">
-      <div className="text-xs text-gray-400 mb-1.5">
-        <span className="text-gray-200 font-medium">{visibleCount}</span>
-        <span className="text-gray-500"> / {totalCount} memories</span>
+    <div className="rounded-lg bg-white/85 dark:bg-gray-900/80 border border-gray-300/80 dark:border-gray-700/50 backdrop-blur-sm px-3 py-2 shadow-sm dark:shadow-none">
+      <div className="text-xs text-gray-500 dark:text-gray-400 mb-1.5">
+        <span className="text-gray-800 dark:text-gray-200 font-medium">{visibleCount}</span>
+        <span className="text-gray-400 dark:text-gray-500"> / {totalCount} memories</span>
       </div>
       <div className="flex flex-wrap gap-x-3 gap-y-1">
         {Object.entries(CATEGORY_COLORS).map(([cat, color]) => (

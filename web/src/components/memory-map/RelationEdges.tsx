@@ -6,6 +6,7 @@ import type { ProcessedEdge } from './types';
 interface RelationEdgesProps {
   edges: ProcessedEdge[];
   highlightIds: Record<string, true> | null;
+  darkMode: boolean;
 }
 
 /** A single batch of line segments that fades in and can be dimmed */
@@ -43,7 +44,7 @@ function EdgeBatch({ positions, color, targetOpacity }: {
   );
 }
 
-export default function RelationEdges({ edges, highlightIds }: RelationEdgesProps) {
+export default function RelationEdges({ edges, highlightIds, darkMode }: RelationEdgesProps) {
   // Group edges by: relationType + dimmed state
   const batches = useMemo(() => {
     const map = new Map<string, { color: string; positions: number[]; dimmed: boolean }>();
@@ -69,9 +70,9 @@ export default function RelationEdges({ edges, highlightIds }: RelationEdgesProp
       key,
       color: g.color,
       positions: new Float32Array(g.positions),
-      targetOpacity: g.dimmed ? 0.04 : 0.7,
+      targetOpacity: g.dimmed ? 0.04 : darkMode ? 0.7 : 0.9,
     }));
-  }, [edges, highlightIds]);
+  }, [edges, highlightIds, darkMode]);
 
   return (
     <group>

@@ -6,10 +6,26 @@ export const CATEGORY_COLORS: Record<string, string> = {
   insight: '#fbbf24',
 };
 
+/** Deeper/darker variants for light backgrounds */
+export const CATEGORY_COLORS_LIGHT: Record<string, string> = {
+  preference: '#db2777',
+  fact: '#2563eb',
+  event: '#7c3aed',
+  relationship: '#059669',
+  insight: '#d97706',
+};
+
 export const RELATION_COLORS: Record<string, string> = {
   UPDATES: '#ef4444',
   EXTENDS: '#22d3ee',
   DERIVES: '#a855f7',
+};
+
+/** Deeper variants for light backgrounds */
+export const RELATION_COLORS_LIGHT: Record<string, string> = {
+  UPDATES: '#991b1b',
+  EXTENDS: '#155e75',
+  DERIVES: '#5b21b6',
 };
 
 export const CATEGORY_LABELS: Record<string, string> = {

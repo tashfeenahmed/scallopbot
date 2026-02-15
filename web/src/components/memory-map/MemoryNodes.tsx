@@ -12,6 +12,7 @@ interface MemoryNodesProps {
   highlightIds: Record<string, true> | null;
   onHover: (index: number | null) => void;
   onSelect: (index: number | null) => void;
+  darkMode: boolean;
 }
 
 function MemoryNode({
@@ -20,6 +21,7 @@ function MemoryNode({
   isSelected,
   showColor,
   dimmed,
+  darkMode,
   onHover,
   onSelect,
 }: {
@@ -28,6 +30,7 @@ function MemoryNode({
   isSelected: boolean;
   showColor: boolean;
   dimmed: boolean;
+  darkMode: boolean;
   onHover: (index: number | null) => void;
   onSelect: (index: number | null) => void;
 }) {
@@ -35,10 +38,21 @@ function MemoryNode({
   const spawnTime = useRef(-1);
 
   const baseScale = isSelected ? node.size * 1.6 : isHovered ? node.size * 1.4 : node.size;
-  const displayColor = showColor ? node.color : '#ffffff';
-  const emissiveIntensity = isHovered || isSelected ? 1.2 : 0.4 + node.opacity * 0.6;
-  const targetOpacity = dimmed ? 0.06 : node.opacity;
-  const targetEmissive = dimmed ? 0.05 : emissiveIntensity;
+  const displayColor = showColor ? node.color : darkMode ? '#ffffff' : '#6b7280';
+
+  // In light mode: less emissive, more solid appearance
+  const emissiveIntensity = darkMode
+    ? (isHovered || isSelected ? 1.2 : 0.4 + node.opacity * 0.6)
+    : (isHovered || isSelected ? 0.4 : 0.1 + node.opacity * 0.15);
+
+  // In light mode: nodes should be more opaque to stand out
+  const targetOpacity = dimmed
+    ? 0.06
+    : darkMode ? node.opacity : Math.max(node.opacity, 0.7);
+
+  const targetEmissive = dimmed
+    ? 0.05
+    : emissiveIntensity;
 
   useFrame(({ clock }) => {
     const mesh = ref.current;
@@ -79,16 +93,18 @@ function MemoryNode({
         color={displayColor}
         emissive={displayColor}
         emissiveIntensity={0}
+        metalness={darkMode ? 0 : 0.1}
+        roughness={darkMode ? 1 : 0.6}
         transparent
         opacity={0.01}
-        toneMapped={false}
+        toneMapped={!darkMode}
         depthWrite={node.opacity > 0.5}
       />
     </mesh>
   );
 }
 
-export default function MemoryNodes({ nodes, hoveredIndex, selectedIndex, hoveredCategory, allCategoriesActive, highlightIds, onHover, onSelect }: MemoryNodesProps) {
+export default function MemoryNodes({ nodes, hoveredIndex, selectedIndex, hoveredCategory, allCategoriesActive, highlightIds, onHover, onSelect, darkMode }: MemoryNodesProps) {
   return (
     <group>
       {nodes.map(
@@ -106,6 +122,7 @@ export default function MemoryNodes({ nodes, hoveredIndex, selectedIndex, hovere
               isSelected={isSelected}
               showColor={showColor}
               dimmed={dimmed}
+              darkMode={darkMode}
               onHover={onHover}
               onSelect={onSelect}
             />

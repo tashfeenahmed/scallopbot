@@ -23,14 +23,14 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
   switch (message.type) {
     case 'user':
       return (
-        <div className="self-end max-w-[65%] max-md:max-w-[85%] px-3 py-2 rounded-xl rounded-br-sm bg-blue-50 text-gray-900 animate-[fade-in_0.15s_ease-out] whitespace-pre-wrap">
+        <div className="self-end max-w-[65%] max-md:max-w-[85%] px-3 py-2 rounded-xl rounded-br-sm bg-blue-50 dark:bg-gray-800 text-gray-900 dark:text-gray-100 animate-[fade-in_0.15s_ease-out] whitespace-pre-wrap">
           {message.content}
         </div>
       );
 
     case 'assistant':
       return (
-        <div className="self-start max-w-[65%] max-md:max-w-[85%] px-3 py-2 rounded-xl rounded-bl-sm bg-gray-100 text-gray-900 animate-[fade-in_0.15s_ease-out]">
+        <div className="self-start max-w-[65%] max-md:max-w-[85%] px-3 py-2 rounded-xl rounded-bl-sm bg-gray-100 dark:bg-gray-800 text-gray-900 dark:text-gray-100 animate-[fade-in_0.15s_ease-out]">
           {html ? (
             <div
               className="markdown-content leading-relaxed"
@@ -44,14 +44,14 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
 
     case 'system':
       return (
-        <div className="self-center px-3 py-1 text-xs text-gray-500 bg-gray-100 rounded-full animate-[fade-in_0.15s_ease-out]">
+        <div className="self-center px-3 py-1 text-xs text-gray-500 dark:text-gray-400 bg-gray-100 dark:bg-gray-800 rounded-full animate-[fade-in_0.15s_ease-out]">
           {message.content}
         </div>
       );
 
     case 'error':
       return (
-        <div className="self-center px-3 py-1.5 text-xs text-red-600 bg-red-50 rounded-lg animate-[fade-in_0.15s_ease-out]">
+        <div className="self-center px-3 py-1.5 text-xs text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/20 rounded-lg animate-[fade-in_0.15s_ease-out]">
           {message.content}
         </div>
       );
