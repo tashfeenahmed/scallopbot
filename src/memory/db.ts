@@ -289,6 +289,32 @@ export interface ScheduledItem {
   updatedAt: number;
 }
 
+// ============ Sub-Agent Runs ============
+
+/**
+ * Sub-agent run row as stored in SQLite
+ */
+export interface SubAgentRunRow {
+  id: string;
+  parentSessionId: string;
+  childSessionId: string;
+  task: string;
+  label: string;
+  status: string;
+  allowedSkills: string | null;
+  modelTier: string;
+  timeoutMs: number;
+  resultResponse: string | null;
+  resultIterations: number | null;
+  resultTaskComplete: boolean | null;
+  error: string | null;
+  inputTokens: number;
+  outputTokens: number;
+  createdAt: number;
+  startedAt: number | null;
+  completedAt: number | null;
+}
+
 /**
  * SQLite Database Manager for ScallopMemory
  */
@@ -515,6 +541,31 @@ export class ScallopDatabase {
       CREATE INDEX IF NOT EXISTS idx_scheduled_status ON scheduled_items(status);
       CREATE INDEX IF NOT EXISTS idx_scheduled_trigger_at ON scheduled_items(trigger_at);
       CREATE INDEX IF NOT EXISTS idx_scheduled_pending ON scheduled_items(status, trigger_at) WHERE status = 'pending';
+
+      -- Sub-agent runs (tracks sub-agent execution lifecycle)
+      CREATE TABLE IF NOT EXISTS subagent_runs (
+        id TEXT PRIMARY KEY,
+        parent_session_id TEXT NOT NULL,
+        child_session_id TEXT NOT NULL,
+        task TEXT NOT NULL,
+        label TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        allowed_skills TEXT,
+        model_tier TEXT NOT NULL DEFAULT 'fast',
+        timeout_ms INTEGER NOT NULL,
+        result_response TEXT,
+        result_iterations INTEGER,
+        result_task_complete INTEGER,
+        error TEXT,
+        input_tokens INTEGER DEFAULT 0,
+        output_tokens INTEGER DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        started_at INTEGER,
+        completed_at INTEGER
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_subagent_runs_parent ON subagent_runs(parent_session_id);
+      CREATE INDEX IF NOT EXISTS idx_subagent_runs_status ON subagent_runs(status);
     `);
 
     // Migration: Add source column to existing databases
@@ -2109,6 +2160,96 @@ export class ScallopDatabase {
       outputTokens: row.output_tokens as number,
       cost: row.cost as number,
       timestamp: row.timestamp as number,
+    };
+  }
+
+  // ============ Sub-Agent Run Methods ============
+
+  insertSubAgentRun(run: SubAgentRunRow): void {
+    this.db.prepare(`
+      INSERT INTO subagent_runs (
+        id, parent_session_id, child_session_id, task, label, status,
+        allowed_skills, model_tier, timeout_ms, input_tokens, output_tokens,
+        created_at, started_at, completed_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      run.id, run.parentSessionId, run.childSessionId, run.task, run.label, run.status,
+      run.allowedSkills, run.modelTier, run.timeoutMs, run.inputTokens, run.outputTokens,
+      run.createdAt, run.startedAt ?? null, run.completedAt ?? null
+    );
+  }
+
+  updateSubAgentRun(id: string, updates: Partial<SubAgentRunRow>): void {
+    const setClauses: string[] = [];
+    const values: unknown[] = [];
+
+    if (updates.status !== undefined) { setClauses.push('status = ?'); values.push(updates.status); }
+    if (updates.resultResponse !== undefined) { setClauses.push('result_response = ?'); values.push(updates.resultResponse); }
+    if (updates.resultIterations !== undefined) { setClauses.push('result_iterations = ?'); values.push(updates.resultIterations); }
+    if (updates.resultTaskComplete !== undefined) { setClauses.push('result_task_complete = ?'); values.push(updates.resultTaskComplete ? 1 : 0); }
+    if (updates.error !== undefined) { setClauses.push('error = ?'); values.push(updates.error); }
+    if (updates.inputTokens !== undefined) { setClauses.push('input_tokens = ?'); values.push(updates.inputTokens); }
+    if (updates.outputTokens !== undefined) { setClauses.push('output_tokens = ?'); values.push(updates.outputTokens); }
+    if (updates.startedAt !== undefined) { setClauses.push('started_at = ?'); values.push(updates.startedAt); }
+    if (updates.completedAt !== undefined) { setClauses.push('completed_at = ?'); values.push(updates.completedAt); }
+
+    if (setClauses.length === 0) return;
+
+    values.push(id);
+    this.db.prepare(`UPDATE subagent_runs SET ${setClauses.join(', ')} WHERE id = ?`).run(...values);
+  }
+
+  getSubAgentRunsByParent(parentSessionId: string): SubAgentRunRow[] {
+    const rows = this.db.prepare(
+      'SELECT * FROM subagent_runs WHERE parent_session_id = ? ORDER BY created_at DESC'
+    ).all(parentSessionId) as Array<Record<string, unknown>>;
+    return rows.map(r => this.rowToSubAgentRun(r));
+  }
+
+  getActiveSubAgentRuns(): SubAgentRunRow[] {
+    const rows = this.db.prepare(
+      "SELECT * FROM subagent_runs WHERE status IN ('pending', 'running')"
+    ).all() as Array<Record<string, unknown>>;
+    return rows.map(r => this.rowToSubAgentRun(r));
+  }
+
+  deleteOldSubAgentRuns(maxAgeMs: number): number {
+    const cutoff = Date.now() - maxAgeMs;
+    const result = this.db.prepare(
+      "DELETE FROM subagent_runs WHERE status NOT IN ('pending', 'running') AND created_at < ?"
+    ).run(cutoff);
+    return result.changes;
+  }
+
+  getSubAgentChildSessionIds(maxAgeMs?: number): string[] {
+    const sql = maxAgeMs
+      ? 'SELECT child_session_id FROM subagent_runs WHERE created_at < ?'
+      : 'SELECT child_session_id FROM subagent_runs';
+    const params = maxAgeMs ? [Date.now() - maxAgeMs] : [];
+    const rows = this.db.prepare(sql).all(...params) as Array<Record<string, unknown>>;
+    return rows.map(r => r.child_session_id as string);
+  }
+
+  private rowToSubAgentRun(row: Record<string, unknown>): SubAgentRunRow {
+    return {
+      id: row.id as string,
+      parentSessionId: row.parent_session_id as string,
+      childSessionId: row.child_session_id as string,
+      task: row.task as string,
+      label: row.label as string,
+      status: row.status as string,
+      allowedSkills: row.allowed_skills as string | null,
+      modelTier: row.model_tier as string,
+      timeoutMs: row.timeout_ms as number,
+      resultResponse: row.result_response as string | null,
+      resultIterations: row.result_iterations as number | null,
+      resultTaskComplete: row.result_task_complete != null ? !!(row.result_task_complete as number) : null,
+      error: row.error as string | null,
+      inputTokens: row.input_tokens as number,
+      outputTokens: row.output_tokens as number,
+      createdAt: row.created_at as number,
+      startedAt: row.started_at as number | null,
+      completedAt: row.completed_at as number | null,
     };
   }
 

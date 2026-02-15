@@ -153,7 +153,16 @@ export async function runSessionSummarization(ctx: GardenerContext): Promise<Ses
     const oldSessions = ctx.db.raw<{ id: string; metadata: string | null }>(
       'SELECT id, metadata FROM sessions WHERE updated_at < ? LIMIT 20',
       [cutoff]
-    );
+    ).filter(s => {
+      // Skip sub-agent sessions — transient, results already in parent
+      if (s.metadata) {
+        try {
+          const meta = JSON.parse(s.metadata);
+          if (meta.isSubAgent) return false;
+        } catch { /* ignore */ }
+      }
+      return true;
+    });
     if (oldSessions.length > 0) {
       // Resolve userId from session metadata, then fall back to first known user from DB
       let resolvedUserId: string | null = null;
@@ -523,5 +532,50 @@ export async function runInnerThoughts(ctx: GardenerContext): Promise<InnerThoug
   } catch (err) {
     ctx.logger.warn({ error: (err as Error).message }, 'Inner thoughts phase failed');
     return { proactiveItemsCreated: 0 };
+  }
+}
+
+// ============ Sub-Agent Cleanup ============
+
+export interface SubAgentCleanupResult {
+  runsDeleted: number;
+  sessionsDeleted: number;
+}
+
+/**
+ * B8: Clean up old sub-agent runs and their sessions
+ */
+export function runSubAgentCleanup(ctx: GardenerContext, cleanupAfterSeconds: number = 3600): SubAgentCleanupResult {
+  try {
+    const maxAgeMs = cleanupAfterSeconds * 1000;
+
+    // Get child session IDs of old sub-agent runs before deleting
+    const childSessionIds = ctx.db.getSubAgentChildSessionIds(maxAgeMs);
+
+    // Delete old completed/failed sub-agent run records
+    const runsDeleted = ctx.db.deleteOldSubAgentRuns(maxAgeMs);
+
+    // Delete their sessions and messages
+    let sessionsDeleted = 0;
+    for (const sessionId of childSessionIds) {
+      try {
+        ctx.db.deleteSession(sessionId);
+        sessionsDeleted++;
+      } catch {
+        // Session may already be deleted
+      }
+    }
+
+    if (runsDeleted > 0 || sessionsDeleted > 0) {
+      ctx.logger.info(
+        { runsDeleted, sessionsDeleted },
+        'Sub-agent cleanup complete'
+      );
+    }
+
+    return { runsDeleted, sessionsDeleted };
+  } catch (err) {
+    ctx.logger.warn({ error: (err as Error).message }, 'Sub-agent cleanup failed');
+    return { runsDeleted: 0, sessionsDeleted: 0 };
   }
 }
