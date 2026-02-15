@@ -2,7 +2,7 @@
   <img src="assets/scallop.png" alt="ScallopBot" width="120" height="120">
 </p>
 
-# ScallopBot
+<h1 align="center">ScallopBot</h1>
 
 <p align="center">
   <strong>A bio-inspired cognitive architecture for personal AI agents.</strong><br>
