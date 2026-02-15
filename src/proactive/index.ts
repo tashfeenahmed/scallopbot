@@ -2,15 +2,14 @@
  * Proactive messaging system
  *
  * Unified scheduler handles both user-set reminders and agent-set triggers.
- * - User reminders (source='user'): Direct message delivery
- * - Agent triggers (source='agent'): LLM-generated contextual messages
+ * - Nudges (kind='nudge'): Pre-written messages delivered directly
+ * - Tasks (kind='task'): Background work via sub-agent, result sent to user
  */
 
 export {
   UnifiedScheduler,
   type UnifiedSchedulerOptions,
   type MessageHandler,
-  type AgentProcessHandler,
 } from './scheduler.js';
 
 export {

@@ -14,7 +14,7 @@ export interface ProactiveFormatInput {
   message: string;
   gapType: string | undefined;
   urgency: 'low' | 'medium' | 'high';
-  source: 'inner_thoughts' | 'gap_scanner';
+  source: 'inner_thoughts' | 'gap_scanner' | 'task_result';
 }
 
 export interface ProactiveWebSocketOutput {
@@ -22,7 +22,7 @@ export interface ProactiveWebSocketOutput {
   content: string;
   category: string;
   urgency: 'low' | 'medium' | 'high';
-  source: 'inner_thoughts' | 'gap_scanner';
+  source: 'inner_thoughts' | 'gap_scanner' | 'task_result';
 }
 
 // ============ Constants ============

@@ -201,15 +201,13 @@ describe('E2E Cognitive Reflection & Gaps', () => {
       // Inner thoughts (deepTick step 7 in sleepTick):
       //   Call 2+: Inner thoughts evaluation — no proaction
       const fusionProvider = createMockLLMProvider([
-        // Call 1: Gap diagnosis — stale goal is actionable
+        // Call 1: Gap pipeline — nudge for stale goal
         JSON.stringify({
-          gaps: [
+          items: [
             {
-              index: 0,
-              actionable: true,
-              confidence: 0.85,
-              diagnosis: 'Goal has not been updated in over two weeks',
-              suggestedAction: 'Check in about progress on learning Rust programming',
+              index: 1,
+              action: 'nudge',
+              message: 'Check in about progress on learning Rust programming',
             },
           ],
         }),
@@ -365,15 +363,12 @@ describe('E2E Cognitive Reflection & Gaps', () => {
       // Gap scanner:
       //   Call 1: Gap diagnosis — returns low confidence, actionable but low severity
       const fusionProvider = createMockLLMProvider([
-        // Call 1: Gap diagnosis — low confidence, low severity
+        // Call 1: Gap pipeline — conservative dial skips non-critical signal
         JSON.stringify({
-          gaps: [
+          items: [
             {
-              index: 0,
-              actionable: true,
-              confidence: 0.5,
-              diagnosis: 'Goal is somewhat stale but not critical',
-              suggestedAction: 'Consider checking in on Rust learning progress',
+              index: 1,
+              action: 'skip',
             },
           ],
         }),

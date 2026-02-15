@@ -265,21 +265,18 @@ export {
   type GapScanInput,
 } from './gap-scanner.js';
 
-// Gap Diagnosis (Stage 2: LLM Triage)
+// Gap Pipeline (unified Stage 2+3: single LLM call → ready-to-schedule items)
 export {
-  diagnoseGaps,
-  buildGapDiagnosisPrompt,
-  parseGapDiagnosis,
-  type DiagnosedGap,
-  type UserContext,
-} from './gap-diagnosis.js';
-
-// Gap Actions (Stage 3: Proactiveness-Gated Actions)
-export {
-  createGapActions,
+  runGapPipeline,
+  buildGapPipelinePrompt,
+  parseGapPipelineResponse,
+  wordOverlap,
+  isDuplicate,
   DIAL_THRESHOLDS,
-  type GapAction,
-} from './gap-actions.js';
+  type GapScheduledItem,
+  type GapPipelineInput,
+  type ExistingItemForDedup,
+} from './gap-pipeline.js';
 
 // Inner Thoughts (Post-session proactive evaluation)
 export {

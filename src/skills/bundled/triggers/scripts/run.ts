@@ -14,6 +14,7 @@ interface TriggerEntry {
   user_id: string;
   session_id: string | null;
   source: string;
+  kind: string;
   type: string;
   message: string;
   context: string | null;
@@ -92,7 +93,8 @@ function listTriggers(db: Database.Database): string {
     const timeStr = formatTriggerTime(trigger.trigger_at);
     const shortId = trigger.id.substring(0, 8);
     const sourceTag = trigger.source === 'user' ? 'reminder' : trigger.type;
-    lines.push(`- [${shortId}] **${trigger.message}** (${sourceTag})`);
+    const kindTag = (trigger.kind === 'task') ? ' [task]' : (trigger.kind === 'nudge' ? ' [nudge]' : '');
+    lines.push(`- [${shortId}] **${trigger.message}** (${sourceTag}${kindTag})`);
     lines.push(`  Triggers: ${timeStr}`);
   }
 

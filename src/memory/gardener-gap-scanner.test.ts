@@ -1,8 +1,8 @@
 /**
  * Integration tests for gap scanner pipeline wired into BackgroundGardener.sleepTick().
  *
- * Tests the full pipeline: sleepTick -> scanForGaps -> diagnoseGaps -> createGapActions -> scheduled item insertion.
- * Does NOT re-test pure gap-scanner/diagnosis/actions behavior (covered in their own tests).
+ * Tests the full pipeline: sleepTick -> scanForGaps -> runGapPipeline -> scheduled item insertion.
+ * Does NOT re-test pure gap-scanner or gap-pipeline behavior (covered in their own tests).
  *
  * Key invariants:
  * - Gap scanner runs AFTER dream cycle and self-reflection
@@ -49,15 +49,13 @@ function createMockEmbedder(): EmbeddingProvider {
   };
 }
 
-/** Valid gap diagnosis LLM response — marks signal as actionable with high confidence */
-function makeGapDiagnosisResponse(opts?: { actionable?: boolean; confidence?: number }) {
+/** Valid gap pipeline LLM response — nudge action for the signal */
+function makeGapPipelineResponse(opts?: { action?: string }) {
   return JSON.stringify({
-    gaps: [{
-      index: 0,
-      actionable: opts?.actionable ?? true,
-      confidence: opts?.confidence ?? 0.8,
-      diagnosis: 'This goal has not been updated in a while.',
-      suggestedAction: 'Check in on the stale goal and update progress.',
+    items: [{
+      index: 1,
+      action: opts?.action ?? 'nudge',
+      message: 'Hey, it looks like your Rust goal has been sitting idle. Want to pick it back up?',
     }],
   });
 }
@@ -94,8 +92,8 @@ const VALID_SOUL_RESPONSE = `# Behavioral Guidelines\n\nBe concise.`;
  * vs dream/reflection calls by examining prompt content.
  */
 function createGapScannerProvider(opts?: {
-  gapDiagnosisResponse?: string;
-  throwOnGapDiagnosis?: boolean;
+  gapPipelineResponse?: string;
+  throwOnGapPipeline?: boolean;
 }): LLMProvider {
   return {
     name: 'mock-gap-scanner',
@@ -104,13 +102,13 @@ function createGapScannerProvider(opts?: {
       const userMsg = req.messages[0]?.content ?? '';
       const systemMsg = req.system ?? '';
 
-      // Gap diagnosis prompt — identified by "SIGNALS TO TRIAGE"
+      // Gap pipeline prompt — identified by "SIGNALS TO TRIAGE"
       if (userMsg.includes('SIGNALS TO TRIAGE')) {
-        if (opts?.throwOnGapDiagnosis) {
-          throw new Error('Gap diagnosis LLM failure');
+        if (opts?.throwOnGapPipeline) {
+          throw new Error('Gap pipeline LLM failure');
         }
         return {
-          content: [{ type: 'text', text: opts?.gapDiagnosisResponse ?? makeGapDiagnosisResponse() }],
+          content: [{ type: 'text', text: opts?.gapPipelineResponse ?? makeGapPipelineResponse() }],
           stopReason: 'end_turn',
           usage: { inputTokens: 100, outputTokens: 50 },
           model: 'mock-model',
@@ -342,9 +340,10 @@ describe('BackgroundGardener gap scanner integration', () => {
     const gapItems = items.filter(i => i.type === 'follow_up' && i.source === 'agent');
     expect(gapItems.length).toBeGreaterThanOrEqual(1);
 
-    // Verify the item has gap context
+    // Verify the item has gap context and kind
     const item = gapItems[0];
     expect(item.message).toBeTruthy();
+    expect(item.kind).toBe('nudge');
     expect(item.context).toBeTruthy();
     const context = JSON.parse(item.context!);
     expect(context.gapType).toBe('stale_goal');
@@ -430,8 +429,8 @@ describe('BackgroundGardener gap scanner integration', () => {
     cleanupTestDb();
     const workspace = await createTmpWorkspace();
 
-    // Provider throws on gap diagnosis but succeeds for everything else
-    const fusionProvider = createGapScannerProvider({ throwOnGapDiagnosis: true });
+    // Provider throws on gap pipeline but succeeds for everything else
+    const fusionProvider = createGapScannerProvider({ throwOnGapPipeline: true });
 
     store = new ScallopMemoryStore({
       dbPath: TEST_DB_PATH,
@@ -489,10 +488,9 @@ describe('BackgroundGardener gap scanner integration', () => {
     cleanupTestDb();
     const workspace = await createTmpWorkspace();
 
-    // Mock LLM: diagnoses signal as actionable but with LOW confidence (0.4)
-    // Conservative dial requires minConfidence 0.7, so this should be filtered out
+    // Mock LLM: returns skip action (conservative dial instructs LLM to be conservative)
     const fusionProvider = createGapScannerProvider({
-      gapDiagnosisResponse: makeGapDiagnosisResponse({ actionable: true, confidence: 0.4 }),
+      gapPipelineResponse: JSON.stringify({ items: [{ index: 1, action: 'skip' }] }),
     });
 
     store = new ScallopMemoryStore({

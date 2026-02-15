@@ -124,4 +124,13 @@ describe('formatProactiveMessage', () => {
     expect(typeof result).toBe('object');
     expect((result as Record<string, unknown>).type).toBe('proactive');
   });
+
+  it('handles task_result source correctly', () => {
+    const input = makeInput({ source: 'task_result', gapType: undefined });
+    const result = formatProactiveMessage('api', input);
+    expect(typeof result).toBe('object');
+    const wsResult = result as { type: string; source: string; category: string };
+    expect(wsResult.source).toBe('task_result');
+    expect(wsResult.category).toBe('general');
+  });
 });

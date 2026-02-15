@@ -225,6 +225,20 @@ export interface CostUsageRow {
 export type ScheduledItemSource = 'user' | 'agent';
 
 /**
+ * Kind of scheduled item: nudge (pre-written message) or task (sub-agent work)
+ */
+export type ScheduledItemKind = 'nudge' | 'task';
+
+/**
+ * Configuration for task-kind scheduled items
+ */
+export interface TaskConfig {
+  goal: string;
+  tools?: string[];
+  modelTier?: 'fast' | 'standard' | 'capable';
+}
+
+/**
  * Type of scheduled item
  */
 export type ScheduledItemType =
@@ -265,8 +279,14 @@ export interface ScheduledItem {
   // Source distinction
   source: ScheduledItemSource;  // 'user' (explicit) | 'agent' (implicit)
 
+  // Kind: nudge (pre-written message) or task (sub-agent work)
+  kind: ScheduledItemKind;
+
   // Type/category
   type: ScheduledItemType;
+
+  // Task configuration (for kind='task')
+  taskConfig: TaskConfig | null;
 
   // Content
   message: string;              // The reminder/trigger message
@@ -582,6 +602,9 @@ export class ScallopDatabase {
 
     // Migration: Clean polluted memory entries (skill outputs, assistant responses stored as facts)
     this.migrateCleanPollutedMemories();
+
+    // Migration: Add kind and task_config columns to scheduled_items
+    this.migrateAddKindColumn();
   }
 
   /**
@@ -773,6 +796,29 @@ export class ScallopDatabase {
       if (error instanceof Error) {
         // eslint-disable-next-line no-console
         console.warn(`[migration] migrateCleanPollutedMemories: ${error.message}`);
+      }
+    }
+  }
+
+  /**
+   * Add kind and task_config columns to scheduled_items table if they don't exist.
+   * Backfills event_prep items as kind='task'.
+   */
+  private migrateAddKindColumn(): void {
+    try {
+      const tableInfo = this.db.prepare("PRAGMA table_info(scheduled_items)").all() as Array<{ name: string }>;
+      const hasKindColumn = tableInfo.some(col => col.name === 'kind');
+
+      if (!hasKindColumn) {
+        this.db.exec("ALTER TABLE scheduled_items ADD COLUMN kind TEXT NOT NULL DEFAULT 'nudge'");
+        this.db.exec("ALTER TABLE scheduled_items ADD COLUMN task_config TEXT DEFAULT NULL");
+        // Backfill: event_prep items become tasks
+        this.db.exec("UPDATE scheduled_items SET kind = 'task' WHERE type = 'event_prep'");
+      }
+    } catch (error) {
+      if (error instanceof Error) {
+        // eslint-disable-next-line no-console
+        console.warn(`[migration] migrateAddKindColumn: ${error.message}`);
       }
     }
   }
@@ -1579,17 +1625,17 @@ export class ScallopDatabase {
    * Add a scheduled item (trigger or reminder)
    * Status defaults to 'pending' if not specified
    */
-  addScheduledItem(item: Omit<ScheduledItem, 'id' | 'status' | 'createdAt' | 'updatedAt' | 'firedAt'> & { status?: ScheduledItemStatus }): ScheduledItem {
+  addScheduledItem(item: Omit<ScheduledItem, 'id' | 'status' | 'createdAt' | 'updatedAt' | 'firedAt' | 'kind' | 'taskConfig'> & { status?: ScheduledItemStatus; kind?: ScheduledItemKind; taskConfig?: TaskConfig | null }): ScheduledItem {
     const id = nanoid();
     const now = Date.now();
     const status = item.status ?? 'pending';
 
     const stmt = this.db.prepare(`
       INSERT INTO scheduled_items (
-        id, user_id, session_id, source, type, message, context,
+        id, user_id, session_id, source, kind, type, message, context,
         trigger_at, recurring, status, source_memory_id, fired_at,
-        created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        task_config, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     stmt.run(
@@ -1597,6 +1643,7 @@ export class ScallopDatabase {
       item.userId,
       item.sessionId ?? null,
       item.source,
+      item.kind ?? 'nudge',
       item.type,
       item.message,
       item.context ?? null,
@@ -1605,6 +1652,7 @@ export class ScallopDatabase {
       status,
       item.sourceMemoryId ?? null,
       null,
+      item.taskConfig ? JSON.stringify(item.taskConfig) : null,
       now,
       now
     );
@@ -1612,6 +1660,8 @@ export class ScallopDatabase {
     return {
       ...item,
       id,
+      kind: item.kind ?? 'nudge',
+      taskConfig: item.taskConfig ?? null,
       status,
       firedAt: null,
       createdAt: now,
@@ -1959,7 +2009,9 @@ export class ScallopDatabase {
       userId: row.user_id as string,
       sessionId: row.session_id as string | null,
       source: row.source as ScheduledItemSource,
+      kind: (row.kind as ScheduledItemKind) ?? 'nudge',
       type: row.type as ScheduledItemType,
+      taskConfig: row.task_config ? JSON.parse(row.task_config as string) : null,
       message: row.message as string,
       context: row.context as string | null,
       triggerAt: row.trigger_at as number,

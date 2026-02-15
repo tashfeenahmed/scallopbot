@@ -3,7 +3,7 @@
  * Used by inner thoughts (deepTick) and gap scanner (sleepTick).
  */
 
-import type { ScallopDatabase } from './db.js';
+import type { ScallopDatabase, ScheduledItemKind, TaskConfig } from './db.js';
 import { computeDeliveryTime, type TimingContext, type DeliveryTiming } from '../proactive/timing-model.js';
 
 export interface ScheduleProactiveItemInput {
@@ -12,6 +12,8 @@ export interface ScheduleProactiveItemInput {
   message: string;
   context: string | null;
   type: string;
+  kind?: ScheduledItemKind;
+  taskConfig?: TaskConfig | null;
   quietHours: { start: number; end: number };
   activeHours: number[];
   lastProactiveAt: number | null;
@@ -48,12 +50,14 @@ export function scheduleProactiveItem(input: ScheduleProactiveItemInput): Schedu
     userId: input.userId,
     sessionId: null,
     source: 'agent',
+    kind: input.kind ?? 'nudge',
     type: input.type as 'follow_up',
     message: input.message,
     context: input.context,
     triggerAt: timing.deliverAt,
     recurring: null,
     sourceMemoryId: input.sourceMemoryId ?? null,
+    taskConfig: input.taskConfig ?? null,
   });
 
   return { timing, itemId: item.id };
