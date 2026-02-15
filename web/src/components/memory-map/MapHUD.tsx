@@ -46,7 +46,7 @@ export default function MapHUD({
   return (
     <div className="absolute inset-0 pointer-events-none">
       {/* Top bar */}
-      <div className="absolute top-3 left-3 right-3 flex items-start gap-3 pointer-events-auto">
+      <div className="absolute top-3 left-3 right-3 flex items-center gap-3 pointer-events-auto">
         <FilterBar categories={filters.categories} onToggle={onToggleCategory} onHoverCategory={onHoverCategory} darkMode={darkMode} />
         <TimelinePlayer minTime={minTime} maxTime={maxTime} cutoff={timelineCutoff} onCutoffChange={onTimelineCutoff} darkMode={darkMode} />
         <SearchBox value={filters.searchQuery} onChange={onSearchChange} />
