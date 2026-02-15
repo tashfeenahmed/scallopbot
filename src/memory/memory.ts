@@ -19,7 +19,6 @@ import { performHealthPing } from './health-ping.js';
 import type { GardenerContext } from './gardener-context.js';
 import {
   runFullDecay,
-  runMemoryFusion,
   runSessionSummarization,
   runEnhancedForgetting,
   runBehavioralInference,
@@ -208,7 +207,8 @@ export class BackgroundGardener {
     const ctx = this.buildContext();
 
     runFullDecay(ctx);
-    await runMemoryFusion(ctx);
+    // Memory fusion removed — NREM consolidation (sleep tick) is a strict superset
+    // with wider prominence window, cross-category clustering, and relation context.
     await runSessionSummarization(ctx);
     await runEnhancedForgetting(ctx);
     runBehavioralInference(ctx);
