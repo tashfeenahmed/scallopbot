@@ -782,29 +782,39 @@ export class Gateway {
   private resolveTriggerSource(userId: string): { source: TriggerSource | null; rawUserId: string } {
     const { channel, rawUserId } = parseUserIdPrefix(userId);
 
+    // Single-user bot: patch canonical 'default' userId to actual telegram user
+    let resolvedRawUserId = rawUserId;
+    if (resolvedRawUserId === 'default') {
+      const allowedUsers = this.config.channels.telegram.allowedUsers;
+      if (allowedUsers && allowedUsers.length > 0) {
+        resolvedRawUserId = allowedUsers[0];
+        this.logger.debug({ from: 'default', to: resolvedRawUserId }, 'Resolved default userId to configured telegram user');
+      }
+    }
+
     // If a specific channel is requested, try to use it
     if (channel) {
       const source = this.triggerSources.get(channel);
       if (source) {
-        this.logger.debug({ channel, userId: rawUserId }, 'Using prefixed trigger source');
-        return { source, rawUserId };
+        this.logger.debug({ channel, userId: resolvedRawUserId }, 'Using prefixed trigger source');
+        return { source, rawUserId: resolvedRawUserId };
       }
-      this.logger.warn({ channel, userId: rawUserId }, 'Requested trigger source not available, falling back');
+      this.logger.warn({ channel, userId: resolvedRawUserId }, 'Requested trigger source not available, falling back');
     }
 
     // Fall back to first available trigger source (prefer telegram for backward compat)
     const telegram = this.triggerSources.get('telegram');
     if (telegram) {
-      return { source: telegram, rawUserId };
+      return { source: telegram, rawUserId: resolvedRawUserId };
     }
 
     const api = this.triggerSources.get('api');
     if (api) {
-      return { source: api, rawUserId };
+      return { source: api, rawUserId: resolvedRawUserId };
     }
 
     // No trigger sources available
-    return { source: null, rawUserId };
+    return { source: null, rawUserId: resolvedRawUserId };
   }
 
   /**
