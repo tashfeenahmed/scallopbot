@@ -13,7 +13,7 @@ interface GraphSceneProps {
   selectedIndex: number | null;
   hoveredCategory: string | null;
   allCategoriesActive: boolean;
-  highlightIds: Set<string> | null;
+  highlightIds: Record<string, true> | null;
   onHover: (index: number | null) => void;
   onSelect: (index: number | null) => void;
 }

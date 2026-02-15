@@ -7,7 +7,7 @@ interface TimelinePlayerProps {
   onCutoffChange: (t: number) => void;
 }
 
-const PLAY_DURATION_MS = 6000; // full sweep takes 6 seconds
+const PLAY_DURATION_MS = 15000; // full sweep takes 15 seconds
 
 function formatDate(ts: number): string {
   const d = new Date(ts);
@@ -29,7 +29,11 @@ export default function TimelinePlayer({ minTime, maxTime, cutoff, onCutoffChang
   const animate = useCallback((now: number) => {
     const elapsed = now - startRef.current;
     const progress = Math.min(elapsed / PLAY_DURATION_MS, 1);
-    const newCutoff = startCutoffRef.current + (maxTime - startCutoffRef.current) * progress;
+    // Ease-in-out cubic for smoother playback
+    const eased = progress < 0.5
+      ? 4 * progress * progress * progress
+      : 1 - Math.pow(-2 * progress + 2, 3) / 2;
+    const newCutoff = startCutoffRef.current + (maxTime - startCutoffRef.current) * eased;
     onCutoffChange(newCutoff);
 
     if (progress < 1) {

@@ -139,6 +139,20 @@ export default function MemoryMap() {
 
   const allCategoriesActive = filters.categories.size === ALL_CATEGORIES.size;
 
+  // Compute neighbor set for hover highlighting (node IDs adjacent to hovered node)
+  // Must be above early returns so hook count is stable across renders
+  const highlightIds = useMemo<Record<string, true> | null>(() => {
+    if (interaction.hoveredIndex === null) return null;
+    const hovered = nodes[interaction.hoveredIndex];
+    if (!hovered) return null;
+    const ids: Record<string, true> = { [hovered.memory.id]: true };
+    for (const edge of edges) {
+      if (edge.relation.sourceId === hovered.memory.id) ids[edge.relation.targetId] = true;
+      else if (edge.relation.targetId === hovered.memory.id) ids[edge.relation.sourceId] = true;
+    }
+    return ids;
+  }, [interaction.hoveredIndex, nodes, edges]);
+
   if (state === 'loading') {
     return (
       <div className="flex-1 flex items-center justify-center bg-gray-950 text-gray-400">
@@ -168,19 +182,6 @@ export default function MemoryMap() {
   const totalCount = nodes.length;
   const hoveredNode = interaction.hoveredIndex !== null ? nodes[interaction.hoveredIndex] : null;
   const selectedNode = interaction.selectedIndex !== null ? nodes[interaction.selectedIndex] : null;
-
-  // Compute neighbor set for hover highlighting (node IDs adjacent to hovered node)
-  const highlightIds = useMemo<Set<string> | null>(() => {
-    if (interaction.hoveredIndex === null) return null;
-    const hovered = nodes[interaction.hoveredIndex];
-    if (!hovered) return null;
-    const ids = new Set<string>([hovered.memory.id]);
-    for (const edge of edges) {
-      if (edge.relation.sourceId === hovered.memory.id) ids.add(edge.relation.targetId);
-      else if (edge.relation.targetId === hovered.memory.id) ids.add(edge.relation.sourceId);
-    }
-    return ids;
-  }, [interaction.hoveredIndex, nodes, edges]);
 
   return (
     <div className="flex-1 relative bg-gray-950 overflow-hidden">
