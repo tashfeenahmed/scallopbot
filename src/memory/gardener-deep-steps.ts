@@ -4,7 +4,6 @@
  */
 
 import type { GardenerContext } from './gardener-context.js';
-import { safeBehavioralPatterns } from './gardener-context.js';
 import { storeFusedMemory } from './gardener-fusion-storage.js';
 import { scheduleProactiveItem, getLastProactiveAt } from './gardener-scheduling.js';
 import { findFusionClusters, fuseMemoryCluster } from './fusion.js';
@@ -13,7 +12,6 @@ import { archiveLowUtilityMemories, pruneOrphanedRelations } from './utility-sco
 import { computeTrustScore } from './trust-score.js';
 import { checkGoalDeadlines } from './goal-deadline-check.js';
 import { evaluateInnerThoughts } from './inner-thoughts.js';
-import { scanForGaps } from './gap-scanner.js';
 
 // ============ Result types ============
 
@@ -478,20 +476,12 @@ export async function runInnerThoughts(ctx: GardenerContext): Promise<InnerThoug
 
         const lastProactiveAt = getLastProactiveAt(ctx.db, userId);
 
-        // Get recent gap signals
-        const GoalService = (await import('../goals/goal-service.js')).GoalService;
-        const goalService = new GoalService({ db: ctx.db, logger: ctx.logger });
-        const activeGoals = await goalService.listGoals(userId, { status: 'active' });
-        const safeBehavioral = behavioralPatterns ?? safeBehavioralPatterns(userId);
-        const gapSignals = scanForGaps({
-          activeGoals,
-          behavioralSignals: safeBehavioral,
-          sessionSummaries: allSummaries,
-        });
-
+        // Gap scanning removed — C3 (sleep tick gap pipeline) handles all
+        // gap-based proactive outreach. B7 focuses purely on session context:
+        // "does this specific session warrant follow-up?"
         const result = await evaluateInnerThoughts({
           sessionSummary,
-          recentGapSignals: gapSignals,
+          recentGapSignals: [],
           affect,
           dial,
           lastProactiveAt,
@@ -512,7 +502,6 @@ export async function runInnerThoughts(ctx: GardenerContext): Promise<InnerThoug
               source: 'inner_thoughts',
               reason: result.reason,
               urgency: result.urgency,
-              gapSourceIds: gapSignals.map(s => s.sourceId),
             }),
             type: 'follow_up',
             kind: 'nudge',

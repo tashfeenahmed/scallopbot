@@ -836,6 +836,7 @@ export class ScallopMemoryStore {
       minProminence: 0.01,
       limit: 500,
       includeAllSources: true,
+      isLatest: true,
     });
 
     const memoryIds = new Set(rawMemories.map(m => m.id));

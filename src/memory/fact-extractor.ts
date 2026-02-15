@@ -687,7 +687,8 @@ Respond with JSON only:
             'Batch classification complete'
           );
 
-          // Step 5: Apply classifications and store
+          // Step 5: Apply classifications, store, and persist relation edges
+          const db = this.scallopStore.getDatabase();
           for (let i = 0; i < factsToClassify.length; i++) {
             const fact = factsToClassify[i];
             const classification = classifications[i];
@@ -696,11 +697,27 @@ Respond with JSON only:
               // Mark old fact as superseded and store new version
               this.scallopStore.update(classification.targetId, { isLatest: false });
               await storeAndCollect(fact, sourceMessage, sourceMessageId);
+              // Persist the UPDATES relation edge so the graph is connected
+              const newMem = storedMemories[storedMemories.length - 1];
+              if (newMem) {
+                db.addRelation(newMem.id, classification.targetId, 'UPDATES', classification.confidence);
+              }
               result.updated++;
               continue;
             }
 
-            // Store as new fact (NEW or EXTENDS)
+            if (classification.classification === 'EXTENDS' && classification.targetId) {
+              // Store new fact and link it to the existing one
+              await storeAndCollect(fact, sourceMessage, sourceMessageId);
+              const newMem = storedMemories[storedMemories.length - 1];
+              if (newMem) {
+                db.addRelation(newMem.id, classification.targetId, 'EXTENDS', classification.confidence);
+              }
+              result.stored++;
+              continue;
+            }
+
+            // Store as new fact (NEW)
             await storeAndCollect(fact, sourceMessage, sourceMessageId);
             result.stored++;
           }
@@ -959,10 +976,11 @@ Respond with JSON only:
     for (const candidate of candidates) {
       if (candidate.score > 0.4) {
         this.scallopStore.update(candidate.memory.id, { isLatest: false });
-        // Bidirectional contradiction tracking
+        // Bidirectional contradiction tracking + relation edge
         if (newMemory) {
           db.addContradiction(candidate.memory.id, newMemory.id);
           db.addContradiction(newMemory.id, candidate.memory.id);
+          db.addRelation(newMemory.id, candidate.memory.id, 'UPDATES', 0.95);
         }
         superseded++;
         this.logger.info(
@@ -1189,9 +1207,11 @@ Respond with JSON only:
               limit: 3,
               minProminence: 0.1,
             });
+            const supersededPrefIds: string[] = [];
             for (const existing of existingPrefs) {
               if (existing.score > 0.6 && existing.memory.category === 'preference') {
                 this.scallopStore.update(existing.memory.id, { isLatest: false });
+                supersededPrefIds.push(existing.memory.id);
                 this.logger.debug(
                   { oldPref: existing.memory.content },
                   'Old preference superseded by learned preference'
@@ -1200,7 +1220,7 @@ Respond with JSON only:
             }
 
             // Store the new preference
-            await this.scallopStore.add({
+            const newPref = await this.scallopStore.add({
               userId,
               content: `Prefers ${pref.prefers} over ${pref.over}`,
               category: 'preference',
@@ -1215,6 +1235,11 @@ Respond with JSON only:
               },
               learnedFrom: 'inference',
             });
+            // Persist UPDATES relation edges for superseded preferences
+            const prefDb = this.scallopStore.getDatabase();
+            for (const oldId of supersededPrefIds) {
+              prefDb.addRelation(newPref.id, oldId, 'UPDATES', 0.85);
+            }
             this.logger.info(
               { prefers: pref.prefers, over: pref.over, domain: pref.domain },
               'Preference learned from user feedback'
