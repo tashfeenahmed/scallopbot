@@ -327,20 +327,17 @@ export class Gateway {
     this.logger.debug('Agent initialized');
 
     // Initialize unified scheduler (handles both user reminders and agent triggers)
-    if (factExtractionProvider && this.scallopMemoryStore) {
+    if (this.scallopMemoryStore) {
       this.unifiedScheduler = new UnifiedScheduler({
         db: this.scallopMemoryStore.getDatabase(),
-        memoryStore: this.scallopMemoryStore,
-        provider: factExtractionProvider,
         logger: this.logger,
         costTracker: this.costTracker || undefined,
         goalService: this.goalService || undefined,
+        subAgentExecutor: this.subAgentExecutor || undefined,
+        sessionManager: this.sessionManager || undefined,
         interval: 30 * 1000, // Check every 30 seconds
         onSendMessage: async (userId: string, message: string) => {
           return this.handleProactiveMessage(userId, message);
-        },
-        onAgentProcess: async (userId: string, sessionId: string | null, message: string) => {
-          return this.handleScheduledAgentProcess(userId, sessionId, message);
         },
         getTimezone: (userId: string) => this.configManager!.getUserTimezone(userId),
       });
@@ -512,7 +509,7 @@ export class Gateway {
 
     // Start unified scheduler (after trigger sources are registered)
     if (this.unifiedScheduler) {
-      this.unifiedScheduler.start();
+      void this.unifiedScheduler.start();
     }
 
     this.isRunning = true;
@@ -1025,41 +1022,6 @@ export class Gateway {
   }
 
   /**
-   * Handle processing a scheduled item through the agent
-   * Used for actionable reminders and triggers that may need the agent to perform tasks
-   */
-  private async handleScheduledAgentProcess(userId: string, sessionId: string | null, message: string): Promise<string | null> {
-    if (!this.agent || !this.sessionManager) {
-      return null;
-    }
-
-    this.logger.debug({ userId, sessionId }, 'Processing scheduled item through agent');
-
-    try {
-      // Use existing session if provided, otherwise create a new one
-      let actualSessionId = sessionId;
-      if (!actualSessionId) {
-        const session = await this.sessionManager.createSession({ userId, source: 'scheduled' });
-        actualSessionId = session.id;
-      }
-
-      // Process through the agent
-      const result = await this.agent.processMessage(
-        actualSessionId,
-        message,
-        undefined,
-        async (_update) => {
-          // Don't surface thinking to users for scheduled messages
-        }
-      );
-
-      return result.response || null;
-    } catch (error) {
-      this.logger.error({ userId, error: (error as Error).message }, 'Failed to process scheduled item through agent');
-      return null;
-    }
-  }
-
   /**
    * Handle sending a file to a user
    * Uses trigger source abstraction for multi-channel support

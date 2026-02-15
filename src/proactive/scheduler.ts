@@ -2,24 +2,22 @@
  * Unified Scheduler - Combines triggers and reminders into a single system
  *
  * Handles both:
- * - User-set reminders (source='user'): Direct message delivery
- * - Agent-set triggers (source='agent'): LLM-generated contextual messages
+ * - Nudges (kind='nudge'): Pre-written messages delivered directly
+ * - Tasks (kind='task'): Background work via sub-agent, result sent to user
  *
- * Supports recurring items and actionable items that run through the agent.
+ * Supports recurring items with kind preservation across reschedules.
  */
 
 import type { Logger } from 'pino';
 import type {
   ScallopDatabase,
   ScheduledItem,
-  ScheduledItemSource,
-  ScheduledItemType,
   RecurringSchedule,
 } from '../memory/db.js';
-import type { LLMProvider, ContentBlock } from '../providers/types.js';
 import type { CostTracker } from '../routing/cost.js';
-import type { ScallopMemoryStore } from '../memory/scallop-store.js';
 import type { GoalService } from '../goals/index.js';
+import type { SubAgentExecutor } from '../subagent/executor.js';
+import type { SessionManager } from '../agent/session.js';
 import { parseUserIdPrefix } from '../triggers/types.js';
 import { formatProactiveMessage, type ProactiveFormatInput } from './proactive-format.js';
 import { detectProactiveEngagement } from './feedback.js';
@@ -30,74 +28,47 @@ import { detectProactiveEngagement } from './feedback.js';
 export type MessageHandler = (userId: string, message: string) => Promise<boolean>;
 
 /**
- * Handler for running messages through the agent (for actionable items)
- */
-export type AgentProcessHandler = (
-  userId: string,
-  sessionId: string | null,
-  message: string
-) => Promise<string | null>;
-
-/**
  * Options for UnifiedScheduler
  */
 export interface UnifiedSchedulerOptions {
   /** Database instance */
   db: ScallopDatabase;
-  /** Memory store for context retrieval */
-  memoryStore: ScallopMemoryStore;
-  /** LLM provider for generating messages (for agent-set items) */
-  provider: LLMProvider;
   /** Logger instance */
   logger: Logger;
-  /** Cost tracker for recording LLM usage from scheduled messages */
+  /** Cost tracker for recording sub-agent usage */
   costTracker?: CostTracker;
   /** Goal service for goal check-in context (optional) */
   goalService?: GoalService;
+  /** Sub-agent executor for task-kind items (optional — graceful degradation if absent) */
+  subAgentExecutor?: SubAgentExecutor;
+  /** Session manager for creating scheduler session */
+  sessionManager?: SessionManager;
   /** Check interval in milliseconds (default: 30 seconds) */
   interval?: number;
   /** Maximum age for expired items in milliseconds (default: 24 hours) */
   maxItemAge?: number;
   /** Handler to send messages to users */
   onSendMessage: MessageHandler;
-  /** Optional handler to process actionable items through the agent */
-  onAgentProcess?: AgentProcessHandler;
   /** Callback to resolve IANA timezone for a user (defaults to server timezone) */
   getTimezone?: (userId: string) => string;
 }
-
-/**
- * Keywords that indicate an actionable item (should run through agent)
- */
-const ACTION_KEYWORDS = [
-  'check',
-  'get',
-  'find',
-  'search',
-  'look up',
-  'tell me',
-  'show',
-  'fetch',
-  'run',
-  'execute',
-  'do',
-];
 
 /**
  * UnifiedScheduler - Handles both user reminders and agent triggers
  */
 export class UnifiedScheduler {
   private db: ScallopDatabase;
-  private memoryStore: ScallopMemoryStore;
-  private provider: LLMProvider;
   private logger: Logger;
   private goalService?: GoalService;
+  private subAgentExecutor?: SubAgentExecutor;
+  private sessionManager?: SessionManager;
+  private costTracker?: CostTracker;
   private interval: number;
   private maxItemAge: number;
   private onSendMessage: MessageHandler;
-  private onAgentProcess?: AgentProcessHandler;
   private getTimezone: (userId: string) => string;
 
+  private schedulerSessionId: string | null = null;
   private intervalHandle: ReturnType<typeof setInterval> | null = null;
   private isRunning = false;
   private evaluating = false;
@@ -105,24 +76,21 @@ export class UnifiedScheduler {
 
   constructor(options: UnifiedSchedulerOptions) {
     this.db = options.db;
-    this.memoryStore = options.memoryStore;
-    // Wrap provider with cost tracking if available
-    this.provider = options.costTracker
-      ? options.costTracker.wrapProvider(options.provider, 'scheduler')
-      : options.provider;
     this.logger = options.logger.child({ component: 'unified-scheduler' });
+    this.costTracker = options.costTracker;
     this.goalService = options.goalService;
+    this.subAgentExecutor = options.subAgentExecutor;
+    this.sessionManager = options.sessionManager;
     this.interval = options.interval ?? 30 * 1000; // 30 seconds
     this.maxItemAge = options.maxItemAge ?? 24 * 60 * 60 * 1000; // 24 hours
     this.onSendMessage = options.onSendMessage;
-    this.onAgentProcess = options.onAgentProcess;
     this.getTimezone = options.getTimezone ?? (() => Intl.DateTimeFormat().resolvedOptions().timeZone);
   }
 
   /**
    * Start the scheduler
    */
-  start(): void {
+  async start(): Promise<void> {
     if (this.isRunning) {
       this.logger.warn('UnifiedScheduler already running');
       return;
@@ -130,6 +98,17 @@ export class UnifiedScheduler {
 
     this.isRunning = true;
     this.logger.info({ intervalMs: this.interval }, 'Starting UnifiedScheduler');
+
+    // Create a persistent scheduler session for sub-agent parenting
+    if (this.sessionManager) {
+      try {
+        const session = await this.sessionManager.createSession({ source: 'scheduler' });
+        this.schedulerSessionId = session.id;
+        this.logger.debug({ sessionId: session.id }, 'Scheduler session created');
+      } catch (err) {
+        this.logger.warn({ error: (err as Error).message }, 'Failed to create scheduler session — tasks will fall back to nudges');
+      }
+    }
 
     // Consolidate duplicate reminders on startup
     try {
@@ -170,7 +149,7 @@ export class UnifiedScheduler {
    */
   async evaluate(): Promise<void> {
     // Prevent overlapping evaluations — if a previous tick is still processing
-    // (e.g. waiting on LLM), defer this tick so it runs after the current one finishes
+    // (e.g. waiting on sub-agent), defer this tick so it runs after the current one finishes
     if (this.evaluating) {
       this.pendingEvaluation = true;
       this.logger.debug('Deferring scheduler tick — previous evaluation still running');
@@ -193,16 +172,34 @@ export class UnifiedScheduler {
 
       this.logger.info({ count: dueItems.length }, 'Found due scheduled items');
 
-      // Process each item
-      for (const item of dueItems) {
+      // Separate nudges and tasks — process nudges first (fast), then tasks (may block)
+      const nudges = dueItems.filter(i => i.kind !== 'task');
+      const tasks = dueItems.filter(i => i.kind === 'task');
+
+      // Process nudges first
+      for (const item of nudges) {
         try {
-          await this.processItem(item);
+          await this.processNudge(item);
+          this.markItemFiredAndReschedule(item);
         } catch (err) {
           this.logger.error(
             { itemId: item.id, error: (err as Error).message },
-            'Failed to process scheduled item'
+            'Failed to process nudge'
           );
-          // Reset to pending so it can be retried on the next tick
+          this.db.resetScheduledItemToPending(item.id);
+        }
+      }
+
+      // Process tasks (may involve sub-agent execution)
+      for (const item of tasks) {
+        try {
+          await this.processTask(item);
+          this.markItemFiredAndReschedule(item);
+        } catch (err) {
+          this.logger.error(
+            { itemId: item.id, error: (err as Error).message },
+            'Failed to process task'
+          );
           this.db.resetScheduledItemToPending(item.id);
         }
       }
@@ -224,82 +221,81 @@ export class UnifiedScheduler {
   }
 
   /**
-   * Process a single scheduled item
+   * Process a nudge item — send pre-written message directly
    */
-  private async processItem(item: ScheduledItem): Promise<void> {
+  private async processNudge(item: ScheduledItem): Promise<void> {
     this.logger.debug(
-      { itemId: item.id, source: item.source, type: item.type, message: item.message },
-      'Processing scheduled item'
+      { itemId: item.id, source: item.source, type: item.type },
+      'Processing nudge'
     );
 
-    let message: string;
-
-    if (item.source === 'user') {
-      // User-set reminder: use stored message directly
-      message = item.message;
+    if (item.source === 'agent') {
+      await this.sendFormattedMessage(item, item.message);
     } else {
-      // Agent-set trigger: generate contextual message using LLM
-      const generatedMessage = await this.generateMessage(item);
-      if (!generatedMessage) {
-        this.logger.warn({ itemId: item.id }, 'Failed to generate message, marking as fired anyway');
-        this.markItemFiredAndReschedule(item);
-        return;
-      }
-      message = generatedMessage;
+      // User-sourced: send directly
+      await this.onSendMessage(item.userId, item.message);
     }
-
-    // Check if this is an actionable item
-    const isActionable = this.isActionable(item);
-
-    if (isActionable && this.onAgentProcess) {
-      // Run through agent for potential action execution
-      this.logger.debug({ itemId: item.id }, 'Processing actionable item through agent');
-
-      const promptPrefix =
-        item.source === 'user'
-          ? '[SCHEDULED REMINDER - Execute this task now]:'
-          : '[PROACTIVE CHECK - Context for you to check in on]:';
-
-      const agentResponse = await this.onAgentProcess(item.userId, item.sessionId, `${promptPrefix} ${message}`);
-
-      if (agentResponse) {
-        // Agent processed it, send the agent's response
-        await this.onSendMessage(item.userId, agentResponse);
-      } else {
-        // Agent didn't produce a response, send the message directly
-        await this.sendFormattedMessage(item, message);
-      }
-    } else {
-      // Simple item - just send the message
-      await this.sendFormattedMessage(item, message);
-    }
-
-    // Mark as fired and handle recurring
-    this.markItemFiredAndReschedule(item);
   }
 
   /**
-   * Check if an item should be processed through the agent
+   * Process a task item — spawn sub-agent, send result
+   * Falls back to nudge delivery if sub-agent is unavailable or fails
    */
-  private isActionable(item: ScheduledItem): boolean {
-    // Agent-set event_prep triggers are always actionable
-    if (item.source === 'agent' && item.type === 'event_prep') {
-      return true;
+  private async processTask(item: ScheduledItem): Promise<void> {
+    this.logger.debug(
+      { itemId: item.id, type: item.type, taskConfig: item.taskConfig },
+      'Processing task'
+    );
+
+    // If sub-agent executor is not available, fall back to nudge
+    if (!this.subAgentExecutor || !this.schedulerSessionId || !item.taskConfig) {
+      this.logger.debug({ itemId: item.id }, 'Sub-agent unavailable, falling back to nudge');
+      await this.processNudge(item);
+      return;
     }
 
-    // User reminders with action keywords are actionable
-    if (item.source === 'user') {
-      return ACTION_KEYWORDS.some(keyword => item.message.toLowerCase().includes(keyword));
-    }
+    try {
+      const result = await this.subAgentExecutor.spawnAndWait(
+        this.schedulerSessionId,
+        {
+          task: item.taskConfig.goal,
+          skills: item.taskConfig.tools,
+          modelTier: item.taskConfig.modelTier ?? 'fast',
+          timeoutSeconds: 120,
+        },
+      );
 
-    return false;
+      if (result.response) {
+        // Send the sub-agent's result through proactive formatting
+        await this.sendFormattedMessage(item, result.response, 'task_result');
+        this.logger.info(
+          { itemId: item.id, iterations: result.iterationsUsed, taskComplete: result.taskComplete },
+          'Task completed via sub-agent'
+        );
+      } else {
+        // Sub-agent returned empty response — fall back to nudge
+        this.logger.warn({ itemId: item.id }, 'Sub-agent returned empty response, sending fallback nudge');
+        await this.sendFormattedMessage(item, item.message);
+      }
+    } catch (err) {
+      // Sub-agent failed — fall back to nudge
+      this.logger.warn(
+        { itemId: item.id, error: (err as Error).message },
+        'Sub-agent task failed, falling back to nudge'
+      );
+      await this.sendFormattedMessage(item, item.message);
+    }
   }
 
   /**
    * Send a formatted message to the user.
    * For agent-sourced items, applies per-channel proactive formatting.
    */
-  private async sendFormattedMessage(item: ScheduledItem, message: string): Promise<void> {
+  private async sendFormattedMessage(
+    item: ScheduledItem,
+    message: string,
+    sourceOverride?: 'task_result' | 'inner_thoughts' | 'gap_scanner',
+  ): Promise<void> {
     if (item.source === 'agent') {
       const { channel } = parseUserIdPrefix(item.userId);
 
@@ -307,7 +303,7 @@ export class UnifiedScheduler {
         // Parse gapType from item context if available
         let gapType: string | undefined;
         let urgency: 'low' | 'medium' | 'high' = 'low';
-        let source: 'inner_thoughts' | 'gap_scanner' = 'gap_scanner';
+        let source: 'inner_thoughts' | 'gap_scanner' | 'task_result' = sourceOverride ?? 'gap_scanner';
         if (item.context) {
           try {
             const ctx = JSON.parse(item.context) as Record<string, unknown>;
@@ -315,7 +311,7 @@ export class UnifiedScheduler {
             if (ctx.urgency === 'high' || ctx.urgency === 'medium' || ctx.urgency === 'low') {
               urgency = ctx.urgency as 'low' | 'medium' | 'high';
             }
-            if (ctx.source === 'inner_thoughts') {
+            if (!sourceOverride && ctx.source === 'inner_thoughts') {
               source = 'inner_thoughts';
             }
           } catch {
@@ -350,7 +346,7 @@ export class UnifiedScheduler {
   private markItemFiredAndReschedule(item: ScheduledItem): void {
     this.db.markScheduledItemFired(item.id);
     this.logger.info(
-      { itemId: item.id, userId: item.userId, source: item.source, type: item.type },
+      { itemId: item.id, userId: item.userId, source: item.source, type: item.type, kind: item.kind },
       'Scheduled item fired'
     );
 
@@ -368,12 +364,14 @@ export class UnifiedScheduler {
           userId: item.userId,
           sessionId: item.sessionId,
           source: item.source,
+          kind: item.kind,
           type: item.type,
           message: item.message,
           context: item.context,
           triggerAt: nextTriggerAt,
           recurring: item.recurring,
           sourceMemoryId: item.sourceMemoryId,
+          taskConfig: item.taskConfig,
         });
         this.logger.debug(
           { itemId: item.id, nextTrigger: new Date(nextTriggerAt).toISOString() },
@@ -485,143 +483,6 @@ export class UnifiedScheduler {
     }
 
     return toUtc(targetYear, targetMonth, targetDay, schedule.hour, schedule.minute);
-  }
-
-  /**
-   * Generate a contextual message for agent-set triggers using LLM
-   */
-  private async generateMessage(item: ScheduledItem): Promise<string | null> {
-    // Get relevant memories for context
-    let memoryContext = '';
-    try {
-      const memories = await this.memoryStore.search(item.message, {
-        userId: item.userId,
-        limit: 5,
-      });
-      if (memories.length > 0) {
-        memoryContext = memories.map(m => `- ${m.memory.content}`).join('\n');
-      }
-    } catch {
-      // Memory search is optional
-    }
-
-    // Get goal progress context for goal_checkin triggers
-    let goalContext = '';
-    if (item.type === 'goal_checkin' && item.context && this.goalService) {
-      try {
-        const triggerContext = JSON.parse(item.context);
-        if (triggerContext.goalId) {
-          const tree = await this.goalService.getGoalHierarchy(triggerContext.goalId);
-          if (tree) {
-            goalContext = `\nGOAL PROGRESS:\n`;
-            goalContext += `- Goal: ${tree.goal.content}\n`;
-            goalContext += `- Overall progress: ${tree.totalProgress}%\n`;
-
-            const activeMilestones = tree.milestones.filter(
-              m => m.milestone.metadata.status === 'active'
-            );
-            const completedMilestones = tree.milestones.filter(
-              m => m.milestone.metadata.status === 'completed'
-            );
-
-            goalContext += `- Milestones: ${completedMilestones.length}/${tree.milestones.length} completed\n`;
-
-            if (activeMilestones.length > 0) {
-              goalContext += `- Currently working on: ${activeMilestones.map(m => m.milestone.content).join(', ')}\n`;
-            }
-
-            // Find pending tasks
-            const pendingTasks = tree.milestones
-              .flatMap(m => m.tasks)
-              .filter(t => t.metadata.status !== 'completed')
-              .slice(0, 3);
-
-            if (pendingTasks.length > 0) {
-              goalContext += `- Next tasks: ${pendingTasks.map(t => t.content).join(', ')}\n`;
-            }
-          }
-        }
-      } catch {
-        // Goal context is optional
-      }
-    }
-
-    const triggerTypeDescriptions: Record<ScheduledItemType, string> = {
-      reminder: 'reminding the user about something they set',
-      event_prep: 'preparing the user for an upcoming event',
-      commitment_check: 'checking in on a commitment the user made',
-      goal_checkin: 'checking in on progress toward a goal',
-      follow_up: 'following up on something the user mentioned',
-    };
-
-    // Parse context: may be structured JSON with guidance, or a plain string
-    let originalContext = item.context || 'None';
-    let guidance = '';
-    if (item.context) {
-      try {
-        const parsedContext = JSON.parse(item.context) as {
-          original_context?: string;
-          guidance?: string;
-        };
-        if (parsedContext.original_context) {
-          originalContext = parsedContext.original_context;
-        }
-        if (parsedContext.guidance) {
-          guidance = parsedContext.guidance;
-        }
-      } catch {
-        // Not JSON — use as plain string (backward compatible)
-      }
-    }
-
-    const now = new Date();
-    const tz = this.getTimezone(item.userId);
-    const tzOptions = { timeZone: tz };
-    const currentDate = now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', ...tzOptions });
-    const currentTime = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true, ...tzOptions });
-
-    const prompt = `You are a proactive personal assistant. Generate a brief, friendly message for ${triggerTypeDescriptions[item.type] || 'following up'}.
-
-CURRENT DATE: ${currentDate}
-CURRENT TIME: ${currentTime}
-
-TRIGGER CONTEXT:
-- Type: ${item.type}
-- Description: ${item.message}
-- Original context: ${originalContext}
-${guidance ? `- Guidance (what to do): ${guidance}\n` : ''}${goalContext}
-${memoryContext ? `RELEVANT MEMORIES:\n${memoryContext}\n` : ''}
-GUIDELINES:
-- Be conversational and warm, not robotic
-- Keep it brief (1-3 sentences)
-- Make it feel natural, like a helpful friend checking in
-- For event_prep: Offer to help prepare or remind of details
-- For commitment_check: Gently check progress, don't be pushy
-- For goal_checkin: Be encouraging, celebrate small wins, mention specific progress
-- For follow_up: Reference the original context naturally
-${guidance ? '- Follow the guidance instructions to help the user proactively\n' : ''}- Don't use emojis unless appropriate for the context
-- Start directly with the message, no greeting needed
-
-Generate the proactive message:`;
-
-    try {
-      const response = await this.provider.complete({
-        messages: [{ role: 'user', content: prompt }],
-        temperature: 0.7,
-        maxTokens: 150,
-      });
-
-      const responseText = Array.isArray(response.content)
-        ? response.content
-            .map((block: ContentBlock) => ('text' in block ? block.text : ''))
-            .join('')
-        : String(response.content);
-
-      return responseText.trim();
-    } catch (err) {
-      this.logger.error({ error: (err as Error).message }, 'Failed to generate proactive message');
-      return null;
-    }
   }
 
   /**

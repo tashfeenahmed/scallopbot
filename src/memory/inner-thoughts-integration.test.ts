@@ -64,15 +64,13 @@ const INNER_THOUGHTS_SKIP_RESPONSE = JSON.stringify({
   urgency: 'low',
 });
 
-/** Gap diagnosis response — marks signal as actionable */
-function makeGapDiagnosisResponse() {
+/** Gap pipeline response — nudge for stale goal */
+function makeGapPipelineResponse() {
   return JSON.stringify({
-    gaps: [{
-      index: 0,
-      actionable: true,
-      confidence: 0.8,
-      diagnosis: 'This goal has not been updated.',
-      suggestedAction: 'Check in on the stale goal.',
+    items: [{
+      index: 1,
+      action: 'nudge',
+      message: 'Check in on the stale goal.',
     }],
   });
 }
@@ -104,7 +102,7 @@ const VALID_SOUL = '# Behavioral Guidelines\n\nBe concise.';
  */
 function createMockProvider(opts?: {
   innerThoughtsResponse?: string;
-  gapDiagnosisResponse?: string;
+  gapPipelineResponse?: string;
 }): LLMProvider {
   return {
     name: 'mock-inner-thoughts',
@@ -123,10 +121,10 @@ function createMockProvider(opts?: {
         } satisfies CompletionResponse;
       }
 
-      // Gap diagnosis prompt
+      // Gap pipeline prompt
       if (userMsg.includes('SIGNALS TO TRIAGE')) {
         return {
-          content: [{ type: 'text', text: opts?.gapDiagnosisResponse ?? makeGapDiagnosisResponse() }],
+          content: [{ type: 'text', text: opts?.gapPipelineResponse ?? makeGapPipelineResponse() }],
           stopReason: 'end_turn',
           usage: { inputTokens: 100, outputTokens: 50 },
           model: 'mock-model',

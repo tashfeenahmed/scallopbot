@@ -637,6 +637,10 @@ describe('Combined fact + trigger extraction', () => {
     const scheduledCall = mockDb.addScheduledItem.mock.calls[0][0];
     expect(scheduledCall.type).toBe('event_prep');
     expect(scheduledCall.message).toBe('Dentist appointment tomorrow');
+    // event_prep defaults to kind='task' when no explicit kind
+    expect(scheduledCall.kind).toBe('task');
+    expect(scheduledCall.taskConfig).toBeTruthy();
+    expect(scheduledCall.taskConfig.goal).toContain('directions');
 
     // Only 1 LLM call (combined extraction) + possible consolidation
     // The key test: no separate trigger extraction call
@@ -679,7 +683,11 @@ describe('Combined fact + trigger extraction', () => {
 
     // But trigger should still be created
     expect(mockDb.addScheduledItem).toHaveBeenCalledTimes(1);
-    expect(mockDb.addScheduledItem.mock.calls[0][0].message).toBe('Flight to London');
+    const call = mockDb.addScheduledItem.mock.calls[0][0];
+    expect(call.message).toBe('Flight to London');
+    // event_prep defaults to kind='task'
+    expect(call.kind).toBe('task');
+    expect(call.taskConfig).toBeTruthy();
   });
 
   it('should store guidance as structured JSON in context', async () => {

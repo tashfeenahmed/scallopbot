@@ -13,8 +13,7 @@ import { dream } from './dream.js';
 import type { DreamResult } from './dream.js';
 import { reflect } from './reflection.js';
 import { scanForGaps } from './gap-scanner.js';
-import { diagnoseGaps } from './gap-diagnosis.js';
-import { createGapActions } from './gap-actions.js';
+import { runGapPipeline } from './gap-pipeline.js';
 
 // ============ Result types ============
 
@@ -263,7 +262,7 @@ export async function runGapScanner(ctx: GardenerContext): Promise<GapScannerSte
         const goalService = new GoalService({ db: ctx.db, logger: ctx.logger });
         const activeGoals = await goalService.listGoals(userId, { status: 'active' });
 
-        // Stage 1: Scan for gaps
+        // Stage 1: Scan for gaps (pure heuristics, no LLM)
         const safeBehavioral = behavioralPatterns ?? safeBehavioralPatterns(userId);
         const signals = scanForGaps({
           activeGoals,
@@ -273,43 +272,38 @@ export async function runGapScanner(ctx: GardenerContext): Promise<GapScannerSte
 
         if (signals.length === 0) continue;
 
-        // Stage 2: LLM diagnosis
+        // Stage 2: Unified gap pipeline (single LLM call → ready-to-schedule items)
         const dial = (safeBehavioral.responsePreferences?.proactivenessDial as string) ?? 'moderate';
         const affect = safeBehavioral.smoothedAffect ?? null;
         const recentTopics = sessionSummaries.slice(0, 5).flatMap(s => s.topics ?? []);
-
-        const diagnosed = await diagnoseGaps(
-          signals,
-          { affect, dial: dial as 'conservative' | 'moderate' | 'eager', recentTopics },
-          ctx.fusionProvider,
-        );
-
-        // Stage 3: Create gated actions
         const pendingItems = existingItems.filter(i => i.status === 'pending' || i.status === 'fired');
-        const actions = createGapActions(
-          diagnosed,
-          dial as 'conservative' | 'moderate' | 'eager',
-          pendingItems.map(i => ({ message: i.message, context: i.context })),
+
+        const gapItems = await runGapPipeline({
+          signals,
+          dial: dial as 'conservative' | 'moderate' | 'eager',
+          affect,
+          recentTopics,
+          existingItems: pendingItems.map(i => ({ message: i.message, context: i.context })),
           userId,
-        );
+        }, ctx.fusionProvider);
 
         // Insert scheduled items with timing model
         const gapActiveHours = safeBehavioral.activeHours ?? [];
         const lastProactiveAt = getLastProactiveAt(ctx.db, userId);
 
-        for (const action of actions) {
-          const gapContext = action.scheduledItem.context ? JSON.parse(action.scheduledItem.context) : {};
-          const gapSeverity = gapContext.severity as string | undefined;
+        for (const item of gapItems) {
           const timingUrgency: 'low' | 'medium' | 'high' =
-            gapSeverity === 'high' ? 'high' :
-            gapSeverity === 'medium' ? 'medium' : 'low';
+            item.severity === 'high' ? 'high' :
+            item.severity === 'medium' ? 'medium' : 'low';
 
           scheduleProactiveItem({
             db: ctx.db,
             userId,
-            message: action.scheduledItem.message,
-            context: action.scheduledItem.context,
+            message: item.message,
+            context: item.context,
             type: 'follow_up',
+            kind: item.kind,
+            taskConfig: item.taskConfig,
             quietHours: ctx.quietHours,
             activeHours: gapActiveHours,
             lastProactiveAt,
@@ -318,9 +312,9 @@ export async function runGapScanner(ctx: GardenerContext): Promise<GapScannerSte
           });
         }
 
-        if (actions.length > 0) {
-          ctx.logger.info({ userId, signalsFound: signals.length, actionsCreated: actions.length }, 'Gap scanner created actions');
-          totalActions += actions.length;
+        if (gapItems.length > 0) {
+          ctx.logger.info({ userId, signalsFound: signals.length, actionsCreated: gapItems.length }, 'Gap scanner created actions');
+          totalActions += gapItems.length;
         }
       } catch (err) {
         ctx.logger.warn({ error: (err as Error).message, userId }, 'Gap scanner failed for user');

@@ -168,12 +168,23 @@ Extract time-sensitive items that warrant proactive follow-up:
 Format each trigger as:
 {
   "type": "event_prep" | "commitment_check" | "goal_checkin" | "follow_up",
+  "kind": "nudge" | "task",
   "description": "Brief description of what to follow up on",
   "trigger_time": "MUST include specific time - use ISO datetime with time (e.g., '2026-02-07T09:00:00') OR relative ('+2h', '+1d 9am', 'tomorrow 10:00')",
   "context": "Context for generating the proactive message",
   "guidance": "Specific instructions for the bot on what to do to help the user when the trigger fires (e.g., 'Search for directions and check weather', 'Look up flight status')",
+  "goal": "What the sub-agent should accomplish (required for task kind, e.g., 'Look up flight EK204 status and check for delays')",
+  "tools": ["optional array of tool names for task kind, e.g., 'web_search', 'bash'"],
   "recurring": "null if one-time, OR an object: { \"type\": \"daily\" | \"weekly\" | \"weekdays\" | \"weekends\", \"hour\": 0-23, \"minute\": 0-59, \"dayOfWeek\": 0-6 (Sunday=0, only for weekly) }"
 }
+
+KIND RULES:
+- "nudge": A pre-written message delivered directly to the user (default). Use for reminders, check-ins, and simple follow-ups where the description IS the message.
+- "task": Background work by a sub-agent before messaging the user. Use when the bot needs to DO something (search, look up, check, compute) before responding.
+- Examples of nudge: "Time for your standup!", "How's the Spanish learning going?", "Don't forget to call mom"
+- Examples of task: "Check flight EK204 status" (goal: search for flight info), "Look up weather for tomorrow's hike" (goal: search weather forecast)
+- When kind is "task", the "goal" field describes what the sub-agent should do, and "description" is the fallback message if the task fails
+- Default to "nudge" unless the trigger clearly requires the bot to perform research or actions
 
 RECURRING RULES:
 - If the user says "daily", "every day", "every morning", "every evening", etc. → set recurring with type "daily"
@@ -197,7 +208,7 @@ Respond with JSON only:
     { "content": "fact text", "subject": "user|agent|name", "category": "category", "confidence": 0.0-1.0, "action": "fact|forget|correction|preference_update", "old_value": "optional", "replaces": "optional" }
   ],
   "proactive_triggers": [
-    { "type": "event_prep|commitment_check|goal_checkin|follow_up", "description": "text", "trigger_time": "ISO or relative", "context": "text", "guidance": "text or null", "recurring": "null or {type, hour, minute, dayOfWeek?}" }
+    { "type": "event_prep|commitment_check|goal_checkin|follow_up", "kind": "nudge|task", "description": "text", "trigger_time": "ISO or relative", "context": "text", "guidance": "text or null", "goal": "text or null (required for task)", "tools": ["optional tool names"], "recurring": "null or {type, hour, minute, dayOfWeek?}" }
   ]
 }
 
@@ -1224,10 +1235,13 @@ Respond with JSON only:
   private processExtractedTriggers(
     triggers: Array<{
       type: 'event_prep' | 'commitment_check' | 'goal_checkin' | 'follow_up';
+      kind?: 'nudge' | 'task';
       description: string;
       trigger_time: string;
       context: string;
       guidance?: string | null;
+      goal?: string | null;
+      tools?: string[] | null;
       recurring?: RecurringSchedule | null;
       recurring_pattern?: string | null; // legacy fallback
     }>,
@@ -1269,23 +1283,38 @@ Respond with JSON only:
         recurring = trigger.recurring;
       }
 
+      // Determine kind: explicit from LLM, or default based on type
+      const kind = trigger.kind || (trigger.type === 'event_prep' ? 'task' : 'nudge');
+
+      // Build taskConfig for task-kind items
+      const taskConfig = kind === 'task'
+        ? {
+            goal: trigger.goal || trigger.guidance || trigger.description,
+            tools: Array.isArray(trigger.tools) ? trigger.tools : undefined,
+          }
+        : null;
+
       db.addScheduledItem({
         userId,
         sessionId: null,
         source: 'agent',
+        kind,
         type: trigger.type || 'follow_up',
         message: trigger.description,
         context: storedContext,
         triggerAt,
         recurring,
         sourceMemoryId: sourceMemoryId ?? null,
+        taskConfig,
       });
       this.logger.info(
         {
           type: trigger.type,
+          kind,
           description: trigger.description,
           triggerAt: new Date(triggerAt).toISOString(),
           hasGuidance: !!trigger.guidance,
+          hasGoal: !!trigger.goal,
           recurring: recurring?.type ?? null,
         },
         'Scheduled item created from extraction'
@@ -1473,10 +1502,13 @@ Respond with JSON only:
     facts: ExtractedFactWithEmbedding[];
     proactive_triggers?: Array<{
       type: 'event_prep' | 'commitment_check' | 'goal_checkin' | 'follow_up';
+      kind?: 'nudge' | 'task';
       description: string;
       trigger_time: string;
       context: string;
       guidance?: string | null;
+      goal?: string | null;
+      tools?: string[] | null;
       recurring?: RecurringSchedule | null;
       recurring_pattern?: string | null; // legacy fallback
     }>;
