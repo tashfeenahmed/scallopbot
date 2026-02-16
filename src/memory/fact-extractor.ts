@@ -906,14 +906,21 @@ Respond with JSON only:
       minProminence: 0.05, // Include low-prominence memories too
     });
 
+    const db = this.scallopStore.getDatabase();
     let deleted = 0;
     for (const match of matches) {
       // Only delete if semantic similarity is high enough
       if (match.score > 0.5) {
         this.scallopStore.delete(match.memory.id);
         deleted++;
+
+        // Cascade: cancel any scheduled items linked to this memory
+        const cancelledById = db.cancelScheduledItemsBySourceMemory(match.memory.id);
+        // Also cancel by text similarity (many items have null sourceMemoryId)
+        const cancelledByText = db.cancelSimilarScheduledItems(userId, match.memory.content);
         this.logger.info(
-          { id: match.memory.id, content: match.memory.content, score: match.score },
+          { id: match.memory.id, content: match.memory.content, score: match.score,
+            cancelledScheduledItems: cancelledById + cancelledByText },
           'Memory deleted per user forget request'
         );
       }
@@ -981,6 +988,10 @@ Respond with JSON only:
           db.addContradiction(newMemory.id, candidate.memory.id);
           db.addRelation(newMemory.id, candidate.memory.id, 'UPDATES', 0.95);
         }
+        // Cascade: cancel scheduled items tied to the superseded memory
+        db.cancelScheduledItemsBySourceMemory(candidate.memory.id);
+        db.cancelSimilarScheduledItems(userId, candidate.memory.content);
+
         superseded++;
         this.logger.info(
           { oldId: candidate.memory.id, oldContent: candidate.memory.content, newContent: correction.content },

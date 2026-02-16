@@ -193,7 +193,7 @@ export class Agent {
 
     // Single-user bot: use canonical 'default' userId for all memory operations.
     // This keeps memories unified across channels (Telegram, WebSocket, etc.).
-    // Channel routing for proactive delivery is handled by the scheduler's resolveTriggerSource fallback.
+    // Channel routing for proactive delivery is handled by the scheduler.
     const resolvedUserId = 'default';
 
     // Check budget before processing
@@ -261,8 +261,10 @@ export class Agent {
     });
 
     // Queue LLM-based fact extraction (async, non-blocking)
-    // Pass the last assistant response as context for references like "that's my office"
-    if (this.factExtractor) {
+    // Skip sub-agent results — they're bot output, not user facts, and would
+    // re-extract triggers for events already being processed (causing runaway loops)
+    const isSubAgentResult = typeof userMessage === 'string' && userMessage.startsWith('[Sub-agent "');
+    if (this.factExtractor && !isSubAgentResult) {
       this.factExtractor.queueForExtraction(
         userMessage,
         resolvedUserId,
