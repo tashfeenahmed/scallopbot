@@ -227,10 +227,18 @@ async function searchMemories(
     const prominenceMultiplier = 0.5 + 0.5 * memory.prominence;
     const withProminence = relevanceScore * prominenceMultiplier;
 
+    // Recency boost: exponential decay so recently stored facts surface easily.
+    // Models human short-term memory — things just learned are highly accessible.
+    const ageHours = (Date.now() - memory.documentDate) / (1000 * 60 * 60);
+    const RECENCY_HALF_LIFE_HOURS = 3;
+    const recencyBoost = Math.exp(-ageHours / RECENCY_HALF_LIFE_HOURS) * 0.3;
+
+    const withRecency = withProminence + recencyBoost;
+
     // Boost for exact substring match
     const boostedScore = memory.content.toLowerCase().includes(query.toLowerCase())
-      ? withProminence * 1.5
-      : withProminence;
+      ? withRecency * 1.5
+      : withRecency;
 
     if (boostedScore > 0.05) {
       results.push({ memory, score: boostedScore });
@@ -312,13 +320,11 @@ async function executeSearch(args: MemorySearchArgs): Promise<void> {
       includeAllSources: true,
     });
 
-    // Filter out past time-bound events (meetings, appointments etc. that already happened)
+    // Filter out past events — only use structured eventDate, no keyword heuristics
     const EVENT_EXPIRY_MS = 24 * 60 * 60 * 1000;
-    const TIME_BOUND = /\b(meeting|appointment|call|interview|dentist|doctor|lunch|dinner|flight|train|reminder|gym|workout|errand|today|tonight|this morning|this afternoon|this evening|\d{1,2}\s*[ap]m|\d{1,2}:\d{2})\b/i;
     const now = Date.now();
     const filteredMemories = allMemories.filter(m => {
       if (m.eventDate && m.eventDate < now - EVENT_EXPIRY_MS) return false;
-      if (TIME_BOUND.test(m.content) && m.documentDate < now - EVENT_EXPIRY_MS * 2) return false;
       return true;
     });
 

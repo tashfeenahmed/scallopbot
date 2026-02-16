@@ -1020,6 +1020,31 @@ export class ScallopDatabase {
   }
 
   /**
+   * Get memories stored within a recent time window (short-term memory buffer).
+   * Returns memories ordered by recency (newest first).
+   */
+  getRecentMemories(
+    userId: string,
+    windowMs: number,
+    options: { isLatest?: boolean } = {}
+  ): ScallopMemoryEntry[] {
+    const cutoff = Date.now() - windowMs;
+    let query = 'SELECT * FROM memories WHERE user_id = ? AND document_date >= ?';
+    const params: unknown[] = [userId, cutoff];
+
+    if (options.isLatest !== undefined) {
+      query += ' AND is_latest = ?';
+      params.push(options.isLatest ? 1 : 0);
+    }
+
+    query += ' ORDER BY document_date DESC';
+
+    const stmt = this.db.prepare(query);
+    const rows = stmt.all(...params) as Record<string, unknown>[];
+    return rows.map((row) => this.rowToMemory(row));
+  }
+
+  /**
    * Get all memories
    */
   getAllMemories(options: { limit?: number; minProminence?: number } = {}): ScallopMemoryEntry[] {
