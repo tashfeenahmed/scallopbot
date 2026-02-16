@@ -17,6 +17,7 @@ import type { SessionSummarizer } from './session-summary.js';
 import type { LLMProvider } from '../providers/types.js';
 import { performHealthPing } from './health-ping.js';
 import type { GardenerContext } from './gardener-context.js';
+import { DEFAULT_USER_ID } from './gardener-context.js';
 import {
   runFullDecay,
   runSessionSummarization,
@@ -262,23 +263,17 @@ export class BackgroundGardener {
   private isQuietHours(): boolean {
     let hour: number;
     try {
-      // Resolve timezone from first known user
-      const db = this.scallopStore.getDatabase();
-      const userRows = db.raw<{ user_id: string }>('SELECT DISTINCT user_id FROM memories WHERE source != \'_cleaned_sentinel\' LIMIT 1', []);
-      const userId = userRows.length > 0 ? userRows[0].user_id : null;
-      if (userId) {
-        const tz = this.getTimezone(userId);
-        const parts = new Intl.DateTimeFormat('en-US', {
-          timeZone: tz,
-          hour: 'numeric',
-          hour12: false,
-        }).formatToParts(new Date());
-        const hourPart = parts.find(p => p.type === 'hour');
-        const h = parseInt(hourPart?.value ?? '', 10);
-        hour = isNaN(h) ? new Date().getHours() : h % 24;
-      } else {
-        hour = new Date().getHours();
-      }
+      // Resolve timezone from the single default user
+      const userId = DEFAULT_USER_ID;
+      const tz = this.getTimezone(userId);
+      const parts = new Intl.DateTimeFormat('en-US', {
+        timeZone: tz,
+        hour: 'numeric',
+        hour12: false,
+      }).formatToParts(new Date());
+      const hourPart = parts.find(p => p.type === 'hour');
+      const h = parseInt(hourPart?.value ?? '', 10);
+      hour = isNaN(h) ? new Date().getHours() : h % 24;
     } catch {
       hour = new Date().getHours();
     }

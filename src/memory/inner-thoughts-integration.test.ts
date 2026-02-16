@@ -186,7 +186,7 @@ function seedSessionSummary(
   db.createSession(sessionId);
   return db.addSessionSummary({
     sessionId,
-    userId: opts?.userId ?? 'user-1',
+    userId: opts?.userId ?? 'default',
     summary: 'User discussed various topics including TypeScript and testing.',
     topics: opts?.topics ?? ['typescript', 'testing'],
     messageCount: opts?.messageCount ?? 8,
@@ -201,7 +201,7 @@ function seedMemory(
   opts?: { userId?: string; content?: string },
 ) {
   return db.addMemory({
-    userId: opts?.userId ?? 'user-1',
+    userId: opts?.userId ?? 'default',
     content: opts?.content ?? 'User likes TypeScript',
     category: 'preference',
     memoryType: 'regular',
@@ -231,7 +231,7 @@ function seedStaleGoal(
   Date.now = () => oldTime;
   try {
     return db.addMemory({
-      userId: opts?.userId ?? 'user-1',
+      userId: opts?.userId ?? 'default',
       content: 'Learn Rust programming',
       category: 'insight',
       memoryType: 'regular',
@@ -313,7 +313,7 @@ describe('Inner thoughts integration', () => {
     expect(innerThoughtsCalls.length).toBe(0);
 
     // Verify: no follow_up items from inner thoughts
-    const items = db.getScheduledItemsByUser('user-1');
+    const items = db.getScheduledItemsByUser('default');
     const innerItems = items.filter(i =>
       i.type === 'follow_up' && i.source === 'agent' && i.context?.includes('inner_thoughts'),
     );
@@ -349,7 +349,7 @@ describe('Inner thoughts integration', () => {
 
     // Set behavioral patterns with moderate dial (allows inner thoughts)
     const profileManager = store.getProfileManager();
-    profileManager.updateBehavioralPatterns('user-1', {
+    profileManager.updateBehavioralPatterns('default', {
       responsePreferences: {
         proactivenessDial: 'moderate',
         trustScore: 0.5,
@@ -359,7 +359,7 @@ describe('Inner thoughts integration', () => {
     await gardener.deepTick();
 
     // Verify: scheduled item was created from inner thoughts
-    const items = db.getScheduledItemsByUser('user-1');
+    const items = db.getScheduledItemsByUser('default');
     const innerItems = items.filter(i =>
       i.type === 'follow_up' && i.source === 'agent' && i.context?.includes('inner_thoughts'),
     );
@@ -409,7 +409,7 @@ describe('Inner thoughts integration', () => {
 
     // Set behavioral patterns with distressed affect
     const profileManager = store.getProfileManager();
-    profileManager.updateBehavioralPatterns('user-1', {
+    profileManager.updateBehavioralPatterns('default', {
       responsePreferences: {
         proactivenessDial: 'eager',
         trustScore: 0.8,
@@ -436,7 +436,7 @@ describe('Inner thoughts integration', () => {
     expect(innerThoughtsCalls.length).toBe(0);
 
     // Verify: no inner thoughts scheduled items
-    const items = db.getScheduledItemsByUser('user-1');
+    const items = db.getScheduledItemsByUser('default');
     const innerItems = items.filter(i =>
       i.type === 'follow_up' && i.source === 'agent' && i.context?.includes('inner_thoughts'),
     );
@@ -472,7 +472,7 @@ describe('Inner thoughts integration', () => {
     await gardener.sleepTick();
 
     // Verify: scheduled items created
-    const items = db.getScheduledItemsByUser('user-1');
+    const items = db.getScheduledItemsByUser('default');
     const gapItems = items.filter(i => i.type === 'follow_up' && i.source === 'agent');
     expect(gapItems.length).toBeGreaterThanOrEqual(1);
 
@@ -509,7 +509,7 @@ describe('Inner thoughts integration', () => {
 
     // Insert an agent item as pending, then mark it as fired
     db.addScheduledItem({
-      userId: 'user-1',
+      userId: 'default',
       sessionId: null,
       source: 'agent',
       type: 'follow_up',
@@ -521,7 +521,7 @@ describe('Inner thoughts integration', () => {
     });
 
     // Mark as fired (sets firedAt to Date.now())
-    const items = db.getScheduledItemsByUser('user-1');
+    const items = db.getScheduledItemsByUser('default');
     expect(items.length).toBe(1);
     const itemId = items[0].id;
     db.markScheduledItemFired(itemId);
@@ -531,7 +531,7 @@ describe('Inner thoughts integration', () => {
     expect(firedItem?.status).toBe('fired');
 
     // Call checkEngagement (simulating user sending a message)
-    scheduler.checkEngagement('user-1');
+    scheduler.checkEngagement('default');
 
     // Verify: item is now marked as 'acted'
     const actedItem = db.getScheduledItem(itemId);

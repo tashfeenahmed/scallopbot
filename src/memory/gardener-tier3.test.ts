@@ -38,21 +38,26 @@ function createMockGardener(quietHours?: { start: number; end: number }) {
     scallopStore: mockScallopStore as any,
     logger: mockLogger,
     interval: 1000,
+    getTimezone: () => 'UTC',
     ...(quietHours ? { quietHours } : {}),
   });
 
   return { gardener, mockLogger, mockScallopStore };
 }
 
-describe('BackgroundGardener Tier 3 — Sleep Tick', () => {
-  let hourMock: ReturnType<typeof vi.spyOn>;
+/** Set fake system time to a specific UTC hour */
+function setUTCHour(hour: number) {
+  const d = new Date();
+  d.setUTCHours(hour, 0, 0, 0);
+  vi.setSystemTime(d);
+}
 
+describe('BackgroundGardener Tier 3 — Sleep Tick', () => {
   beforeEach(() => {
     vi.useFakeTimers();
   });
 
   afterEach(() => {
-    if (hourMock) hourMock.mockRestore();
     vi.useRealTimers();
   });
 
@@ -61,7 +66,7 @@ describe('BackgroundGardener Tier 3 — Sleep Tick', () => {
   describe('isQuietHours', () => {
     it('should detect quiet hours in normal range (hour 3, range 2-5)', () => {
       const { gardener } = createMockGardener({ start: 2, end: 5 });
-      hourMock = vi.spyOn(Date.prototype, 'getHours').mockReturnValue(3);
+      setUTCHour(3);
       const sleepTickSpy = vi.spyOn(gardener, 'sleepTick').mockResolvedValue();
 
       // Advance counter to threshold
@@ -74,7 +79,7 @@ describe('BackgroundGardener Tier 3 — Sleep Tick', () => {
 
     it('should reject hours outside normal range (hour 10, range 2-5)', () => {
       const { gardener } = createMockGardener({ start: 2, end: 5 });
-      hourMock = vi.spyOn(Date.prototype, 'getHours').mockReturnValue(10);
+      setUTCHour(10);
       const sleepTickSpy = vi.spyOn(gardener, 'sleepTick').mockResolvedValue();
 
       // Advance counter to threshold
@@ -87,7 +92,7 @@ describe('BackgroundGardener Tier 3 — Sleep Tick', () => {
 
     it('should detect quiet hours in wrap-around range (hour 23, range 23-5)', () => {
       const { gardener } = createMockGardener({ start: 23, end: 5 });
-      hourMock = vi.spyOn(Date.prototype, 'getHours').mockReturnValue(23);
+      setUTCHour(23);
       const sleepTickSpy = vi.spyOn(gardener, 'sleepTick').mockResolvedValue();
 
       for (let i = 0; i < 288; i++) {
@@ -99,7 +104,7 @@ describe('BackgroundGardener Tier 3 — Sleep Tick', () => {
 
     it('should detect quiet hours in wrap-around range (hour 3, range 23-5)', () => {
       const { gardener } = createMockGardener({ start: 23, end: 5 });
-      hourMock = vi.spyOn(Date.prototype, 'getHours').mockReturnValue(3);
+      setUTCHour(3);
       const sleepTickSpy = vi.spyOn(gardener, 'sleepTick').mockResolvedValue();
 
       for (let i = 0; i < 288; i++) {
@@ -111,7 +116,7 @@ describe('BackgroundGardener Tier 3 — Sleep Tick', () => {
 
     it('should reject hours outside wrap-around range (hour 12, range 23-5)', () => {
       const { gardener } = createMockGardener({ start: 23, end: 5 });
-      hourMock = vi.spyOn(Date.prototype, 'getHours').mockReturnValue(12);
+      setUTCHour(12);
       const sleepTickSpy = vi.spyOn(gardener, 'sleepTick').mockResolvedValue();
 
       for (let i = 0; i < 288; i++) {
@@ -127,7 +132,7 @@ describe('BackgroundGardener Tier 3 — Sleep Tick', () => {
   describe('sleep tick counter', () => {
     it('should NOT fire sleepTick after 287 ticks (below threshold)', () => {
       const { gardener } = createMockGardener({ start: 0, end: 24 }); // always quiet
-      hourMock = vi.spyOn(Date.prototype, 'getHours').mockReturnValue(3);
+      setUTCHour(3);
       const sleepTickSpy = vi.spyOn(gardener, 'sleepTick').mockResolvedValue();
 
       for (let i = 0; i < 287; i++) {
@@ -139,7 +144,7 @@ describe('BackgroundGardener Tier 3 — Sleep Tick', () => {
 
     it('should fire sleepTick after 288 ticks during quiet hours', () => {
       const { gardener } = createMockGardener({ start: 2, end: 5 });
-      hourMock = vi.spyOn(Date.prototype, 'getHours').mockReturnValue(3);
+      setUTCHour(3);
       const sleepTickSpy = vi.spyOn(gardener, 'sleepTick').mockResolvedValue();
 
       for (let i = 0; i < 288; i++) {
@@ -151,7 +156,7 @@ describe('BackgroundGardener Tier 3 — Sleep Tick', () => {
 
     it('should reset counter after sleepTick fires', () => {
       const { gardener } = createMockGardener({ start: 0, end: 24 }); // always quiet
-      hourMock = vi.spyOn(Date.prototype, 'getHours').mockReturnValue(3);
+      setUTCHour(3);
       const sleepTickSpy = vi.spyOn(gardener, 'sleepTick').mockResolvedValue();
 
       // First cycle: 288 ticks
@@ -173,7 +178,7 @@ describe('BackgroundGardener Tier 3 — Sleep Tick', () => {
 
     it('should NOT fire sleepTick after 288 ticks outside quiet hours', () => {
       const { gardener } = createMockGardener({ start: 2, end: 5 });
-      hourMock = vi.spyOn(Date.prototype, 'getHours').mockReturnValue(10); // outside quiet hours
+      setUTCHour(10); // outside quiet hours
       const sleepTickSpy = vi.spyOn(gardener, 'sleepTick').mockResolvedValue();
 
       for (let i = 0; i < 288; i++) {
@@ -192,7 +197,7 @@ describe('BackgroundGardener Tier 3 — Sleep Tick', () => {
       const sleepTickSpy = vi.spyOn(gardener, 'sleepTick').mockResolvedValue();
 
       // Reach threshold outside quiet hours
-      hourMock = vi.spyOn(Date.prototype, 'getHours').mockReturnValue(10);
+      setUTCHour(10);
       for (let i = 0; i < 288; i++) {
         gardener.lightTick();
       }
@@ -200,7 +205,7 @@ describe('BackgroundGardener Tier 3 — Sleep Tick', () => {
 
       // Counter should still be >= 288, not reset
       // Next tick enters quiet hours — should fire
-      hourMock.mockReturnValue(3);
+      setUTCHour(3);
       gardener.lightTick();
       expect(sleepTickSpy).toHaveBeenCalledTimes(1);
     });
@@ -210,14 +215,14 @@ describe('BackgroundGardener Tier 3 — Sleep Tick', () => {
       const sleepTickSpy = vi.spyOn(gardener, 'sleepTick').mockResolvedValue();
 
       // Reach threshold outside quiet hours
-      hourMock = vi.spyOn(Date.prototype, 'getHours').mockReturnValue(14);
+      setUTCHour(14);
       for (let i = 0; i < 290; i++) {
         gardener.lightTick();
       }
       expect(sleepTickSpy).not.toHaveBeenCalled();
 
       // Enter quiet hours — should fire immediately
-      hourMock.mockReturnValue(3);
+      setUTCHour(3);
       gardener.lightTick();
       expect(sleepTickSpy).toHaveBeenCalledTimes(1);
     });
@@ -228,7 +233,7 @@ describe('BackgroundGardener Tier 3 — Sleep Tick', () => {
   describe('default quiet hours', () => {
     it('should use default quiet hours 2-5 AM when not specified', () => {
       const { gardener } = createMockGardener(); // no quietHours option
-      hourMock = vi.spyOn(Date.prototype, 'getHours').mockReturnValue(3); // within 2-5
+      setUTCHour(3); // within 2-5
       const sleepTickSpy = vi.spyOn(gardener, 'sleepTick').mockResolvedValue();
 
       for (let i = 0; i < 288; i++) {

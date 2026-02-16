@@ -6,7 +6,7 @@
 import * as path from 'node:path';
 import * as fsPromises from 'node:fs/promises';
 import type { GardenerContext } from './gardener-context.js';
-import { safeBehavioralPatterns } from './gardener-context.js';
+import { safeBehavioralPatterns, DEFAULT_USER_ID } from './gardener-context.js';
 import { storeFusedMemory } from './gardener-fusion-storage.js';
 import { scheduleProactiveItem, getLastProactiveAt } from './gardener-scheduling.js';
 import { dream } from './dream.js';
@@ -42,26 +42,24 @@ export async function runDreamCycle(ctx: GardenerContext): Promise<DreamCycleRes
   if (!ctx.fusionProvider) return { totalFused: 0, totalMerged: 0, totalDiscoveries: 0 };
 
   try {
-    const userRows = ctx.db.raw<{ user_id: string }>('SELECT DISTINCT user_id FROM memories WHERE source != \'_cleaned_sentinel\'', []);
+    const userId = DEFAULT_USER_ID;
     let totalFused = 0;
     let totalMerged = 0;
     let totalDiscoveries = 0;
 
-    for (const { user_id: userId } of userRows) {
-      // Get memories with NREM's wider prominence window [0.05, 0.8)
-      const allMemories = ctx.db.getMemoriesByUser(userId, {
-        minProminence: 0.05,
-        isLatest: true,
-        includeAllSources: true,
-      });
-      const eligibleMemories = allMemories.filter(m =>
-        m.prominence < 0.8 &&
-        m.memoryType !== 'static_profile' &&
-        m.memoryType !== 'derived'
-      );
+    // Get memories with NREM's wider prominence window [0.05, 0.8)
+    const allMemories = ctx.db.getMemoriesByUser(userId, {
+      minProminence: 0.05,
+      isLatest: true,
+      includeAllSources: true,
+    });
+    const eligibleMemories = allMemories.filter(m =>
+      m.prominence < 0.8 &&
+      m.memoryType !== 'static_profile' &&
+      m.memoryType !== 'derived'
+    );
 
-      if (eligibleMemories.length < 3) continue;
-
+    if (eligibleMemories.length >= 3) {
       const dreamResult: DreamResult = await dream(
         eligibleMemories,
         (id) => ctx.db.getRelations(id),
@@ -159,19 +157,17 @@ export async function runSelfReflection(ctx: GardenerContext): Promise<Reflectio
   if (!ctx.fusionProvider || !ctx.workspace) return { usersReflected: 0, insightsGenerated: 0, soulUpdated: false };
 
   try {
-    const userRows = ctx.db.raw<{ user_id: string }>('SELECT DISTINCT user_id FROM session_summaries', []);
+    const userId = DEFAULT_USER_ID;
     let totalInsights = 0;
     let soulUpdated = false;
     let usersReflected = 0;
 
-    for (const { user_id: userId } of userRows) {
-      try {
-        const allSummaries = ctx.db.getSessionSummariesByUser(userId, 50);
-        const oneDayAgo = Date.now() - 24 * 60 * 60 * 1000;
-        const todaySummaries = allSummaries.filter(s => s.createdAt >= oneDayAgo);
+    try {
+      const allSummaries = ctx.db.getSessionSummariesByUser(userId, 50);
+      const oneDayAgo = Date.now() - 24 * 60 * 60 * 1000;
+      const todaySummaries = allSummaries.filter(s => s.createdAt >= oneDayAgo);
 
-        if (todaySummaries.length === 0) continue;
-
+      if (todaySummaries.length > 0) {
         // Read current SOUL.md
         let currentSoul: string | null = null;
         const soulPath = path.join(ctx.workspace, 'SOUL.md');
@@ -183,57 +179,56 @@ export async function runSelfReflection(ctx: GardenerContext): Promise<Reflectio
 
         const result = await reflect(todaySummaries, currentSoul, ctx.fusionProvider);
 
-        if (result.skipped) {
+        if (!result.skipped) {
+          // Store insights as insight-category memories
+          for (const insight of result.insights) {
+            try {
+              const mem = await ctx.scallopStore.add({
+                userId,
+                content: insight.content,
+                category: 'insight',
+                importance: 7,
+                confidence: 0.85,
+                sourceChunk: insight.sourceSessionIds.join(' | '),
+                metadata: {
+                  reflectedAt: new Date().toISOString(),
+                  topics: insight.topics,
+                  sourceSessionIds: insight.sourceSessionIds,
+                },
+                learnedFrom: 'self_reflection',
+                detectRelations: false,
+              });
+              ctx.db.updateMemory(mem.id, { memoryType: 'derived' });
+              totalInsights++;
+            } catch (err) {
+              ctx.logger.warn({ error: (err as Error).message, userId }, 'Reflection insight storage failed');
+            }
+          }
+
+          // Write updated SOUL.md
+          if (result.updatedSoul) {
+            try {
+              await fsPromises.writeFile(soulPath, result.updatedSoul, 'utf-8');
+              ctx.logger.info({ userId }, 'SOUL.md updated from self-reflection');
+              soulUpdated = true;
+            } catch (err) {
+              ctx.logger.warn({ error: (err as Error).message }, 'SOUL.md write failed');
+            }
+          }
+
+          ctx.logger.info({
+            userId,
+            insightsGenerated: result.insights.length,
+            soulUpdated: result.updatedSoul !== null,
+            sessionsReflected: todaySummaries.length,
+          }, 'Self-reflection complete for user');
+          usersReflected++;
+        } else {
           ctx.logger.debug({ userId, reason: result.skipReason }, 'Self-reflection skipped');
-          continue;
         }
-
-        // Store insights as insight-category memories
-        for (const insight of result.insights) {
-          try {
-            const mem = await ctx.scallopStore.add({
-              userId,
-              content: insight.content,
-              category: 'insight',
-              importance: 7,
-              confidence: 0.85,
-              sourceChunk: insight.sourceSessionIds.join(' | '),
-              metadata: {
-                reflectedAt: new Date().toISOString(),
-                topics: insight.topics,
-                sourceSessionIds: insight.sourceSessionIds,
-              },
-              learnedFrom: 'self_reflection',
-              detectRelations: false,
-            });
-            ctx.db.updateMemory(mem.id, { memoryType: 'derived' });
-            totalInsights++;
-          } catch (err) {
-            ctx.logger.warn({ error: (err as Error).message, userId }, 'Reflection insight storage failed');
-          }
-        }
-
-        // Write updated SOUL.md
-        if (result.updatedSoul) {
-          try {
-            await fsPromises.writeFile(soulPath, result.updatedSoul, 'utf-8');
-            ctx.logger.info({ userId }, 'SOUL.md updated from self-reflection');
-            soulUpdated = true;
-          } catch (err) {
-            ctx.logger.warn({ error: (err as Error).message }, 'SOUL.md write failed');
-          }
-        }
-
-        ctx.logger.info({
-          userId,
-          insightsGenerated: result.insights.length,
-          soulUpdated: result.updatedSoul !== null,
-          sessionsReflected: todaySummaries.length,
-        }, 'Self-reflection complete for user');
-        usersReflected++;
-      } catch (err) {
-        ctx.logger.warn({ error: (err as Error).message, userId }, 'Self-reflection failed for user');
       }
+    } catch (err) {
+      ctx.logger.warn({ error: (err as Error).message, userId }, 'Self-reflection failed for user');
     }
     return { usersReflected, insightsGenerated: totalInsights, soulUpdated };
   } catch (err) {
@@ -249,29 +244,27 @@ export async function runGapScanner(ctx: GardenerContext): Promise<GapScannerSte
   if (!ctx.fusionProvider) return { actionsCreated: 0 };
 
   try {
-    const users = ctx.db.raw<{ user_id: string }>('SELECT DISTINCT user_id FROM memories WHERE source != \'_cleaned_sentinel\'', []);
+    const userId = DEFAULT_USER_ID;
     let totalActions = 0;
 
-    for (const { user_id: userId } of users) {
-      try {
-        const sessionSummaries = ctx.db.getSessionSummariesByUser(userId, 20);
-        const behavioralPatterns = ctx.db.getBehavioralPatterns(userId);
-        const existingItems = ctx.db.getScheduledItemsByUser(userId);
+    try {
+      const sessionSummaries = ctx.db.getSessionSummariesByUser(userId, 20);
+      const behavioralPatterns = ctx.db.getBehavioralPatterns(userId);
+      const existingItems = ctx.db.getScheduledItemsByUser(userId);
 
-        const GoalService = (await import('../goals/goal-service.js')).GoalService;
-        const goalService = new GoalService({ db: ctx.db, logger: ctx.logger });
-        const activeGoals = await goalService.listGoals(userId, { status: 'active' });
+      const GoalService = (await import('../goals/goal-service.js')).GoalService;
+      const goalService = new GoalService({ db: ctx.db, logger: ctx.logger });
+      const activeGoals = await goalService.listGoals(userId, { status: 'active' });
 
-        // Stage 1: Scan for gaps (pure heuristics, no LLM)
-        const safeBehavioral = behavioralPatterns ?? safeBehavioralPatterns(userId);
-        const signals = scanForGaps({
-          activeGoals,
-          behavioralSignals: safeBehavioral,
-          sessionSummaries,
-        });
+      // Stage 1: Scan for gaps (pure heuristics, no LLM)
+      const safeBehavioral = behavioralPatterns ?? safeBehavioralPatterns(userId);
+      const signals = scanForGaps({
+        activeGoals,
+        behavioralSignals: safeBehavioral,
+        sessionSummaries,
+      });
 
-        if (signals.length === 0) continue;
-
+      if (signals.length > 0) {
         // Stage 2: Unified gap pipeline (single LLM call → ready-to-schedule items)
         const dial = (safeBehavioral.responsePreferences?.proactivenessDial as string) ?? 'moderate';
         const affect = safeBehavioral.smoothedAffect ?? null;
@@ -316,9 +309,9 @@ export async function runGapScanner(ctx: GardenerContext): Promise<GapScannerSte
           ctx.logger.info({ userId, signalsFound: signals.length, actionsCreated: gapItems.length }, 'Gap scanner created actions');
           totalActions += gapItems.length;
         }
-      } catch (err) {
-        ctx.logger.warn({ error: (err as Error).message, userId }, 'Gap scanner failed for user');
       }
+    } catch (err) {
+      ctx.logger.warn({ error: (err as Error).message, userId }, 'Gap scanner failed for user');
     }
     return { actionsCreated: totalActions };
   } catch (err) {

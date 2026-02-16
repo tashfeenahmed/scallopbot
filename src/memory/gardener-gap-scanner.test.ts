@@ -170,7 +170,7 @@ function seedMemory(
   },
 ) {
   return db.addMemory({
-    userId: opts.userId ?? 'user-1',
+    userId: opts.userId ?? 'default',
     content: opts.content,
     category: opts.category,
     memoryType: 'regular',
@@ -208,7 +208,7 @@ function seedStaleGoal(
   Date.now = () => oldTime;
   try {
     return db.addMemory({
-      userId: opts?.userId ?? 'user-1',
+      userId: opts?.userId ?? 'default',
       content: opts?.title ?? 'Learn Rust programming',
       category: 'insight',
       memoryType: 'regular',
@@ -239,7 +239,7 @@ function seedFreshGoal(
   opts?: { userId?: string; title?: string },
 ) {
   return db.addMemory({
-    userId: opts?.userId ?? 'user-1',
+    userId: opts?.userId ?? 'default',
     content: opts?.title ?? 'Active fresh goal',
     category: 'insight',
     memoryType: 'regular',
@@ -275,7 +275,7 @@ function seedRecentSessionSummary(
   db.createSession(sessionId);
   return db.addSessionSummary({
     sessionId,
-    userId: opts?.userId ?? 'user-1',
+    userId: opts?.userId ?? 'default',
     summary: 'User discussed various topics in this session.',
     topics: opts?.topics ?? ['typescript', 'testing'],
     messageCount: opts?.messageCount ?? 8,
@@ -336,7 +336,7 @@ describe('BackgroundGardener gap scanner integration', () => {
     await gardener.sleepTick();
 
     // Verify: scheduled items created
-    const items = db.getScheduledItemsByUser('user-1');
+    const items = db.getScheduledItemsByUser('default');
     const gapItems = items.filter(i => i.type === 'follow_up' && i.source === 'agent');
     expect(gapItems.length).toBeGreaterThanOrEqual(1);
 
@@ -375,7 +375,7 @@ describe('BackgroundGardener gap scanner integration', () => {
     await expect(gardener.sleepTick()).resolves.not.toThrow();
 
     // Verify: no scheduled items created
-    const items = db.getScheduledItemsByUser('user-1');
+    const items = db.getScheduledItemsByUser('default');
     const gapItems = items.filter(i => i.type === 'follow_up' && i.source === 'agent');
     expect(gapItems.length).toBe(0);
   });
@@ -408,7 +408,7 @@ describe('BackgroundGardener gap scanner integration', () => {
     await gardener.sleepTick();
 
     // Verify: no scheduled items created (Stage 1 returns empty)
-    const items = db.getScheduledItemsByUser('user-1');
+    const items = db.getScheduledItemsByUser('default');
     const gapItems = items.filter(i => i.type === 'follow_up' && i.source === 'agent');
     expect(gapItems.length).toBe(0);
 
@@ -451,7 +451,7 @@ describe('BackgroundGardener gap scanner integration', () => {
     const m2 = seedMemory(db, { content: 'Likes listening to podcasts while walking', category: 'preference', prominence: 0.38 });
     const m3 = seedMemory(db, { content: 'Usually walks for 30 minutes', category: 'fact', prominence: 0.35 });
     const m4 = seedMemory(db, { content: 'Prefers walking over running', category: 'preference', prominence: 0.42 });
-    const m1 = db.getMemoriesByUser('user-1', { includeAllSources: true })[0];
+    const m1 = db.getMemoriesByUser('default', { includeAllSources: true })[0];
 
     // Connect them for NREM clustering
     db.addRelation(m1.id, m2.id, 'EXTENDS', 0.8);
@@ -468,7 +468,7 @@ describe('BackgroundGardener gap scanner integration', () => {
     await expect(gardener.sleepTick()).resolves.not.toThrow();
 
     // Verify: NREM fused memories were created (dream cycle succeeded)
-    const allMemories = db.getMemoriesByUser('user-1', { includeAllSources: true });
+    const allMemories = db.getMemoriesByUser('default', { includeAllSources: true });
     const nremMemories = allMemories.filter(m => m.learnedFrom === 'nrem_consolidation');
     expect(nremMemories.length).toBeGreaterThanOrEqual(1);
 
@@ -477,7 +477,7 @@ describe('BackgroundGardener gap scanner integration', () => {
     expect(reflectionMemories.length).toBeGreaterThanOrEqual(1);
 
     // Verify: no gap scanner scheduled items (gap scanner failed)
-    const items = db.getScheduledItemsByUser('user-1');
+    const items = db.getScheduledItemsByUser('default');
     const gapItems = items.filter(i => i.type === 'follow_up' && i.source === 'agent');
     expect(gapItems.length).toBe(0);
   });
@@ -515,7 +515,7 @@ describe('BackgroundGardener gap scanner integration', () => {
 
     // Set behavioral patterns with conservative dial
     const profileManager = store.getProfileManager();
-    profileManager.updateBehavioralPatterns('user-1', {
+    profileManager.updateBehavioralPatterns('default', {
       responsePreferences: {
         proactivenessDial: 'conservative',
         trustScore: 0.3,
@@ -535,7 +535,7 @@ describe('BackgroundGardener gap scanner integration', () => {
     expect(gapDiagnosisCalls.length).toBeGreaterThanOrEqual(1);
 
     // Verify: no scheduled items created (conservative dial + low confidence = filtered)
-    const items = db.getScheduledItemsByUser('user-1');
+    const items = db.getScheduledItemsByUser('default');
     const gapItems = items.filter(i => i.type === 'follow_up' && i.source === 'agent');
     expect(gapItems.length).toBe(0);
   });

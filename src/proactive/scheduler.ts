@@ -319,7 +319,7 @@ export class UnifiedScheduler {
     if (item.source === 'agent') {
       const { channel } = parseUserIdPrefix(item.userId);
 
-      if (channel === 'telegram' || channel === 'api') {
+      if (channel === 'telegram' || channel === 'api' || !channel) {
         // Parse gapType from item context if available
         let gapType: string | undefined;
         let urgency: 'low' | 'medium' | 'high' = 'low';
@@ -346,7 +346,7 @@ export class UnifiedScheduler {
           source,
         };
 
-        const formatted = formatProactiveMessage(channel, formatInput);
+        const formatted = formatProactiveMessage((channel ?? 'telegram') as 'telegram' | 'api', formatInput);
         const formattedStr = typeof formatted === 'string'
           ? formatted
           : JSON.stringify(formatted);

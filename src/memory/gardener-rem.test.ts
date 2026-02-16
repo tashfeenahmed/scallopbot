@@ -81,7 +81,7 @@ function seedMemory(
   },
 ) {
   return db.addMemory({
-    userId: opts.userId ?? 'user-1',
+    userId: opts.userId ?? 'default',
     content: opts.content,
     category: opts.category,
     memoryType: 'regular',
@@ -170,7 +170,7 @@ describe('BackgroundGardener REM integration', () => {
     await gardener.sleepTick();
 
     // Gather all relations
-    const allMemories = db.getMemoriesByUser('user-1', { includeAllSources: true });
+    const allMemories = db.getMemoriesByUser('default', { includeAllSources: true });
     const originalIds = new Set([mA.id, mB.id, mC.id, mD.id, mE.id]);
 
     // Check for EXTENDS relations that were NOT in our original setup
@@ -204,10 +204,10 @@ describe('BackgroundGardener REM integration', () => {
     expect(remExtendsCount).toBeGreaterThanOrEqual(1);
 
     // Verify: REM did NOT create any new memories (only relations)
+    // All non-original memories (excluding migration sentinels) should be NREM-derived
     const nonOriginalMemories = allMemories.filter(m =>
-      !originalIds.has(m.id) && m.learnedFrom !== 'nrem_consolidation'
+      !originalIds.has(m.id) && m.source !== '_cleaned_sentinel'
     );
-    // Any non-original memories should only be NREM-derived
     for (const m of nonOriginalMemories) {
       expect(m.learnedFrom).toBe('nrem_consolidation');
     }
@@ -269,7 +269,7 @@ describe('BackgroundGardener REM integration', () => {
 
     await gardener.sleepTick();
 
-    const allMemories = db.getMemoriesByUser('user-1', { includeAllSources: true });
+    const allMemories = db.getMemoriesByUser('default', { includeAllSources: true });
 
     // NREM should have created derived memories with DERIVES relations
     const derivedMemories = allMemories.filter(m => m.memoryType === 'derived');
@@ -364,7 +364,7 @@ describe('BackgroundGardener REM integration', () => {
     expect(remExtendsCount).toBe(0);
 
     // NREM should still have worked (derived memories created)
-    const allMemories = db.getMemoriesByUser('user-1', { includeAllSources: true });
+    const allMemories = db.getMemoriesByUser('default', { includeAllSources: true });
     const derivedMemories = allMemories.filter(m => m.memoryType === 'derived');
     expect(derivedMemories.length).toBeGreaterThanOrEqual(1);
   });
@@ -428,7 +428,7 @@ describe('BackgroundGardener REM integration', () => {
     await expect(gardener.sleepTick()).resolves.not.toThrow();
 
     // NREM should have succeeded — derived memories created
-    const allMemories = db.getMemoriesByUser('user-1', { includeAllSources: true });
+    const allMemories = db.getMemoriesByUser('default', { includeAllSources: true });
     const derivedMemories = allMemories.filter(m => m.memoryType === 'derived');
     expect(derivedMemories.length).toBeGreaterThanOrEqual(1);
     expect(derivedMemories[0].learnedFrom).toBe('nrem_consolidation');
