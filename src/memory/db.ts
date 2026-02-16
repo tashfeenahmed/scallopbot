@@ -1954,7 +1954,7 @@ export class ScallopDatabase {
     // Get all pending items within the time window
     const stmt = this.db.prepare(`
       SELECT message FROM scheduled_items
-      WHERE user_id = ? AND status = 'pending'
+      WHERE user_id = ? AND status IN ('pending', 'processing', 'fired')
         AND trigger_at BETWEEN ? AND ?
     `);
     const rows = stmt.all(userId, now - withinMs, now + withinMs * 7) as Array<{ message: string }>;
@@ -1998,6 +1998,68 @@ export class ScallopDatabase {
     }
 
     return false;
+  }
+
+  /**
+   * Cancel pending/processing scheduled items that reference a deleted memory
+   */
+  cancelScheduledItemsBySourceMemory(memoryId: string): number {
+    const stmt = this.db.prepare(`
+      UPDATE scheduled_items SET status = 'expired', updated_at = ?
+      WHERE source_memory_id = ? AND status IN ('pending', 'processing')
+    `);
+    const result = stmt.run(Date.now(), memoryId);
+    return result.changes;
+  }
+
+  /**
+   * Cancel pending scheduled items whose message is textually similar to the given content.
+   * Used to clean up orphaned items when a memory is forgotten (sourceMemoryId may be null).
+   */
+  cancelSimilarScheduledItems(userId: string, content: string): number {
+    const stmt = this.db.prepare(`
+      SELECT id, message FROM scheduled_items
+      WHERE user_id = ? AND status IN ('pending', 'processing')
+    `);
+    const rows = stmt.all(userId) as Array<{ id: string; message: string }>;
+
+    const stopWords = new Set(['the', 'a', 'an', 'at', 'on', 'in', 'to', 'for', 'of', 'and', 'is', 'my', 'me', 'i', 'you', 'your', 'about',
+      'remind', 'reminder', 'remember', 'check', 'follow', 'up', 'user', 'upcoming', 'scheduled']);
+    const normalizeText = (text: string): Set<string> => {
+      return new Set(
+        text.toLowerCase()
+          .replace(/[^\w\s]/g, '')
+          .split(/\s+/)
+          .filter(word => word.length > 2 && !stopWords.has(word))
+      );
+    };
+
+    const contentWords = normalizeText(content);
+    if (contentWords.size === 0) return 0;
+
+    let cancelled = 0;
+    const updateStmt = this.db.prepare(`
+      UPDATE scheduled_items SET status = 'expired', updated_at = ? WHERE id = ?
+    `);
+    const now = Date.now();
+
+    for (const row of rows) {
+      const msgWords = normalizeText(row.message);
+      if (msgWords.size === 0) continue;
+
+      let overlap = 0;
+      for (const word of contentWords) {
+        if (msgWords.has(word)) overlap++;
+      }
+
+      const smaller = Math.min(contentWords.size, msgWords.size);
+      if (overlap / smaller >= 0.6) {
+        updateStmt.run(now, row.id);
+        cancelled++;
+      }
+    }
+
+    return cancelled;
   }
 
   /**

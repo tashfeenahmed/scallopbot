@@ -322,8 +322,9 @@ export async function remExplore(
     return { seedsExplored: 0, candidatesEvaluated: 0, discoveries: [], failures: 0 };
   }
 
-  // Build a memory lookup for resolving neighbor IDs from activation results
-  const memoryMap = new Map(eligible.map(m => [m.id, m]));
+  // Build a memory lookup from ALL memories (not just eligible) so spreading
+  // activation can discover candidates outside the seed prominence window
+  const memoryMap = new Map(memories.map(m => [m.id, m]));
 
   // Step 3-7: Process each seed with error isolation
   const discoveries: RemDiscovery[] = [];

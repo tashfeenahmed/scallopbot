@@ -1273,6 +1273,12 @@ export class TelegramChannel {
       return false;
     }
 
+    // Single-user bot safety net: resolve 'default' to the configured allowed user
+    if (chatId === 'default' && this.allowedUsers.size > 0) {
+      chatId = this.allowedUsers.values().next().value!;
+      this.logger.debug({ resolvedChatId: chatId }, 'Resolved default chatId to allowed user');
+    }
+
     try {
       const htmlMessage = formatMarkdownToHtml(message);
       const chunks = splitMessage(htmlMessage);
