@@ -337,6 +337,14 @@ export class ScallopMemoryStore {
   }
 
   /**
+   * Get recently stored memories (short-term memory buffer).
+   * Returns memories from the last `windowMs` milliseconds, newest first.
+   */
+  getRecentMemories(userId: string, windowMs: number): ScallopMemoryEntry[] {
+    return this.db.getRecentMemories(userId, windowMs, { isLatest: true });
+  }
+
+  /**
    * Get active memories (prominence > 0.5)
    */
   getActiveMemories(userId: string, limit?: number): ScallopMemoryEntry[] {
@@ -460,10 +468,17 @@ export class ScallopMemoryStore {
 
       const relevanceScore = keywordScore * SEARCH_WEIGHTS.keyword + semanticScore * SEARCH_WEIGHTS.semantic;
 
+      // Recency boost: exponential decay so recently stored facts surface more
+      // easily even with weaker keyword/semantic overlap.  Models human
+      // short-term memory — things you just learned are highly accessible.
+      const ageHours = (Date.now() - memory.documentDate) / (1000 * 60 * 60);
+      const RECENCY_HALF_LIFE_HOURS = 3;
+      const recencyBoost = Math.exp(-ageHours / RECENCY_HALF_LIFE_HOURS) * 0.3;
+
       // Prominence already gates visibility via minProminence threshold
       // (active/dormant/archived). No additional scoring penalty needed —
       // decay handles long-term forgetting, search should rank purely by relevance.
-      let score = relevanceScore;
+      let score = relevanceScore + recencyBoost;
 
       // Boost for exact matches
       if (memory.content.toLowerCase().includes(queryLower)) {

@@ -736,40 +736,48 @@ Only use write_file + send_file for **binary/generated files** (PDFs, images, ar
         // Behavioral patterns not available, that's fine
       }
 
-      // Tier 2: Query-relevant facts via search
-      // Phase 1: Get key user facts (high prominence, no query needed)
+      // Tier 2: Memory retrieval — three-phase approach modelling human memory:
+      //  Phase 0 (short-term): Recently stored facts — always available (last 6h)
+      //  Phase 1 (long-term):  High-prominence facts — core identity/knowledge
+      //  Phase 2 (search):     Query-relevant facts — associative retrieval
+
+      // Filter: only exclude memories with an explicit eventDate that has passed
+      const EVENT_EXPIRY_MS = 24 * 60 * 60 * 1000;
+      const isPastEvent = (mem: { eventDate: number | null }): boolean => {
+        return !!(mem.eventDate && mem.eventDate < Date.now() - EVENT_EXPIRY_MS);
+      };
+
+      // Phase 0: Short-term memory buffer — things the user just told us
+      const SHORT_TERM_WINDOW_MS = 6 * 60 * 60 * 1000; // 6 hours
+      const recentFacts = this.scallopStore.getRecentMemories(userId, SHORT_TERM_WINDOW_MS);
+
+      // Phase 1: Long-term prominent facts
       const userFacts = this.scallopStore.getByUser(userId, {
         minProminence: 0.3,
         isLatest: true,
         limit: 20,
       });
 
-      // Phase 2: Get query-relevant facts via hybrid search
+      // Phase 2: Query-relevant facts via hybrid search (now includes recency boost)
       const relevantResults = await this.scallopStore.search(userMessage, {
         userId,
         minProminence: 0.1,
         limit: 10,
       });
 
-      // Filter: exclude past time-bound events from ambient context.
-      // Events with explicit eventDate or time-bound language that are >24h old
-      // should not clutter the system prompt — the user doesn't need to be
-      // reminded about meetings/appointments that already happened.
-      const EVENT_EXPIRY_MS = 24 * 60 * 60 * 1000; // 24 hours
-      const TIME_BOUND_PATTERN = /\b(meeting|appointment|call|interview|dentist|doctor|lunch|dinner|flight|train|reminder|gym|workout|errand|today|tonight|this morning|this afternoon|this evening|1\s*[ap]m|2\s*[ap]m|3\s*[ap]m|4\s*[ap]m|5\s*[ap]m|6\s*[ap]m|7\s*[ap]m|8\s*[ap]m|9\s*[ap]m|10\s*[ap]m|11\s*[ap]m|12\s*[ap]m|\d{1,2}:\d{2})\b/i;
-      const isPastEvent = (mem: { eventDate: number | null; documentDate: number; content: string }): boolean => {
-        // Explicit event date that's passed
-        if (mem.eventDate && mem.eventDate < Date.now() - EVENT_EXPIRY_MS) return true;
-        // Time-bound language + old document date (>48h) = likely a past event
-        if (TIME_BOUND_PATTERN.test(mem.content) && mem.documentDate < Date.now() - EVENT_EXPIRY_MS * 2) return true;
-        return false;
-      };
-
-      // Combine: query-relevant results first, then fill with ambient facts
+      // Combine: recent first (short-term), then search-relevant, then prominent
       const seenIds = new Set<string>();
       const allFactTexts: { content: string; subject?: string }[] = [];
 
-      // Phase 2 results first — these are query-relevant and should take priority
+      // Phase 0: Recent facts — highest priority (user just said these)
+      for (const fact of recentFacts) {
+        if (!seenIds.has(fact.id) && !isPastEvent(fact)) {
+          seenIds.add(fact.id);
+          const subject = fact.metadata?.subject as string | undefined;
+          allFactTexts.push({ content: fact.content, subject });
+        }
+      }
+      // Phase 2: Search-relevant facts
       for (const result of relevantResults) {
         if (!seenIds.has(result.memory.id) && !isPastEvent(result.memory)) {
           seenIds.add(result.memory.id);
@@ -777,7 +785,7 @@ Only use write_file + send_file for **binary/generated files** (PDFs, images, ar
           allFactTexts.push({ content: result.memory.content, subject });
         }
       }
-      // Then fill remaining space with ambient high-prominence facts
+      // Phase 1: Long-term prominent facts (fill remaining space)
       for (const fact of userFacts) {
         if (!seenIds.has(fact.id) && !isPastEvent(fact)) {
           seenIds.add(fact.id);
