@@ -21,6 +21,28 @@ import type {
 import type { AffectEMAState, SmoothedAffect } from './affect-smoothing.js';
 
 /**
+ * Shared stop words for scheduled-item text similarity matching.
+ * Used by consolidation, dedup, and cascade cancellation.
+ */
+const SCHEDULED_ITEM_STOP_WORDS = new Set([
+  'the', 'a', 'an', 'at', 'on', 'in', 'to', 'for', 'of', 'and', 'is', 'are', 'was', 'were', 'been',
+  'my', 'me', 'i', 'you', 'your', 'its', 'his', 'her', 'our', 'their',
+  'with', 'from', 'has', 'have', 'had', 'will', 'can', 'not', 'but', 'this', 'that', 'about',
+  'remind', 'reminder', 'remember', 'check', 'follow', 'up', 'user', 'upcoming', 'scheduled',
+  'prepare', 'notes', 'ready', 'get', 'time', 'just', 'now', 'today', 'tomorrow',
+]);
+
+/** Normalize text to significant word set for similarity matching */
+function normalizeForSimilarity(text: string): Set<string> {
+  return new Set(
+    text.toLowerCase()
+      .replace(/[^\w\s]/g, '')
+      .split(/\s+/)
+      .filter(word => word.length > 2 && !SCHEDULED_ITEM_STOP_WORDS.has(word))
+  );
+}
+
+/**
  * Memory types for decay calculation
  */
 export type ScallopMemoryType =
@@ -1873,17 +1895,6 @@ export class ScallopDatabase {
     `);
     const rows = stmt.all() as Array<{ id: string; user_id: string; message: string; trigger_at: number; created_at: number }>;
 
-    const stopWords = new Set(['the', 'a', 'an', 'at', 'on', 'in', 'to', 'for', 'of', 'and', 'is', 'my', 'me', 'i', 'you', 'your', 'about',
-      'remind', 'reminder', 'remember', 'check', 'follow', 'up', 'user', 'upcoming', 'scheduled']);
-    const normalizeText = (text: string): Set<string> => {
-      return new Set(
-        text.toLowerCase()
-          .replace(/[^\w\s]/g, '')
-          .split(/\s+/)
-          .filter(word => word.length > 2 && !stopWords.has(word))
-      );
-    };
-
     const isSimilar = (a: Set<string>, b: Set<string>): boolean => {
       if (a.size === 0 || b.size === 0) return false;
       let overlap = 0;
@@ -1910,12 +1921,12 @@ export class ScallopDatabase {
       for (let i = 0; i < items.length; i++) {
         if (toDelete.has(items[i].id)) continue;
         kept.add(i);
-        const wordsI = normalizeText(items[i].message);
+        const wordsI = normalizeForSimilarity(items[i].message);
         for (let j = i + 1; j < items.length; j++) {
           if (toDelete.has(items[j].id)) continue;
           // Only compare items within 7 days of each other
           if (Math.abs(items[i].trigger_at - items[j].trigger_at) > 7 * 24 * 60 * 60 * 1000) continue;
-          const wordsJ = normalizeText(items[j].message);
+          const wordsJ = normalizeForSimilarity(items[j].message);
           if (isSimilar(wordsI, wordsJ)) {
             toDelete.add(items[j].id); // keep earlier (i), remove later (j)
           }
@@ -1961,23 +1972,11 @@ export class ScallopDatabase {
 
     if (rows.length === 0) return false;
 
-    // Normalize and extract significant words
-    const stopWords = new Set(['the', 'a', 'an', 'at', 'on', 'in', 'to', 'for', 'of', 'and', 'is', 'my', 'me', 'i', 'you', 'your', 'about',
-      'remind', 'reminder', 'remember', 'check', 'follow', 'up', 'user', 'upcoming', 'scheduled']);
-    const normalizeText = (text: string): Set<string> => {
-      return new Set(
-        text.toLowerCase()
-          .replace(/[^\w\s]/g, '')
-          .split(/\s+/)
-          .filter(word => word.length > 2 && !stopWords.has(word))
-      );
-    };
-
-    const newWords = normalizeText(message);
+    const newWords = normalizeForSimilarity(message);
     if (newWords.size === 0) return false;
 
     for (const row of rows) {
-      const existingWords = normalizeText(row.message);
+      const existingWords = normalizeForSimilarity(row.message);
       if (existingWords.size === 0) continue;
 
       let overlap = 0;
@@ -2023,18 +2022,7 @@ export class ScallopDatabase {
     `);
     const rows = stmt.all(userId) as Array<{ id: string; message: string }>;
 
-    const stopWords = new Set(['the', 'a', 'an', 'at', 'on', 'in', 'to', 'for', 'of', 'and', 'is', 'my', 'me', 'i', 'you', 'your', 'about',
-      'remind', 'reminder', 'remember', 'check', 'follow', 'up', 'user', 'upcoming', 'scheduled']);
-    const normalizeText = (text: string): Set<string> => {
-      return new Set(
-        text.toLowerCase()
-          .replace(/[^\w\s]/g, '')
-          .split(/\s+/)
-          .filter(word => word.length > 2 && !stopWords.has(word))
-      );
-    };
-
-    const contentWords = normalizeText(content);
+    const contentWords = normalizeForSimilarity(content);
     if (contentWords.size === 0) return 0;
 
     let cancelled = 0;
@@ -2044,7 +2032,7 @@ export class ScallopDatabase {
     const now = Date.now();
 
     for (const row of rows) {
-      const msgWords = normalizeText(row.message);
+      const msgWords = normalizeForSimilarity(row.message);
       if (msgWords.size === 0) continue;
 
       let overlap = 0;
@@ -2052,8 +2040,11 @@ export class ScallopDatabase {
         if (msgWords.has(word)) overlap++;
       }
 
+      // Use multiple overlap metrics to catch different phrasing patterns:
+      // - overlap/smaller >= 0.5: at least half the words in the shorter text match
+      // - overlap/either >= 0.4: at least 40% of either side matches (asymmetric catch)
       const smaller = Math.min(contentWords.size, msgWords.size);
-      if (overlap / smaller >= 0.6) {
+      if (overlap / smaller >= 0.5 || overlap / contentWords.size >= 0.4 || overlap / msgWords.size >= 0.4) {
         updateStmt.run(now, row.id);
         cancelled++;
       }
