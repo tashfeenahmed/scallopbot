@@ -2012,6 +2012,42 @@ export class ScallopDatabase {
   }
 
   /**
+   * Remove user profile entries whose value is textually similar to superseded memory content.
+   * Prevents stale profile fields (e.g. "focus: meeting with X") from persisting after
+   * the source memory is superseded or forgotten.
+   */
+  cleanStaleProfileEntries(userId: string, content: string): number {
+    const contentWords = normalizeForSimilarity(content);
+    if (contentWords.size === 0) return 0;
+
+    const entries = this.getProfile(userId);
+    let cleaned = 0;
+
+    // Only clean ephemeral fields that are derived from conversations
+    const ephemeralFields = new Set(['focus', 'mood']);
+
+    for (const entry of entries) {
+      if (!ephemeralFields.has(entry.key)) continue;
+
+      const valueWords = normalizeForSimilarity(entry.value);
+      if (valueWords.size === 0) continue;
+
+      let overlap = 0;
+      for (const word of contentWords) {
+        if (valueWords.has(word)) overlap++;
+      }
+
+      const smaller = Math.min(contentWords.size, valueWords.size);
+      if (smaller > 0 && (overlap / smaller >= 0.5 || overlap / valueWords.size >= 0.4)) {
+        this.deleteProfileValue(userId, entry.key);
+        cleaned++;
+      }
+    }
+
+    return cleaned;
+  }
+
+  /**
    * Cancel pending scheduled items whose message is textually similar to the given content.
    * Used to clean up orphaned items when a memory is forgotten (sourceMemoryId may be null).
    */

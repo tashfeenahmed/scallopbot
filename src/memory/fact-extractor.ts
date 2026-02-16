@@ -918,9 +918,11 @@ Respond with JSON only:
         const cancelledById = db.cancelScheduledItemsBySourceMemory(match.memory.id);
         // Also cancel by text similarity (many items have null sourceMemoryId)
         const cancelledByText = db.cancelSimilarScheduledItems(userId, match.memory.content);
+        // Cascade: clean stale profile entries derived from this memory
+        const profilesCleaned = db.cleanStaleProfileEntries(userId, match.memory.content);
         this.logger.info(
           { id: match.memory.id, content: match.memory.content, score: match.score,
-            cancelledScheduledItems: cancelledById + cancelledByText },
+            cancelledScheduledItems: cancelledById + cancelledByText, profilesCleaned },
           'Memory deleted per user forget request'
         );
       }
@@ -991,10 +993,12 @@ Respond with JSON only:
         // Cascade: cancel scheduled items tied to the superseded memory
         db.cancelScheduledItemsBySourceMemory(candidate.memory.id);
         db.cancelSimilarScheduledItems(userId, candidate.memory.content);
+        // Cascade: clean stale profile entries derived from superseded memory
+        const profilesCleaned = db.cleanStaleProfileEntries(userId, candidate.memory.content);
 
         superseded++;
         this.logger.info(
-          { oldId: candidate.memory.id, oldContent: candidate.memory.content, newContent: correction.content },
+          { oldId: candidate.memory.id, oldContent: candidate.memory.content, newContent: correction.content, profilesCleaned },
           'Memory superseded by correction'
         );
       }
@@ -1148,9 +1152,18 @@ Respond with JSON only:
       // 1. Supersede outdated memories
       if (parsed.superseded && Array.isArray(parsed.superseded) && parsed.superseded.length > 0) {
         const validIds = new Set(candidates.map(c => c.id));
+        const candidateMap = new Map(candidates.map(c => [c.id, c]));
+        const db = this.scallopStore.getDatabase();
         for (const id of parsed.superseded) {
           if (validIds.has(id)) {
             this.scallopStore.update(id, { isLatest: false });
+            // Cascade: cancel scheduled items and clean stale profile entries
+            const mem = candidateMap.get(id);
+            if (mem) {
+              db.cancelScheduledItemsBySourceMemory(id);
+              db.cancelSimilarScheduledItems(userId, mem.content);
+              db.cleanStaleProfileEntries(userId, mem.content);
+            }
             this.logger.info(
               { supersededId: id, newFacts: storedFacts.map(f => f.substring(0, 40)) },
               'Memory superseded by newer fact'
