@@ -314,7 +314,7 @@ async function executeSearch(args: MemorySearchArgs): Promise<void> {
 
     // Filter out past time-bound events (meetings, appointments etc. that already happened)
     const EVENT_EXPIRY_MS = 24 * 60 * 60 * 1000;
-    const TIME_BOUND = /\b(meeting|appointment|call|interview|dentist|doctor|lunch|dinner|flight|train|reminder|\d{1,2}\s*[ap]m|\d{1,2}:\d{2})\b/i;
+    const TIME_BOUND = /\b(meeting|appointment|call|interview|dentist|doctor|lunch|dinner|flight|train|reminder|gym|workout|errand|today|tonight|this morning|this afternoon|this evening|\d{1,2}\s*[ap]m|\d{1,2}:\d{2})\b/i;
     const now = Date.now();
     const filteredMemories = allMemories.filter(m => {
       if (m.eventDate && m.eventDate < now - EVENT_EXPIRY_MS) return false;
