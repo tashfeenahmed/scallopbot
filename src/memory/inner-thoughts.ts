@@ -28,6 +28,8 @@ export interface InnerThoughtsInput {
   dial: 'conservative' | 'moderate' | 'eager';
   lastProactiveAt: number | null;
   activeHours: number[];
+  /** Compact board summary for LLM awareness of pending tasks */
+  boardSummary?: string;
 }
 
 export interface InnerThoughtsResult {
@@ -149,6 +151,8 @@ Response format:
     ? `Emotion: ${input.affect.emotion}, Valence: ${input.affect.valence}, Arousal: ${input.affect.arousal}`
     : 'Affect: unknown';
 
+  const boardLine = input.boardSummary || 'No board items';
+
   const userMessage = `SESSION SUMMARY:
 Topics: ${input.sessionSummary.topics.join(', ')}
 Messages: ${input.sessionSummary.messageCount}
@@ -158,10 +162,13 @@ Summary: ${input.sessionSummary.summary}
 GAP SIGNALS:
 ${signalLines}
 
+TASK BOARD:
+${boardLine}
+
 AFFECT:
 ${affectLine}
 
-Evaluate whether proactive follow-up is warranted and respond with JSON only:`;
+Evaluate whether proactive follow-up is warranted. Consider if any board tasks relate to the conversation or could benefit from proactive action. Respond with JSON only:`;
 
   return {
     messages: [{ role: 'user', content: userMessage }],

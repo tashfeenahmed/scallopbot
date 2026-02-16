@@ -258,10 +258,23 @@ export async function runGapScanner(ctx: GardenerContext): Promise<GapScannerSte
 
       // Stage 1: Scan for gaps (pure heuristics, no LLM)
       const safeBehavioral = behavioralPatterns ?? safeBehavioralPatterns(userId);
+
+      // Include board items for stale/blocked detection
+      const boardItems = existingItems
+        .filter(i => i.boardStatus === 'in_progress' || i.boardStatus === 'waiting')
+        .map(i => ({
+          id: i.id,
+          title: i.message,
+          boardStatus: i.boardStatus!,
+          updatedAt: i.updatedAt,
+          priority: i.priority,
+        }));
+
       const signals = scanForGaps({
         activeGoals,
         behavioralSignals: safeBehavioral,
         sessionSummaries,
+        boardItems,
       });
 
       if (signals.length > 0) {
@@ -317,5 +330,49 @@ export async function runGapScanner(ctx: GardenerContext): Promise<GapScannerSte
   } catch (err) {
     ctx.logger.warn({ error: (err as Error).message }, 'Gap scanner phase failed');
     return { actionsCreated: 0 };
+  }
+}
+
+// ============ C4: Board Review ============
+
+export interface BoardReviewResult {
+  itemsAutoArchived: number;
+  staleItemsFound: number;
+}
+
+/**
+ * C4: Board Review — overnight task board maintenance.
+ *
+ * - Auto-archives done items older than 7 days
+ * - Identifies stale in_progress/waiting items
+ * - Logs board state for morning digest awareness
+ */
+export async function runBoardReview(ctx: GardenerContext): Promise<BoardReviewResult> {
+  try {
+    const userId = DEFAULT_USER_ID;
+    const { BoardService } = await import('../board/board-service.js');
+    const boardService = new BoardService(ctx.db, ctx.logger);
+
+    // Auto-archive old done items
+    const archived = boardService.autoArchive(userId);
+
+    // Get board state for logging
+    const board = boardService.getBoard(userId);
+    const staleItems = (board.columns.in_progress || [])
+      .filter(i => Date.now() - i.updatedAt > 48 * 60 * 60 * 1000).length
+      + (board.columns.waiting || [])
+      .filter(i => Date.now() - i.updatedAt > 72 * 60 * 60 * 1000).length;
+
+    if (archived > 0 || staleItems > 0) {
+      ctx.logger.info(
+        { userId, autoArchived: archived, staleItems, activeItems: board.stats.totalActive },
+        'Board review completed'
+      );
+    }
+
+    return { itemsAutoArchived: archived, staleItemsFound: staleItems };
+  } catch (err) {
+    ctx.logger.warn({ error: (err as Error).message }, 'Board review phase failed');
+    return { itemsAutoArchived: 0, staleItemsFound: 0 };
   }
 }

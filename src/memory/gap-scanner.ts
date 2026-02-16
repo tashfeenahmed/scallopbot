@@ -14,17 +14,27 @@ import type { BehavioralPatterns, SessionSummaryRow } from './db.js';
 // ============ Types ============
 
 export interface GapSignal {
-  type: 'stale_goal' | 'behavioral_anomaly' | 'unresolved_thread';
+  type: 'stale_goal' | 'behavioral_anomaly' | 'unresolved_thread' | 'stale_board_item' | 'blocked_item';
   severity: 'low' | 'medium' | 'high';
   description: string;
   context: Record<string, unknown>;
   sourceId: string;
 }
 
+/** Minimal board item info for gap scanning */
+export interface BoardItemForScan {
+  id: string;
+  title: string;
+  boardStatus: string;
+  updatedAt: number;
+  priority: string;
+}
+
 export interface GapScanInput {
   activeGoals: GoalItem[];
   behavioralSignals: BehavioralPatterns;
   sessionSummaries: SessionSummaryRow[];
+  boardItems?: BoardItemForScan[];
   now?: number;
 }
 
@@ -252,6 +262,47 @@ export function scanUnresolvedThreads(
 
 // ============ Orchestrator ============
 
+// ============ scanStaleBoardItems ============
+
+const STALE_IN_PROGRESS_HOURS = 48;
+const STALE_WAITING_HOURS = 72;
+
+/**
+ * Scan board items for stale/blocked signals:
+ * - in_progress items not updated for 48h+
+ * - waiting items older than 72h
+ */
+export function scanStaleBoardItems(items: BoardItemForScan[], now: number): GapSignal[] {
+  const signals: GapSignal[] = [];
+
+  for (const item of items) {
+    const ageMs = now - item.updatedAt;
+    const ageHours = ageMs / (60 * 60 * 1000);
+
+    if (item.boardStatus === 'in_progress' && ageHours > STALE_IN_PROGRESS_HOURS) {
+      signals.push({
+        type: 'stale_board_item',
+        severity: item.priority === 'urgent' || item.priority === 'high' ? 'high' : 'medium',
+        description: `Task "${item.title}" has been in progress for ${Math.round(ageHours)}h without updates`,
+        context: { boardStatus: item.boardStatus, ageHours: Math.round(ageHours), priority: item.priority },
+        sourceId: item.id,
+      });
+    }
+
+    if (item.boardStatus === 'waiting' && ageHours > STALE_WAITING_HOURS) {
+      signals.push({
+        type: 'blocked_item',
+        severity: item.priority === 'urgent' ? 'high' : 'medium',
+        description: `Task "${item.title}" has been blocked for ${Math.round(ageHours)}h`,
+        context: { boardStatus: item.boardStatus, ageHours: Math.round(ageHours), priority: item.priority },
+        sourceId: item.id,
+      });
+    }
+  }
+
+  return signals;
+}
+
 /**
  * Orchestrator that calls all sub-scanners and concatenates results.
  * Returns GapSignal[] for downstream LLM triage.
@@ -262,5 +313,6 @@ export function scanForGaps(input: GapScanInput): GapSignal[] {
     ...scanStaleGoals(input.activeGoals, now),
     ...scanBehavioralAnomalies(input.behavioralSignals, now),
     ...scanUnresolvedThreads(input.sessionSummaries, now),
+    ...(input.boardItems ? scanStaleBoardItems(input.boardItems, now) : []),
   ];
 }

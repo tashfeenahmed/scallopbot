@@ -1,8 +1,8 @@
 ---
 name: reminder
-description: Set, list, and cancel reminders that trigger messages at specified times
-user-invocable: true
-triggers: [remind, reminder, alarm, schedule, notify, timer]
+description: "[DEPRECATED — use the 'board' skill instead] Set, list, and cancel reminders"
+user-invocable: false
+triggers: []
 scripts:
   run: "scripts/run.ts"
 inputSchema:

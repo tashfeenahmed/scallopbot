@@ -24,6 +24,7 @@ import type { GoalService } from '../goals/index.js';
 import type { BotConfigManager } from '../channels/bot-config.js';
 import type { AnnounceQueue } from '../subagent/announce-queue.js';
 import type { SubAgentExecutor } from '../subagent/executor.js';
+import type { BoardService } from '../board/board-service.js';
 
 export interface AgentOptions {
   provider: LLMProvider;
@@ -48,6 +49,8 @@ export interface AgentOptions {
   announceQueue?: AnnounceQueue;
   /** Sub-agent executor for cancellation propagation (main agent only) */
   subAgentExecutor?: SubAgentExecutor;
+  /** Board service for task board context injection */
+  boardService?: BoardService;
 }
 
 export interface AgentResult {
@@ -149,6 +152,8 @@ export class Agent {
   private announceQueue: AnnounceQueue | null;
   /** Sub-agent executor for cancellation propagation */
   private subAgentExecutor: SubAgentExecutor | null;
+  /** Board service for task board context injection */
+  private boardService: BoardService | null;
 
   constructor(options: AgentOptions) {
     this.provider = options.provider;
@@ -170,6 +175,7 @@ export class Agent {
     this.enableThinking = options.enableThinking ?? false;
     this.announceQueue = options.announceQueue || null;
     this.subAgentExecutor = options.subAgentExecutor || null;
+    this.boardService = options.boardService || null;
 
     this.logger.info({ enableThinking: this.enableThinking }, 'Agent thinking mode configured');
   }
@@ -671,6 +677,19 @@ Only use write_file + send_file for **binary/generated files** (PDFs, images, ar
         }
       } catch (error) {
         this.logger.warn({ error: (error as Error).message }, 'Failed to build goal context');
+      }
+    }
+
+    // Add board context (task board summary)
+    if (this.boardService) {
+      try {
+        const boardContext = this.boardService.getBoardContext(userId, userMessage);
+        if (boardContext) {
+          prompt += boardContext;
+          this.logger.debug({ boardContextLength: boardContext.length }, 'Board context added to prompt');
+        }
+      } catch (error) {
+        this.logger.warn({ error: (error as Error).message }, 'Failed to build board context');
       }
     }
 

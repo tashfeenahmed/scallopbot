@@ -2,7 +2,7 @@
 name: goals
 description: Create, list, update, and complete goals, milestones, and tasks with hierarchical tracking
 user-invocable: true
-triggers: [goal, goals, milestone, task, objective, target, kanban, tracking]
+triggers: [goal, goals, milestone, objective, target]
 scripts:
   run: "scripts/run.ts"
 inputSchema:

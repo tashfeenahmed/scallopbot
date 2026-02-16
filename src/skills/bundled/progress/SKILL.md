@@ -1,8 +1,8 @@
 ---
 name: progress
-description: Check progress on goals and get a summary of active work
-user-invocable: true
-triggers: [progress, how am i doing, status, tracking, overview]
+description: "[DEPRECATED — use the 'board' skill instead] Check progress on goals"
+user-invocable: false
+triggers: []
 scripts:
   run: "scripts/run.ts"
 inputSchema:

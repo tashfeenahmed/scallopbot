@@ -13,7 +13,9 @@ import type {
   ScallopDatabase,
   ScheduledItem,
   RecurringSchedule,
+  BoardItemResult,
 } from '../memory/db.js';
+import { BoardService } from '../board/board-service.js';
 import type { CostTracker } from '../routing/cost.js';
 import type { GoalService } from '../goals/index.js';
 import type { SubAgentExecutor } from '../subagent/executor.js';
@@ -68,6 +70,7 @@ export class UnifiedScheduler {
   private onSendMessage: MessageHandler;
   private getTimezone: (userId: string) => string;
 
+  private boardService: BoardService;
   private schedulerSessionId: string | null = null;
   private intervalHandle: ReturnType<typeof setInterval> | null = null;
   private isRunning = false;
@@ -85,6 +88,7 @@ export class UnifiedScheduler {
     this.maxItemAge = options.maxItemAge ?? 24 * 60 * 60 * 1000; // 24 hours
     this.onSendMessage = options.onSendMessage;
     this.getTimezone = options.getTimezone ?? (() => Intl.DateTimeFormat().resolvedOptions().timeZone);
+    this.boardService = new BoardService(this.db, this.logger);
   }
 
   /**
@@ -172,9 +176,30 @@ export class UnifiedScheduler {
 
       this.logger.info({ count: dueItems.length }, 'Found due scheduled items');
 
+      // Dependency check: skip items whose dependencies aren't done/archived
+      const readyItems = dueItems.filter(item => {
+        if (!item.dependsOn || item.dependsOn.length === 0) return true;
+        for (const depId of item.dependsOn) {
+          const dep = this.db.getScheduledItem(depId);
+          if (!dep) continue; // deleted dependency counts as resolved
+          const depBoard = dep.boardStatus ?? (dep.status === 'fired' || dep.status === 'acted' ? 'done' : 'pending');
+          if (depBoard !== 'done' && depBoard !== 'archived') {
+            // Dependency not resolved — reset to pending with a delayed trigger
+            this.db.resetScheduledItemToPending(item.id);
+            this.db.updateScheduledItemBoard(item.id, {
+              boardStatus: 'waiting',
+              triggerAt: Date.now() + 60 * 60 * 1000, // retry in 1 hour
+            });
+            this.logger.debug({ itemId: item.id, blockedBy: depId }, 'Item blocked by dependency');
+            return false;
+          }
+        }
+        return true;
+      });
+
       // Separate nudges and tasks — process nudges first (fast), then tasks (may block)
-      const nudges = dueItems.filter(i => i.kind !== 'task');
-      const tasks = dueItems.filter(i => i.kind === 'task');
+      const nudges = readyItems.filter(i => i.kind !== 'task');
+      const tasks = readyItems.filter(i => i.kind === 'task');
 
       // Process nudges first
       for (const item of nudges) {
@@ -254,6 +279,9 @@ export class UnifiedScheduler {
       return;
     }
 
+    // Set board status to in_progress before spawning sub-agent
+    this.db.updateScheduledItemBoard(item.id, { boardStatus: 'in_progress' });
+
     try {
       // Enrich the task goal with context and guidance from the scheduled item
       // so the sub-agent understands WHY it was spawned and has enough detail
@@ -286,6 +314,17 @@ export class UnifiedScheduler {
       );
 
       if (result.response) {
+        // Store result on the board item
+        const boardResult: BoardItemResult = {
+          response: result.response,
+          completedAt: Date.now(),
+          iterationsUsed: result.iterationsUsed,
+        };
+        this.boardService.storeResult(item.id, boardResult);
+
+        // Set board status to done
+        this.db.updateScheduledItemBoard(item.id, { boardStatus: 'done' });
+
         // Send the sub-agent's result through proactive formatting
         await this.sendFormattedMessage(item, result.response, 'task_result');
         this.logger.info(
@@ -295,10 +334,12 @@ export class UnifiedScheduler {
       } else {
         // Sub-agent returned empty response — fall back to nudge
         this.logger.warn({ itemId: item.id }, 'Sub-agent returned empty response, sending fallback nudge');
+        this.db.updateScheduledItemBoard(item.id, { boardStatus: 'done' });
         await this.sendFormattedMessage(item, item.message);
       }
     } catch (err) {
-      // Sub-agent failed — fall back to nudge
+      // Sub-agent failed — set to waiting with error context
+      this.db.updateScheduledItemBoard(item.id, { boardStatus: 'waiting' });
       this.logger.warn(
         { itemId: item.id, error: (err as Error).message },
         'Sub-agent task failed, falling back to nudge'
@@ -365,6 +406,10 @@ export class UnifiedScheduler {
    */
   private markItemFiredAndReschedule(item: ScheduledItem): void {
     this.db.markScheduledItemFired(item.id);
+    // Also set board status to done (for nudges; tasks already set in processTask)
+    if (item.kind !== 'task') {
+      this.db.updateScheduledItemBoard(item.id, { boardStatus: 'done' });
+    }
     this.logger.info(
       { itemId: item.id, userId: item.userId, source: item.source, type: item.type, kind: item.kind },
       'Scheduled item fired'
@@ -379,7 +424,7 @@ export class UnifiedScheduler {
           this.logger.debug({ itemId: item.id }, 'Skipping reschedule - similar item already pending');
           return;
         }
-        // Create a new item for the next occurrence
+        // Create a new item for the next occurrence (preserves board fields)
         this.db.addScheduledItem({
           userId: item.userId,
           sessionId: item.sessionId,
@@ -392,6 +437,10 @@ export class UnifiedScheduler {
           recurring: item.recurring,
           sourceMemoryId: item.sourceMemoryId,
           taskConfig: item.taskConfig,
+          boardStatus: 'scheduled',
+          priority: item.priority,
+          labels: item.labels,
+          goalId: item.goalId,
         });
         this.logger.debug(
           { itemId: item.id, nextTrigger: new Date(nextTriggerAt).toISOString() },
@@ -546,5 +595,48 @@ export class UnifiedScheduler {
    */
   getIsRunning(): boolean {
     return this.isRunning;
+  }
+
+  /**
+   * Send a morning digest of unnotified completed items.
+   * Call this at quiet hours end (e.g., 7 AM) to consolidate overnight results.
+   */
+  async sendMorningDigest(userId: string): Promise<number> {
+    const unnotified = this.db.getUnnotifiedCompletedItems(userId);
+    if (unnotified.length === 0) return 0;
+
+    const lines: string[] = ['📋 While you were away:'];
+
+    for (const item of unnotified) {
+      const result = item.result;
+      const title = item.message.substring(0, 60);
+      if (result) {
+        const summary = result.response.substring(0, 100);
+        lines.push(`  ✅ ${title}: ${summary}${result.response.length > 100 ? '...' : ''}`);
+      } else {
+        lines.push(`  ✅ ${title}`);
+      }
+
+      // Mark as notified
+      if (result) {
+        const updatedResult: BoardItemResult = { ...result, notifiedAt: Date.now() };
+        this.db.updateScheduledItemResult(item.id, updatedResult);
+      }
+    }
+
+    if (lines.length > 1) {
+      lines.push(`\nUse board detail <id> to see full results.`);
+      await this.onSendMessage(userId, lines.join('\n'));
+    }
+
+    this.logger.info({ userId, count: unnotified.length }, 'Sent morning digest');
+    return unnotified.length;
+  }
+
+  /**
+   * Get the board service instance (for use by cognitive layer)
+   */
+  getBoardService(): BoardService {
+    return this.boardService;
   }
 }

@@ -166,7 +166,8 @@ export class GoalService {
   }
 
   /**
-   * Create a task under a milestone
+   * Create a task under a milestone.
+   * Also creates a board item (scheduled_item) linked via goal_id.
    */
   async createTask(
     milestoneId: string,
@@ -214,6 +215,32 @@ export class GoalService {
       { taskId: task.id, milestoneId, title: options.title },
       'Task created'
     );
+
+    // Also create a board item linked to this goal task
+    try {
+      const boardItem = this.db.addScheduledItem({
+        userId: milestone.userId,
+        sessionId: null,
+        source: 'user',
+        kind: 'task',
+        type: 'reminder',
+        message: options.title,
+        context: JSON.stringify({ goalId: memory.id, milestoneId, source: 'goal_service' }),
+        triggerAt: options.dueDate ?? 0,
+        recurring: null,
+        sourceMemoryId: memory.id,
+        boardStatus: options.dueDate ? 'scheduled' : 'backlog',
+        priority: 'medium',
+        labels: null,
+        dependsOn: null,
+        goalId: memory.id,
+        taskConfig: null,
+      });
+      this.logger.debug({ taskId: task.id, boardItemId: boardItem.id }, 'Board item created for goal task');
+    } catch (err) {
+      // Non-critical — the goal task is still created even if board item fails
+      this.logger.warn({ error: (err as Error).message, taskId: task.id }, 'Failed to create board item for goal task');
+    }
 
     // Update parent milestone and goal progress
     await this.updateProgress(milestoneId);
