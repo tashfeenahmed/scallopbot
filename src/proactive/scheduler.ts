@@ -255,10 +255,30 @@ export class UnifiedScheduler {
     }
 
     try {
+      // Enrich the task goal with context and guidance from the scheduled item
+      // so the sub-agent understands WHY it was spawned and has enough detail
+      let enrichedTask = item.taskConfig.goal;
+      if (item.context) {
+        try {
+          const ctx = JSON.parse(item.context) as Record<string, unknown>;
+          const parts: string[] = [];
+          if (ctx.original_context) {
+            parts.push(`Context: ${ctx.original_context}`);
+          }
+          if (ctx.guidance && ctx.guidance !== item.taskConfig.goal) {
+            parts.push(`Guidance: ${ctx.guidance}`);
+          }
+          parts.push(`Task: ${item.taskConfig.goal}`);
+          enrichedTask = parts.join('\n');
+        } catch {
+          // Context parsing failed, use goal as-is
+        }
+      }
+
       const result = await this.subAgentExecutor.spawnAndWait(
         this.schedulerSessionId,
         {
-          task: item.taskConfig.goal,
+          task: enrichedTask,
           skills: item.taskConfig.tools,
           modelTier: item.taskConfig.modelTier ?? 'fast',
           timeoutSeconds: 120,
