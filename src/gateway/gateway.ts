@@ -497,6 +497,7 @@ export class Gateway {
         logger: this.logger,
         costTracker: this.costTracker || undefined,
         memoryStore: this.scallopMemoryStore || undefined,
+        db: this.scallopMemoryStore?.getDatabase(),
       });
       await this.apiChannel.start();
 

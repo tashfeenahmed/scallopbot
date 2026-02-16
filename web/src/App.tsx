@@ -1,10 +1,13 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { useWebSocket, type WsMessage } from './hooks/useWebSocket';
 import { useCosts } from './hooks/useCosts';
+import { useAuth } from './hooks/useAuth';
 import Sidebar from './components/Sidebar';
 import CreditsPanel from './components/CreditsPanel';
 import ChatContainer from './components/ChatContainer';
 import ChatInput from './components/ChatInput';
+import SetupScreen from './components/SetupScreen';
+import LoginScreen from './components/LoginScreen';
 
 const MemoryMap = lazy(() => import('./components/memory-map/MemoryMap'));
 
@@ -50,6 +53,7 @@ export default function App() {
     return stored ? stored === 'true' : true;
   });
   const { costs, refetch: refetchCosts } = useCosts();
+  const { authState, error: authError, setup, login, logout } = useAuth();
   const inputRef = useRef<HTMLInputElement>(null);
 
   // Sync view changes to browser URL
@@ -221,6 +225,25 @@ export default function App() {
     addMessage({ type: 'system', content: 'Stopping...' });
   }, [addMessage, sendStop]);
 
+  // Auth gating
+  if (authState === 'loading') {
+    return (
+      <div className={darkMode ? 'dark' : ''}>
+        <div className="flex items-center justify-center min-h-screen bg-white dark:bg-gray-950">
+          <div className="w-8 h-8 border-2 border-gray-400 dark:border-blue-400 border-t-transparent rounded-full animate-spin" />
+        </div>
+      </div>
+    );
+  }
+
+  if (authState === 'needs-setup') {
+    return <SetupScreen onSetup={setup} error={authError} darkMode={darkMode} />;
+  }
+
+  if (authState === 'needs-login') {
+    return <LoginScreen onLogin={login} error={authError} darkMode={darkMode} />;
+  }
+
   return (
     <div className={`${darkMode ? 'dark' : ''}`}>
       <div className="flex h-screen bg-white dark:bg-gray-950 text-gray-900 dark:text-gray-100">
@@ -234,6 +257,7 @@ export default function App() {
           onDebugToggle={setDebugMode}
           costsAvailable={costs !== null}
           hasSpend={costs !== null && costs.daily.spent > 0}
+          onLogout={logout}
         />
         <div className="flex flex-col flex-1 min-w-0">
           {currentView === 'costs' ? (

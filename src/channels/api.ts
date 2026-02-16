@@ -29,6 +29,8 @@ import type { Channel, Attachment } from './types.js';
 import type { TriggerSource } from '../triggers/types.js';
 import type { CostTracker } from '../routing/cost.js';
 import type { ScallopMemoryStore } from '../memory/scallop-store.js';
+import type { ScallopDatabase } from '../memory/db.js';
+import { AuthService } from './auth.js';
 import { nanoid } from 'nanoid';
 
 /** Maximum request body size (1MB) */
@@ -60,6 +62,8 @@ export interface ApiChannelConfig {
   costTracker?: CostTracker;
   /** Memory store for graph visualization API (optional) */
   memoryStore?: ScallopMemoryStore;
+  /** Database for web UI auth (optional — enables password login) */
+  db?: ScallopDatabase;
 }
 
 /** Content-Type mapping for static files */
@@ -163,7 +167,7 @@ interface WsResponse {
 export class ApiChannel implements Channel, TriggerSource {
   name = 'api';
 
-  private config: Required<Omit<ApiChannelConfig, 'apiKey' | 'allowedOrigins' | 'staticDir' | 'costTracker' | 'memoryStore'>> & {
+  private config: Required<Omit<ApiChannelConfig, 'apiKey' | 'allowedOrigins' | 'staticDir' | 'costTracker' | 'memoryStore' | 'db'>> & {
     apiKey?: string;
     allowedOrigins: string[];
     staticDir?: string;
@@ -179,6 +183,7 @@ export class ApiChannel implements Channel, TriggerSource {
   private clientsByUser: Map<string, Set<WebSocket>> = new Map();
   /** Track stop requests by clientId */
   private stopRequests: Set<string> = new Set();
+  private authService: AuthService | null = null;
 
   constructor(config: ApiChannelConfig) {
     this.config = {
@@ -195,6 +200,9 @@ export class ApiChannel implements Channel, TriggerSource {
       logger: config.logger,
     };
     this.logger = config.logger.child({ channel: 'api' });
+    if (config.db) {
+      this.authService = new AuthService(config.db);
+    }
   }
 
   async start(): Promise<void> {
@@ -331,7 +339,16 @@ export class ApiChannel implements Channel, TriggerSource {
       return;
     }
 
-    // Serve static files (no auth required for static assets)
+    // Auth endpoints — always open (no auth required)
+    if (urlPath.startsWith('/api/auth/')) {
+      await this.handleAuthRoute(req, res, urlPath, method);
+      return;
+    }
+
+    // Auth gate
+    const authenticated = this.checkAuthentication(req);
+
+    // Serve static files — always serve index.html so the SPA can show login
     if (this.config.staticDir && !urlPath.startsWith('/api/') && urlPath !== '/ws') {
       const served = await this.serveStaticFile(urlPath, res);
       if (served) {
@@ -339,10 +356,8 @@ export class ApiChannel implements Channel, TriggerSource {
       }
     }
 
-    // Check authentication for API routes (file downloads and costs exempt when same-origin)
-    const sameOriginExempt = (urlPath === '/api/files' || urlPath === '/api/costs' || urlPath === '/api/memories/graph') && method === 'GET';
-    const skipAuth = sameOriginExempt && this.isSameOriginRequest(req);
-    if (this.config.apiKey && !skipAuth && !this.authenticateRequest(req)) {
+    // Block unauthenticated API requests
+    if (!authenticated) {
       this.sendJson(res, 401, { error: 'Unauthorized' });
       return;
     }
@@ -375,6 +390,70 @@ export class ApiChannel implements Channel, TriggerSource {
     } catch (error) {
       const err = error as Error;
       this.logger.error({ error: err.message, path: urlPath }, 'Request error');
+      this.sendJson(res, 500, { error: 'Internal server error' });
+    }
+  }
+
+  /**
+   * Check if a request is authenticated.
+   * Returns true if:
+   * - No auth is configured (no db and no apiKey) — backward compat
+   * - authService exists but setup is not complete — allow pre-setup access
+   * - Valid session cookie
+   * - Valid API key
+   */
+  private checkAuthentication(req: IncomingMessage): boolean {
+    const hasApiKey = !!this.config.apiKey;
+    const hasAuth = !!this.authService;
+
+    // No auth configured — allow all (backward compat)
+    if (!hasApiKey && !hasAuth) return true;
+
+    // Setup not yet complete — allow access so user can reach setup page
+    if (hasAuth && !this.authService!.isSetupComplete()) return true;
+
+    // Check session cookie
+    if (hasAuth && this.authService!.validateRequest(req)) return true;
+
+    // Check API key
+    if (hasApiKey && this.authenticateRequest(req)) return true;
+
+    // Same-origin exemption for specific GET endpoints (file downloads, costs, graph)
+    const url = new URL(req.url || '/', `http://${req.headers.host}`);
+    const urlPath = url.pathname;
+    const method = req.method?.toUpperCase();
+    const sameOriginExempt = (urlPath === '/api/files' || urlPath === '/api/costs' || urlPath === '/api/memories/graph') && method === 'GET';
+    if (sameOriginExempt && this.isSameOriginRequest(req)) return true;
+
+    return false;
+  }
+
+  /**
+   * Route auth API endpoints
+   */
+  private async handleAuthRoute(req: IncomingMessage, res: ServerResponse, urlPath: string, method: string | undefined): Promise<void> {
+    if (!this.authService) {
+      this.sendJson(res, 404, { error: 'Auth not configured' });
+      return;
+    }
+
+    try {
+      if (urlPath === '/api/auth/status' && method === 'GET') {
+        await this.authService.handleStatusAuthenticated(req, res);
+      } else if (urlPath === '/api/auth/setup' && method === 'POST') {
+        const body = await this.parseBody<{ email?: string; password?: string }>(req);
+        await this.authService.handleSetup(req, res, body);
+      } else if (urlPath === '/api/auth/login' && method === 'POST') {
+        const body = await this.parseBody<{ email?: string; password?: string }>(req);
+        await this.authService.handleLogin(req, res, body);
+      } else if (urlPath === '/api/auth/logout' && method === 'POST') {
+        await this.authService.handleLogout(req, res);
+      } else {
+        this.sendJson(res, 404, { error: 'Not found' });
+      }
+    } catch (error) {
+      const err = error as Error;
+      this.logger.error({ error: err.message, path: urlPath }, 'Auth request error');
       this.sendJson(res, 500, { error: 'Internal server error' });
     }
   }
@@ -793,12 +872,33 @@ export class ApiChannel implements Channel, TriggerSource {
     const userId = `ws-${clientId}`;
     this.logger.debug({ clientId, userId }, 'WebSocket client connected');
 
-    // Check authentication using constant-time comparison
-    if (this.config.apiKey) {
-      const url = new URL(req.url || '/', `http://${req.headers.host}`);
-      const apiKey = url.searchParams.get('apiKey') || req.headers['x-api-key'];
+    // Check authentication: API key, session cookie, or pre-setup bypass
+    {
+      let wsAuthed = false;
 
-      if (!this.authenticateWebSocket(apiKey)) {
+      // API key auth
+      if (this.config.apiKey) {
+        const url = new URL(req.url || '/', `http://${req.headers.host}`);
+        const apiKey = url.searchParams.get('apiKey') || req.headers['x-api-key'];
+        if (this.authenticateWebSocket(apiKey)) wsAuthed = true;
+      }
+
+      // Session cookie auth (browser sends cookies on same-origin WS upgrade)
+      if (!wsAuthed && this.authService && this.authService.validateRequest(req)) {
+        wsAuthed = true;
+      }
+
+      // Pre-setup bypass: allow WS if setup not yet done
+      if (!wsAuthed && this.authService && !this.authService.isSetupComplete()) {
+        wsAuthed = true;
+      }
+
+      // No auth configured at all — allow
+      if (!wsAuthed && !this.config.apiKey && !this.authService) {
+        wsAuthed = true;
+      }
+
+      if (!wsAuthed) {
         ws.close(4001, 'Unauthorized');
         return;
       }

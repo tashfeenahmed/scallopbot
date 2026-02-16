@@ -11,6 +11,7 @@ interface SidebarProps {
   onDebugToggle: (enabled: boolean) => void;
   costsAvailable: boolean;
   hasSpend: boolean;
+  onLogout?: () => void;
 }
 
 const STATUS_DOT: Record<ConnectionStatus, string> = {
@@ -29,6 +30,7 @@ export default function Sidebar({
   onDebugToggle,
   costsAvailable,
   hasSpend,
+  onLogout,
 }: SidebarProps) {
   return (
     <aside className="flex flex-col items-center w-16 shrink-0 border-r border-gray-200 dark:border-neutral-800 bg-gray-50 dark:bg-black py-3 gap-1">
@@ -106,6 +108,21 @@ export default function Sidebar({
           <path d="M12 12h.01M8 12h.01M16 12h.01M21 12c0 4.97-4.03 9-9 9s-9-4.03-9-9 4.03-9 9-9 9 4.03 9 9z" />
         </svg>
       </button>
+
+      {/* Logout button */}
+      {onLogout && (
+        <button
+          onClick={onLogout}
+          className="w-10 h-10 flex items-center justify-center rounded-xl text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-neutral-800 transition-colors"
+          title="Sign out"
+        >
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+            <polyline points="16 17 21 12 16 7" />
+            <line x1="21" y1="12" x2="9" y2="12" />
+          </svg>
+        </button>
+      )}
 
       {/* Dark mode toggle */}
       <button
