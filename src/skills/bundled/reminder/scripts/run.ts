@@ -438,7 +438,7 @@ function setReminder(args: ReminderArgs): SkillResult {
   }
 
   const id = nanoid(8);
-  const userId = process.env.SKILL_USER_ID || 'unknown';
+  const userId = process.env.SKILL_USER_ID || 'default';
   const sessionId = process.env.SKILL_SESSION_ID || null;
 
   // Save to SQLite
@@ -490,7 +490,7 @@ function setReminder(args: ReminderArgs): SkillResult {
 
 // List reminders (shows both user reminders AND agent triggers)
 function listReminders(): SkillResult {
-  const userId = process.env.SKILL_USER_ID || 'unknown';
+  const userId = process.env.SKILL_USER_ID || 'default';
   const now = Date.now();
 
   const db = openDb();
@@ -554,7 +554,7 @@ function cancelReminder(args: ReminderArgs): SkillResult {
     };
   }
 
-  const userId = process.env.SKILL_USER_ID || 'unknown';
+  const userId = process.env.SKILL_USER_ID || 'default';
 
   const db = openDb();
   try {
