@@ -273,7 +273,30 @@ export type ScheduledItemType =
 /**
  * Status of scheduled item
  */
-export type ScheduledItemStatus = 'pending' | 'fired' | 'dismissed' | 'expired' | 'acted';
+export type ScheduledItemStatus = 'pending' | 'processing' | 'fired' | 'dismissed' | 'expired' | 'acted';
+
+// ============ Board (Kanban) Types ============
+
+/**
+ * Board column status for kanban view
+ */
+export type BoardStatus = 'inbox' | 'backlog' | 'scheduled' | 'in_progress' | 'waiting' | 'done' | 'archived';
+
+/**
+ * Priority levels for board items
+ */
+export type Priority = 'urgent' | 'high' | 'medium' | 'low';
+
+/**
+ * Result stored when a board item completes
+ */
+export interface BoardItemResult {
+  response: string;
+  completedAt: number;
+  subAgentRunId?: string;
+  iterationsUsed?: number;
+  notifiedAt?: number | null;
+}
 
 /**
  * Recurring schedule types
@@ -326,6 +349,14 @@ export interface ScheduledItem {
 
   // Metadata
   sourceMemoryId: string | null; // For agent-created items
+
+  // Board (kanban) fields
+  boardStatus: BoardStatus | null;   // null = legacy item, compute from status
+  priority: Priority;
+  labels: string[] | null;
+  result: BoardItemResult | null;
+  dependsOn: string[] | null;        // IDs of items this depends on
+  goalId: string | null;             // FK to memories.id (goal/milestone)
 
   createdAt: number;
   updatedAt: number;
@@ -650,6 +681,9 @@ export class ScallopDatabase {
 
     // Migration: Add kind and task_config columns to scheduled_items
     this.migrateAddKindColumn();
+
+    // Migration: Add board (kanban) columns to scheduled_items
+    this.migrateAddBoardColumns();
   }
 
   /**
@@ -900,6 +934,36 @@ export class ScallopDatabase {
       if (error instanceof Error) {
         // eslint-disable-next-line no-console
         console.warn(`[migration] migrateAddKindColumn: ${error.message}`);
+      }
+    }
+  }
+
+  /**
+   * Add board columns to scheduled_items table if they don't exist.
+   * Adds: board_status, priority, labels, result, depends_on, goal_id
+   */
+  private migrateAddBoardColumns(): void {
+    try {
+      const tableInfo = this.db.prepare("PRAGMA table_info(scheduled_items)").all() as Array<{ name: string }>;
+      const hasBoardStatus = tableInfo.some(col => col.name === 'board_status');
+
+      if (!hasBoardStatus) {
+        this.db.exec("ALTER TABLE scheduled_items ADD COLUMN board_status TEXT DEFAULT NULL");
+        this.db.exec("ALTER TABLE scheduled_items ADD COLUMN priority TEXT DEFAULT 'medium'");
+        this.db.exec("ALTER TABLE scheduled_items ADD COLUMN labels TEXT DEFAULT NULL");
+        this.db.exec("ALTER TABLE scheduled_items ADD COLUMN result TEXT DEFAULT NULL");
+        this.db.exec("ALTER TABLE scheduled_items ADD COLUMN depends_on TEXT DEFAULT NULL");
+        this.db.exec("ALTER TABLE scheduled_items ADD COLUMN goal_id TEXT DEFAULT NULL");
+
+        // Indexes for board queries
+        this.db.exec("CREATE INDEX IF NOT EXISTS idx_scheduled_board ON scheduled_items(user_id, board_status)");
+        this.db.exec("CREATE INDEX IF NOT EXISTS idx_scheduled_priority ON scheduled_items(priority)");
+        this.db.exec("CREATE INDEX IF NOT EXISTS idx_scheduled_goal ON scheduled_items(goal_id)");
+      }
+    } catch (error) {
+      if (error instanceof Error) {
+        // eslint-disable-next-line no-console
+        console.warn(`[migration] migrateAddBoardColumns: ${error.message}`);
       }
     }
   }
@@ -1731,7 +1795,7 @@ export class ScallopDatabase {
    * Add a scheduled item (trigger or reminder)
    * Status defaults to 'pending' if not specified
    */
-  addScheduledItem(item: Omit<ScheduledItem, 'id' | 'status' | 'createdAt' | 'updatedAt' | 'firedAt' | 'kind' | 'taskConfig'> & { status?: ScheduledItemStatus; kind?: ScheduledItemKind; taskConfig?: TaskConfig | null }): ScheduledItem {
+  addScheduledItem(item: Omit<ScheduledItem, 'id' | 'status' | 'createdAt' | 'updatedAt' | 'firedAt' | 'kind' | 'taskConfig' | 'boardStatus' | 'priority' | 'labels' | 'result' | 'dependsOn' | 'goalId'> & { status?: ScheduledItemStatus; kind?: ScheduledItemKind; taskConfig?: TaskConfig | null; boardStatus?: BoardStatus | null; priority?: Priority; labels?: string[] | null; dependsOn?: string[] | null; goalId?: string | null }): ScheduledItem {
     const id = nanoid();
     const now = Date.now();
     const status = item.status ?? 'pending';
@@ -1740,8 +1804,9 @@ export class ScallopDatabase {
       INSERT INTO scheduled_items (
         id, user_id, session_id, source, kind, type, message, context,
         trigger_at, recurring, status, source_memory_id, fired_at,
-        task_config, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        task_config, board_status, priority, labels, depends_on, goal_id,
+        created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     stmt.run(
@@ -1759,6 +1824,11 @@ export class ScallopDatabase {
       item.sourceMemoryId ?? null,
       null,
       item.taskConfig ? JSON.stringify(item.taskConfig) : null,
+      item.boardStatus ?? null,
+      item.priority ?? 'medium',
+      item.labels ? JSON.stringify(item.labels) : null,
+      item.dependsOn ? JSON.stringify(item.dependsOn) : null,
+      item.goalId ?? null,
       now,
       now
     );
@@ -1768,6 +1838,12 @@ export class ScallopDatabase {
       id,
       kind: item.kind ?? 'nudge',
       taskConfig: item.taskConfig ?? null,
+      boardStatus: item.boardStatus ?? null,
+      priority: item.priority ?? 'medium',
+      labels: item.labels ?? null,
+      result: null,
+      dependsOn: item.dependsOn ?? null,
+      goalId: item.goalId ?? null,
       status,
       firedAt: null,
       createdAt: now,
@@ -1954,6 +2030,138 @@ export class ScallopDatabase {
     const stmt = this.db.prepare(`UPDATE scheduled_items SET ${sets.join(', ')} WHERE id = ?`);
     const result = stmt.run(...params);
     return result.changes > 0;
+  }
+
+  /**
+   * Update board-specific fields on a scheduled item
+   */
+  updateScheduledItemBoard(id: string, updates: {
+    boardStatus?: BoardStatus | null;
+    priority?: Priority;
+    labels?: string[] | null;
+    triggerAt?: number;
+    message?: string;
+    kind?: ScheduledItemKind;
+    goalId?: string | null;
+    dependsOn?: string[] | null;
+    status?: ScheduledItemStatus;
+  }): boolean {
+    const now = Date.now();
+    const sets: string[] = ['updated_at = ?'];
+    const params: unknown[] = [now];
+
+    if (updates.boardStatus !== undefined) {
+      sets.push('board_status = ?');
+      params.push(updates.boardStatus);
+    }
+    if (updates.priority !== undefined) {
+      sets.push('priority = ?');
+      params.push(updates.priority);
+    }
+    if (updates.labels !== undefined) {
+      sets.push('labels = ?');
+      params.push(updates.labels ? JSON.stringify(updates.labels) : null);
+    }
+    if (updates.triggerAt !== undefined) {
+      sets.push('trigger_at = ?');
+      params.push(updates.triggerAt);
+    }
+    if (updates.message !== undefined) {
+      sets.push('message = ?');
+      params.push(updates.message);
+    }
+    if (updates.kind !== undefined) {
+      sets.push('kind = ?');
+      params.push(updates.kind);
+    }
+    if (updates.goalId !== undefined) {
+      sets.push('goal_id = ?');
+      params.push(updates.goalId);
+    }
+    if (updates.dependsOn !== undefined) {
+      sets.push('depends_on = ?');
+      params.push(updates.dependsOn ? JSON.stringify(updates.dependsOn) : null);
+    }
+    if (updates.status !== undefined) {
+      sets.push('status = ?');
+      params.push(updates.status);
+    }
+
+    params.push(id);
+    const stmt = this.db.prepare(`UPDATE scheduled_items SET ${sets.join(', ')} WHERE id = ?`);
+    const result = stmt.run(...params);
+    return result.changes > 0;
+  }
+
+  /**
+   * Store a result on a scheduled item (called by scheduler after sub-agent completes)
+   */
+  updateScheduledItemResult(id: string, result: BoardItemResult): boolean {
+    const now = Date.now();
+    const stmt = this.db.prepare(`
+      UPDATE scheduled_items SET result = ?, updated_at = ? WHERE id = ?
+    `);
+    const res = stmt.run(JSON.stringify(result), now, id);
+    return res.changes > 0;
+  }
+
+  /**
+   * Get scheduled items by board status for a user
+   */
+  getScheduledItemsByBoardStatus(userId: string, boardStatus: BoardStatus): ScheduledItem[] {
+    const stmt = this.db.prepare(`
+      SELECT * FROM scheduled_items
+      WHERE user_id = ? AND board_status = ?
+      ORDER BY
+        CASE priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 END,
+        trigger_at ASC
+    `);
+    const rows = stmt.all(userId, boardStatus) as Record<string, unknown>[];
+    return rows.map(row => this.rowToScheduledItem(row));
+  }
+
+  /**
+   * Get all board items for a user (items with board_status set, plus legacy items)
+   */
+  getScheduledItemsForBoard(userId: string): ScheduledItem[] {
+    const stmt = this.db.prepare(`
+      SELECT * FROM scheduled_items
+      WHERE user_id = ? AND status NOT IN ('expired')
+      ORDER BY
+        CASE priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 END,
+        trigger_at ASC
+    `);
+    const rows = stmt.all(userId) as Record<string, unknown>[];
+    return rows.map(row => this.rowToScheduledItem(row));
+  }
+
+  /**
+   * Get completed board items that haven't been notified yet
+   */
+  getUnnotifiedCompletedItems(userId: string): ScheduledItem[] {
+    const stmt = this.db.prepare(`
+      SELECT * FROM scheduled_items
+      WHERE user_id = ? AND board_status = 'done' AND result IS NOT NULL
+      ORDER BY updated_at ASC
+    `);
+    const rows = stmt.all(userId) as Record<string, unknown>[];
+    return rows.map(row => this.rowToScheduledItem(row))
+      .filter(item => item.result && item.result.notifiedAt == null);
+  }
+
+  /**
+   * Auto-archive done items older than maxAgeMs
+   */
+  autoArchiveDoneItems(userId: string, maxAgeMs: number = 7 * 24 * 60 * 60 * 1000): number {
+    const cutoff = Date.now() - maxAgeMs;
+    const now = Date.now();
+    const stmt = this.db.prepare(`
+      UPDATE scheduled_items
+      SET board_status = 'archived', updated_at = ?
+      WHERE user_id = ? AND board_status = 'done' AND updated_at < ?
+    `);
+    const result = stmt.run(now, userId, cutoff);
+    return result.changes;
   }
 
   /**
@@ -2192,6 +2400,12 @@ export class ScallopDatabase {
       status: row.status as ScheduledItemStatus,
       firedAt: row.fired_at as number | null,
       sourceMemoryId: row.source_memory_id as string | null,
+      boardStatus: (row.board_status as BoardStatus) ?? null,
+      priority: (row.priority as Priority) ?? 'medium',
+      labels: row.labels ? JSON.parse(row.labels as string) : null,
+      result: row.result ? JSON.parse(row.result as string) : null,
+      dependsOn: row.depends_on ? JSON.parse(row.depends_on as string) : null,
+      goalId: (row.goal_id as string) ?? null,
       createdAt: row.created_at as number,
       updatedAt: row.updated_at as number,
     };

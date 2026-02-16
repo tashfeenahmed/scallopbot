@@ -1298,6 +1298,7 @@ Respond with JSON only:
       tools?: string[] | null;
       recurring?: RecurringSchedule | null;
       recurring_pattern?: string | null; // legacy fallback
+      priority?: 'urgent' | 'high' | 'medium' | 'low';
     }>,
     userId: string,
     sourceMemoryId?: string | null,
@@ -1348,6 +1349,9 @@ Respond with JSON only:
           }
         : null;
 
+      // Extract priority from trigger if available (urgent/high/medium/low)
+      const priority = (trigger.priority && ['urgent', 'high', 'medium', 'low'].includes(trigger.priority) ? trigger.priority : 'medium') as 'urgent' | 'high' | 'medium' | 'low';
+
       db.addScheduledItem({
         userId,
         sessionId: null,
@@ -1360,6 +1364,8 @@ Respond with JSON only:
         recurring,
         sourceMemoryId: sourceMemoryId ?? null,
         taskConfig,
+        boardStatus: 'inbox',
+        priority,
       });
       this.logger.info(
         {
@@ -1565,6 +1571,7 @@ Respond with JSON only:
       tools?: string[] | null;
       recurring?: RecurringSchedule | null;
       recurring_pattern?: string | null; // legacy fallback
+      priority?: 'urgent' | 'high' | 'medium' | 'low';
     }>;
   } {
     if (!content || content.trim().length === 0) {

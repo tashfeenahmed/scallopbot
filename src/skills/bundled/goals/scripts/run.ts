@@ -362,10 +362,24 @@ function createItem(db: Database.Database, args: GoalArgs): SkillResult {
     scheduleCheckin(db, goal);
   }
 
+  // For tasks, also create a board item linked via goal_id
+  let boardItemId: string | undefined;
+  if (args.type === 'task') {
+    try {
+      boardItemId = createBoardItemForTask(db, userId, args.title, id, dueDate);
+    } catch {
+      // Board item creation is non-critical; goal task still created successfully
+    }
+  }
+
   const typeLabel = args.type.charAt(0).toUpperCase() + args.type.slice(1);
+  let output = `${typeLabel} created: "${args.title}" (ID: ${id})`;
+  if (boardItemId) {
+    output += ` · Board item: ${boardItemId.substring(0, 6)}`;
+  }
   return {
     success: true,
-    output: `${typeLabel} created: "${args.title}" (ID: ${id})`,
+    output,
     exitCode: 0,
   };
 }
@@ -623,6 +637,31 @@ function deleteItem(db: Database.Database, args: GoalArgs): SkillResult {
     output: `Deleted: "${item.content}" and ${children.length} child item(s)`,
     exitCode: 0,
   };
+}
+
+// Create a board item for a goal task (bridge between goals and board)
+function createBoardItemForTask(
+  db: Database.Database,
+  userId: string,
+  title: string,
+  goalId: string,
+  dueDate: number | null,
+): string {
+  const now = Date.now();
+  const id = nanoid();
+  const triggerAt = dueDate ?? 0;
+  const boardStatus = triggerAt > 0 ? 'scheduled' : 'backlog';
+
+  db.prepare(`
+    INSERT INTO scheduled_items (id, user_id, session_id, source, kind, type, message, context, trigger_at, recurring, status, source_memory_id, board_status, priority, created_at, updated_at, goal_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    id, userId, null, 'user', 'task', 'reminder', title,
+    JSON.stringify({ goalId, source: 'goals_skill' }),
+    triggerAt, null, 'pending', goalId, boardStatus, 'medium', now, now, goalId
+  );
+
+  return id;
 }
 
 // Main

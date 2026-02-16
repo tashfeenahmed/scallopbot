@@ -32,6 +32,7 @@ import {
   runDreamCycle,
   runSelfReflection,
   runGapScanner,
+  runBoardReview,
 } from './gardener-sleep-steps.js';
 
 export interface BackgroundGardenerOptions {
@@ -298,6 +299,7 @@ export class BackgroundGardener {
     await runDreamCycle(ctx);
     await runSelfReflection(ctx);
     await runGapScanner(ctx);
+    await runBoardReview(ctx);
 
     this.logger.info('Sleep tick complete');
   }

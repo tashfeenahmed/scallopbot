@@ -37,6 +37,7 @@ import { type TriggerSource, type TriggerSourceRegistry, parseUserIdPrefix } fro
 import { UnifiedScheduler } from '../proactive/index.js';
 import { BotConfigManager } from '../channels/bot-config.js';
 import { GoalService } from '../goals/index.js';
+import { BoardService } from '../board/board-service.js';
 import { SubAgentRegistry, SubAgentExecutor, AnnounceQueue } from '../subagent/index.js';
 
 export interface GatewayOptions {
@@ -58,6 +59,7 @@ export class Gateway {
   private backgroundGardener: BackgroundGardener | null = null;
   private factExtractor: LLMFactExtractor | null = null;
   private goalService: GoalService | null = null;
+  private boardService: BoardService | null = null;
   private contextManager: ContextManager | null = null;
   private mediaProcessor: MediaProcessor | null = null;
   private voiceManager: VoiceManager | null = null;
@@ -154,6 +156,10 @@ export class Gateway {
       logger: this.logger,
     });
     this.logger.debug('Goal service initialized');
+
+    // Board service for unified task tracking
+    this.boardService = new BoardService(this.scallopMemoryStore.getDatabase(), this.logger);
+    this.logger.debug('Board service initialized');
 
     // Initialize LLM-based fact extractor
     // Use a chat-capable provider (not Ollama which may only have embedding models)
@@ -314,6 +320,7 @@ export class Gateway {
       scallopStore: this.scallopMemoryStore || undefined,
       factExtractor: this.factExtractor || undefined,
       goalService: this.goalService || undefined,
+      boardService: this.boardService || undefined,
       configManager: this.configManager || undefined,
       contextManager: this.contextManager,
       mediaProcessor: this.mediaProcessor,
