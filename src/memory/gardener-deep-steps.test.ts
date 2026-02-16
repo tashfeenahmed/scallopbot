@@ -179,7 +179,7 @@ describe('gardener-deep-steps', () => {
       const ctx = buildCtx(store, db, { sessionSummarizer: mockSummarizer as any });
       const result = await runSessionSummarization(ctx);
 
-      expect(mockSummarizer.summarizeBatch).toHaveBeenCalledWith(db, ['old-session-1'], 'telegram:123');
+      expect(mockSummarizer.summarizeBatch).toHaveBeenCalledWith(db, ['old-session-1'], 'default');
       expect(result.summarized).toBe(1);
     });
   });

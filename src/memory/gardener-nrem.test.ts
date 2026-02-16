@@ -92,7 +92,7 @@ function seedMemory(
   },
 ) {
   return db.addMemory({
-    userId: opts.userId ?? 'user-1',
+    userId: opts.userId ?? 'default',
     content: opts.content,
     category: opts.category,
     memoryType: 'regular',
@@ -158,7 +158,7 @@ describe('BackgroundGardener NREM integration', () => {
     expect(fusionProvider.complete).toHaveBeenCalled();
 
     // Assert: new derived memory exists
-    const allMemories = db.getMemoriesByUser('user-1', { includeAllSources: true });
+    const allMemories = db.getMemoriesByUser('default', { includeAllSources: true });
     const derivedMemories = allMemories.filter(m => m.memoryType === 'derived');
     expect(derivedMemories.length).toBeGreaterThanOrEqual(1);
 
@@ -209,7 +209,7 @@ describe('BackgroundGardener NREM integration', () => {
     await expect(gardener.sleepTick()).resolves.not.toThrow();
 
     // No derived memories should be created
-    const allMemories = db.getMemoriesByUser('user-1', { includeAllSources: true });
+    const allMemories = db.getMemoriesByUser('default', { includeAllSources: true });
     const derivedMemories = allMemories.filter(m => m.memoryType === 'derived');
     expect(derivedMemories.length).toBe(0);
   });
@@ -251,7 +251,7 @@ describe('BackgroundGardener NREM integration', () => {
     expect(fusionProvider.complete).toHaveBeenCalled();
 
     // Assert: derived memory created from these memories
-    const allMemories = db.getMemoriesByUser('user-1', { includeAllSources: true });
+    const allMemories = db.getMemoriesByUser('default', { includeAllSources: true });
     const derivedMemories = allMemories.filter(m => m.memoryType === 'derived');
     expect(derivedMemories.length).toBeGreaterThanOrEqual(1);
 
@@ -299,7 +299,7 @@ describe('BackgroundGardener NREM integration', () => {
     expect(fusionProvider.complete).toHaveBeenCalled();
 
     // Assert: fused memory created from cross-category sources
-    const allMemories = db.getMemoriesByUser('user-1', { includeAllSources: true });
+    const allMemories = db.getMemoriesByUser('default', { includeAllSources: true });
     const derivedMemories = allMemories.filter(m => m.memoryType === 'derived');
     expect(derivedMemories.length).toBeGreaterThanOrEqual(1);
 
@@ -362,7 +362,7 @@ describe('BackgroundGardener NREM integration', () => {
     expect((fusionProvider.complete as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThanOrEqual(2);
 
     // Assert: at least one derived memory was created (from the second cluster that succeeded)
-    const allMemories = db.getMemoriesByUser('user-1', { includeAllSources: true });
+    const allMemories = db.getMemoriesByUser('default', { includeAllSources: true });
     const derivedMemories = allMemories.filter(m => m.memoryType === 'derived');
     expect(derivedMemories.length).toBeGreaterThanOrEqual(1);
     expect(derivedMemories[0].content).toBe('Second cluster fused');

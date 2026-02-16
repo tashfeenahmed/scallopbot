@@ -8,6 +8,8 @@ import type { ScallopDatabase, BehavioralPatterns } from './db.js';
 import type { SessionSummarizer } from './session-summary.js';
 import type { LLMProvider } from '../providers/types.js';
 
+export const DEFAULT_USER_ID = 'default';
+
 export interface GardenerContext {
   scallopStore: ScallopMemoryStore;
   db: ScallopDatabase;

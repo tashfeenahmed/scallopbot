@@ -175,7 +175,7 @@ function seedMemory(
   },
 ) {
   return db.addMemory({
-    userId: opts.userId ?? 'user-1',
+    userId: opts.userId ?? 'default',
     content: opts.content,
     category: opts.category,
     memoryType: 'regular',
@@ -211,7 +211,7 @@ function seedRecentSessionSummary(
   db.createSession(sessionId);
   return db.addSessionSummary({
     sessionId,
-    userId: opts?.userId ?? 'user-1',
+    userId: opts?.userId ?? 'default',
     summary: opts?.summary ?? 'User asked about TypeScript generics. Discussed type inference and mapped types. User seemed satisfied with code examples.',
     topics: opts?.topics ?? ['typescript', 'generics', 'type-inference'],
     messageCount: opts?.messageCount ?? 8,
@@ -240,7 +240,7 @@ function seedOldSessionSummary(
   try {
     return db.addSessionSummary({
       sessionId,
-      userId: opts?.userId ?? 'user-1',
+      userId: opts?.userId ?? 'default',
       summary: 'Old session about something from two days ago.',
       topics: ['old-topic'],
       messageCount: opts?.messageCount ?? 8,
@@ -310,7 +310,7 @@ describe('BackgroundGardener self-reflection integration', () => {
     await gardener.sleepTick();
 
     // Verify: insight memories stored
-    const allMemories = db.getMemoriesByUser('user-1', { includeAllSources: true });
+    const allMemories = db.getMemoriesByUser('default', { includeAllSources: true });
     const insightMemories = allMemories.filter(
       m => m.category === 'insight' && m.learnedFrom === 'self_reflection'
     );
@@ -411,7 +411,7 @@ describe('BackgroundGardener self-reflection integration', () => {
     await gardener.sleepTick();
 
     // Verify: no insight memories created
-    const allMemories = db.getMemoriesByUser('user-1', { includeAllSources: true });
+    const allMemories = db.getMemoriesByUser('default', { includeAllSources: true });
     const insightMemories = allMemories.filter(
       m => m.category === 'insight' && m.learnedFrom === 'self_reflection'
     );
@@ -451,7 +451,7 @@ describe('BackgroundGardener self-reflection integration', () => {
     await gardener.sleepTick();
 
     // Verify: no insight memories created (reflect() should return skipped)
-    const allMemories = db.getMemoriesByUser('user-1', { includeAllSources: true });
+    const allMemories = db.getMemoriesByUser('default', { includeAllSources: true });
     const insightMemories = allMemories.filter(
       m => m.category === 'insight' && m.learnedFrom === 'self_reflection'
     );
@@ -505,7 +505,7 @@ describe('BackgroundGardener self-reflection integration', () => {
     await expect(gardener.sleepTick()).resolves.not.toThrow();
 
     // Verify: NREM fused memories were created (dream succeeded)
-    const allMemories = db.getMemoriesByUser('user-1', { includeAllSources: true });
+    const allMemories = db.getMemoriesByUser('default', { includeAllSources: true });
     const nremMemories = allMemories.filter(m => m.learnedFrom === 'nrem_consolidation');
     expect(nremMemories.length).toBeGreaterThanOrEqual(1);
 
@@ -547,7 +547,7 @@ describe('BackgroundGardener self-reflection integration', () => {
     await expect(gardener.sleepTick()).resolves.not.toThrow();
 
     // Verify: no insight memories created
-    const allMemories = db.getMemoriesByUser('user-1', { includeAllSources: true });
+    const allMemories = db.getMemoriesByUser('default', { includeAllSources: true });
     const insightMemories = allMemories.filter(
       m => m.category === 'insight' && m.learnedFrom === 'self_reflection'
     );

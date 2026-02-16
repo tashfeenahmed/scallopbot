@@ -608,6 +608,25 @@ export class ScallopDatabase {
 
       CREATE INDEX IF NOT EXISTS idx_subagent_runs_parent ON subagent_runs(parent_session_id);
       CREATE INDEX IF NOT EXISTS idx_subagent_runs_status ON subagent_runs(status);
+
+      -- Auth: single web UI user
+      CREATE TABLE IF NOT EXISTS auth_user (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        email TEXT NOT NULL,
+        password_hash TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+
+      -- Auth: session tokens
+      CREATE TABLE IF NOT EXISTS auth_sessions (
+        token TEXT PRIMARY KEY,
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL,
+        last_active INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires ON auth_sessions(expires_at);
     `);
 
     // Migration: Add source column to existing databases
@@ -618,6 +637,10 @@ export class ScallopDatabase {
 
     // Migration: Consolidate all memory user_ids to 'default' (single-user bot)
     this.migrateConsolidateMemoryUserIds();
+
+    // Migration: Consolidate session_summaries and scheduled_items user_ids to 'default'
+    this.migrateConsolidateSessionSummaryUserIds();
+    this.migrateConsolidateScheduledItemUserIds();
 
     // Migration: Add source memory columns (learned_from, times_confirmed, contradiction_ids)
     this.migrateAddSourceMemoryColumns();
@@ -692,6 +715,42 @@ export class ScallopDatabase {
       if (error instanceof Error) {
         // eslint-disable-next-line no-console
         console.warn(`[migration] migrateConsolidateMemoryUserIds: ${error.message}`);
+      }
+    }
+  }
+
+  /**
+   * Consolidate all session_summaries user_ids to 'default' (single-user bot).
+   * Session summaries may have been stored under channel-prefixed userIds like
+   * "telegram:12345" — merge them all to 'default'.
+   */
+  private migrateConsolidateSessionSummaryUserIds(): void {
+    try {
+      this.db.prepare(
+        "UPDATE session_summaries SET user_id = 'default' WHERE user_id != 'default'"
+      ).run();
+    } catch (error) {
+      if (error instanceof Error) {
+        // eslint-disable-next-line no-console
+        console.warn(`[migration] migrateConsolidateSessionSummaryUserIds: ${error.message}`);
+      }
+    }
+  }
+
+  /**
+   * Consolidate all scheduled_items user_ids to 'default' (single-user bot).
+   * Scheduled items may have been stored under channel-prefixed userIds like
+   * "telegram:12345" — merge them all to 'default'.
+   */
+  private migrateConsolidateScheduledItemUserIds(): void {
+    try {
+      this.db.prepare(
+        "UPDATE scheduled_items SET user_id = 'default' WHERE user_id != 'default'"
+      ).run();
+    } catch (error) {
+      if (error instanceof Error) {
+        // eslint-disable-next-line no-console
+        console.warn(`[migration] migrateConsolidateScheduledItemUserIds: ${error.message}`);
       }
     }
   }
@@ -2417,6 +2476,54 @@ export class ScallopDatabase {
       startedAt: row.started_at as number | null,
       completedAt: row.completed_at as number | null,
     };
+  }
+
+  // ============ Auth ============
+
+  hasAuthUser(): boolean {
+    const row = this.db.prepare('SELECT 1 FROM auth_user WHERE id = 1').get();
+    return !!row;
+  }
+
+  createAuthUser(email: string, passwordHash: string): void {
+    const now = Date.now();
+    this.db.prepare(
+      'INSERT INTO auth_user (id, email, password_hash, created_at, updated_at) VALUES (1, ?, ?, ?, ?)'
+    ).run(email, passwordHash, now, now);
+  }
+
+  getAuthUser(): { email: string; passwordHash: string } | null {
+    const row = this.db.prepare('SELECT email, password_hash FROM auth_user WHERE id = 1').get() as
+      | { email: string; password_hash: string }
+      | undefined;
+    if (!row) return null;
+    return { email: row.email, passwordHash: row.password_hash };
+  }
+
+  createAuthSession(token: string, ttlMs: number): void {
+    const now = Date.now();
+    this.db.prepare(
+      'INSERT INTO auth_sessions (token, created_at, expires_at, last_active) VALUES (?, ?, ?, ?)'
+    ).run(token, now, now + ttlMs, now);
+  }
+
+  validateAuthSession(token: string): boolean {
+    const now = Date.now();
+    const row = this.db.prepare('SELECT expires_at FROM auth_sessions WHERE token = ?').get(token) as
+      | { expires_at: number }
+      | undefined;
+    if (!row || row.expires_at <= now) return false;
+    this.db.prepare('UPDATE auth_sessions SET last_active = ? WHERE token = ?').run(now, token);
+    return true;
+  }
+
+  deleteAuthSession(token: string): void {
+    this.db.prepare('DELETE FROM auth_sessions WHERE token = ?').run(token);
+  }
+
+  purgeExpiredSessions(): number {
+    const result = this.db.prepare('DELETE FROM auth_sessions WHERE expires_at <= ?').run(Date.now());
+    return result.changes;
   }
 
 }
