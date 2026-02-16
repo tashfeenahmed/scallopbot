@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  <a href="pdf/smartbot-research-validation-2col.pdf"><strong>Read the Paper</strong></a>
+  <a href="smartbot-research-validation-2col.pdf"><strong>Read the Paper</strong></a>
 </p>
 
 ---
@@ -34,20 +34,24 @@ Evaluated on the [LoCoMo](https://github.com/snap-research/locomo) long-conversa
 
 | Metric | OpenClaw | ScallopBot | Improvement |
 |--------|:--------:|:----------:|:-----------:|
-| **F1** | 0.39 | **0.51** | +31% |
-| **Exact Match** | 0.28 | **0.32** | +14% |
+| **F1** | 0.38 | **0.48** | +26% |
+| **Exact Match** | 0.24 | **0.30** | +25% |
 
 **F1 by question category:**
 
+<p align="center">
+  <img src="assets/locomo-f1-by-category.png" alt="LoCoMo F1 by question category" width="800">
+</p>
+
 | Category | OpenClaw | ScallopBot | Delta |
 |----------|:--------:|:----------:|:-----:|
-| Single-hop | 0.12 | **0.23** | +0.11 |
-| Temporal | 0.10 | **0.39** | +0.29 (4x) |
-| Open-domain | 0.11 | 0.11 | 0.00 |
-| Multi-hop | 0.34 | **0.47** | +0.13 |
-| Adversarial | **0.96** | 0.93 | -0.03 |
+| Single-hop | 0.14 | **0.20** | +0.06 |
+| Temporal | 0.26 | **0.34** | +0.08 |
+| Open-domain | 0.07 | **0.09** | +0.02 |
+| Multi-hop | 0.32 | **0.42** | +0.10 |
+| Adversarial | 0.77 | **0.97** | +0.20 |
 
-Temporal questions show a 4x improvement driven by date-embedded memories and temporal query detection. Multi-hop benefits from memory fusion and NREM dream consolidation.
+Adversarial questions show the largest gain (+0.20) driven by cognitive pipeline features and strict answering constraints. Multi-hop benefits from memory fusion and NREM dream consolidation.
 
 ## Cognitive Architecture
 
@@ -408,7 +412,7 @@ ScallopBot's design decisions independently converged on patterns validated by 3
 - **Self-reflection**: Shinn et al. (Reflexion, 91% HumanEval), Renze & Guven (reflection taxonomy)
 - **Proactive intelligence**: Pasternak et al. (PROBE), Liu et al. (Inner Thoughts)
 
-For the full analysis, see [the paper](pdf/smartbot-research-validation-2col.pdf).
+For the full analysis, see [the paper](smartbot-research-validation-2col.pdf).
 
 ## License
 
