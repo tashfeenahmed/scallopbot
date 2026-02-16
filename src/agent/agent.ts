@@ -756,7 +756,7 @@ Only use write_file + send_file for **binary/generated files** (PDFs, images, ar
       // should not clutter the system prompt — the user doesn't need to be
       // reminded about meetings/appointments that already happened.
       const EVENT_EXPIRY_MS = 24 * 60 * 60 * 1000; // 24 hours
-      const TIME_BOUND_PATTERN = /\b(meeting|appointment|call|interview|dentist|doctor|lunch|dinner|flight|train|reminder|1\s*[ap]m|2\s*[ap]m|3\s*[ap]m|4\s*[ap]m|5\s*[ap]m|6\s*[ap]m|7\s*[ap]m|8\s*[ap]m|9\s*[ap]m|10\s*[ap]m|11\s*[ap]m|12\s*[ap]m|\d{1,2}:\d{2})\b/i;
+      const TIME_BOUND_PATTERN = /\b(meeting|appointment|call|interview|dentist|doctor|lunch|dinner|flight|train|reminder|gym|workout|errand|today|tonight|this morning|this afternoon|this evening|1\s*[ap]m|2\s*[ap]m|3\s*[ap]m|4\s*[ap]m|5\s*[ap]m|6\s*[ap]m|7\s*[ap]m|8\s*[ap]m|9\s*[ap]m|10\s*[ap]m|11\s*[ap]m|12\s*[ap]m|\d{1,2}:\d{2})\b/i;
       const isPastEvent = (mem: { eventDate: number | null; documentDate: number; content: string }): boolean => {
         // Explicit event date that's passed
         if (mem.eventDate && mem.eventDate < Date.now() - EVENT_EXPIRY_MS) return true;

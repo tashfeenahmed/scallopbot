@@ -113,9 +113,9 @@ ACTION TYPES:
 - "preference_update": User is explicitly stating a preference comparison (prefer X over Y)
 
 Rules:
-1. Only extract CONCRETE, DURABLE facts — NOT questions, greetings, opinions, temporary states, or conversational filler
+1. Extract CONCRETE facts — NOT questions, greetings, opinions, or conversational filler
 2. NEVER extract: "hey how are you", "what do you know", "what time is it", "good morning", casual chat, rhetorical questions, or messages that contain no factual information about the user
-3. A valid fact is something worth remembering long-term: name, job, location, family, preferences, projects, skills, relationships
+3. A valid fact includes BOTH long-term info (name, job, location, family, preferences, projects, skills, relationships) AND short-term plans/activities the user states for today (e.g., "going to the gym", "working from home", "having lunch with Sarah"). Today's plans ARE valid facts — they form the user's agenda and should be remembered within the current day.
 4. For each fact, identify WHO it's about:
    - "user" if it's about the person speaking (their name, job, preferences, relationships, location)
    - "agent" if the user is telling the AI assistant about itself (giving it a name, personality, behavior instructions)
@@ -156,6 +156,11 @@ Regular fact examples (action defaults to "fact"):
 - "I work at Microsoft" → { "content": "Works at Microsoft", "subject": "user", "category": "work" }
 - "My wife is Hayat" → { "content": "Wife is Hayat", "subject": "user", "category": "relationship" }
 - "I live in Wicklow" → { "content": "Lives in Wicklow", "subject": "user", "category": "location" }
+
+Daily plan/activity examples (ALWAYS extract these — they are the user's agenda):
+- "I'm going to the gym" → { "content": "Going to the gym today", "subject": "user", "category": "general", "confidence": 0.9 }
+- "Working from home today" → { "content": "Working from home today", "subject": "user", "category": "work", "confidence": 0.9 }
+- "I'm going to the gym. Then have to build the agent proto" → extract BOTH: gym activity AND the project task as separate facts
 
 PROACTIVE TRIGGERS (for agent-initiated follow-ups):
 Extract time-sensitive items that warrant proactive follow-up:
@@ -220,6 +225,7 @@ Notes:
 - If no facts can be extracted, return EMPTY facts array — this is the CORRECT response for greetings, questions, small talk, and messages with no factual content
 - If nothing time-sensitive found, return empty proactive_triggers array
 - NEVER store greetings or filler ("hey", "hi", "thanks", "good morning")
+- ALWAYS extract stated plans/activities for today — these are the user's agenda (gym, errands, meetings, tasks)
 - Each fact should be a concise statement under 100 characters
 - CRITICAL: trigger_time MUST include a specific time (hour:minute), not just a date!
 - "TODAY" alone is NOT valid - must be "TODAY 2pm" or similar with time
