@@ -304,11 +304,26 @@ async function executeSearch(args: MemorySearchArgs): Promise<void> {
   try {
     db = new ScallopDatabase(dbPath);
 
-    // Get candidate memories
-    const allMemories = db.getAllMemories({ minProminence: 0.1, limit: 200 });
+    // Get candidate memories (only latest versions — exclude superseded)
+    const userId = process.env.SKILL_USER_ID || 'default';
+    const allMemories = db.getMemoriesByUser(userId, {
+      minProminence: 0.1,
+      isLatest: true,
+      includeAllSources: true,
+    });
+
+    // Filter out past time-bound events (meetings, appointments etc. that already happened)
+    const EVENT_EXPIRY_MS = 24 * 60 * 60 * 1000;
+    const TIME_BOUND = /\b(meeting|appointment|call|interview|dentist|doctor|lunch|dinner|flight|train|reminder|\d{1,2}\s*[ap]m|\d{1,2}:\d{2})\b/i;
+    const now = Date.now();
+    const filteredMemories = allMemories.filter(m => {
+      if (m.eventDate && m.eventDate < now - EVENT_EXPIRY_MS) return false;
+      if (TIME_BOUND.test(m.content) && m.documentDate < now - EVENT_EXPIRY_MS * 2) return false;
+      return true;
+    });
 
     // Filter by subject if requested
-    let candidates = allMemories;
+    let candidates = filteredMemories;
     if (args.subject) {
       const subjectLower = args.subject.toLowerCase();
       candidates = candidates.filter((m) => {
