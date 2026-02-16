@@ -751,13 +751,27 @@ Only use write_file + send_file for **binary/generated files** (PDFs, images, ar
         limit: 10,
       });
 
+      // Filter: exclude past time-bound events from ambient context.
+      // Events with explicit eventDate or time-bound language that are >24h old
+      // should not clutter the system prompt — the user doesn't need to be
+      // reminded about meetings/appointments that already happened.
+      const EVENT_EXPIRY_MS = 24 * 60 * 60 * 1000; // 24 hours
+      const TIME_BOUND_PATTERN = /\b(meeting|appointment|call|interview|dentist|doctor|lunch|dinner|flight|train|reminder|1\s*[ap]m|2\s*[ap]m|3\s*[ap]m|4\s*[ap]m|5\s*[ap]m|6\s*[ap]m|7\s*[ap]m|8\s*[ap]m|9\s*[ap]m|10\s*[ap]m|11\s*[ap]m|12\s*[ap]m|\d{1,2}:\d{2})\b/i;
+      const isPastEvent = (mem: { eventDate: number | null; documentDate: number; content: string }): boolean => {
+        // Explicit event date that's passed
+        if (mem.eventDate && mem.eventDate < Date.now() - EVENT_EXPIRY_MS) return true;
+        // Time-bound language + old document date (>48h) = likely a past event
+        if (TIME_BOUND_PATTERN.test(mem.content) && mem.documentDate < Date.now() - EVENT_EXPIRY_MS * 2) return true;
+        return false;
+      };
+
       // Combine: query-relevant results first, then fill with ambient facts
       const seenIds = new Set<string>();
       const allFactTexts: { content: string; subject?: string }[] = [];
 
       // Phase 2 results first — these are query-relevant and should take priority
       for (const result of relevantResults) {
-        if (!seenIds.has(result.memory.id)) {
+        if (!seenIds.has(result.memory.id) && !isPastEvent(result.memory)) {
           seenIds.add(result.memory.id);
           const subject = result.memory.metadata?.subject as string | undefined;
           allFactTexts.push({ content: result.memory.content, subject });
@@ -765,7 +779,7 @@ Only use write_file + send_file for **binary/generated files** (PDFs, images, ar
       }
       // Then fill remaining space with ambient high-prominence facts
       for (const fact of userFacts) {
-        if (!seenIds.has(fact.id)) {
+        if (!seenIds.has(fact.id) && !isPastEvent(fact)) {
           seenIds.add(fact.id);
           const subject = fact.metadata?.subject as string | undefined;
           allFactTexts.push({ content: fact.content, subject });
