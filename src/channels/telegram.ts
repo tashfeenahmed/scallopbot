@@ -11,6 +11,12 @@ import { resolveTimezone } from '../utils/country-timezone.js';
 
 const MAX_MESSAGE_LENGTH = 4096;
 const TYPING_INTERVAL = 5000; // 5 seconds
+const MAX_QUEUE_SIZE = 10;
+
+interface QueuedMessage {
+  type: 'text' | 'voice' | 'document' | 'photo';
+  execute: () => Promise<void>;
+}
 
 export interface TelegramChannelOptions {
   botToken: string;
@@ -101,6 +107,7 @@ export class TelegramChannel {
   private isRunning = false;
   private stopRequests: Set<string> = new Set(); // Track users who want to stop processing
   private activeProcessing: Set<string> = new Set(); // Track users with in-flight agent calls
+  private userQueues: Map<string, QueuedMessage[]> = new Map(); // Per-user message queue
   private verboseUsers: Set<string> = new Set(); // Track users who want debug output
   private voiceManager: VoiceManager | null = null;
   private voiceAvailable = false;
@@ -266,8 +273,17 @@ export class TelegramChannel {
 
       this.stopRequests.add(userId);
       const wasActive = this.activeProcessing.has(userId);
-      await ctx.reply(wasActive ? 'Stopping current task...' : 'Nothing running right now.');
-      this.logger.info({ userId, wasActive }, 'Stop requested by user');
+      const queue = this.userQueues.get(userId);
+      const queuedCount = queue?.length || 0;
+      this.userQueues.delete(userId);
+
+      if (wasActive) {
+        const queueMsg = queuedCount > 0 ? ` Cleared ${queuedCount} queued message${queuedCount > 1 ? 's' : ''}.` : '';
+        await ctx.reply(`Stopping current task...${queueMsg}`);
+      } else {
+        await ctx.reply('Nothing running right now.');
+      }
+      this.logger.info({ userId, wasActive, queuedCleared: queuedCount }, 'Stop requested by user');
     });
 
     // /verbose command - toggle debug output
@@ -675,9 +691,20 @@ export class TelegramChannel {
     }
 
     if (this.activeProcessing.has(userId)) {
-      await ctx.reply('Still working on your previous message... Send /stop to cancel it.');
+      this.enqueue(userId, { type: 'voice', execute: () => this.processVoiceCore(ctx) });
       return;
     }
+
+    this.activeProcessing.add(userId);
+    try {
+      await this.processVoiceCore(ctx);
+    } finally {
+      await this.drainQueue(userId);
+    }
+  }
+
+  private async processVoiceCore(ctx: Context): Promise<void> {
+    const userId = ctx.from!.id.toString();
 
     this.logger.info({ userId }, 'Received voice message');
 
@@ -687,7 +714,6 @@ export class TelegramChannel {
     }
 
     const typingInterval = this.startTypingIndicator(ctx);
-    this.activeProcessing.add(userId);
 
     try {
       const voice = ctx.message?.voice || ctx.message?.audio;
@@ -704,7 +730,7 @@ export class TelegramChannel {
       }
 
       const audioBuffer = Buffer.from(await response.arrayBuffer());
-      const transcription = await this.voiceManager.transcribe(audioBuffer);
+      const transcription = await this.voiceManager!.transcribe(audioBuffer);
 
       if (!transcription.text.trim()) {
         clearInterval(typingInterval);
@@ -742,8 +768,6 @@ export class TelegramChannel {
       clearInterval(typingInterval);
       this.logger.error({ userId, error: (error as Error).message }, 'Failed to process voice message');
       await ctx.reply('Sorry, I had trouble processing your voice message. Please try again or send a text message.');
-    } finally {
-      this.activeProcessing.delete(userId);
     }
   }
 
@@ -758,9 +782,21 @@ export class TelegramChannel {
     if (!document) return;
 
     if (this.activeProcessing.has(userId)) {
-      await ctx.reply('Still working on your previous message... Send /stop to cancel it.');
+      this.enqueue(userId, { type: 'document', execute: () => this.processDocumentCore(ctx) });
       return;
     }
+
+    this.activeProcessing.add(userId);
+    try {
+      await this.processDocumentCore(ctx);
+    } finally {
+      await this.drainQueue(userId);
+    }
+  }
+
+  private async processDocumentCore(ctx: Context): Promise<void> {
+    const userId = ctx.from!.id.toString();
+    const document = ctx.message!.document!;
 
     this.logger.info({ userId, fileName: document.file_name, mimeType: document.mime_type }, 'Received document');
 
@@ -770,7 +806,6 @@ export class TelegramChannel {
     }
 
     const typingInterval = this.startTypingIndicator(ctx);
-    this.activeProcessing.add(userId);
 
     try {
       // Download the file
@@ -833,8 +868,6 @@ export class TelegramChannel {
       clearInterval(typingInterval);
       this.logger.error({ userId, error: (error as Error).message }, 'Failed to process document');
       await ctx.reply('Sorry, I had trouble processing that file. Please try again.');
-    } finally {
-      this.activeProcessing.delete(userId);
     }
   }
 
@@ -937,12 +970,25 @@ export class TelegramChannel {
     caption?: string
   ): Promise<void> {
     if (this.activeProcessing.has(userId)) {
-      await ctx.reply('Still working on your previous message... Send /stop to cancel it.');
+      this.enqueue(userId, { type: 'photo', execute: () => this.processPhotosCore(ctx, userId, photos, caption) });
       return;
     }
 
-    const typingInterval = this.startTypingIndicator(ctx);
     this.activeProcessing.add(userId);
+    try {
+      await this.processPhotosCore(ctx, userId, photos, caption);
+    } finally {
+      await this.drainQueue(userId);
+    }
+  }
+
+  private async processPhotosCore(
+    ctx: Context,
+    userId: string,
+    photos: Array<{ buffer: Buffer; mimeType: string }>,
+    caption?: string
+  ): Promise<void> {
+    const typingInterval = this.startTypingIndicator(ctx);
 
     try {
       // Create attachments for all photos
@@ -988,6 +1034,49 @@ export class TelegramChannel {
       clearInterval(typingInterval);
       this.logger.error({ userId, error: (error as Error).message }, 'Failed to process photos');
       await ctx.reply('Sorry, I had trouble processing that photo. Please try again.');
+    }
+  }
+
+  /**
+   * Enqueue a message for a user. Returns the queue position (1-based) or -1 if full.
+   */
+  private enqueue(userId: string, msg: QueuedMessage): number {
+    let queue = this.userQueues.get(userId);
+    if (!queue) {
+      queue = [];
+      this.userQueues.set(userId, queue);
+    }
+    if (queue.length >= MAX_QUEUE_SIZE) {
+      this.logger.warn({ userId, queueSize: queue.length }, 'Message queue full, dropping message');
+      return -1;
+    }
+    queue.push(msg);
+    this.logger.debug({ userId, type: msg.type, queueSize: queue.length }, 'Message queued');
+    return queue.length;
+  }
+
+  /**
+   * Drain queued messages for a user sequentially, then release the processing lock.
+   */
+  private async drainQueue(userId: string): Promise<void> {
+    try {
+      while (true) {
+        if (this.stopRequests.has(userId)) {
+          this.userQueues.delete(userId);
+          break;
+        }
+        const queue = this.userQueues.get(userId);
+        if (!queue || queue.length === 0) break;
+
+        const next = queue.shift()!;
+        if (queue.length === 0) this.userQueues.delete(userId);
+
+        try {
+          await next.execute();
+        } catch (error) {
+          this.logger.error({ userId, type: next.type, error: (error as Error).message }, 'Queued message processing failed');
+        }
+      }
     } finally {
       this.activeProcessing.delete(userId);
     }
@@ -1007,12 +1096,22 @@ export class TelegramChannel {
       return;
     }
 
-    // Atomically check-and-set to prevent race between concurrent messages
     if (this.activeProcessing.has(userId)) {
-      await ctx.reply('Still working on your previous message... Send /stop to cancel it.');
+      this.enqueue(userId, { type: 'text', execute: () => this.processTextCore(ctx) });
       return;
     }
+
     this.activeProcessing.add(userId);
+    try {
+      await this.processTextCore(ctx);
+    } finally {
+      await this.drainQueue(userId);
+    }
+  }
+
+  private async processTextCore(ctx: Context): Promise<void> {
+    const userId = ctx.from!.id.toString();
+    const messageText = ctx.message!.text!;
 
     // Extract reply context if user is replying to a previous message
     const fullMessage = this.buildMessageWithReplyContext(ctx, messageText);
@@ -1066,8 +1165,6 @@ export class TelegramChannel {
       const err = error as Error;
       this.logger.error({ userId, error: err.message }, 'Failed to process message');
       await ctx.reply('Sorry, I encountered an error processing your message. Please try again.');
-    } finally {
-      this.activeProcessing.delete(userId);
     }
   }
 
@@ -1258,6 +1355,7 @@ export class TelegramChannel {
     // Save configurations
     await this.configManager.saveNow();
 
+    this.userQueues.clear();
     await this.bot.stop();
     this.isRunning = false;
     this.logger.info('Telegram bot stopped');
