@@ -211,6 +211,7 @@ export class Agent {
 
     // Process media (URLs in text and attachments) if media processor available
     let processedContent: ContentBlock[] | string = userMessage;
+    let hasImageAttachments = false;
     if (this.mediaProcessor) {
       try {
         const { content, processedMedia, errors } = await this.mediaProcessor.processMessage(
@@ -221,6 +222,7 @@ export class Agent {
         // If we processed any media, use content blocks
         if (processedMedia.length > 0) {
           processedContent = content;
+          hasImageAttachments = processedMedia.some((m) => m.type === 'image');
           this.logger.debug(
             { mediaCount: processedMedia.length, types: processedMedia.map((m) => m.type) },
             'Media processed'
@@ -262,9 +264,11 @@ export class Agent {
 
     // Queue LLM-based fact extraction (async, non-blocking)
     // Skip sub-agent results — they're bot output, not user facts, and would
-    // re-extract triggers for events already being processed (causing runaway loops)
+    // re-extract triggers for events already being processed (causing runaway loops).
+    // Skip image messages here — they get a post-response extraction pass instead,
+    // which includes the assistant's description of the image content.
     const isSubAgentResult = typeof userMessage === 'string' && userMessage.startsWith('[Sub-agent "');
-    if (this.factExtractor && !isSubAgentResult) {
+    if (this.factExtractor && !isSubAgentResult && !hasImageAttachments) {
       this.factExtractor.queueForExtraction(
         userMessage,
         resolvedUserId,
@@ -564,6 +568,22 @@ export class Agent {
       if (oldest !== undefined) this.lastAssistantResponses.delete(oldest);
     }
     this.lastAssistantResponses.set(sessionId, finalResponse);
+
+    // Post-response fact extraction for image messages.
+    // When the user sends an image, the pre-response extraction only sees the text
+    // (e.g. "is this wicker synthetic?") without the visual details. The LLM's response
+    // contains the product/image details it extracted from the image. Re-run extraction
+    // with the full exchange so triggers and facts capture those details.
+    if (hasImageAttachments && this.factExtractor && finalResponse) {
+      const imageContext = `User sent a message with an image attachment. The assistant's response (which could see the image) was:\n${finalResponse.slice(0, 2000)}`;
+      this.factExtractor.queueForExtraction(
+        userMessage,
+        resolvedUserId,
+        imageContext
+      ).catch((error) => {
+        this.logger.warn({ error: (error as Error).message }, 'Post-image fact extraction failed');
+      });
+    }
 
     return {
       response: finalResponse,
