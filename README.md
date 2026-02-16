@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  <a href="smartbot-research-validation-2col.pdf"><strong>Read the Paper</strong></a>
+  <a href="Paper2026.pdf"><strong>Read the Paper</strong></a>
 </p>
 
 ---
@@ -109,13 +109,13 @@ At 100 messages/day with Groq for fast-tier operations:
 |-----------|:---------:|:----------:|
 | Primary conversation | 100 | $0.03 |
 | Memory re-ranking | 100 | $0.003 |
-| Relation classification | 50 | $0.002 |
+| Relation classification | 50 | $0.0015 |
 | Affect classification | 100 | $0 (lexicon) |
 | Decay/fusion (Breath ticks) | 48 | $0.005 |
 | Dream cycle (nightly) | 15--20 | $0.005 |
 | Self-reflection (nightly) | 2 | $0.002 |
 | Gap scanner (nightly) | 3--5 | $0.001 |
-| **Total** | | **$0.05--0.10** |
+| **Total** | | **$0.047--0.10** |
 
 The entire cognitive pipeline -- dreams, reflection, affect, gap scanning -- adds approximately $0.02/day to the base conversation cost.
 
@@ -412,7 +412,7 @@ ScallopBot's design decisions independently converged on patterns validated by 3
 - **Self-reflection**: Shinn et al. (Reflexion, 91% HumanEval), Renze & Guven (reflection taxonomy)
 - **Proactive intelligence**: Pasternak et al. (PROBE), Liu et al. (Inner Thoughts)
 
-For the full analysis, see [the paper](smartbot-research-validation-2col.pdf).
+For the full analysis, see [the paper](Paper2026.pdf).
 
 ## License
 
