@@ -25,44 +25,16 @@ export interface ProactiveWebSocketOutput {
   source: 'inner_thoughts' | 'gap_scanner' | 'task_result';
 }
 
-// ============ Constants ============
-
-/** Maximum message length before truncation (Telegram) */
-const MAX_MESSAGE_LENGTH = 250;
-
-/** Dismiss footer appended to Telegram messages */
-const DISMISS_FOOTER = '\n\n_Reply to discuss, or ignore to dismiss._';
-
-/** Icons for each gap type */
-const GAP_TYPE_ICONS: Record<string, string> = {
-  stale_goal: '\uD83C\uDFAF',            // 🎯
-  approaching_deadline: '\u23F0',         // ⏰
-  unresolved_thread: '\uD83D\uDCAC',     // 💬
-  behavioral_anomaly: '\uD83D\uDCCA',    // 📊
-};
-
-/** Default icon when gap type is unknown */
-const DEFAULT_ICON = '\uD83D\uDCA1';     // 💡
-
 // ============ Functions ============
 
 /**
  * Format a proactive message for Telegram.
  *
- * - Prepends a type-based icon
- * - Truncates message to 250 chars (appends "..." if truncated)
- * - Appends a dismiss footer
- * - Total output stays well under Telegram's 4096 char limit
+ * Passes through the message as-is — no icons, truncation, or footers.
+ * The conversational tone is set at extraction time in the fact-extractor prompt.
  */
 export function formatProactiveForTelegram(input: ProactiveFormatInput): string {
-  const icon = GAP_TYPE_ICONS[input.gapType ?? ''] ?? DEFAULT_ICON;
-
-  let message = input.message;
-  if (message.length > MAX_MESSAGE_LENGTH) {
-    message = message.slice(0, MAX_MESSAGE_LENGTH) + '...';
-  }
-
-  return `${icon} ${message}${DISMISS_FOOTER}`;
+  return input.message;
 }
 
 /**
