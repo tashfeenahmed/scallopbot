@@ -670,6 +670,14 @@ export class ScallopDatabase {
       );
 
       CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires ON auth_sessions(expires_at);
+
+      -- Runtime key vault (API keys set by agent, persisted across restarts)
+      CREATE TABLE IF NOT EXISTS runtime_keys (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
     `);
 
     // Migration: Add source column to existing databases
@@ -2913,6 +2921,35 @@ export class ScallopDatabase {
   purgeExpiredSessions(): number {
     const result = this.db.prepare('DELETE FROM auth_sessions WHERE expires_at <= ?').run(Date.now());
     return result.changes;
+  }
+
+  // ============ Runtime Key Vault Operations ============
+
+  setRuntimeKey(key: string, value: string): void {
+    const now = Date.now();
+    this.db.prepare(`
+      INSERT INTO runtime_keys (key, value, created_at, updated_at)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+    `).run(key, value, now, now);
+  }
+
+  getRuntimeKey(key: string): string | null {
+    const row = this.db.prepare('SELECT value FROM runtime_keys WHERE key = ?').get(key) as
+      | { value: string }
+      | undefined;
+    return row?.value ?? null;
+  }
+
+  deleteRuntimeKey(key: string): boolean {
+    const result = this.db.prepare('DELETE FROM runtime_keys WHERE key = ?').run(key);
+    return result.changes > 0;
+  }
+
+  getAllRuntimeKeys(): Array<{ key: string; value: string }> {
+    const rows = this.db.prepare('SELECT key, value FROM runtime_keys ORDER BY key').all() as
+      Array<{ key: string; value: string }>;
+    return rows;
   }
 
 }
