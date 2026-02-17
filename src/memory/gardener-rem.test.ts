@@ -117,6 +117,15 @@ describe('BackgroundGardener REM integration', () => {
   it('sleepTick creates EXTENDS relations for REM discoveries', async () => {
     cleanupTestDb();
 
+    // Make Gaussian noise deterministic (zero) so spreading activation candidates
+    // aren't randomly filtered out. gaussianNoise uses Box-Muller:
+    //   sigma * sqrt(-2*log(u1)) * cos(2*PI*u2)
+    // When u2 = 0.25, cos(PI/2) = 0, so noise = 0 regardless of u1.
+    let callIdx = 0;
+    const randomSpy = vi.spyOn(Math, 'random').mockImplementation(() => {
+      return (callIdx++ % 2 === 0) ? 0.5 : 0.25;
+    });
+
     // Provider returns NREM fusion for NREM calls, REM judge for REM calls.
     // Since both NREM and REM share the provider, we use a smart mock that
     // distinguishes by prompt content.
@@ -217,6 +226,8 @@ describe('BackgroundGardener REM integration', () => {
     // The key invariant is: no memory was superseded solely because of REM
     // Since REM only adds EXTENDS, no memories should be superseded by REM
     // (This is inherently satisfied by the implementation — REM never calls supersede)
+
+    randomSpy.mockRestore();
   });
 
   // ─── Test b: REM runs after NREM without interference ───────
