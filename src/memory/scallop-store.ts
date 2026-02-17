@@ -14,6 +14,7 @@ import type { Logger } from 'pino';
 import {
   ScallopDatabase,
   type ScallopMemoryEntry,
+  type ScallopMemoryEntryLight,
   type MemoryCategory,
 } from './db.js';
 import { DecayEngine, PROMINENCE_THRESHOLDS, type DecayConfig } from './decay.js';
@@ -317,7 +318,7 @@ export class ScallopMemoryStore {
   }
 
   /**
-   * Get memories by user
+   * Get memories by user (light — no embeddings loaded)
    */
   getByUser(
     userId: string,
@@ -327,8 +328,8 @@ export class ScallopMemoryStore {
       minProminence?: number;
       limit?: number;
     } = {}
-  ): ScallopMemoryEntry[] {
-    return this.db.getMemoriesByUser(userId, {
+  ): ScallopMemoryEntryLight[] {
+    return this.db.getMemoriesByUserLight(userId, {
       category: options.category,
       isLatest: options.isLatest,
       minProminence: options.minProminence ?? PROMINENCE_THRESHOLDS.DORMANT,
@@ -337,11 +338,11 @@ export class ScallopMemoryStore {
   }
 
   /**
-   * Get recently stored memories (short-term memory buffer).
+   * Get recently stored memories (light — no embeddings loaded).
    * Returns memories from the last `windowMs` milliseconds, newest first.
    */
-  getRecentMemories(userId: string, windowMs: number): ScallopMemoryEntry[] {
-    return this.db.getRecentMemories(userId, windowMs, { isLatest: true });
+  getRecentMemories(userId: string, windowMs: number): ScallopMemoryEntryLight[] {
+    return this.db.getRecentMemoriesLight(userId, windowMs, { isLatest: true });
   }
 
   /**
@@ -358,7 +359,13 @@ export class ScallopMemoryStore {
   // ============ Hybrid Search ============
 
   /**
-   * Search memories with hybrid semantic + keyword search
+   * Search memories with hybrid semantic + keyword search.
+   *
+   * Two-stage pipeline to avoid loading 768-dim embeddings for every memory:
+   *   Stage 1 — light fetch (no embeddings) + BM25 scoring → top-50 candidates
+   *   Stage 2 — load embeddings only for top-50 → cosine similarity scoring
+   *
+   * The query embedding is computed in parallel with the light fetch + BM25.
    */
   async search(query: string, options: ScallopSearchOptions = {}): Promise<ScallopSearchResult[]> {
     const {
@@ -372,11 +379,20 @@ export class ScallopMemoryStore {
       documentDateRange,
     } = options;
 
-    // Get ALL candidate memories so BM25 and semantic search
-    // score the full corpus — no artificial cap that could exclude relevant matches
-    let candidates: ScallopMemoryEntry[];
+    // ── Stage 1: Light fetch (no embeddings) ────────────────────────
+    // Fire query embedding in parallel — we won't await it until Stage 2.
+    let queryEmbedding: number[] | undefined = options.queryEmbedding;
+    const embeddingPromise: Promise<number[] | undefined> =
+      !queryEmbedding && this.embedder
+        ? this.embedder.embed(query).catch((err: Error) => {
+            this.logger.warn({ error: err.message }, 'Query embedding failed, using keyword-only search');
+            return undefined;
+          })
+        : Promise.resolve(queryEmbedding);
+
+    let lightCandidates: ScallopMemoryEntryLight[];
     if (userId) {
-      candidates = this.db.getMemoriesByUser(userId, {
+      lightCandidates = this.db.getMemoriesByUserLight(userId, {
         category,
         minProminence,
         isLatest,
@@ -384,12 +400,12 @@ export class ScallopMemoryStore {
       });
     } else {
       this.logger.warn('Search called without userId - searching ALL users. This may leak memories across users in multi-user deployments.');
-      candidates = this.db.getAllMemories({ minProminence });
+      lightCandidates = this.db.getAllMemoriesLight({ minProminence });
     }
 
     // Apply date filters
     if (eventDateRange) {
-      candidates = candidates.filter(
+      lightCandidates = lightCandidates.filter(
         (m) =>
           m.eventDate !== null &&
           m.eventDate >= eventDateRange.start &&
@@ -397,66 +413,59 @@ export class ScallopMemoryStore {
       );
     }
     if (documentDateRange) {
-      candidates = candidates.filter(
+      lightCandidates = lightCandidates.filter(
         (m) =>
           m.documentDate >= documentDateRange.start &&
           m.documentDate <= documentDateRange.end
       );
     }
 
-    if (candidates.length === 0) {
+    if (lightCandidates.length === 0) {
       return [];
     }
 
-    // Score each candidate using two-pass min-max BM25 normalization
+    // BM25 scoring on the full light corpus (no embedding data needed)
     const queryLower = query.toLowerCase();
-
-    // Use pre-computed query embedding if provided, otherwise compute it
-    const anyCandidateHasEmbedding = candidates.some(m => m.embedding !== null);
-    let queryEmbedding: number[] | undefined = options.queryEmbedding;
-    if (!queryEmbedding && this.embedder && anyCandidateHasEmbedding) {
-      try {
-        queryEmbedding = await this.embedder.embed(query);
-      } catch (err) {
-        this.logger.warn({ error: (err as Error).message }, 'Query embedding failed, using keyword-only search');
-      }
-    }
-
-    // Pre-compute BM25 statistics for proper keyword scoring
-    const contentTexts = candidates.map((m) => m.content);
+    const contentTexts = lightCandidates.map((m) => m.content);
     const avgDocLength =
       contentTexts.reduce((sum, c) => sum + c.split(/\s+/).length, 0) / contentTexts.length;
     const docFreq = buildDocFreqMap(contentTexts);
     const bm25Options: BM25Options = {
       avgDocLength,
-      docCount: candidates.length,
+      docCount: lightCandidates.length,
       docFreq,
     };
 
-    // Pass 1: Compute raw BM25 + semantic scores for all candidates
-    const rawScores = candidates.map(memory => {
-      const rawBM25 = calculateBM25Score(queryLower, memory.content.toLowerCase(), bm25Options);
-      let semanticScore = 0;
-      if (queryEmbedding && memory.embedding) {
-        semanticScore = cosineSimilarity(queryEmbedding, memory.embedding);
-      }
-      return { memory, rawBM25, semanticScore };
-    });
+    const BM25_TOP_K = 50;
+    const bm25Scored = lightCandidates.map(memory => ({
+      memory,
+      rawBM25: calculateBM25Score(queryLower, memory.content.toLowerCase(), bm25Options),
+    }));
+    bm25Scored.sort((a, b) => b.rawBM25 - a.rawBM25);
+    const bm25Top = bm25Scored.slice(0, BM25_TOP_K);
 
-    // Rank-based BM25 normalization: sort by raw BM25 descending, assign ranks,
-    // normalize as 1/(1+rank). This compresses keyword influence and prevents
-    // keyword-heavy memories from dominating over semantic matches.
-    const bm25Sorted = [...rawScores].sort((a, b) => b.rawBM25 - a.rawBM25);
+    // Build rank-based BM25 normalization map (only for top-K)
     const bm25RankMap = new Map<string, number>();
-    bm25Sorted.forEach((item, rank) => {
+    bm25Top.forEach((item, rank) => {
       bm25RankMap.set(item.memory.id, rank);
     });
 
-    // Pass 2: Combine scores with rank-based BM25
+    // ── Stage 2: Load embeddings only for top-50 candidates ─────────
+    queryEmbedding = await embeddingPromise;
+    const topIds = bm25Top.map(item => item.memory.id);
+    const embeddingMap = queryEmbedding ? this.db.getEmbeddingsByIds(topIds) : new Map<string, number[]>();
+
+    // Score top-K with combined BM25 rank + semantic similarity
     const results: ScallopSearchResult[] = [];
-    for (const { memory, rawBM25, semanticScore } of rawScores) {
-      const bm25Rank = bm25RankMap.get(memory.id) ?? rawScores.length;
+    for (const { memory, rawBM25 } of bm25Top) {
+      const bm25Rank = bm25RankMap.get(memory.id) ?? bm25Top.length;
       const keywordScore = 1 / (1 + bm25Rank);
+
+      let semanticScore = 0;
+      const memEmbedding = embeddingMap.get(memory.id);
+      if (queryEmbedding && memEmbedding) {
+        semanticScore = cosineSimilarity(queryEmbedding, memEmbedding);
+      }
 
       let matchType: 'semantic' | 'keyword' | 'hybrid' = 'keyword';
       if (semanticScore > 0) {
@@ -469,15 +478,11 @@ export class ScallopMemoryStore {
       const relevanceScore = keywordScore * SEARCH_WEIGHTS.keyword + semanticScore * SEARCH_WEIGHTS.semantic;
 
       // Recency boost: exponential decay so recently stored facts surface more
-      // easily even with weaker keyword/semantic overlap.  Models human
-      // short-term memory — things you just learned are highly accessible.
+      // easily even with weaker keyword/semantic overlap.
       const ageHours = (Date.now() - memory.documentDate) / (1000 * 60 * 60);
       const RECENCY_HALF_LIFE_HOURS = 3;
       const recencyBoost = Math.exp(-ageHours / RECENCY_HALF_LIFE_HOURS) * 0.3;
 
-      // Prominence already gates visibility via minProminence threshold
-      // (active/dormant/archived). No additional scoring penalty needed —
-      // decay handles long-term forgetting, search should rank purely by relevance.
       let score = relevanceScore + recencyBoost;
 
       // Boost for exact matches
@@ -486,8 +491,13 @@ export class ScallopMemoryStore {
       }
 
       if (score >= 0.35) {
+        // Promote light entry to full ScallopMemoryEntry for the result
+        const fullMemory: ScallopMemoryEntry = {
+          ...memory,
+          embedding: memEmbedding ?? null,
+        };
         results.push({
-          memory,
+          memory: fullMemory,
           score,
           sourceChunk: includeChunks ? memory.sourceChunk : null,
           matchType,
@@ -496,9 +506,6 @@ export class ScallopMemoryStore {
     }
 
     // Sort by score and over-fetch for re-ranking.
-    // The LLM reranker is much better at judging semantic relevance than
-    // lexical/vector scoring alone, so give it a wider candidate pool (limit * 4)
-    // and let it pick the best `limit` results.
     results.sort((a, b) => b.score - a.score);
     const rerankPoolSize = this.rerankProvider ? limit * 4 : limit;
     let topResults = results.slice(0, rerankPoolSize);
@@ -506,13 +513,13 @@ export class ScallopMemoryStore {
     // LLM re-ranking: refine top results using semantic relevance scoring
     if (this.rerankProvider && topResults.length > 0) {
       try {
-        const candidates: RerankCandidate[] = topResults.map(r => ({
+        const rerankCandidates: RerankCandidate[] = topResults.map(r => ({
           id: r.memory.id,
           content: r.memory.content,
           originalScore: r.score,
         }));
 
-        const reranked = await rerankResults(query, candidates, this.rerankProvider, { maxCandidates: 20 });
+        const reranked = await rerankResults(query, rerankCandidates, this.rerankProvider, { maxCandidates: 20 });
 
         // Map re-ranked scores back to search results, then trim to requested limit
         const rerankedMap = new Map(reranked.map(r => [r.id, r.finalScore]));

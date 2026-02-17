@@ -654,43 +654,43 @@ Only use write_file + send_file for **binary/generated files** (PDFs, images, ar
       // SOUL.md not found, that's fine
     }
 
-    // Add memory context from ScallopMemoryStore (SQLite)
-    let memoryStats = { factsFound: 0, conversationsFound: 0 };
-    let memoryItems: { type: 'fact' | 'conversation'; content: string; subject?: string }[] = [];
-    if (this.scallopStore) {
-      const { context: memoryContext, stats, items } = await this.buildMemoryContext(userMessage, sessionId, userId);
-      memoryStats = stats;
-      memoryItems = items;
-      if (memoryContext) {
-        prompt += memoryContext;
-        this.logger.debug({ memoryContextLength: memoryContext.length, preview: memoryContext.substring(0, 300) }, 'Memory context added to prompt');
-      }
-    }
+    // Build memory, goal, and board context in parallel
+    const memoryPromise = this.scallopStore
+      ? this.buildMemoryContext(userMessage, sessionId, userId)
+      : Promise.resolve({ context: '', stats: { factsFound: 0, conversationsFound: 0 }, items: [] as { type: 'fact' | 'conversation'; content: string; subject?: string }[] });
 
-    // Add goal context (query-relevant)
-    if (this.goalService) {
-      try {
-        const goalContext = await this.goalService.getGoalContext(userId, userMessage);
-        if (goalContext) {
-          prompt += goalContext;
-          this.logger.debug({ goalContextLength: goalContext.length }, 'Goal context added to prompt');
-        }
-      } catch (error) {
-        this.logger.warn({ error: (error as Error).message }, 'Failed to build goal context');
-      }
-    }
+    const goalPromise = this.goalService
+      ? this.goalService.getGoalContext(userId, userMessage).catch((error: Error) => {
+          this.logger.warn({ error: error.message }, 'Failed to build goal context');
+          return null;
+        })
+      : Promise.resolve(null);
 
-    // Add board context (task board summary)
-    if (this.boardService) {
-      try {
-        const boardContext = this.boardService.getBoardContext(userId, userMessage);
-        if (boardContext) {
-          prompt += boardContext;
-          this.logger.debug({ boardContextLength: boardContext.length }, 'Board context added to prompt');
-        }
-      } catch (error) {
-        this.logger.warn({ error: (error as Error).message }, 'Failed to build board context');
-      }
+    const boardPromise = Promise.resolve(
+      this.boardService
+        ? (() => { try { return this.boardService!.getBoardContext(userId, userMessage); } catch (error) { this.logger.warn({ error: (error as Error).message }, 'Failed to build board context'); return null; } })()
+        : null
+    );
+
+    const [memoryResult, goalContext, boardContext] = await Promise.all([
+      memoryPromise,
+      goalPromise,
+      boardPromise,
+    ]);
+
+    const memoryStats = memoryResult.stats;
+    const memoryItems = memoryResult.items;
+    if (memoryResult.context) {
+      prompt += memoryResult.context;
+      this.logger.debug({ memoryContextLength: memoryResult.context.length, preview: memoryResult.context.substring(0, 300) }, 'Memory context added to prompt');
+    }
+    if (goalContext) {
+      prompt += goalContext;
+      this.logger.debug({ goalContextLength: goalContext.length }, 'Goal context added to prompt');
+    }
+    if (boardContext) {
+      prompt += boardContext;
+      this.logger.debug({ boardContextLength: boardContext.length }, 'Board context added to prompt');
     }
 
     return { prompt, memoryStats, memoryItems };

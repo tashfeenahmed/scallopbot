@@ -68,6 +68,13 @@ export type MemoryCategory =
 export type RelationType = 'UPDATES' | 'EXTENDS' | 'DERIVES';
 
 /**
+ * Lightweight memory entry — same as ScallopMemoryEntry but without the
+ * embedding vector.  Used for BM25/keyword scoring where loading and
+ * JSON-parsing the 768-dim float[] per row is unnecessary overhead.
+ */
+export type ScallopMemoryEntryLight = Omit<ScallopMemoryEntry, 'embedding'> & { embedding: null };
+
+/**
  * Core memory entry in SQLite
  */
 export interface ScallopMemoryEntry {
@@ -604,6 +611,11 @@ export class ScallopDatabase {
       CREATE INDEX IF NOT EXISTS idx_memories_event_date ON memories(event_date);
       CREATE INDEX IF NOT EXISTS idx_memories_is_latest ON memories(is_latest);
       CREATE INDEX IF NOT EXISTS idx_memories_document_date ON memories(document_date);
+
+      -- Compound indexes for light queries (getMemoriesByUserLight, getRecentMemoriesLight)
+      CREATE INDEX IF NOT EXISTS idx_memories_user_latest_prom ON memories(user_id, is_latest, prominence DESC);
+      CREATE INDEX IF NOT EXISTS idx_memories_user_docdate ON memories(user_id, document_date DESC);
+
       CREATE INDEX IF NOT EXISTS idx_relations_source ON memory_relations(source_id);
       CREATE INDEX IF NOT EXISTS idx_relations_target ON memory_relations(target_id);
       CREATE INDEX IF NOT EXISTS idx_relations_type ON memory_relations(relation_type);
@@ -1189,6 +1201,169 @@ export class ScallopDatabase {
     const stmt = this.db.prepare(query);
     const rows = stmt.all(...params) as Record<string, unknown>[];
     return rows.map((row) => this.rowToMemory(row));
+  }
+
+  // ============ Light (no-embedding) Memory Queries ============
+
+  /** All columns except `embedding` — avoids loading & JSON-parsing 768-dim vectors */
+  private static readonly LIGHT_COLUMNS = [
+    'id', 'user_id', 'content', 'category', 'memory_type', 'importance',
+    'confidence', 'is_latest', 'source', 'document_date', 'event_date',
+    'prominence', 'last_accessed', 'access_count', 'source_chunk',
+    'metadata', 'learned_from', 'times_confirmed', 'contradiction_ids',
+    'created_at', 'updated_at',
+  ].join(', ');
+
+  /** Convert a row (without embedding column) to ScallopMemoryEntryLight */
+  private rowToMemoryLight(row: Record<string, unknown>): ScallopMemoryEntryLight {
+    return {
+      id: row.id as string,
+      userId: row.user_id as string,
+      content: row.content as string,
+      category: row.category as MemoryCategory,
+      memoryType: row.memory_type as ScallopMemoryType,
+      importance: row.importance as number,
+      confidence: row.confidence as number,
+      isLatest: (row.is_latest as number) === 1,
+      source: (row.source as 'user' | 'assistant') || 'user',
+      documentDate: row.document_date as number,
+      eventDate: row.event_date as number | null,
+      prominence: row.prominence as number,
+      lastAccessed: row.last_accessed as number | null,
+      accessCount: row.access_count as number,
+      sourceChunk: row.source_chunk as string | null,
+      embedding: null,
+      metadata: row.metadata ? JSON.parse(row.metadata as string) : null,
+      learnedFrom: (row.learned_from as string) || 'conversation',
+      timesConfirmed: (row.times_confirmed as number) || 1,
+      contradictionIds: row.contradiction_ids ? JSON.parse(row.contradiction_ids as string) : null,
+      createdAt: row.created_at as number,
+      updatedAt: row.updated_at as number,
+    };
+  }
+
+  /**
+   * Light version of getMemoriesByUser — excludes embedding column.
+   */
+  getMemoriesByUserLight(
+    userId: string,
+    options: {
+      category?: MemoryCategory;
+      memoryType?: ScallopMemoryType;
+      minProminence?: number;
+      isLatest?: boolean;
+      limit?: number;
+      offset?: number;
+      includeAllSources?: boolean;
+    } = {}
+  ): ScallopMemoryEntryLight[] {
+    let query = `SELECT ${ScallopDatabase.LIGHT_COLUMNS} FROM memories WHERE user_id = ?`;
+    const params: unknown[] = [userId];
+
+    if (!options.includeAllSources) {
+      query += " AND source = 'user'";
+    }
+    if (options.category) {
+      query += ' AND category = ?';
+      params.push(options.category);
+    }
+    if (options.memoryType) {
+      query += ' AND memory_type = ?';
+      params.push(options.memoryType);
+    }
+    if (options.minProminence !== undefined) {
+      query += ' AND prominence >= ?';
+      params.push(options.minProminence);
+    }
+    if (options.isLatest !== undefined) {
+      query += ' AND is_latest = ?';
+      params.push(options.isLatest ? 1 : 0);
+    }
+
+    query += ' ORDER BY prominence DESC, document_date DESC';
+
+    if (options.limit) {
+      query += ' LIMIT ?';
+      params.push(options.limit);
+    }
+    if (options.offset) {
+      query += ' OFFSET ?';
+      params.push(options.offset);
+    }
+
+    const stmt = this.db.prepare(query);
+    const rows = stmt.all(...params) as Record<string, unknown>[];
+    return rows.map((row) => this.rowToMemoryLight(row));
+  }
+
+  /**
+   * Light version of getRecentMemories — excludes embedding column.
+   */
+  getRecentMemoriesLight(
+    userId: string,
+    windowMs: number,
+    options: { isLatest?: boolean } = {}
+  ): ScallopMemoryEntryLight[] {
+    const cutoff = Date.now() - windowMs;
+    let query = `SELECT ${ScallopDatabase.LIGHT_COLUMNS} FROM memories WHERE user_id = ? AND document_date >= ?`;
+    const params: unknown[] = [userId, cutoff];
+
+    if (options.isLatest !== undefined) {
+      query += ' AND is_latest = ?';
+      params.push(options.isLatest ? 1 : 0);
+    }
+
+    query += ' ORDER BY document_date DESC';
+
+    const stmt = this.db.prepare(query);
+    const rows = stmt.all(...params) as Record<string, unknown>[];
+    return rows.map((row) => this.rowToMemoryLight(row));
+  }
+
+  /**
+   * Light version of getAllMemories — excludes embedding column.
+   */
+  getAllMemoriesLight(options: { limit?: number; minProminence?: number } = {}): ScallopMemoryEntryLight[] {
+    let query = `SELECT ${ScallopDatabase.LIGHT_COLUMNS} FROM memories`;
+    const params: unknown[] = [];
+
+    if (options.minProminence !== undefined) {
+      query += ' WHERE prominence >= ?';
+      params.push(options.minProminence);
+    }
+
+    query += ' ORDER BY prominence DESC';
+
+    if (options.limit) {
+      query += ' LIMIT ?';
+      params.push(options.limit);
+    }
+
+    const stmt = this.db.prepare(query);
+    const rows = stmt.all(...params) as Record<string, unknown>[];
+    return rows.map((row) => this.rowToMemoryLight(row));
+  }
+
+  /**
+   * Load only id + embedding for a set of memory IDs.
+   * Returns a Map<id, number[]> (entries without embeddings are omitted).
+   */
+  getEmbeddingsByIds(ids: string[]): Map<string, number[]> {
+    if (ids.length === 0) return new Map();
+
+    const placeholders = ids.map(() => '?').join(',');
+    const stmt = this.db.prepare(
+      `SELECT id, embedding FROM memories WHERE id IN (${placeholders})`
+    );
+    const rows = stmt.all(...ids) as Array<{ id: string; embedding: string | null }>;
+
+    const result = new Map<string, number[]>();
+    for (const row of rows) {
+      if (row.embedding) {
+        result.set(row.id, JSON.parse(row.embedding));
+      }
+    }
+    return result;
   }
 
   /**
