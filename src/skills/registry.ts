@@ -79,6 +79,45 @@ export class SkillRegistry {
   }
 
   /**
+   * Reload skills from disk while preserving SDK-registered skills.
+   * Unlike reload(), this won't wipe native skills like send_message, spawn_agent, etc.
+   */
+  async reloadFromDisk(): Promise<void> {
+    // Save SDK skills before clearing
+    const sdkSkills = Array.from(this.state.skills.values())
+      .filter(s => s.source === 'sdk');
+
+    // Reload from disk
+    const skills = await this.loader.loadAll();
+    this.state.skills.clear();
+    this.state.availableSkills = [];
+
+    // Re-register SDK skills first
+    for (const sdk of sdkSkills) {
+      this.state.skills.set(sdk.name, sdk);
+      if (sdk.available) {
+        this.state.availableSkills.push(sdk);
+      }
+    }
+
+    // Then add disk skills (won't overwrite SDK)
+    for (const skill of skills) {
+      if (!this.state.skills.has(skill.name)) {
+        this.state.skills.set(skill.name, skill);
+        if (skill.available) {
+          this.state.availableSkills.push(skill);
+        }
+      }
+    }
+
+    this.state.lastLoaded = Date.now();
+    this.logger?.info(
+      { total: this.state.skills.size, available: this.state.availableSkills.length },
+      'Skills reloaded from disk (SDK preserved)'
+    );
+  }
+
+  /**
    * Get a skill by name
    */
   getSkill(name: string): Skill | undefined {
