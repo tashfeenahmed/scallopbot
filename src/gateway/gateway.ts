@@ -313,6 +313,10 @@ export class Gateway {
     this.registerSubAgentSkills();
     this.logger.debug('Sub-agent system initialized');
 
+    // Register manage_skills skill for ClawHub integration
+    await this.registerSkillManagementSkill();
+    this.logger.debug('Skill management skill registered');
+
     this.agent = new Agent({
       provider,
       sessionManager: this.sessionManager,
@@ -969,6 +973,61 @@ export class Gateway {
       })
       .build();
     this.skillRegistry.registerSkill(checkAgentsSkill.skill);
+  }
+
+  /**
+   * Register manage_skills native skill for ClawHub skill management.
+   * Allows the agent to search, install, uninstall, and list skills at runtime.
+   */
+  private async registerSkillManagementSkill(): Promise<void> {
+    if (!this.skillRegistry) return;
+
+    const { SkillPackageManager } = await import('../skills/clawhub.js');
+    const pkgManager = new SkillPackageManager({ logger: this.logger });
+    const registry = this.skillRegistry;
+
+    const skill = defineSkill('manage_skills', 'Search, install, uninstall, or list skills from ClawHub (clawhub.ai). After install/uninstall, skills are hot-reloaded automatically.')
+      .userInvocable(false)
+      .inputSchema({
+        type: 'object',
+        properties: {
+          action: { type: 'string', description: 'One of: search, install, uninstall, list' },
+          query: { type: 'string', description: 'Search query (for search action)' },
+          slug: { type: 'string', description: 'Skill slug e.g. "owner/skill-name" (for install/uninstall)' },
+        },
+        required: ['action'],
+      })
+      .onNativeExecute(async (ctx) => {
+        const action = ctx.args.action as string;
+        switch (action) {
+          case 'search': {
+            const results = await pkgManager.searchClawHub(ctx.args.query as string);
+            return { success: true, output: JSON.stringify(results, null, 2) };
+          }
+          case 'install': {
+            const result = await pkgManager.installFromClawHub(ctx.args.slug as string);
+            if (result.success) {
+              await registry.reloadFromDisk();
+            }
+            return { success: result.success, output: result.success ? `Installed "${ctx.args.slug}"` : result.error || 'Install failed' };
+          }
+          case 'uninstall': {
+            const result = await pkgManager.uninstall(ctx.args.slug as string);
+            if (result.success) {
+              await registry.reloadFromDisk();
+            }
+            return { success: result.success, output: result.success ? `Uninstalled "${ctx.args.slug}"` : result.error || 'Uninstall failed' };
+          }
+          case 'list': {
+            const installed = await pkgManager.listInstalled();
+            return { success: true, output: installed.length ? installed.join('\n') : 'No skills installed' };
+          }
+          default:
+            return { success: false, output: `Unknown action: ${action}. Use search, install, uninstall, or list.` };
+        }
+      })
+      .build();
+    this.skillRegistry.registerSkill(skill.skill);
   }
 
   /**

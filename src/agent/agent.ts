@@ -343,11 +343,6 @@ export class Agent {
       });
     }
 
-    // Get tool definitions from skills (all tools are now skills)
-    const tools = this.skillRegistry
-      ? this.skillRegistry.getToolDefinitions()
-      : [];
-
     // Wrap provider with cost tracker so each LLM call records its own usage
     if (this.costTracker) {
       activeProvider = this.costTracker.wrapProvider(activeProvider, sessionId);
@@ -415,6 +410,11 @@ export class Agent {
         }
         this.logger.debug({ sessionId, drained: interrupts.length }, 'User interrupts injected into context');
       }
+
+      // Refresh tool definitions each iteration so hot-loaded skills appear immediately
+      const tools = this.skillRegistry
+        ? this.skillRegistry.getToolDefinitions()
+        : [];
 
       // Check budget before each iteration
       if (this.costTracker) {
@@ -693,6 +693,16 @@ Only use write_file + send_file for **binary/generated files** (PDFs, images, ar
         prompt += `\n\n${skillPrompt}`;
       }
     }
+
+    // Add skill management instructions
+    prompt += `\n\n## SKILL MANAGEMENT
+You can search for and install new skills from ClawHub (clawhub.ai) using the manage_skills tool.
+- To find skills: manage_skills with action="search", query="<what you need>"
+- To install: manage_skills with action="install", slug="owner/skill-name"
+- To uninstall: manage_skills with action="uninstall", slug="skill-name"
+- To list installed: manage_skills with action="list"
+After installing a skill, it becomes available immediately — no restart needed.
+Only install skills when the user asks, or when you determine a skill would help accomplish the user's request and they confirm.`;
 
     // Load SOUL.md if present
     const soulPath = path.join(this.workspace, 'SOUL.md');
