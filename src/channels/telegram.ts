@@ -8,6 +8,8 @@ import { VoiceManager } from '../voice/index.js';
 import { getPendingVoiceAttachments, cleanupVoiceAttachments } from '../voice/attachments.js';
 import { BotConfigManager } from './bot-config.js';
 import { resolveTimezone } from '../utils/country-timezone.js';
+import type { ProviderRegistry } from '../providers/registry.js';
+import type { LLMProvider } from '../providers/types.js';
 
 const MAX_MESSAGE_LENGTH = 4096;
 const TYPING_INTERVAL = 5000; // 5 seconds
@@ -28,6 +30,7 @@ export interface TelegramChannelOptions {
   allowedUsers?: string[]; // Empty = allow all
   enableVoiceReply?: boolean;
   voiceManager?: VoiceManager; // Optional shared voice manager
+  providerRegistry?: ProviderRegistry; // For /model command
   /** Called when a user sends a message (for engagement detection) */
   onUserMessage?: (prefixedUserId: string) => void;
 }
@@ -114,6 +117,7 @@ export class TelegramChannel {
   private enableVoiceReply: boolean;
   private workspacePath: string;
   private db: ScallopDatabase;
+  private providerRegistry: ProviderRegistry | null = null;
   private onUserMessage?: (prefixedUserId: string) => void;
   // Buffer for collecting media group photos (multiple photos sent at once)
   private mediaGroupBuffer: Map<string, {
@@ -135,6 +139,7 @@ export class TelegramChannel {
     this.enableVoiceReply = options.enableVoiceReply ?? false;
     this.voiceManager = options.voiceManager || null;
     this.db = options.db;
+    this.providerRegistry = options.providerRegistry || null;
     this.onUserMessage = options.onUserMessage;
 
     this.setupHandlers();
@@ -318,6 +323,19 @@ export class TelegramChannel {
       await this.handleUsage(ctx);
     });
 
+    // /model command - switch AI model/provider
+    this.bot.command('model', async (ctx) => {
+      const userId = ctx.from?.id.toString();
+      if (!userId) return;
+
+      if (!this.isUserAllowed(userId)) {
+        await this.sendUnauthorized(ctx);
+        return;
+      }
+
+      await this.handleModel(ctx, userId);
+    });
+
     // Handle regular messages
     // NOTE: Handlers use fire-and-forget (no await) so Grammy's update loop
     // stays unblocked and can process /stop commands while the agent is running.
@@ -450,12 +468,17 @@ export class TelegramChannel {
       ? config.customPersonality.substring(0, 100) + (config.customPersonality.length > 100 ? '...' : '')
       : 'Default';
 
+    const modelLabel = config.modelId === 'auto'
+      ? 'auto (smart routing)'
+      : TelegramChannel.PROVIDER_LABELS[config.modelId] || config.modelId;
+
     await ctx.reply(
       '<b>Your Settings</b>\n\n' +
       `<b>Bot Name:</b> ${config.botName}\n` +
+      `<b>Model:</b> ${modelLabel}\n` +
       `<b>Personality:</b> ${personalityPreview}\n` +
       `<b>Timezone:</b> ${config.timezone}\n\n` +
-      'Use /setup to reconfigure these settings.',
+      'Use /setup to reconfigure, /model to switch AI provider.',
       { parse_mode: 'HTML' }
     );
   }
@@ -472,6 +495,7 @@ export class TelegramChannel {
       '<b>Commands:</b>\n' +
       '/start - Welcome message\n' +
       '/help - Show this help\n' +
+      '/model - Switch AI model/provider\n' +
       '/usage - View token usage and costs\n' +
       '/settings - View your configuration\n' +
       '/setup - Reconfigure the bot\n' +
@@ -544,6 +568,109 @@ export class TelegramChannel {
       (modelBreakdown ? `<b>This Month by Model:</b>\n${modelBreakdown}` : '');
 
     await ctx.reply(message, { parse_mode: 'HTML' });
+  }
+
+  /** Display name for each provider */
+  private static PROVIDER_LABELS: Record<string, string> = {
+    anthropic: 'Anthropic (Claude)',
+    openai: 'OpenAI (GPT)',
+    groq: 'Groq',
+    moonshot: 'Moonshot (Kimi)',
+    xai: 'xAI (Grok)',
+    ollama: 'Ollama (local)',
+    openrouter: 'OpenRouter',
+  };
+
+  /**
+   * Handle /model command — show or switch AI provider
+   */
+  private async handleModel(ctx: Context, userId: string): Promise<void> {
+    if (!this.providerRegistry) {
+      await ctx.reply('Model switching is not available.');
+      return;
+    }
+
+    const config = this.configManager.getUserConfig(userId);
+    // Filter out ollama (typically used for embeddings only, not chat)
+    const available = this.providerRegistry.getAvailableProviders()
+      .filter(p => p.name !== 'ollama');
+
+    if (available.length === 0) {
+      await ctx.reply('No AI providers are configured.');
+      return;
+    }
+
+    // Check if user passed an argument: /model <name|number>
+    const args = ctx.message?.text?.split(/\s+/).slice(1).join(' ').trim() || '';
+
+    if (!args) {
+      // Show current model and list available options
+      const current = config.modelId === 'auto'
+        ? 'auto (smart routing)'
+        : TelegramChannel.PROVIDER_LABELS[config.modelId] || config.modelId;
+
+      let list = '';
+      available.forEach((p, i) => {
+        const label = TelegramChannel.PROVIDER_LABELS[p.name] || p.name;
+        const marker = config.modelId === p.name ? ' ✓' : '';
+        list += `  <b>${i + 1}.</b> <code>${p.name}</code> — ${label}${marker}\n`;
+      });
+      const autoMarker = config.modelId === 'auto' ? ' ✓' : '';
+      list += `  <b>${available.length + 1}.</b> <code>auto</code> — Smart routing (picks by complexity)${autoMarker}\n`;
+
+      await ctx.reply(
+        `<b>Current model:</b> ${current}\n\n` +
+        `<b>Available:</b>\n${list}\n` +
+        `Reply <code>/model &lt;number or name&gt;</code> to switch.`,
+        { parse_mode: 'HTML' }
+      );
+      return;
+    }
+
+    // Parse selection — number or name
+    let selectedName: string;
+    const num = parseInt(args, 10);
+
+    if (!isNaN(num) && num >= 1 && num <= available.length + 1) {
+      // Numeric selection
+      if (num === available.length + 1) {
+        selectedName = 'auto';
+      } else {
+        selectedName = available[num - 1].name;
+      }
+    } else {
+      // Name selection
+      selectedName = args.toLowerCase();
+    }
+
+    // Validate
+    if (selectedName !== 'auto' && !available.some(p => p.name === selectedName)) {
+      await ctx.reply(
+        `Unknown model "<code>${args}</code>". Use /model to see available options.`,
+        { parse_mode: 'HTML' }
+      );
+      return;
+    }
+
+    // Save preference
+    await this.configManager.updateUserConfig(userId, { modelId: selectedName });
+
+    const label = selectedName === 'auto'
+      ? 'auto (smart routing)'
+      : TelegramChannel.PROVIDER_LABELS[selectedName] || selectedName;
+
+    await ctx.reply(`Switched to <b>${label}</b>`, { parse_mode: 'HTML' });
+    this.logger.info({ userId, model: selectedName }, 'User switched model');
+  }
+
+  /**
+   * Resolve the user's model preference to a provider (or undefined for auto/router)
+   */
+  private getProviderForUser(userId: string): LLMProvider | undefined {
+    if (!this.providerRegistry) return undefined;
+    const config = this.configManager.getUserConfig(userId);
+    if (config.modelId === 'auto') return undefined;
+    return this.providerRegistry.getProvider(config.modelId);
   }
 
   /**
@@ -745,7 +872,8 @@ export class TelegramChannel {
       const onProgress = this.buildOnProgress(userId, ctx);
 
       const shouldStop = () => this.stopRequests.has(userId);
-      const result = await this.agent.processMessage(sessionId, transcription.text, undefined, onProgress, shouldStop);
+      const providerOverride = this.getProviderForUser(userId);
+      const result = await this.agent.processMessage(sessionId, transcription.text, undefined, onProgress, shouldStop, providerOverride);
       this.stopRequests.delete(userId);
 
       clearInterval(typingInterval);
@@ -847,7 +975,8 @@ export class TelegramChannel {
       const onProgress = this.buildOnProgress(userId, ctx);
 
       const shouldStop = () => this.stopRequests.has(userId);
-      const result = await this.agent.processMessage(sessionId, prompt, undefined, onProgress, shouldStop);
+      const providerOverride = this.getProviderForUser(userId);
+      const result = await this.agent.processMessage(sessionId, prompt, undefined, onProgress, shouldStop, providerOverride);
       this.stopRequests.delete(userId);
 
       clearInterval(typingInterval);
@@ -1012,8 +1141,9 @@ export class TelegramChannel {
 
       const onProgress = this.buildOnProgress(userId, ctx);
       const shouldStop = () => this.stopRequests.has(userId);
+      const providerOverride = this.getProviderForUser(userId);
 
-      const result = await this.agent.processMessage(sessionId, prompt, attachments, onProgress, shouldStop);
+      const result = await this.agent.processMessage(sessionId, prompt, attachments, onProgress, shouldStop, providerOverride);
       this.stopRequests.delete(userId);
 
       clearInterval(typingInterval);
@@ -1133,8 +1263,9 @@ export class TelegramChannel {
 
       // Check if user wants to stop
       const shouldStop = () => this.stopRequests.has(userId);
+      const providerOverride = this.getProviderForUser(userId);
 
-      const result = await this.agent.processMessage(sessionId, fullMessage, undefined, onProgress, shouldStop);
+      const result = await this.agent.processMessage(sessionId, fullMessage, undefined, onProgress, shouldStop, providerOverride);
 
       // Clear stop request after processing
       this.stopRequests.delete(userId);
@@ -1322,6 +1453,7 @@ export class TelegramChannel {
     // Note: /start is intentionally omitted - it still works but doesn't clutter the menu
     await this.bot.api.setMyCommands([
       { command: 'help', description: 'Show available commands' },
+      { command: 'model', description: 'Switch AI model/provider' },
       { command: 'usage', description: 'View token usage and costs' },
       { command: 'stop', description: 'Stop current task' },
       { command: 'settings', description: 'View your current settings' },

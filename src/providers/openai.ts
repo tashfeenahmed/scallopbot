@@ -8,7 +8,29 @@ import type {
 } from './types.js';
 import { DEFAULT_MAX_RETRIES, RETRY_STATUS_CODES, RETRY_DELAY_MS } from './constants.js';
 
-const DEFAULT_MODEL = 'gpt-4o';
+/**
+ * OpenAI Model IDs
+ */
+export const OPENAI_MODELS = {
+  // GPT-5.2 (Latest reasoning)
+  'gpt-5.2': 'gpt-5.2',
+  'gpt-5.2-pro': 'gpt-5.2-pro',
+  // GPT-4.1 (Standard)
+  'gpt-4.1': 'gpt-4.1',
+  'gpt-4.1-mini': 'gpt-4.1-mini',
+  'gpt-4.1-nano': 'gpt-4.1-nano',
+  // Reasoning models
+  'o4-mini': 'o4-mini',
+  'o3': 'o3',
+  // Legacy
+  'gpt-4o': 'gpt-4o',
+  'gpt-4o-mini': 'gpt-4o-mini',
+} as const;
+
+/** Models that support reasoning_effort parameter */
+const REASONING_MODELS = new Set(['gpt-5.2', 'gpt-5.2-pro', 'o3', 'o4-mini']);
+
+const DEFAULT_MODEL = 'gpt-4.1';
 const DEFAULT_MAX_TOKENS = 4096;
 
 export interface ProviderCharacteristics {
@@ -48,14 +70,20 @@ export class OpenAIProvider implements LLMProvider {
 
   async complete(request: CompletionRequest): Promise<CompletionResponse> {
     const messages = this.formatMessages(request);
+    const isReasoning = REASONING_MODELS.has(this.model);
 
     const params: OpenAI.ChatCompletionCreateParams = {
       model: this.model,
       messages,
-      max_tokens: request.maxTokens || DEFAULT_MAX_TOKENS,
-      ...(request.temperature !== undefined && { temperature: request.temperature }),
+      // Reasoning models use max_completion_tokens instead of max_tokens
+      ...(isReasoning
+        ? { max_completion_tokens: request.maxTokens || DEFAULT_MAX_TOKENS }
+        : { max_tokens: request.maxTokens || DEFAULT_MAX_TOKENS }),
+      ...(request.temperature !== undefined && !isReasoning && { temperature: request.temperature }),
       ...(request.stopSequences && { stop: request.stopSequences }),
       ...(request.tools && { tools: this.formatTools(request.tools) }),
+      // Enable reasoning for thinking-capable models
+      ...(isReasoning && { reasoning_effort: request.enableThinking ? 'high' : 'medium' }),
     };
 
     const response = await this.executeWithRetry(() =>
@@ -183,12 +211,19 @@ export class OpenAIProvider implements LLMProvider {
       }
     }
 
+    // Extract reasoning tokens if present (GPT-5.2, o3, o4-mini)
+    const completionDetails = response.usage?.completion_tokens_details as
+      | { reasoning_tokens?: number } | undefined;
+
     return {
       content,
       stopReason: this.mapStopReason(choice.finish_reason),
       usage: {
         inputTokens: response.usage?.prompt_tokens || 0,
         outputTokens: response.usage?.completion_tokens || 0,
+        ...(completionDetails?.reasoning_tokens && {
+          reasoningTokens: completionDetails.reasoning_tokens,
+        }),
       },
       model: response.model,
     };

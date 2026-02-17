@@ -15,7 +15,7 @@ export interface UserBotConfig {
   personalityId: string;
   /** Custom personality prompt */
   customPersonality?: string;
-  /** Model ID (kept for backwards compat) */
+  /** Provider name for model selection ('auto' = smart routing, or provider name like 'anthropic') */
   modelId: string;
   /** User's IANA timezone (e.g. 'Europe/Dublin') */
   timezone: string;
@@ -46,7 +46,7 @@ export interface BotConfigStore {
 const DEFAULT_CONFIG: UserBotConfig = {
   botName: 'ScallopBot',
   personalityId: 'custom',
-  modelId: 'moonshot-v1-128k',
+  modelId: 'auto',
   timezone: 'UTC',
   onboardingComplete: false,
   onboardingStep: 'welcome',

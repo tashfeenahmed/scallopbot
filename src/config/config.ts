@@ -17,7 +17,7 @@ const anthropicProviderSchema = z.object({
 
 const openaiProviderSchema = z.object({
   apiKey: z.string().default(''),
-  model: z.string().default('gpt-4o'),
+  model: z.string().default('gpt-4.1'),
 });
 
 const groqProviderSchema = z.object({

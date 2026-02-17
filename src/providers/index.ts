@@ -1,6 +1,6 @@
 export * from './types.js';
 export { AnthropicProvider, ANTHROPIC_MODELS } from './anthropic.js';
-export { OpenAIProvider } from './openai.js';
+export { OpenAIProvider, OPENAI_MODELS } from './openai.js';
 export { GroqProvider } from './groq.js';
 export { OllamaProvider } from './ollama.js';
 export { OpenRouterProvider } from './openrouter.js';

@@ -193,7 +193,8 @@ export class Agent {
     userMessage: string,
     attachments?: Attachment[],
     onProgress?: ProgressCallback,
-    shouldStop?: ShouldStopCallback
+    shouldStop?: ShouldStopCallback,
+    providerOverride?: LLMProvider
   ): Promise<AgentResult> {
     const session = await this.sessionManager.getSession(sessionId);
     if (!session) {
@@ -255,9 +256,12 @@ export class Agent {
       'Complexity analysis'
     );
 
-    // Select provider based on complexity (use router if available, else default)
+    // Select provider: explicit override > router > default
     let activeProvider: LLMProvider = this.provider;
-    if (this.router) {
+    if (providerOverride) {
+      activeProvider = providerOverride;
+      this.logger.debug({ provider: activeProvider.name }, 'Provider set by user override');
+    } else if (this.router) {
       const selectedProvider = await this.router.selectProvider(complexity.suggestedModelTier);
       if (selectedProvider) {
         activeProvider = selectedProvider;
