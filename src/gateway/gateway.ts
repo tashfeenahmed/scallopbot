@@ -479,6 +479,7 @@ export class Gateway {
         allowedUsers: this.config.channels.telegram.allowedUsers,
         enableVoiceReply: this.config.channels.telegram.enableVoiceReply,
         voiceManager: this.voiceManager || undefined, // Share voice manager
+        providerRegistry: this.providerRegistry || undefined,
         onUserMessage: (prefixedUserId: string) => {
           this.unifiedScheduler?.checkEngagement(prefixedUserId);
         },

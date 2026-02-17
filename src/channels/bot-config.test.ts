@@ -64,7 +64,7 @@ describe('BotConfigManager', () => {
 
       expect(config.botName).toBe('ScallopBot');
       expect(config.personalityId).toBe('custom');
-      expect(config.modelId).toBe('moonshot-v1-128k');
+      expect(config.modelId).toBe('auto');
       expect(config.timezone).toBe('UTC');
       expect(config.onboardingComplete).toBe(false);
       expect(config.onboardingStep).toBe('welcome');
