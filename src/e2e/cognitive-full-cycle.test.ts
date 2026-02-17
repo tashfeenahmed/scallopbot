@@ -349,21 +349,12 @@ describe('E2E Cognitive Full Cycle', () => {
       source: 'inner_thoughts',
     };
 
-    it('should format proactive message for Telegram with icon, message, and footer', () => {
+    it('should format proactive message for Telegram as plain message', () => {
       const result = formatProactiveForTelegram(testInput);
 
-      // Assert result is a string
+      // Assert result is a string matching the message exactly
       expect(typeof result).toBe('string');
-
-      // Assert result contains an emoji/icon (default icon for unknown gapType)
-      // The default icon is used when gapType doesn't match known types
-      expect(result).toMatch(/[\u{1F300}-\u{1FFFF}]|[\u{2600}-\u{26FF}]|[\u{2700}-\u{27BF}]/u);
-
-      // Assert result contains the message text
-      expect(result).toContain(testInput.message);
-
-      // Assert result contains the dismiss footer
-      expect(result).toContain('dismiss');
+      expect(result).toBe(testInput.message);
     });
 
     it('should format proactive message for WebSocket with structured JSON', () => {
@@ -389,35 +380,19 @@ describe('E2E Cognitive Full Cycle', () => {
       // Telegram channel should return a string
       const telegramResult = formatProactiveMessage('telegram', testInput);
       expect(typeof telegramResult).toBe('string');
+      expect(telegramResult as string).toBe(testInput.message);
 
       // API (WebSocket) channel should return an object
-      // Note: the channel param is 'api' not 'websocket' in the actual API
       const apiResult = formatProactiveMessage('api', testInput);
       expect(typeof apiResult).toBe('object');
       expect(apiResult).not.toBeNull();
 
-      // Verify the telegram result contains the message
-      expect(telegramResult as string).toContain(testInput.message);
-
-      // Verify the API result has the proactive type
       const wsResult = apiResult as { type: string; content: string };
       expect(wsResult.type).toBe('proactive');
       expect(wsResult.content).toBe(testInput.message);
     });
 
-    it('should use correct icon for known gap types and truncate long messages', () => {
-      // Known gap type 'stale_goal' should use the target icon
-      const staleGoalInput: ProactiveFormatInput = {
-        message: 'Your goal seems stale. Want to revisit it?',
-        gapType: 'stale_goal',
-        urgency: 'high',
-        source: 'gap_scanner',
-      };
-      const staleResult = formatProactiveForTelegram(staleGoalInput);
-      // stale_goal maps to target icon U+1F3AF
-      expect(staleResult).toContain('\uD83C\uDFAF');
-
-      // Long messages (>250 chars) should be truncated with "..."
+    it('should pass through long messages without truncation', () => {
       const longMessage = 'A'.repeat(300);
       const longInput: ProactiveFormatInput = {
         message: longMessage,
@@ -426,9 +401,7 @@ describe('E2E Cognitive Full Cycle', () => {
         source: 'gap_scanner',
       };
       const longResult = formatProactiveForTelegram(longInput);
-      expect(longResult).toContain('...');
-      // Original 300-char message should NOT appear in full
-      expect(longResult).not.toContain(longMessage);
+      expect(longResult).toBe(longMessage);
     });
   });
 });

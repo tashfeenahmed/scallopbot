@@ -184,12 +184,21 @@ Format each trigger as:
 }
 
 KIND RULES:
-- "nudge": A pre-written message delivered directly to the user (default). Use for reminders, check-ins, and simple follow-ups where the description IS the message.
+- "nudge": A pre-written message delivered directly to the user (default). Use for reminders, check-ins, and simple follow-ups where the description IS the message sent to the user.
 - "task": Background work by a sub-agent before messaging the user. Use when the bot needs to DO something (search, look up, check, compute) before responding.
-- Examples of nudge: "Time for your standup!", "How's the Spanish learning going?", "Don't forget to call mom"
-- Examples of task: "Check flight EK204 status" (goal: search for flight info), "Look up weather for tomorrow's hike" (goal: search weather forecast)
 - When kind is "task", the "goal" field describes what the sub-agent should do, and "description" is the fallback message if the task fails
 - Default to "nudge" unless the trigger clearly requires the bot to perform research or actions
+
+NUDGE TONE — CRITICAL:
+The description for nudges is sent DIRECTLY to the user as a chat message. Write it like a casual, friendly message from a mate — not a robotic notification.
+- Use natural, conversational language. Imagine you're texting a friend.
+- BAD: "Eir fibre appointment tomorrow between 10am and 5pm"
+- GOOD: "Hey, just a heads up — your Eir fibre appointment is tomorrow, they said between 10 and 5."
+- BAD: "Check progress on agent mode proto for Dan"
+- GOOD: "Hey, how's the agent mode proto for Dan coming along? Wanted to check in on that."
+- BAD: "Dentist appointment at 2pm"
+- GOOD: "Just a reminder, you've got the dentist at 2 today."
+- Keep it brief but human. No emojis, no bullet points, no structured formatting.
 
 RECURRING RULES:
 - If the user says "daily", "every day", "every morning", "every evening", etc. → set recurring with type "daily"

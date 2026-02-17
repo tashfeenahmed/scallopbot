@@ -605,16 +605,15 @@ export class UnifiedScheduler {
     const unnotified = this.db.getUnnotifiedCompletedItems(userId);
     if (unnotified.length === 0) return 0;
 
-    const lines: string[] = ['📋 While you were away:'];
+    const lines: string[] = ['While you were away:'];
 
     for (const item of unnotified) {
       const result = item.result;
-      const title = item.message.substring(0, 60);
+      const title = item.message;
       if (result) {
-        const summary = result.response.substring(0, 100);
-        lines.push(`  ✅ ${title}: ${summary}${result.response.length > 100 ? '...' : ''}`);
+        lines.push(`- ${title}: ${result.response}`);
       } else {
-        lines.push(`  ✅ ${title}`);
+        lines.push(`- ${title}`);
       }
 
       // Mark as notified
@@ -625,7 +624,6 @@ export class UnifiedScheduler {
     }
 
     if (lines.length > 1) {
-      lines.push(`\nUse board detail <id> to see full results.`);
       await this.onSendMessage(userId, lines.join('\n'));
     }
 
