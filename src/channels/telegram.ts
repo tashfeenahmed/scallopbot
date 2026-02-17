@@ -10,6 +10,7 @@ import { BotConfigManager } from './bot-config.js';
 import { resolveTimezone } from '../utils/country-timezone.js';
 import type { ProviderRegistry } from '../providers/registry.js';
 import type { LLMProvider } from '../providers/types.js';
+import type { InterruptQueue } from '../agent/interrupt-queue.js';
 
 const MAX_MESSAGE_LENGTH = 4096;
 const TYPING_INTERVAL = 5000; // 5 seconds
@@ -33,6 +34,8 @@ export interface TelegramChannelOptions {
   providerRegistry?: ProviderRegistry; // For /model command
   /** Called when a user sends a message (for engagement detection) */
   onUserMessage?: (prefixedUserId: string) => void;
+  /** Interrupt queue for mid-loop user message injection */
+  interruptQueue?: InterruptQueue;
 }
 
 export function formatMarkdownToHtml(text: string): string {
@@ -119,6 +122,7 @@ export class TelegramChannel {
   private db: ScallopDatabase;
   private providerRegistry: ProviderRegistry | null = null;
   private onUserMessage?: (prefixedUserId: string) => void;
+  private interruptQueue: InterruptQueue | null = null;
   // Buffer for collecting media group photos (multiple photos sent at once)
   private mediaGroupBuffer: Map<string, {
     photos: Array<{ buffer: Buffer; mimeType: string }>;
@@ -141,6 +145,7 @@ export class TelegramChannel {
     this.db = options.db;
     this.providerRegistry = options.providerRegistry || null;
     this.onUserMessage = options.onUserMessage;
+    this.interruptQueue = options.interruptQueue || null;
 
     this.setupHandlers();
     this.initVoice();
@@ -281,6 +286,11 @@ export class TelegramChannel {
       const queue = this.userQueues.get(userId);
       const queuedCount = queue?.length || 0;
       this.userQueues.delete(userId);
+      // Clear any pending interrupts for this user's session
+      if (this.interruptQueue) {
+        const sessionId = this.userSessions.get(userId);
+        if (sessionId) this.interruptQueue.clear(sessionId);
+      }
 
       if (wasActive) {
         const queueMsg = queuedCount > 0 ? ` Cleared ${queuedCount} queued message${queuedCount > 1 ? 's' : ''}.` : '';
@@ -1227,6 +1237,14 @@ export class TelegramChannel {
     }
 
     if (this.activeProcessing.has(userId)) {
+      // Inject text messages into the running agent loop via interrupt queue
+      if (this.interruptQueue) {
+        const sessionId = await this.getOrCreateSession(userId);
+        const fullMessage = this.buildMessageWithReplyContext(ctx, messageText);
+        this.interruptQueue.enqueue({ sessionId, text: fullMessage, timestamp: Date.now() });
+        return;
+      }
+      // Fallback: queue for sequential processing if no interrupt queue
       this.enqueue(userId, { type: 'text', execute: () => this.processTextCore(ctx) });
       return;
     }
