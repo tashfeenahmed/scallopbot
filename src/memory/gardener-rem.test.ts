@@ -120,11 +120,10 @@ describe('BackgroundGardener REM integration', () => {
     // Make Gaussian noise deterministic (zero) so spreading activation candidates
     // aren't randomly filtered out. gaussianNoise uses Box-Muller:
     //   sigma * sqrt(-2*log(u1)) * cos(2*PI*u2)
-    // When u2 = 0.25, cos(PI/2) = 0, so noise = 0 regardless of u1.
-    let callIdx = 0;
-    const randomSpy = vi.spyOn(Math, 'random').mockImplementation(() => {
-      return (callIdx++ % 2 === 0) ? 0.5 : 0.25;
-    });
+    // Always return 0.25 so that EVERY call pair gets cos(2*PI*0.25) = cos(PI/2) ≈ 0,
+    // producing zero noise regardless of how many total Math.random calls occur
+    // (the old alternating pattern was fragile to call-count parity shifts).
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0.25);
 
     // Provider returns NREM fusion for NREM calls, REM judge for REM calls.
     // Since both NREM and REM share the provider, we use a smart mock that
