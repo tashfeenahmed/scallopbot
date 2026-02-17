@@ -134,6 +134,15 @@ export class Gateway {
     });
     this.logger.info({ dbPath, count: this.scallopMemoryStore.getCount() }, 'ScallopMemory initialized');
 
+    // Load runtime vault keys into process.env (before skill loading so gates pass)
+    const runtimeKeys = this.scallopMemoryStore.getDatabase().getAllRuntimeKeys();
+    for (const { key, value } of runtimeKeys) {
+      process.env[key] = value;
+    }
+    if (runtimeKeys.length > 0) {
+      this.logger.info({ count: runtimeKeys.length }, 'Runtime vault keys loaded into process.env');
+    }
+
     // Initialize cost tracker (with SQLite persistence)
     this.costTracker = new CostTracker({
       dailyBudget: this.config.cost.dailyBudget,
@@ -985,15 +994,18 @@ export class Gateway {
     const { SkillPackageManager } = await import('../skills/clawhub.js');
     const pkgManager = new SkillPackageManager({ logger: this.logger });
     const registry = this.skillRegistry;
+    const db = this.scallopMemoryStore!.getDatabase();
 
-    const skill = defineSkill('manage_skills', 'Search, install, uninstall, or list skills from ClawHub (clawhub.ai). After install/uninstall, skills are hot-reloaded automatically.')
+    const skill = defineSkill('manage_skills', 'Search, install, uninstall, or list skills from ClawHub (clawhub.ai). Also manages runtime API keys for gated skills.')
       .userInvocable(false)
       .inputSchema({
         type: 'object',
         properties: {
-          action: { type: 'string', description: 'One of: search, install, uninstall, list' },
+          action: { type: 'string', description: 'One of: search, install, uninstall, list, set_key, remove_key' },
           query: { type: 'string', description: 'Search query (for search action)' },
           slug: { type: 'string', description: 'Skill slug e.g. "owner/skill-name" (for install/uninstall)' },
+          key_name: { type: 'string', description: 'Environment variable name, e.g. WEATHER_API_KEY (for set_key/remove_key)' },
+          key_value: { type: 'string', description: 'The API key value (for set_key)' },
         },
         required: ['action'],
       })
@@ -1022,8 +1034,32 @@ export class Gateway {
             const installed = await pkgManager.listInstalled();
             return { success: true, output: installed.length ? installed.join('\n') : 'No skills installed' };
           }
+          case 'set_key': {
+            const keyName = ctx.args.key_name as string | undefined;
+            const keyValue = ctx.args.key_value as string | undefined;
+            if (!keyName || !keyValue) {
+              return { success: false, output: 'set_key requires key_name and key_value' };
+            }
+            if (!/^[A-Z][A-Z0-9_]*$/.test(keyName)) {
+              return { success: false, output: `Invalid key name "${keyName}". Must be UPPER_SNAKE_CASE (e.g. WEATHER_API_KEY).` };
+            }
+            db.setRuntimeKey(keyName, keyValue);
+            process.env[keyName] = keyValue;
+            await registry.reloadFromDisk();
+            return { success: true, output: `Key "${keyName}" set. Skills requiring it are now available.` };
+          }
+          case 'remove_key': {
+            const keyName = ctx.args.key_name as string | undefined;
+            if (!keyName) {
+              return { success: false, output: 'remove_key requires key_name' };
+            }
+            db.deleteRuntimeKey(keyName);
+            delete process.env[keyName];
+            await registry.reloadFromDisk();
+            return { success: true, output: `Key "${keyName}" removed.` };
+          }
           default:
-            return { success: false, output: `Unknown action: ${action}. Use search, install, uninstall, or list.` };
+            return { success: false, output: `Unknown action: ${action}. Use search, install, uninstall, list, set_key, or remove_key.` };
         }
       })
       .build();

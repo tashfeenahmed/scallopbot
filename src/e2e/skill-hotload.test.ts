@@ -362,4 +362,95 @@ describe('E2E Skill Hot-Loading', () => {
       expect(secondRequestTools).toContain('register_new_skill');
     }, 20000);
   });
+
+  // --------------------------------------------------------------------------
+  // Scenario 4: Runtime key vault enables a gated skill
+  // --------------------------------------------------------------------------
+  describe('Scenario 4: Key vault enables gated skill', () => {
+    let ctx: E2EGatewayContext;
+    const ENV_KEY = 'TEST_VAULT_KEY_E2E';
+
+    /**
+     * Write a skill with an env gate so it requires TEST_VAULT_KEY_E2E.
+     */
+    async function writeGatedSkillToDisk(skillsDir: string): Promise<void> {
+      const skillDir = path.join(skillsDir, 'gated-skill');
+      await fs.mkdir(skillDir, { recursive: true });
+
+      const skillMd = `---
+name: gated-skill
+description: A gated test skill that requires an API key
+metadata:
+  openclaw:
+    requires:
+      env:
+        - ${ENV_KEY}
+scripts:
+  run: scripts/run.sh
+---
+
+Instructions for gated-skill.
+`;
+      await fs.writeFile(path.join(skillDir, 'SKILL.md'), skillMd, 'utf-8');
+
+      const scriptsDir = path.join(skillDir, 'scripts');
+      await fs.mkdir(scriptsDir, { recursive: true });
+      await fs.writeFile(path.join(scriptsDir, 'run.sh'), '#!/bin/bash\necho "ok"', { mode: 0o755 });
+    }
+
+    beforeAll(async () => {
+      // Ensure the env var is NOT set
+      delete process.env[ENV_KEY];
+
+      ctx = await createE2EGateway({ responses: ['OK [DONE]'] });
+
+      // Write the gated skill to disk
+      await writeGatedSkillToDisk(WORKSPACE_SKILLS_DIR);
+
+      // Reload so the loader picks it up (gate will fail — env missing)
+      await ctx.skillRegistry.reloadFromDisk();
+    }, 30000);
+
+    afterAll(async () => {
+      // Cleanup: remove env var and test DB
+      delete process.env[ENV_KEY];
+      await cleanupE2E(ctx);
+      await fs.rm(path.join(WORKSPACE_SKILLS_DIR, 'gated-skill'), { recursive: true, force: true }).catch(() => {});
+    }, 15000);
+
+    it('should unlock a gated skill after setting an API key via the vault', async () => {
+      const db = ctx.scallopStore.getDatabase();
+
+      // 1. Skill should NOT be available (env gate fails)
+      const toolsBefore = ctx.skillRegistry.getToolDefinitions();
+      expect(toolsBefore.find(t => t.name === 'gated-skill')).toBeUndefined();
+
+      // 2. Set the key via the vault (same as manage_skills set_key handler)
+      db.setRuntimeKey(ENV_KEY, 'test-secret-123');
+      process.env[ENV_KEY] = 'test-secret-123';
+
+      // 3. Reload — gate should now pass
+      await ctx.skillRegistry.reloadFromDisk();
+
+      const toolsAfter = ctx.skillRegistry.getToolDefinitions();
+      const gatedTool = toolsAfter.find(t => t.name === 'gated-skill');
+      expect(gatedTool).toBeDefined();
+      expect(gatedTool!.description).toContain('gated test skill');
+
+      // 4. Verify key is persisted in DB
+      expect(db.getRuntimeKey(ENV_KEY)).toBe('test-secret-123');
+      expect(db.getAllRuntimeKeys().find(k => k.key === ENV_KEY)).toBeDefined();
+
+      // 5. Remove the key — skill should become unavailable again
+      db.deleteRuntimeKey(ENV_KEY);
+      delete process.env[ENV_KEY];
+      await ctx.skillRegistry.reloadFromDisk();
+
+      const toolsAfterRemove = ctx.skillRegistry.getToolDefinitions();
+      expect(toolsAfterRemove.find(t => t.name === 'gated-skill')).toBeUndefined();
+
+      // 6. Key should be gone from DB
+      expect(db.getRuntimeKey(ENV_KEY)).toBeNull();
+    });
+  });
 });

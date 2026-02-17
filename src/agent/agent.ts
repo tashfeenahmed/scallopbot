@@ -701,7 +701,11 @@ You can search for and install new skills from ClawHub (clawhub.ai) using the ma
 - To install: manage_skills with action="install", slug="owner/skill-name"
 - To uninstall: manage_skills with action="uninstall", slug="skill-name"
 - To list installed: manage_skills with action="list"
+- To set an API key: manage_skills with action="set_key", key_name="WEATHER_API_KEY", key_value="sk-..."
+- To remove a key: manage_skills with action="remove_key", key_name="WEATHER_API_KEY"
 After installing a skill, it becomes available immediately — no restart needed.
+Keys take effect immediately and persist across restarts. After setting a key, skills that require it become available.
+When a user provides an API key, always store it via set_key so it persists.
 Only install skills when the user asks, or when you determine a skill would help accomplish the user's request and they confirm.`;
 
     // Load SOUL.md if present
