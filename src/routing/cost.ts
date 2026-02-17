@@ -66,6 +66,7 @@ const DEFAULT_PRICING: Record<string, ModelPricing> = {
 
   // OpenAI — GPT-5.x
   'gpt-5.2': { inputPerMillion: 1.75, outputPerMillion: 14 },
+  'gpt-5.2-2025-12-11': { inputPerMillion: 1.75, outputPerMillion: 14 },
   'gpt-5.2-chat': { inputPerMillion: 1.75, outputPerMillion: 14 },
   'gpt-5.2-codex': { inputPerMillion: 1.75, outputPerMillion: 14 },
   'gpt-5.2-pro': { inputPerMillion: 21, outputPerMillion: 168 },
