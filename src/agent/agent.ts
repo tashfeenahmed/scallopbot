@@ -411,15 +411,18 @@ export class Agent {
 
       // Enable thinking for providers that support it (complexity gating removed —
       // the model decides internally how much to think based on the query)
-      const providerSupportsThinking = activeProvider.name === 'moonshot';
+      const providerSupportsThinking = activeProvider.name === 'moonshot' || activeProvider.name === 'openai';
       const useThinking = this.enableThinking && providerSupportsThinking;
 
       // Build completion request
+      // Reasoning models (GPT-5.2, o3, etc.) need higher token limit since
+      // reasoning tokens count against max_completion_tokens
+      const maxTokens = useThinking && activeProvider.name === 'openai' ? 16384 : 4096;
       const request: CompletionRequest = {
         messages,
         system: systemPrompt,
         tools: tools.length > 0 ? tools : undefined,
-        maxTokens: 4096,
+        maxTokens,
         enableThinking: useThinking,
       };
 
