@@ -39,6 +39,7 @@ import { BotConfigManager } from '../channels/bot-config.js';
 import { GoalService } from '../goals/index.js';
 import { BoardService } from '../board/board-service.js';
 import { SubAgentRegistry, SubAgentExecutor, AnnounceQueue } from '../subagent/index.js';
+import { InterruptQueue } from '../agent/interrupt-queue.js';
 
 export interface GatewayOptions {
   config: Config;
@@ -71,6 +72,7 @@ export class Gateway {
   private subAgentRegistry: SubAgentRegistry | null = null;
   private subAgentExecutor: SubAgentExecutor | null = null;
   private announceQueue: AnnounceQueue | null = null;
+  private interruptQueue: InterruptQueue | null = null;
 
   /** Registry of active trigger sources for multi-channel message dispatch */
   private triggerSources: TriggerSourceRegistry = new Map();
@@ -252,6 +254,7 @@ export class Gateway {
     // Initialize sub-agent infrastructure
     const subagentConfig = this.config.subagent;
     this.announceQueue = new AnnounceQueue({ maxQueueSize: 20, logger: this.logger });
+    this.interruptQueue = new InterruptQueue({ maxQueueSize: 10, logger: this.logger });
     this.subAgentRegistry = new SubAgentRegistry({ config: subagentConfig, logger: this.logger });
 
     // Recover orphaned sub-agent runs from SQLite on startup
@@ -330,6 +333,7 @@ export class Gateway {
       enableThinking: this.config.providers.moonshot.enableThinking,
       announceQueue: this.announceQueue,
       subAgentExecutor: this.subAgentExecutor,
+      interruptQueue: this.interruptQueue,
     });
     this.logger.debug('Agent initialized');
 
@@ -480,6 +484,7 @@ export class Gateway {
         enableVoiceReply: this.config.channels.telegram.enableVoiceReply,
         voiceManager: this.voiceManager || undefined, // Share voice manager
         providerRegistry: this.providerRegistry || undefined,
+        interruptQueue: this.interruptQueue || undefined,
         onUserMessage: (prefixedUserId: string) => {
           this.unifiedScheduler?.checkEngagement(prefixedUserId);
         },
@@ -506,6 +511,7 @@ export class Gateway {
         costTracker: this.costTracker || undefined,
         memoryStore: this.scallopMemoryStore || undefined,
         db: this.scallopMemoryStore?.getDatabase(),
+        interruptQueue: this.interruptQueue || undefined,
       });
       await this.apiChannel.start();
 

@@ -32,6 +32,7 @@ import type { ScallopMemoryStore } from '../memory/scallop-store.js';
 import type { ScallopDatabase } from '../memory/db.js';
 import { AuthService } from './auth.js';
 import { nanoid } from 'nanoid';
+import type { InterruptQueue } from '../agent/interrupt-queue.js';
 
 /** Maximum request body size (1MB) */
 const MAX_BODY_SIZE = 1024 * 1024;
@@ -64,6 +65,8 @@ export interface ApiChannelConfig {
   memoryStore?: ScallopMemoryStore;
   /** Database for web UI auth (optional — enables password login) */
   db?: ScallopDatabase;
+  /** Interrupt queue for mid-loop user message injection */
+  interruptQueue?: InterruptQueue;
 }
 
 /** Content-Type mapping for static files */
@@ -167,7 +170,7 @@ interface WsResponse {
 export class ApiChannel implements Channel, TriggerSource {
   name = 'api';
 
-  private config: Required<Omit<ApiChannelConfig, 'apiKey' | 'allowedOrigins' | 'staticDir' | 'costTracker' | 'memoryStore' | 'db'>> & {
+  private config: Required<Omit<ApiChannelConfig, 'apiKey' | 'allowedOrigins' | 'staticDir' | 'costTracker' | 'memoryStore' | 'db' | 'interruptQueue'>> & {
     apiKey?: string;
     allowedOrigins: string[];
     staticDir?: string;
@@ -183,6 +186,9 @@ export class ApiChannel implements Channel, TriggerSource {
   private clientsByUser: Map<string, Set<WebSocket>> = new Map();
   /** Track stop requests by clientId */
   private stopRequests: Set<string> = new Set();
+  /** Track clients with in-flight agent calls */
+  private activeProcessing: Set<string> = new Set();
+  private interruptQueue: InterruptQueue | null = null;
   private authService: AuthService | null = null;
 
   constructor(config: ApiChannelConfig) {
@@ -200,6 +206,7 @@ export class ApiChannel implements Channel, TriggerSource {
       logger: config.logger,
     };
     this.logger = config.logger.child({ channel: 'api' });
+    this.interruptQueue = config.interruptQueue || null;
     if (config.db) {
       this.authService = new AuthService(config.db);
     }
@@ -968,12 +975,19 @@ export class ApiChannel implements Channel, TriggerSource {
         this.sendWsMessage(ws, { type: 'pong' });
         break;
 
-      case 'stop':
+      case 'stop': {
         this.stopRequests.add(clientId);
+        // Clear any pending interrupts for this client's session
+        if (this.interruptQueue) {
+          const stopUserId = `ws-${clientId}`;
+          const stopSessionId = this.userSessions.get(stopUserId);
+          if (stopSessionId) this.interruptQueue.clear(stopSessionId);
+        }
         this.logger.debug({ clientId }, 'Stop requested');
         break;
+      }
 
-      case 'chat':
+      case 'chat': {
         if (!message.message) {
           this.sendWsMessage(ws, { type: 'error', error: 'Message is required' });
           return;
@@ -983,11 +997,20 @@ export class ApiChannel implements Channel, TriggerSource {
         const userId = `ws-${clientId}`;
         const sessionId = await this.getOrCreateSession(userId);
 
+        // If already processing and no attachments, inject via interrupt queue
+        const hasAttachments = message.attachments && message.attachments.length > 0;
+        if (this.activeProcessing.has(clientId) && this.interruptQueue && !hasAttachments) {
+          this.interruptQueue.enqueue({ sessionId, text: message.message, timestamp: Date.now() });
+          this.logger.debug({ clientId, sessionId }, 'Message pushed to interrupt queue');
+          return;
+        }
+
         this.logger.debug(
           { clientId, sessionId, messageLength: message.message.length },
           'WebSocket chat'
         );
 
+        this.activeProcessing.add(clientId);
         try {
           // Progress callback to send debug updates to WebSocket
           const onProgress = async (update: { type: string; message: string; toolName?: string; iteration?: number; count?: number; action?: string; items?: { type: string; content: string; subject?: string }[] }) => {
@@ -1032,8 +1055,8 @@ export class ApiChannel implements Channel, TriggerSource {
 
           // Convert WebSocket attachments to agent Attachment format
           let attachments: Attachment[] | undefined;
-          if (message.attachments && message.attachments.length > 0) {
-            attachments = message.attachments.map((att) => ({
+          if (hasAttachments) {
+            attachments = message.attachments!.map((att) => ({
               type: att.type === 'image' ? 'image' as const : 'file' as const,
               data: Buffer.from(att.data, 'base64'),
               mimeType: att.mimeType,
@@ -1064,8 +1087,11 @@ export class ApiChannel implements Channel, TriggerSource {
           const err = error as Error;
           this.logger.error({ clientId, sessionId, error: err.message }, 'WebSocket chat error');
           this.sendWsMessage(ws, { type: 'error', error: 'Failed to process message' });
+        } finally {
+          this.activeProcessing.delete(clientId);
         }
         break;
+      }
 
       default:
         this.sendWsMessage(ws, { type: 'error', error: `Unknown message type: ${message.type}` });

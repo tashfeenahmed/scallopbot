@@ -25,6 +25,7 @@ import type { BotConfigManager } from '../channels/bot-config.js';
 import type { AnnounceQueue } from '../subagent/announce-queue.js';
 import type { SubAgentExecutor } from '../subagent/executor.js';
 import type { BoardService } from '../board/board-service.js';
+import type { InterruptQueue } from './interrupt-queue.js';
 
 export interface AgentOptions {
   provider: LLMProvider;
@@ -51,6 +52,8 @@ export interface AgentOptions {
   subAgentExecutor?: SubAgentExecutor;
   /** Board service for task board context injection */
   boardService?: BoardService;
+  /** Interrupt queue for mid-loop user message injection */
+  interruptQueue?: InterruptQueue;
 }
 
 export interface AgentResult {
@@ -157,6 +160,8 @@ export class Agent {
   private subAgentExecutor: SubAgentExecutor | null;
   /** Board service for task board context injection */
   private boardService: BoardService | null;
+  /** Interrupt queue for mid-loop user message injection */
+  private interruptQueue: InterruptQueue | null;
 
   constructor(options: AgentOptions) {
     this.provider = options.provider;
@@ -179,6 +184,7 @@ export class Agent {
     this.announceQueue = options.announceQueue || null;
     this.subAgentExecutor = options.subAgentExecutor || null;
     this.boardService = options.boardService || null;
+    this.interruptQueue = options.interruptQueue || null;
 
     this.logger.info({ enableThinking: this.enableThinking }, 'Agent thinking mode configured');
   }
@@ -364,6 +370,7 @@ export class Agent {
         if (this.subAgentExecutor) {
           this.subAgentExecutor.cancelForParent(sessionId);
         }
+        this.interruptQueue?.clear(sessionId);
         finalResponse = 'Stopped by user request.';
         break;
       }
@@ -388,6 +395,25 @@ export class Agent {
           });
         }
         this.logger.debug({ sessionId, drained: entries.length }, 'Sub-agent results injected into context');
+      }
+
+      // Drain user interrupts (messages sent while agent is processing)
+      if (this.interruptQueue?.hasPending(sessionId)) {
+        const interrupts = this.interruptQueue.drain(sessionId);
+        for (const interrupt of interrupts) {
+          await this.sessionManager.addMessage(sessionId, { role: 'user', content: interrupt.text });
+          // Queue async fact extraction (non-blocking)
+          if (this.factExtractor) {
+            this.factExtractor.queueForExtraction(
+              interrupt.text,
+              resolvedUserId,
+              this.lastAssistantResponses.get(sessionId) || undefined
+            ).catch((error) => {
+              this.logger.warn({ error: (error as Error).message }, 'Async fact extraction failed for interrupt');
+            });
+          }
+        }
+        this.logger.debug({ sessionId, drained: interrupts.length }, 'User interrupts injected into context');
       }
 
       // Check budget before each iteration
@@ -482,6 +508,18 @@ export class Agent {
 
       // If task is explicitly complete OR no tool use with end_turn, we're done
       if (taskComplete || (response.stopReason === 'end_turn' && toolUses.length === 0)) {
+        // Before breaking, check if user sent new messages during this LLM call
+        if (this.interruptQueue?.hasPending(sessionId)) {
+          // Save assistant response, but DON'T break — continue loop to drain interrupts
+          await this.sessionManager.addMessage(sessionId, {
+            role: 'assistant',
+            content: response.content,
+          });
+          this.logger.info({ sessionId }, 'Pending user interrupts detected at exit — continuing loop');
+          continue;
+        }
+
+        // No interrupts — normal exit
         // Strip [DONE] marker from response if present
         finalResponse = taskComplete
           ? this.stripDoneMarker(textContent)
@@ -546,6 +584,7 @@ export class Agent {
         if (this.subAgentExecutor) {
           this.subAgentExecutor.cancelForParent(sessionId);
         }
+        this.interruptQueue?.clear(sessionId);
         finalResponse = 'Stopped by user request.';
         break;
       }
