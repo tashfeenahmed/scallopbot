@@ -1315,7 +1315,38 @@ Respond with JSON only:
     if (!this.scallopStore || triggers.length === 0) return;
 
     const db = this.scallopStore.getDatabase();
+
+    // Enforce daily budget: count agent-sourced items created today
+    const MAX_DAILY_TRIGGERS = 5;
+    const tz = this.getTimezone(userId);
+    const now = new Date();
+    const formatter = new Intl.DateTimeFormat('en-US', { timeZone: tz, hour: '2-digit', hour12: false });
+    const hourStr = formatter.formatToParts(now).find(p => p.type === 'hour')?.value ?? '0';
+    const todayStartMs = now.getTime() - (parseInt(hourStr, 10) * 3600000 + now.getMinutes() * 60000 + now.getSeconds() * 1000 + now.getMilliseconds());
+    const existingItems = db.getScheduledItemsByUser(userId);
+    const todayAgentCount = existingItems.filter(
+      i => i.source === 'agent' && i.createdAt >= todayStartMs
+    ).length;
+    let remainingBudget = Math.max(0, MAX_DAILY_TRIGGERS - todayAgentCount);
+
+    if (remainingBudget === 0) {
+      this.logger.debug(
+        { todayAgentCount, max: MAX_DAILY_TRIGGERS },
+        'Daily trigger budget exhausted, skipping all extracted triggers'
+      );
+      return;
+    }
+
     for (const trigger of triggers) {
+      // Enforce daily budget per trigger
+      if (remainingBudget <= 0) {
+        this.logger.debug(
+          { skipped: trigger.description },
+          'Daily trigger budget exhausted, skipping remaining triggers'
+        );
+        break;
+      }
+
       if (!trigger.description || !trigger.trigger_time || !trigger.context) continue;
 
       const triggerAt = this.parseTriggerTime(trigger.trigger_time);
@@ -1376,6 +1407,7 @@ Respond with JSON only:
         boardStatus: 'inbox',
         priority,
       });
+      remainingBudget--;
       this.logger.info(
         {
           type: trigger.type,

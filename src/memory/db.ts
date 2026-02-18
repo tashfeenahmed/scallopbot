@@ -2487,6 +2487,31 @@ export class ScallopDatabase {
   }
 
   /**
+   * Null out session_id references on scheduled items that point to non-existent sessions.
+   * Prevents "Session not found" errors when scheduled items fire.
+   */
+  cleanStaleScheduledItemSessions(): number {
+    // Find scheduled items with non-null session_id where the session no longer exists
+    const staleItems = this.db.prepare(`
+      SELECT si.id FROM scheduled_items si
+      WHERE si.session_id IS NOT NULL
+        AND si.session_id != ''
+        AND NOT EXISTS (SELECT 1 FROM sessions s WHERE s.id = si.session_id)
+    `).all() as Array<{ id: string }>;
+
+    if (staleItems.length === 0) return 0;
+
+    const updateStmt = this.db.prepare(
+      'UPDATE scheduled_items SET session_id = NULL, updated_at = ? WHERE id = ?'
+    );
+    const now = Date.now();
+    for (const item of staleItems) {
+      updateStmt.run(now, item.id);
+    }
+    return staleItems.length;
+  }
+
+  /**
    * Remove user profile entries whose value is textually similar to superseded memory content.
    * Prevents stale profile fields (e.g. "focus: meeting with X") from persisting after
    * the source memory is superseded or forgotten.

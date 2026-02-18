@@ -35,6 +35,7 @@ import { MediaProcessor } from '../media/index.js';
 import { VoiceManager } from '../voice/index.js';
 import { type TriggerSource, type TriggerSourceRegistry, parseUserIdPrefix } from '../triggers/index.js';
 import { UnifiedScheduler } from '../proactive/index.js';
+import { OutboundQueue } from '../proactive/outbound-queue.js';
 import { BotConfigManager } from '../channels/bot-config.js';
 import { GoalService } from '../goals/index.js';
 import { BoardService } from '../board/board-service.js';
@@ -73,6 +74,7 @@ export class Gateway {
   private subAgentExecutor: SubAgentExecutor | null = null;
   private announceQueue: AnnounceQueue | null = null;
   private interruptQueue: InterruptQueue | null = null;
+  private outboundQueue: OutboundQueue | null = null;
 
   /** Registry of active trigger sources for multi-channel message dispatch */
   private triggerSources: TriggerSourceRegistry = new Map();
@@ -353,6 +355,12 @@ export class Gateway {
     });
     this.logger.debug('Agent initialized');
 
+    // Initialize outbound queue (rate-limits proactive messages across all subsystems)
+    this.outboundQueue = new OutboundQueue({
+      sendMessage: (userId: string, message: string) => this.handleProactiveMessage(userId, message),
+      logger: this.logger,
+    });
+
     // Initialize unified scheduler (handles both user reminders and agent triggers)
     if (this.scallopMemoryStore) {
       this.unifiedScheduler = new UnifiedScheduler({
@@ -363,9 +371,7 @@ export class Gateway {
         subAgentExecutor: this.subAgentExecutor || undefined,
         sessionManager: this.sessionManager || undefined,
         interval: 30 * 1000, // Check every 30 seconds
-        onSendMessage: async (userId: string, message: string) => {
-          return this.handleProactiveMessage(userId, message);
-        },
+        onSendMessage: this.outboundQueue.createHandler(),
         getTimezone: (userId: string) => this.configManager!.getUserTimezone(userId),
       });
       this.logger.debug('Unified scheduler initialized');
@@ -541,6 +547,11 @@ export class Gateway {
       }
     }
 
+    // Start outbound queue (before scheduler so deliveries are ready)
+    if (this.outboundQueue) {
+      this.outboundQueue.start();
+    }
+
     // Start unified scheduler (after trigger sources are registered)
     if (this.unifiedScheduler) {
       void this.unifiedScheduler.start();
@@ -596,6 +607,12 @@ export class Gateway {
     // Stop unified scheduler
     if (this.unifiedScheduler) {
       this.unifiedScheduler.stop();
+    }
+
+    // Stop outbound queue
+    if (this.outboundQueue) {
+      this.outboundQueue.stop();
+      this.outboundQueue = null;
     }
 
     // Clear trigger sources before stopping channels
