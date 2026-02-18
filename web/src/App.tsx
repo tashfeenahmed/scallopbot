@@ -30,6 +30,8 @@ export interface ChatMessage {
   type: 'user' | 'assistant' | 'system' | 'error' | 'debug' | 'memory' | 'file';
   content: string;
   isMarkdown?: boolean;
+  // DB message ID for cursor pagination
+  _dbId?: number;
   // Debug fields
   debugType?: 'tool-start' | 'tool-complete' | 'tool-error' | 'memory' | 'thinking';
   label?: string;
@@ -39,6 +41,24 @@ export interface ChatMessage {
   // File fields
   filePath?: string;
   caption?: string;
+}
+
+/** Extract text from DB content — handles JSON ContentBlock[] or plain strings */
+function deserializeContent(content: string): string {
+  if (!content) return '';
+  // Try parsing as JSON ContentBlock array
+  if (content.startsWith('[')) {
+    try {
+      const blocks = JSON.parse(content) as Array<{ type: string; text?: string }>;
+      return blocks
+        .filter((b) => b.type === 'text' && b.text)
+        .map((b) => b.text!)
+        .join('\n\n');
+    } catch {
+      // Not valid JSON, return as-is
+    }
+  }
+  return content;
 }
 
 let messageIdCounter = 0;
@@ -52,9 +72,13 @@ export default function App() {
     const stored = localStorage.getItem('darkMode');
     return stored ? stored === 'true' : true;
   });
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
+  const [hasMore, setHasMore] = useState(false);
+  const [historyLoaded, setHistoryLoaded] = useState(false);
   const { costs, refetch: refetchCosts } = useCosts();
   const { authState, error: authError, setup, login, logout } = useAuth();
   const inputRef = useRef<HTMLInputElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
 
   // Sync view changes to browser URL
   const handleViewChange = useCallback((view: ViewMode) => {
@@ -87,6 +111,12 @@ export default function App() {
       switch (data.type) {
         case 'response':
           setIsWaiting(false);
+          // Empty sessionId from /new command — clear history
+          if (data.sessionId === '') {
+            setMessages([]);
+            setHasMore(false);
+            setHistoryLoaded(false);
+          }
           if (data.content) {
             addMessage({ type: 'assistant', content: data.content, isMarkdown: true });
           }
@@ -205,10 +235,130 @@ export default function App() {
     [addMessage, refetchCosts]
   );
 
-  const { status, sendMessage, sendStop } = useWebSocket({
+  const { status, sendMessage, sendStop, sessionId } = useWebSocket({
     onMessage: handleWsMessage,
     enabled: authState === 'authenticated',
   });
+
+  // Load chat history when connected
+  useEffect(() => {
+    if (status !== 'connected' || historyLoaded) return;
+
+    const loadHistory = async () => {
+      try {
+        // Get current session
+        const sessionRes = await fetch('/api/sessions/current');
+        if (!sessionRes.ok) {
+          setHistoryLoaded(true);
+          return;
+        }
+        const session = await sessionRes.json();
+
+        // Fetch latest messages
+        const msgRes = await fetch(`/api/sessions/${session.id}/messages?limit=50`);
+        if (!msgRes.ok) {
+          setHistoryLoaded(true);
+          return;
+        }
+        const { messages: dbMessages, hasMore: more } = await msgRes.json();
+
+        if (dbMessages && dbMessages.length > 0) {
+          const chatMessages: ChatMessage[] = dbMessages
+            .filter((m: { role: string }) => m.role === 'user' || m.role === 'assistant')
+            .map((m: { id: number; role: string; content: string }) => ({
+              id: ++messageIdCounter,
+              type: m.role as 'user' | 'assistant',
+              content: m.role === 'assistant' ? deserializeContent(m.content) : m.content,
+              isMarkdown: m.role === 'assistant',
+              _dbId: m.id,
+            }));
+
+          setMessages(chatMessages);
+          setHasMore(more);
+
+          // Scroll to bottom after history loads
+          requestAnimationFrame(() => {
+            if (containerRef.current) {
+              containerRef.current.scrollTop = containerRef.current.scrollHeight;
+            }
+          });
+        }
+      } catch (err) {
+        console.error('Failed to load chat history:', err);
+      }
+      setHistoryLoaded(true);
+    };
+
+    loadHistory();
+  }, [status, historyLoaded]);
+
+  const handleLoadMore = useCallback(async () => {
+    if (isLoadingMore || !hasMore) return;
+
+    // Find oldest _dbId in current messages
+    const oldestDbId = messages.reduce<number | undefined>((min, m) => {
+      if (m._dbId === undefined) return min;
+      return min === undefined ? m._dbId : Math.min(min, m._dbId);
+    }, undefined);
+
+    if (oldestDbId === undefined) return;
+
+    // Get sessionId from the current session endpoint
+    let sid = sessionId;
+    if (!sid) {
+      try {
+        const res = await fetch('/api/sessions/current');
+        if (res.ok) {
+          const data = await res.json();
+          sid = data.id;
+        }
+      } catch { /* ignore */ }
+    }
+    if (!sid) return;
+
+    setIsLoadingMore(true);
+
+    // Save scroll position before prepending
+    const el = containerRef.current;
+    const prevScrollHeight = el?.scrollHeight || 0;
+
+    try {
+      const res = await fetch(`/api/sessions/${sid}/messages?limit=50&before=${oldestDbId}`);
+      if (!res.ok) {
+        setIsLoadingMore(false);
+        return;
+      }
+      const { messages: dbMessages, hasMore: more } = await res.json();
+
+      if (dbMessages && dbMessages.length > 0) {
+        const olderMessages: ChatMessage[] = dbMessages
+          .filter((m: { role: string }) => m.role === 'user' || m.role === 'assistant')
+          .map((m: { id: number; role: string; content: string }) => ({
+            id: ++messageIdCounter,
+            type: m.role as 'user' | 'assistant',
+            content: m.role === 'assistant' ? deserializeContent(m.content) : m.content,
+            isMarkdown: m.role === 'assistant',
+            _dbId: m.id,
+          }));
+
+        setMessages((prev) => [...olderMessages, ...prev]);
+        setHasMore(more);
+
+        // Restore scroll position after prepend
+        requestAnimationFrame(() => {
+          if (el) {
+            el.scrollTop = el.scrollHeight - prevScrollHeight;
+          }
+        });
+      } else {
+        setHasMore(false);
+      }
+    } catch (err) {
+      console.error('Failed to load more messages:', err);
+    }
+
+    setIsLoadingMore(false);
+  }, [isLoadingMore, hasMore, messages, sessionId]);
 
   const handleSend = useCallback(
     (text: string) => {
@@ -271,7 +421,15 @@ export default function App() {
             )
           ) : currentView === 'chat' ? (
             <>
-              <ChatContainer messages={messages} debugMode={debugMode} isWaiting={isWaiting} />
+              <ChatContainer
+                ref={containerRef}
+                messages={messages}
+                debugMode={debugMode}
+                isWaiting={isWaiting}
+                onLoadMore={handleLoadMore}
+                isLoadingMore={isLoadingMore}
+                hasMore={hasMore}
+              />
               <ChatInput
                 onSend={handleSend}
                 onStop={handleStop}

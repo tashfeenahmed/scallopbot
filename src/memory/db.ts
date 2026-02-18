@@ -1786,6 +1786,33 @@ export class ScallopDatabase {
     return rows.map(row => this.rowToSessionMessage(row));
   }
 
+  getSessionMessagesPaginated(sessionId: string, limit: number, before?: number): { messages: SessionMessageRow[]; hasMore: boolean } {
+    let rows: Record<string, unknown>[];
+    if (before) {
+      const stmt = this.db.prepare(
+        'SELECT * FROM session_messages WHERE session_id = ? AND id < ? ORDER BY id DESC LIMIT ?'
+      );
+      rows = stmt.all(sessionId, before, limit + 1) as Record<string, unknown>[];
+    } else {
+      const stmt = this.db.prepare(
+        'SELECT * FROM session_messages WHERE session_id = ? ORDER BY id DESC LIMIT ?'
+      );
+      rows = stmt.all(sessionId, limit + 1) as Record<string, unknown>[];
+    }
+    const hasMore = rows.length > limit;
+    if (hasMore) rows = rows.slice(0, limit);
+    rows.reverse();
+    return { messages: rows.map(row => this.rowToSessionMessage(row)), hasMore };
+  }
+
+  findSessionByUserId(userId: string): SessionRow | null {
+    const stmt = this.db.prepare(
+      "SELECT * FROM sessions WHERE json_extract(metadata, '$.userId') = ? ORDER BY updated_at DESC LIMIT 1"
+    );
+    const row = stmt.get(userId) as Record<string, unknown> | undefined;
+    return row ? this.rowToSession(row) : null;
+  }
+
   // ============ Session Summary Operations ============
 
   addSessionSummary(summary: Omit<SessionSummaryRow, 'id' | 'createdAt'>): SessionSummaryRow {

@@ -317,9 +317,23 @@ export class ApiChannel implements Channel, TriggerSource {
       }
     }
 
+    // DB fallback: find existing session after server restart
+    const prefixedUserId = `api:${userId}`;
+    if (this.db) {
+      const existing = this.db.findSessionByUserId(prefixedUserId);
+      if (existing) {
+        // Re-hydrate into session manager so it picks up messages
+        const session = await this.config.sessionManager.getSession(existing.id);
+        if (session) {
+          this.userSessions.set(userId, existing.id);
+          return existing.id;
+        }
+      }
+    }
+
     // Create new session — prefix userId with channel for trigger routing
     const session = await this.config.sessionManager.createSession({
-      userId: `api:${userId}`,
+      userId: prefixedUserId,
       channelId: 'api',
     });
 
@@ -399,6 +413,11 @@ export class ApiChannel implements Channel, TriggerSource {
         await this.handleChatStream(req, res);
       } else if (urlPath === '/api/sessions' && method === 'GET') {
         await this.handleListSessions(res);
+      } else if (urlPath === '/api/sessions/current' && method === 'GET') {
+        this.handleGetCurrentSession(res);
+      } else if (urlPath.match(/^\/api\/sessions\/[^/]+\/messages$/) && method === 'GET') {
+        const sessionId = urlPath.split('/')[3];
+        this.handleGetSessionMessages(res, sessionId, url);
       } else if (urlPath.startsWith('/api/sessions/') && method === 'GET') {
         const sessionId = urlPath.slice('/api/sessions/'.length);
         await this.handleGetSession(res, sessionId);
@@ -733,6 +752,37 @@ export class ApiChannel implements Channel, TriggerSource {
   }
 
   /**
+   * Handle GET /api/sessions/current — returns the current session for web UI user
+   */
+  private handleGetCurrentSession(res: ServerResponse): void {
+    if (!this.db) {
+      this.sendJson(res, 503, { error: 'Database not available' });
+      return;
+    }
+    const session = this.db.findSessionByUserId('api:default');
+    if (!session) {
+      this.sendJson(res, 404, { error: 'No session found' });
+      return;
+    }
+    this.sendJson(res, 200, { id: session.id, createdAt: session.createdAt, updatedAt: session.updatedAt });
+  }
+
+  /**
+   * Handle GET /api/sessions/:id/messages?limit=50&before=123
+   */
+  private handleGetSessionMessages(res: ServerResponse, sessionId: string, url: URL): void {
+    if (!this.db) {
+      this.sendJson(res, 503, { error: 'Database not available' });
+      return;
+    }
+    const limit = Math.min(parseInt(url.searchParams.get('limit') || '50', 10) || 50, 100);
+    const beforeParam = url.searchParams.get('before');
+    const before = beforeParam ? parseInt(beforeParam, 10) : undefined;
+    const { messages, hasMore } = this.db.getSessionMessagesPaginated(sessionId, limit, before);
+    this.sendJson(res, 200, { messages, hasMore });
+  }
+
+  /**
    * Handle GET /api/files?path=<filePath>
    * Serves files from the agent workspace for download.
    */
@@ -893,8 +943,8 @@ export class ApiChannel implements Channel, TriggerSource {
    */
   private handleWebSocket(ws: WebSocket, req: IncomingMessage): void {
     const clientId = nanoid(8);
-    // UserId follows the ws-{clientId} pattern used by session management
-    const userId = `ws-${clientId}`;
+    // All web UI connections share a single stable userId for session continuity
+    const userId = 'default';
     this.logger.debug({ clientId, userId }, 'WebSocket client connected');
 
     // Check authentication: API key, session cookie, or pre-setup bypass
@@ -929,8 +979,9 @@ export class ApiChannel implements Channel, TriggerSource {
       }
     }
 
-    // Track this client by userId for trigger support
-    this.addClientToUser(userId, ws);
+    // Track this client by prefixed userId for trigger support
+    const prefixedUserId = `api:${userId}`;
+    this.addClientToUser(prefixedUserId, ws);
 
     ws.on('message', async (data) => {
       try {
@@ -944,7 +995,7 @@ export class ApiChannel implements Channel, TriggerSource {
     });
 
     ws.on('close', () => {
-      this.removeClientFromUser(userId, ws);
+      this.removeClientFromUser(prefixedUserId, ws);
       this.logger.debug({ clientId, userId }, 'WebSocket client disconnected');
     });
 
@@ -1011,13 +1062,14 @@ export class ApiChannel implements Channel, TriggerSource {
 
     switch (cmd) {
       case 'new': {
-        const userId = `ws-${clientId}`;
+        const userId = 'default';
         const sessionId = this.userSessions.get(userId);
         if (sessionId) {
           await this.config.sessionManager.deleteSession(sessionId);
           this.userSessions.delete(userId);
         }
-        this.sendWsMessage(ws, { type: 'response', content: 'Starting a new conversation!' });
+        // Send empty sessionId to signal client to clear stored session
+        this.sendWsMessage(ws, { type: 'response', content: 'Starting a new conversation!', sessionId: '' });
         return true;
       }
 
@@ -1046,8 +1098,7 @@ export class ApiChannel implements Channel, TriggerSource {
       case 'stop': {
         this.stopRequests.add(clientId);
         if (this.interruptQueue) {
-          const userId = `ws-${clientId}`;
-          const sessionId = this.userSessions.get(userId);
+          const sessionId = this.userSessions.get('default');
           if (sessionId) this.interruptQueue.clear(sessionId);
         }
         const wasActive = this.activeProcessing.has(clientId);
@@ -1224,8 +1275,7 @@ export class ApiChannel implements Channel, TriggerSource {
         this.stopRequests.add(clientId);
         // Clear any pending interrupts for this client's session
         if (this.interruptQueue) {
-          const stopUserId = `ws-${clientId}`;
-          const stopSessionId = this.userSessions.get(stopUserId);
+          const stopSessionId = this.userSessions.get('default');
           if (stopSessionId) this.interruptQueue.clear(stopSessionId);
         }
         this.logger.debug({ clientId }, 'Stop requested');
@@ -1242,8 +1292,8 @@ export class ApiChannel implements Channel, TriggerSource {
         const slashHandled = await this.handleSlashCommand(ws, clientId, message.message.trim());
         if (slashHandled) return;
 
-        // Ensure session exists before processing
-        const userId = `ws-${clientId}`;
+        // All web UI connections share one stable session via userId 'default'
+        const userId = 'default';
         const sessionId = await this.getOrCreateSession(userId);
 
         // Notify engagement tracker (trust feedback loop)

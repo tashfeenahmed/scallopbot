@@ -24,8 +24,11 @@ interface UseWebSocketOptions {
   enabled?: boolean;
 }
 
+const SESSION_KEY = 'smartbot_sessionId';
+
 export function useWebSocket({ onMessage, enabled = true }: UseWebSocketOptions) {
   const [status, setStatus] = useState<ConnectionStatus>('disconnected');
+  const [sessionId, setSessionId] = useState<string | null>(() => localStorage.getItem(SESSION_KEY));
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectAttemptsRef = useRef(0);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -59,7 +62,20 @@ export function useWebSocket({ onMessage, enabled = true }: UseWebSocketOptions)
 
       ws.onmessage = (event) => {
         try {
-          const data = JSON.parse(event.data);
+          const data: WsMessage = JSON.parse(event.data);
+
+          // Track sessionId from server responses
+          if (data.type === 'response' && data.sessionId !== undefined) {
+            if (data.sessionId) {
+              localStorage.setItem(SESSION_KEY, data.sessionId);
+              setSessionId(data.sessionId);
+            } else {
+              // Empty string signals session reset (/new command)
+              localStorage.removeItem(SESSION_KEY);
+              setSessionId(null);
+            }
+          }
+
           onMessageRef.current(data);
         } catch {
           console.error('Failed to parse message');
@@ -135,5 +151,5 @@ export function useWebSocket({ onMessage, enabled = true }: UseWebSocketOptions)
     };
   }, [connect, enabled]);
 
-  return { status, sendMessage, sendStop };
+  return { status, sendMessage, sendStop, sessionId };
 }
