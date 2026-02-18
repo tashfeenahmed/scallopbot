@@ -205,6 +205,9 @@ export class Gateway {
       sessionSummarizer,
       workspace: this.config.agent.workspace,
       getTimezone: (userId: string) => this.configManager!.getUserTimezone(userId),
+      onMorningDigest: async (userId: string) => {
+        await (this.unifiedScheduler?.sendMorningDigest(userId) ?? Promise.resolve(0));
+      },
     });
 
     this.logger.debug('Memory system initialized');
@@ -525,6 +528,9 @@ export class Gateway {
         memoryStore: this.scallopMemoryStore || undefined,
         db: this.scallopMemoryStore?.getDatabase(),
         interruptQueue: this.interruptQueue || undefined,
+        onUserMessage: (prefixedUserId: string) => {
+          this.unifiedScheduler?.checkEngagement(prefixedUserId);
+        },
       });
       await this.apiChannel.start();
 

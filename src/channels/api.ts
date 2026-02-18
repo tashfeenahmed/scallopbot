@@ -67,6 +67,8 @@ export interface ApiChannelConfig {
   db?: ScallopDatabase;
   /** Interrupt queue for mid-loop user message injection */
   interruptQueue?: InterruptQueue;
+  /** Callback when a WebSocket user sends a message (for engagement tracking) */
+  onUserMessage?: (prefixedUserId: string) => void;
 }
 
 /** Content-Type mapping for static files */
@@ -190,6 +192,7 @@ export class ApiChannel implements Channel, TriggerSource {
   private activeProcessing: Set<string> = new Set();
   private interruptQueue: InterruptQueue | null = null;
   private authService: AuthService | null = null;
+  private onUserMessage?: (prefixedUserId: string) => void;
 
   constructor(config: ApiChannelConfig) {
     this.config = {
@@ -207,6 +210,7 @@ export class ApiChannel implements Channel, TriggerSource {
     };
     this.logger = config.logger.child({ channel: 'api' });
     this.interruptQueue = config.interruptQueue || null;
+    this.onUserMessage = config.onUserMessage;
     if (config.db) {
       this.authService = new AuthService(config.db);
     }
@@ -996,6 +1000,9 @@ export class ApiChannel implements Channel, TriggerSource {
         // Ensure session exists before processing
         const userId = `ws-${clientId}`;
         const sessionId = await this.getOrCreateSession(userId);
+
+        // Notify engagement tracker (trust feedback loop)
+        this.onUserMessage?.(`api:${userId}`);
 
         // If already processing and no attachments, inject via interrupt queue
         const hasAttachments = message.attachments && message.attachments.length > 0;

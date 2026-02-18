@@ -284,6 +284,13 @@ export async function runGapScanner(ctx: GardenerContext): Promise<GapScannerSte
         const recentTopics = sessionSummaries.slice(0, 5).flatMap(s => s.topics ?? []);
         const pendingItems = existingItems.filter(i => i.status === 'pending' || i.status === 'fired');
 
+        // Count agent-sourced items created today for daily budget enforcement
+        const tz = ctx.getTimezone?.(userId) ?? 'UTC';
+        const todayStart = getTodayStartMs(tz);
+        const todayItemCount = existingItems.filter(
+          i => i.source === 'agent' && i.createdAt >= todayStart
+        ).length;
+
         const gapItems = await runGapPipeline({
           signals,
           dial: dial as 'conservative' | 'moderate' | 'eager',
@@ -291,6 +298,7 @@ export async function runGapScanner(ctx: GardenerContext): Promise<GapScannerSte
           recentTopics,
           existingItems: pendingItems.map(i => ({ message: i.message, context: i.context })),
           userId,
+          todayItemCount,
         }, ctx.fusionProvider);
 
         // Insert scheduled items with timing model
@@ -374,5 +382,31 @@ export async function runBoardReview(ctx: GardenerContext): Promise<BoardReviewR
   } catch (err) {
     ctx.logger.warn({ error: (err as Error).message }, 'Board review phase failed');
     return { itemsAutoArchived: 0, staleItemsFound: 0 };
+  }
+}
+
+// ============ Helpers ============
+
+/**
+ * Get the start of today (midnight) in the given timezone, as epoch ms.
+ * Approximation: uses Intl to find the current local hour, then subtracts
+ * that many hours from the current time (rounded down to the hour).
+ */
+export function getTodayStartMs(timezone: string, nowMs?: number): number {
+  try {
+    const now = new Date(nowMs ?? Date.now());
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: timezone,
+      hour: 'numeric',
+      minute: 'numeric',
+      hour12: false,
+    }).formatToParts(now);
+    const hour = parseInt(parts.find(p => p.type === 'hour')?.value ?? '0', 10) % 24;
+    const minute = parseInt(parts.find(p => p.type === 'minute')?.value ?? '0', 10);
+    return now.getTime() - (hour * 3600_000 + minute * 60_000) - (now.getSeconds() * 1000) - now.getMilliseconds();
+  } catch {
+    // Fallback: midnight in server local time
+    const now = new Date(nowMs ?? Date.now());
+    return new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
   }
 }

@@ -19,6 +19,8 @@ import {
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;
+/** Fixed reference time for deterministic tests */
+const NOW = Date.now();
 
 /** Create a session input */
 function makeSession(
@@ -44,7 +46,7 @@ function makeScheduledItem(
 function makeRecentSessions(
   count: number,
   daysSpread: number,
-  baseTime: number = Date.now(),
+  baseTime: number = NOW,
 ): SessionInput[] {
   const sessions: SessionInput[] = [];
   const interval = (daysSpread * DAY_MS) / count;
@@ -70,12 +72,12 @@ describe('computeTrustScore — cold start', () => {
 
   it('returns null for fewer than 5 sessions', () => {
     const sessions = [
-      makeSession(5, 10 * 60 * 1000, Date.now() - 4 * DAY_MS),
-      makeSession(3, 5 * 60 * 1000, Date.now() - 3 * DAY_MS),
-      makeSession(7, 15 * 60 * 1000, Date.now() - 2 * DAY_MS),
-      makeSession(4, 8 * 60 * 1000, Date.now() - DAY_MS),
+      makeSession(5, 10 * 60 * 1000, NOW - 4 * DAY_MS),
+      makeSession(3, 5 * 60 * 1000, NOW - 3 * DAY_MS),
+      makeSession(7, 15 * 60 * 1000, NOW - 2 * DAY_MS),
+      makeSession(4, 8 * 60 * 1000, NOW - DAY_MS),
     ];
-    expect(computeTrustScore(sessions, [])).toBeNull();
+    expect(computeTrustScore(sessions, [], { now: NOW })).toBeNull();
   });
 
   it('returns null for exactly 4 sessions', () => {
@@ -85,7 +87,7 @@ describe('computeTrustScore — cold start', () => {
 
   it('returns a result for exactly 5 sessions', () => {
     const sessions = makeRecentSessions(5, 7);
-    const result = computeTrustScore(sessions, []);
+    const result = computeTrustScore(sessions, [], { now: NOW });
     expect(result).not.toBeNull();
   });
 });
@@ -95,7 +97,7 @@ describe('computeTrustScore — cold start', () => {
 describe('computeTrustScore — no scheduled items', () => {
   it('computes from sessions only when scheduledItems is empty', () => {
     const sessions = makeRecentSessions(7, 7);
-    const result = computeTrustScore(sessions, []);
+    const result = computeTrustScore(sessions, [], { now: NOW });
     expect(result).not.toBeNull();
     expect(result!.trustScore).toBeGreaterThanOrEqual(0);
     expect(result!.trustScore).toBeLessThanOrEqual(1);
@@ -105,7 +107,7 @@ describe('computeTrustScore — no scheduled items', () => {
 
   it('defaults proactive signals to 0.5 when no scheduled items', () => {
     const sessions = makeRecentSessions(7, 7);
-    const result = computeTrustScore(sessions, []);
+    const result = computeTrustScore(sessions, [], { now: NOW });
     expect(result).not.toBeNull();
     // With no scheduled items, proactiveAcceptRate and proactiveDismissRate should default to neutral
     expect(result!.signals.proactiveAcceptRate).toBe(0.5);
@@ -117,63 +119,60 @@ describe('computeTrustScore — no scheduled items', () => {
 
 describe('computeTrustScore — active user with proactive items', () => {
   it('returns high trust (>0.7) and eager dial when all items acted on', () => {
-    const now = Date.now();
     // Active user: 10 sessions in last 7 days with good durations
     const sessions: SessionInput[] = [];
     for (let i = 0; i < 10; i++) {
-      sessions.push(makeSession(10, 30 * 60 * 1000, now - (9 - i) * DAY_MS * 0.7));
+      sessions.push(makeSession(10, 30 * 60 * 1000, NOW - (9 - i) * DAY_MS * 0.7));
     }
 
     // All proactive items were acted on
     const items: ScheduledItemInput[] = [
-      makeScheduledItem('acted', 'gap-scanner', now - 6 * DAY_MS),
-      makeScheduledItem('acted', 'gap-scanner', now - 5 * DAY_MS),
-      makeScheduledItem('acted', 'gap-scanner', now - 4 * DAY_MS),
-      makeScheduledItem('acted', 'gap-scanner', now - 3 * DAY_MS),
-      makeScheduledItem('acted', 'gap-scanner', now - 2 * DAY_MS),
+      makeScheduledItem('acted', 'gap-scanner', NOW - 6 * DAY_MS),
+      makeScheduledItem('acted', 'gap-scanner', NOW - 5 * DAY_MS),
+      makeScheduledItem('acted', 'gap-scanner', NOW - 4 * DAY_MS),
+      makeScheduledItem('acted', 'gap-scanner', NOW - 3 * DAY_MS),
+      makeScheduledItem('acted', 'gap-scanner', NOW - 2 * DAY_MS),
     ];
 
-    const result = computeTrustScore(sessions, items);
+    const result = computeTrustScore(sessions, items, { now: NOW });
     expect(result).not.toBeNull();
     expect(result!.trustScore).toBeGreaterThan(0.7);
     expect(result!.proactivenessDial).toBe('eager');
   });
 
   it('returns low trust (<0.3) and conservative dial when all items dismissed', () => {
-    const now = Date.now();
     // Some sessions but all proactive items dismissed
     const sessions: SessionInput[] = [];
     for (let i = 0; i < 6; i++) {
-      sessions.push(makeSession(3, 5 * 60 * 1000, now - (10 - i) * DAY_MS));
+      sessions.push(makeSession(3, 5 * 60 * 1000, NOW - (10 - i) * DAY_MS));
     }
 
     const items: ScheduledItemInput[] = [
-      makeScheduledItem('dismissed', 'gap-scanner', now - 6 * DAY_MS),
-      makeScheduledItem('dismissed', 'gap-scanner', now - 5 * DAY_MS),
-      makeScheduledItem('dismissed', 'gap-scanner', now - 4 * DAY_MS),
-      makeScheduledItem('dismissed', 'gap-scanner', now - 3 * DAY_MS),
-      makeScheduledItem('dismissed', 'gap-scanner', now - 2 * DAY_MS),
+      makeScheduledItem('dismissed', 'gap-scanner', NOW - 6 * DAY_MS),
+      makeScheduledItem('dismissed', 'gap-scanner', NOW - 5 * DAY_MS),
+      makeScheduledItem('dismissed', 'gap-scanner', NOW - 4 * DAY_MS),
+      makeScheduledItem('dismissed', 'gap-scanner', NOW - 3 * DAY_MS),
+      makeScheduledItem('dismissed', 'gap-scanner', NOW - 2 * DAY_MS),
     ];
 
-    const result = computeTrustScore(sessions, items);
+    const result = computeTrustScore(sessions, items, { now: NOW });
     expect(result).not.toBeNull();
     expect(result!.trustScore).toBeLessThan(0.3);
     expect(result!.proactivenessDial).toBe('conservative');
   });
 
   it('returns moderate trust (~0.5) and moderate dial for mixed outcomes', () => {
-    const now = Date.now();
     const sessions = makeRecentSessions(7, 7);
 
     const items: ScheduledItemInput[] = [
-      makeScheduledItem('acted', 'gap-scanner', now - 5 * DAY_MS),
-      makeScheduledItem('dismissed', 'gap-scanner', now - 4 * DAY_MS),
-      makeScheduledItem('acted', 'gap-scanner', now - 3 * DAY_MS),
-      makeScheduledItem('fired', 'gap-scanner', now - 2 * DAY_MS),
-      makeScheduledItem('dismissed', 'gap-scanner', now - 1 * DAY_MS),
+      makeScheduledItem('acted', 'gap-scanner', NOW - 5 * DAY_MS),
+      makeScheduledItem('dismissed', 'gap-scanner', NOW - 4 * DAY_MS),
+      makeScheduledItem('acted', 'gap-scanner', NOW - 3 * DAY_MS),
+      makeScheduledItem('fired', 'gap-scanner', NOW - 2 * DAY_MS),
+      makeScheduledItem('dismissed', 'gap-scanner', NOW - 1 * DAY_MS),
     ];
 
-    const result = computeTrustScore(sessions, items);
+    const result = computeTrustScore(sessions, items, { now: NOW });
     expect(result).not.toBeNull();
     expect(result!.trustScore).toBeGreaterThanOrEqual(0.3);
     expect(result!.trustScore).toBeLessThanOrEqual(0.7);
@@ -181,19 +180,18 @@ describe('computeTrustScore — active user with proactive items', () => {
   });
 
   it('ignores pending items in proactive rate calculation', () => {
-    const now = Date.now();
     const sessions = makeRecentSessions(7, 7);
 
     // 2 acted, 3 pending — pending should be excluded
     const items: ScheduledItemInput[] = [
-      makeScheduledItem('acted', 'gap-scanner', now - 3 * DAY_MS),
-      makeScheduledItem('acted', 'gap-scanner', now - 2 * DAY_MS),
+      makeScheduledItem('acted', 'gap-scanner', NOW - 3 * DAY_MS),
+      makeScheduledItem('acted', 'gap-scanner', NOW - 2 * DAY_MS),
       makeScheduledItem('pending', 'gap-scanner'),
       makeScheduledItem('pending', 'gap-scanner'),
       makeScheduledItem('pending', 'gap-scanner'),
     ];
 
-    const result = computeTrustScore(sessions, items);
+    const result = computeTrustScore(sessions, items, { now: NOW });
     expect(result).not.toBeNull();
     // With only acted items (no dismissed), accept rate should be high
     expect(result!.signals.proactiveAcceptRate).toBeGreaterThan(0.8);
@@ -206,17 +204,18 @@ describe('computeTrustScore — EMA smoothing', () => {
   it('smooths toward existing score when provided', () => {
     const sessions = makeRecentSessions(7, 7);
     const items: ScheduledItemInput[] = [
-      makeScheduledItem('acted', 'gap-scanner', Date.now() - 2 * DAY_MS),
-      makeScheduledItem('acted', 'gap-scanner', Date.now() - DAY_MS),
+      makeScheduledItem('acted', 'gap-scanner', NOW - 2 * DAY_MS),
+      makeScheduledItem('acted', 'gap-scanner', NOW - DAY_MS),
     ];
 
     // Compute without existing score
-    const rawResult = computeTrustScore(sessions, items);
+    const rawResult = computeTrustScore(sessions, items, { now: NOW });
     expect(rawResult).not.toBeNull();
 
     // Now compute with a very different existing score
     const smoothedResult = computeTrustScore(sessions, items, {
       existingScore: 0.1,
+      now: NOW,
     });
     expect(smoothedResult).not.toBeNull();
 
@@ -228,12 +227,13 @@ describe('computeTrustScore — EMA smoothing', () => {
   it('prevents wild swings by weighting existing score heavily', () => {
     const sessions = makeRecentSessions(10, 7);
     const items: ScheduledItemInput[] = [
-      makeScheduledItem('acted', 'gap-scanner', Date.now() - 2 * DAY_MS),
-      makeScheduledItem('acted', 'gap-scanner', Date.now() - DAY_MS),
+      makeScheduledItem('acted', 'gap-scanner', NOW - 2 * DAY_MS),
+      makeScheduledItem('acted', 'gap-scanner', NOW - DAY_MS),
     ];
 
     const result = computeTrustScore(sessions, items, {
       existingScore: 0.5,
+      now: NOW,
     });
     expect(result).not.toBeNull();
 
@@ -247,13 +247,12 @@ describe('computeTrustScore — EMA smoothing', () => {
 
 describe('computeTrustScore — edge cases', () => {
   it('handles sessions with 0 duration gracefully (no NaN)', () => {
-    const now = Date.now();
     const sessions: SessionInput[] = [];
     for (let i = 0; i < 6; i++) {
-      sessions.push(makeSession(5, 0, now - (5 - i) * DAY_MS));
+      sessions.push(makeSession(5, 0, NOW - (5 - i) * DAY_MS));
     }
 
-    const result = computeTrustScore(sessions, []);
+    const result = computeTrustScore(sessions, [], { now: NOW });
     expect(result).not.toBeNull();
     expect(Number.isNaN(result!.trustScore)).toBe(false);
     expect(Number.isFinite(result!.trustScore)).toBe(true);
@@ -262,28 +261,26 @@ describe('computeTrustScore — edge cases', () => {
   });
 
   it('trust score is always clamped to [0, 1]', () => {
-    const now = Date.now();
     // Edge case: many dismissed items should push negative weight
     const sessions = makeRecentSessions(6, 14);
     const items: ScheduledItemInput[] = [];
     for (let i = 0; i < 20; i++) {
-      items.push(makeScheduledItem('dismissed', 'gap-scanner', now - i * DAY_MS));
+      items.push(makeScheduledItem('dismissed', 'gap-scanner', NOW - i * DAY_MS));
     }
 
-    const result = computeTrustScore(sessions, items);
+    const result = computeTrustScore(sessions, items, { now: NOW });
     expect(result).not.toBeNull();
     expect(result!.trustScore).toBeGreaterThanOrEqual(0);
     expect(result!.trustScore).toBeLessThanOrEqual(1);
   });
 
   it('no NaN or Infinity in signals', () => {
-    const now = Date.now();
     const sessions: SessionInput[] = [];
     for (let i = 0; i < 5; i++) {
-      sessions.push(makeSession(0, 0, now - i * DAY_MS));
+      sessions.push(makeSession(0, 0, NOW - i * DAY_MS));
     }
 
-    const result = computeTrustScore(sessions, []);
+    const result = computeTrustScore(sessions, [], { now: NOW });
     expect(result).not.toBeNull();
     const signals = result!.signals;
     expect(Number.isFinite(signals.sessionReturnRate)).toBe(true);
@@ -294,13 +291,12 @@ describe('computeTrustScore — edge cases', () => {
   });
 
   it('handles all sessions at same startTime', () => {
-    const now = Date.now();
     const sessions: SessionInput[] = [];
     for (let i = 0; i < 5; i++) {
-      sessions.push(makeSession(5, 10 * 60 * 1000, now));
+      sessions.push(makeSession(5, 10 * 60 * 1000, NOW));
     }
 
-    const result = computeTrustScore(sessions, []);
+    const result = computeTrustScore(sessions, [], { now: NOW });
     expect(result).not.toBeNull();
     expect(Number.isNaN(result!.trustScore)).toBe(false);
     expect(Number.isFinite(result!.trustScore)).toBe(true);
@@ -311,18 +307,17 @@ describe('computeTrustScore — edge cases', () => {
 
 describe('computeTrustScore — dial mapping', () => {
   it('maps score < 0.3 to conservative', () => {
-    const now = Date.now();
     // Infrequent sessions spread over a long time + all dismissed items
     const sessions: SessionInput[] = [];
     for (let i = 0; i < 6; i++) {
-      sessions.push(makeSession(2, 2 * 60 * 1000, now - (30 - i * 5) * DAY_MS));
+      sessions.push(makeSession(2, 2 * 60 * 1000, NOW - (30 - i * 5) * DAY_MS));
     }
     const items: ScheduledItemInput[] = [];
     for (let i = 0; i < 10; i++) {
-      items.push(makeScheduledItem('dismissed', 'gap-scanner', now - i * DAY_MS));
+      items.push(makeScheduledItem('dismissed', 'gap-scanner', NOW - i * DAY_MS));
     }
 
-    const result = computeTrustScore(sessions, items);
+    const result = computeTrustScore(sessions, items, { now: NOW });
     expect(result).not.toBeNull();
     if (result!.trustScore < 0.3) {
       expect(result!.proactivenessDial).toBe('conservative');
@@ -330,15 +325,14 @@ describe('computeTrustScore — dial mapping', () => {
   });
 
   it('maps score 0.3-0.7 to moderate', () => {
-    const now = Date.now();
     const sessions = makeRecentSessions(7, 7);
     const items: ScheduledItemInput[] = [
-      makeScheduledItem('acted', 'gap-scanner', now - 3 * DAY_MS),
-      makeScheduledItem('dismissed', 'gap-scanner', now - 2 * DAY_MS),
-      makeScheduledItem('fired', 'gap-scanner', now - DAY_MS),
+      makeScheduledItem('acted', 'gap-scanner', NOW - 3 * DAY_MS),
+      makeScheduledItem('dismissed', 'gap-scanner', NOW - 2 * DAY_MS),
+      makeScheduledItem('fired', 'gap-scanner', NOW - DAY_MS),
     ];
 
-    const result = computeTrustScore(sessions, items);
+    const result = computeTrustScore(sessions, items, { now: NOW });
     expect(result).not.toBeNull();
     if (result!.trustScore >= 0.3 && result!.trustScore < 0.7) {
       expect(result!.proactivenessDial).toBe('moderate');
@@ -346,18 +340,17 @@ describe('computeTrustScore — dial mapping', () => {
   });
 
   it('maps score >= 0.7 to eager', () => {
-    const now = Date.now();
     // Very active user with all items acted on
     const sessions: SessionInput[] = [];
     for (let i = 0; i < 10; i++) {
-      sessions.push(makeSession(15, 45 * 60 * 1000, now - (9 - i) * DAY_MS * 0.7));
+      sessions.push(makeSession(15, 45 * 60 * 1000, NOW - (9 - i) * DAY_MS * 0.7));
     }
     const items: ScheduledItemInput[] = [];
     for (let i = 0; i < 8; i++) {
-      items.push(makeScheduledItem('acted', 'gap-scanner', now - i * DAY_MS));
+      items.push(makeScheduledItem('acted', 'gap-scanner', NOW - i * DAY_MS));
     }
 
-    const result = computeTrustScore(sessions, items);
+    const result = computeTrustScore(sessions, items, { now: NOW });
     expect(result).not.toBeNull();
     if (result!.trustScore >= 0.7) {
       expect(result!.proactivenessDial).toBe('eager');
@@ -371,10 +364,10 @@ describe('computeTrustScore — signal values', () => {
   it('returns a TrustSignals object with all expected fields', () => {
     const sessions = makeRecentSessions(7, 7);
     const items: ScheduledItemInput[] = [
-      makeScheduledItem('acted', 'gap-scanner', Date.now() - DAY_MS),
+      makeScheduledItem('acted', 'gap-scanner', NOW - DAY_MS),
     ];
 
-    const result = computeTrustScore(sessions, items);
+    const result = computeTrustScore(sessions, items, { now: NOW });
     expect(result).not.toBeNull();
     expect(result!.signals).toHaveProperty('sessionReturnRate');
     expect(result!.signals).toHaveProperty('avgSessionDuration');
@@ -385,14 +378,14 @@ describe('computeTrustScore — signal values', () => {
 
   it('explicitFeedback defaults to 0.5 (neutral placeholder)', () => {
     const sessions = makeRecentSessions(7, 7);
-    const result = computeTrustScore(sessions, []);
+    const result = computeTrustScore(sessions, [], { now: NOW });
     expect(result).not.toBeNull();
     expect(result!.signals.explicitFeedback).toBe(0.5);
   });
 
   it('sessionReturnRate is between 0 and 1', () => {
     const sessions = makeRecentSessions(7, 7);
-    const result = computeTrustScore(sessions, []);
+    const result = computeTrustScore(sessions, [], { now: NOW });
     expect(result).not.toBeNull();
     expect(result!.signals.sessionReturnRate).toBeGreaterThanOrEqual(0);
     expect(result!.signals.sessionReturnRate).toBeLessThanOrEqual(1);
@@ -400,40 +393,38 @@ describe('computeTrustScore — signal values', () => {
 
   it('avgSessionDuration is between 0 and 1', () => {
     const sessions = makeRecentSessions(7, 7);
-    const result = computeTrustScore(sessions, []);
+    const result = computeTrustScore(sessions, [], { now: NOW });
     expect(result).not.toBeNull();
     expect(result!.signals.avgSessionDuration).toBeGreaterThanOrEqual(0);
     expect(result!.signals.avgSessionDuration).toBeLessThanOrEqual(1);
   });
 
   it('proactiveAcceptRate reflects acted ratio correctly', () => {
-    const now = Date.now();
     const sessions = makeRecentSessions(7, 7);
     // 3 acted out of 4 actionable (fired, acted, dismissed)
     const items: ScheduledItemInput[] = [
-      makeScheduledItem('acted', 'gap-scanner', now - 4 * DAY_MS),
-      makeScheduledItem('acted', 'gap-scanner', now - 3 * DAY_MS),
-      makeScheduledItem('acted', 'gap-scanner', now - 2 * DAY_MS),
-      makeScheduledItem('dismissed', 'gap-scanner', now - DAY_MS),
+      makeScheduledItem('acted', 'gap-scanner', NOW - 4 * DAY_MS),
+      makeScheduledItem('acted', 'gap-scanner', NOW - 3 * DAY_MS),
+      makeScheduledItem('acted', 'gap-scanner', NOW - 2 * DAY_MS),
+      makeScheduledItem('dismissed', 'gap-scanner', NOW - DAY_MS),
     ];
 
-    const result = computeTrustScore(sessions, items);
+    const result = computeTrustScore(sessions, items, { now: NOW });
     expect(result).not.toBeNull();
     expect(result!.signals.proactiveAcceptRate).toBeCloseTo(0.75, 1);
   });
 
   it('proactiveDismissRate reflects dismissed ratio correctly', () => {
-    const now = Date.now();
     const sessions = makeRecentSessions(7, 7);
     // 2 dismissed out of 4 actionable
     const items: ScheduledItemInput[] = [
-      makeScheduledItem('acted', 'gap-scanner', now - 4 * DAY_MS),
-      makeScheduledItem('acted', 'gap-scanner', now - 3 * DAY_MS),
-      makeScheduledItem('dismissed', 'gap-scanner', now - 2 * DAY_MS),
-      makeScheduledItem('dismissed', 'gap-scanner', now - DAY_MS),
+      makeScheduledItem('acted', 'gap-scanner', NOW - 4 * DAY_MS),
+      makeScheduledItem('acted', 'gap-scanner', NOW - 3 * DAY_MS),
+      makeScheduledItem('dismissed', 'gap-scanner', NOW - 2 * DAY_MS),
+      makeScheduledItem('dismissed', 'gap-scanner', NOW - DAY_MS),
     ];
 
-    const result = computeTrustScore(sessions, items);
+    const result = computeTrustScore(sessions, items, { now: NOW });
     expect(result).not.toBeNull();
     expect(result!.signals.proactiveDismissRate).toBeCloseTo(0.5, 1);
   });
