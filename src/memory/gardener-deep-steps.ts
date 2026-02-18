@@ -14,56 +14,12 @@ import { computeTrustScore } from './trust-score.js';
 import { checkGoalDeadlines } from './goal-deadline-check.js';
 import { evaluateInnerThoughts } from './inner-thoughts.js';
 
-// ============ Result types ============
-
-export interface FullDecayResult {
-  updated: number;
-  archived: number;
-}
-
-export interface FusionStepResult {
-  totalFused: number;
-  totalMerged: number;
-}
-
-export interface SessionSummarizationResult {
-  summarized: number;
-}
-
-export interface ForgettingResult {
-  auditNeverRetrieved: number;
-  auditStaleRetrieved: number;
-  auditCandidateCount: number;
-  archived: number;
-  memoriesDeleted: number;
-  sessionsDeleted: number;
-  orphansDeleted: number;
-}
-
-export interface BehavioralInferenceResult {
-  messageCount: number;
-}
-
-export interface TrustScoreStepResult {
-  trustScore?: number;
-  proactivenessDial?: string;
-}
-
-export interface GoalDeadlineStepResult {
-  approaching: number;
-  notifications: number;
-}
-
-export interface InnerThoughtsStepResult {
-  proactiveItemsCreated: number;
-}
-
 // ============ Step functions ============
 
 /**
  * B1: Full decay scan (all memories)
  */
-export function runFullDecay(ctx: GardenerContext): FullDecayResult {
+export function runFullDecay(ctx: GardenerContext): { updated: number; archived: number } {
   try {
     const result = ctx.scallopStore.processFullDecay();
     if (result.updated > 0) {
@@ -79,7 +35,7 @@ export function runFullDecay(ctx: GardenerContext): FullDecayResult {
 /**
  * B1.5: Memory fusion (merge dormant related memory clusters)
  */
-export async function runMemoryFusion(ctx: GardenerContext): Promise<FusionStepResult> {
+export async function runMemoryFusion(ctx: GardenerContext): Promise<{ totalFused: number; totalMerged: number }> {
   if (!ctx.fusionProvider) return { totalFused: 0, totalMerged: 0 };
 
   try {
@@ -141,7 +97,7 @@ export async function runMemoryFusion(ctx: GardenerContext): Promise<FusionStepR
 /**
  * B2: Generate session summaries for old sessions before pruning
  */
-export async function runSessionSummarization(ctx: GardenerContext): Promise<SessionSummarizationResult> {
+export async function runSessionSummarization(ctx: GardenerContext): Promise<{ summarized: number }> {
   if (!ctx.sessionSummarizer) return { summarized: 0 };
 
   try {
@@ -182,7 +138,7 @@ export async function runSessionSummarization(ctx: GardenerContext): Promise<Ses
 /**
  * B3: Enhanced forgetting pipeline (audit + archival + prune + orphan cleanup)
  */
-export async function runEnhancedForgetting(ctx: GardenerContext): Promise<ForgettingResult> {
+export async function runEnhancedForgetting(ctx: GardenerContext): Promise<void> {
   let auditNeverRetrieved = 0;
   let auditStaleRetrieved = 0;
   let auditCandidateCount = 0;
@@ -261,22 +217,12 @@ export async function runEnhancedForgetting(ctx: GardenerContext): Promise<Forge
     },
     'Enhanced forgetting complete'
   );
-
-  return {
-    auditNeverRetrieved,
-    auditStaleRetrieved,
-    auditCandidateCount,
-    archived: archiveCount,
-    memoriesDeleted,
-    sessionsDeleted,
-    orphansDeleted,
-  };
 }
 
 /**
  * B4: Behavioral pattern inference
  */
-export function runBehavioralInference(ctx: GardenerContext): BehavioralInferenceResult {
+export function runBehavioralInference(ctx: GardenerContext): { messageCount: number } {
   try {
     const profileManager = ctx.scallopStore.getProfileManager();
     const userId = DEFAULT_USER_ID;
@@ -327,31 +273,15 @@ export function runBehavioralInference(ctx: GardenerContext): BehavioralInferenc
 /**
  * B5: Trust score update
  */
-export function runTrustScoreUpdate(ctx: GardenerContext): TrustScoreStepResult {
+export function runTrustScoreUpdate(ctx: GardenerContext): void {
   try {
     const profileManager = ctx.scallopStore.getProfileManager();
     const userId = DEFAULT_USER_ID;
 
     const sessionSummaries = ctx.db.getSessionSummariesByUser(userId, 30);
-    let sessions = sessionSummaries
+    const sessions = sessionSummaries
       .filter(s => s.messageCount > 0)
       .map(s => ({ messageCount: s.messageCount, durationMs: s.durationMs, startTime: s.createdAt }));
-
-    // Fallback: if fewer than 5 session summaries, use raw sessions
-    if (sessions.length < 5) {
-      const rawSessions = ctx.db.listSessions(30);
-      const fallbackSessions = rawSessions.map(s => {
-        const msgs = ctx.db.getSessionMessages(s.id);
-        return {
-          messageCount: msgs.length,
-          durationMs: s.updatedAt - s.createdAt,
-          startTime: s.createdAt,
-        };
-      }).filter(s => s.messageCount > 0);
-      if (fallbackSessions.length > sessions.length) {
-        sessions = fallbackSessions;
-      }
-    }
 
     const rawScheduledItems = ctx.db.getScheduledItemsByUser(userId);
     const scheduledItems = rawScheduledItems
@@ -369,25 +299,20 @@ export function runTrustScoreUpdate(ctx: GardenerContext): TrustScoreStepResult 
         },
       });
       ctx.logger.debug({ userId, trustScore: trustResult.trustScore, dial: trustResult.proactivenessDial }, 'Trust score updated');
-      return { trustScore: trustResult.trustScore, proactivenessDial: trustResult.proactivenessDial };
     }
-    return {};
   } catch (err) {
     ctx.logger.warn({ error: (err as Error).message }, 'Trust score update failed');
-    return {};
   }
 }
 
 /**
  * B6: Goal deadline check
  */
-export async function runGoalDeadlineCheck(ctx: GardenerContext): Promise<GoalDeadlineStepResult> {
+export async function runGoalDeadlineCheck(ctx: GardenerContext): Promise<void> {
   try {
     const GoalService = (await import('../goals/goal-service.js')).GoalService;
     const goalService = new GoalService({ db: ctx.db, logger: ctx.logger });
     const userId = DEFAULT_USER_ID;
-    let totalApproaching = 0;
-    let totalNotifications = 0;
 
     const activeGoals = await goalService.listGoals(userId, { status: 'active' });
     const goalsWithDueDates = activeGoals.filter(g => g.metadata.dueDate != null);
@@ -414,101 +339,82 @@ export async function runGoalDeadlineCheck(ctx: GardenerContext): Promise<GoalDe
       if (deadlineResult.approaching.length > 0) {
         ctx.logger.info({ userId, approaching: deadlineResult.approaching.length, notifications: deadlineResult.notifications.length }, 'Goal deadline check complete');
       }
-      totalApproaching += deadlineResult.approaching.length;
-      totalNotifications += deadlineResult.notifications.length;
     }
-    return { approaching: totalApproaching, notifications: totalNotifications };
   } catch (err) {
     ctx.logger.warn({ error: (err as Error).message }, 'Goal deadline check failed');
-    return { approaching: 0, notifications: 0 };
   }
 }
 
 /**
  * B7: Inner thoughts evaluation (for users with recent session summaries)
  */
-export async function runInnerThoughts(ctx: GardenerContext): Promise<InnerThoughtsStepResult> {
-  if (!ctx.fusionProvider) return { proactiveItemsCreated: 0 };
+export async function runInnerThoughts(ctx: GardenerContext): Promise<void> {
+  if (!ctx.fusionProvider) return;
 
   try {
     const userId = DEFAULT_USER_ID;
     const sixHoursAgo = Date.now() - 6 * 60 * 60 * 1000;
-    let proactiveItemsCreated = 0;
 
-    try {
-      const allSummaries = ctx.db.getSessionSummariesByUser(userId, 10);
-      const recentSummaries = allSummaries.filter(s => s.createdAt >= sixHoursAgo);
+    const allSummaries = ctx.db.getSessionSummariesByUser(userId, 10);
+    const recentSummaries = allSummaries.filter(s => s.createdAt >= sixHoursAgo);
 
-      if (recentSummaries.length > 0) {
-        const sessionSummary = recentSummaries[0];
+    if (recentSummaries.length > 0) {
+      const sessionSummary = recentSummaries[0];
 
-        const behavioralPatterns = ctx.db.getBehavioralPatterns(userId);
-        const affect = behavioralPatterns?.smoothedAffect ?? null;
-        const dial = (behavioralPatterns?.responsePreferences?.proactivenessDial as 'conservative' | 'moderate' | 'eager') ?? 'moderate';
-        const activeHours = behavioralPatterns?.activeHours ?? [];
+      const behavioralPatterns = ctx.db.getBehavioralPatterns(userId);
+      const affect = behavioralPatterns?.smoothedAffect ?? null;
+      const dial = (behavioralPatterns?.responsePreferences?.proactivenessDial as 'conservative' | 'moderate' | 'eager') ?? 'moderate';
+      const activeHours = behavioralPatterns?.activeHours ?? [];
 
-        const lastProactiveAt = getLastProactiveAt(ctx.db, userId);
+      const lastProactiveAt = getLastProactiveAt(ctx.db, userId);
 
-        // Gap scanning removed — C3 (sleep tick gap pipeline) handles all
-        // gap-based proactive outreach. B7 focuses purely on session context:
-        // "does this specific session warrant follow-up?"
-        const result = await evaluateInnerThoughts({
-          sessionSummary,
-          recentGapSignals: [],
-          affect,
-          dial,
-          lastProactiveAt,
-          activeHours,
-        }, ctx.fusionProvider);
+      // Gap scanning removed — C3 (sleep tick gap pipeline) handles all
+      // gap-based proactive outreach. B7 focuses purely on session context:
+      // "does this specific session warrant follow-up?"
+      const result = await evaluateInnerThoughts({
+        sessionSummary,
+        recentGapSignals: [],
+        affect,
+        dial,
+        lastProactiveAt,
+        activeHours,
+      }, ctx.fusionProvider);
 
-        if (result.decision === 'proact' && result.message) {
-          if (!ctx.db.hasSimilarPendingScheduledItem(userId, result.message)) {
-            scheduleProactiveItem({
-              db: ctx.db,
-              userId,
-              message: result.message,
-              context: JSON.stringify({
-                source: 'inner_thoughts',
-                reason: result.reason,
-                urgency: result.urgency,
-              }),
-              type: 'follow_up',
-              kind: 'nudge',
-              quietHours: ctx.quietHours,
-              activeHours,
-              lastProactiveAt,
+      if (result.decision === 'proact' && result.message) {
+        if (!ctx.db.hasSimilarPendingScheduledItem(userId, result.message)) {
+          scheduleProactiveItem({
+            db: ctx.db,
+            userId,
+            message: result.message,
+            context: JSON.stringify({
+              source: 'inner_thoughts',
+              reason: result.reason,
               urgency: result.urgency,
-              timezone: ctx.getTimezone?.(userId),
-            });
+            }),
+            type: 'follow_up',
+            kind: 'nudge',
+            quietHours: ctx.quietHours,
+            activeHours,
+            lastProactiveAt,
+            urgency: result.urgency,
+            timezone: ctx.getTimezone?.(userId),
+          });
 
-            ctx.logger.info({ userId, urgency: result.urgency, reason: result.reason }, 'Inner thoughts created proactive item');
-            proactiveItemsCreated++;
-          } else {
-            ctx.logger.debug({ userId }, 'Skipping inner thoughts item - similar already pending');
-          }
+          ctx.logger.info({ userId, urgency: result.urgency, reason: result.reason }, 'Inner thoughts created proactive item');
+        } else {
+          ctx.logger.debug({ userId }, 'Skipping inner thoughts item - similar already pending');
         }
       }
-    } catch (err) {
-      ctx.logger.warn({ error: (err as Error).message, userId }, 'Inner thoughts failed for user');
     }
-    return { proactiveItemsCreated };
   } catch (err) {
-    ctx.logger.warn({ error: (err as Error).message }, 'Inner thoughts phase failed');
-    return { proactiveItemsCreated: 0 };
+    ctx.logger.warn({ error: (err as Error).message }, 'Inner thoughts failed');
   }
-}
-
-// ============ Sub-Agent Cleanup ============
-
-export interface SubAgentCleanupResult {
-  runsDeleted: number;
-  sessionsDeleted: number;
 }
 
 /**
  * B8: Clean up old sub-agent runs and their sessions
  */
-export function runSubAgentCleanup(ctx: GardenerContext, cleanupAfterSeconds: number = 3600): SubAgentCleanupResult {
+export function runSubAgentCleanup(ctx: GardenerContext, cleanupAfterSeconds: number = 3600): void {
   try {
     const maxAgeMs = cleanupAfterSeconds * 1000;
 
@@ -544,9 +450,7 @@ export function runSubAgentCleanup(ctx: GardenerContext, cleanupAfterSeconds: nu
       );
     }
 
-    return { runsDeleted, sessionsDeleted };
   } catch (err) {
     ctx.logger.warn({ error: (err as Error).message }, 'Sub-agent cleanup failed');
-    return { runsDeleted: 0, sessionsDeleted: 0 };
   }
 }

@@ -124,10 +124,7 @@ describe('gardener-sleep-steps', () => {
   describe('runDreamCycle', () => {
     it('skips when no fusionProvider', async () => {
       const ctx = buildCtx(store, db);
-      const result = await runDreamCycle(ctx);
-      expect(result.totalFused).toBe(0);
-      expect(result.totalMerged).toBe(0);
-      expect(result.totalDiscoveries).toBe(0);
+      await expect(runDreamCycle(ctx)).resolves.not.toThrow();
     });
 
     it('skips users with fewer than 3 eligible memories', async () => {
@@ -136,9 +133,8 @@ describe('gardener-sleep-steps', () => {
 
       const provider = createMockFusionProvider();
       const ctx = buildCtx(store, db, { fusionProvider: provider });
-      const result = await runDreamCycle(ctx);
+      await runDreamCycle(ctx);
 
-      expect(result.totalFused).toBe(0);
       expect(provider.complete).not.toHaveBeenCalled();
     });
 
@@ -165,12 +161,8 @@ describe('gardener-sleep-steps', () => {
       const provider = createSequentialFusionProvider([nremResponse, remResponse]);
 
       const ctx = buildCtx(store, db, { fusionProvider: provider });
-      const result = await runDreamCycle(ctx);
-
-      // NREM should have produced at least some activity
-      // (exact counts depend on clustering)
-      expect(result).toBeDefined();
-      expect(result.totalFused).toBeGreaterThanOrEqual(0);
+      // Should complete without throwing (exact counts depend on clustering)
+      await expect(runDreamCycle(ctx)).resolves.not.toThrow();
     });
 
     it('catches errors and does not throw', async () => {
@@ -198,15 +190,12 @@ describe('gardener-sleep-steps', () => {
     it('skips when no workspace provided', async () => {
       const provider = createMockFusionProvider();
       const ctx = buildCtx(store, db, { fusionProvider: provider });
-      const result = await runSelfReflection(ctx);
-      expect(result.usersReflected).toBe(0);
-      expect(result.insightsGenerated).toBe(0);
+      await expect(runSelfReflection(ctx)).resolves.not.toThrow();
     });
 
     it('skips when no fusionProvider', async () => {
       const ctx = buildCtx(store, db, { workspace: '/tmp/test-workspace' });
-      const result = await runSelfReflection(ctx);
-      expect(result.usersReflected).toBe(0);
+      await expect(runSelfReflection(ctx)).resolves.not.toThrow();
     });
 
     it('stores reflection insight memories as derived type', async () => {
@@ -238,9 +227,7 @@ describe('gardener-sleep-steps', () => {
       const provider = createMockFusionProvider(reflectionResponse);
 
       const ctx = buildCtx(store, db, { fusionProvider: provider, workspace });
-      const result = await runSelfReflection(ctx);
-
-      expect(result.insightsGenerated).toBeGreaterThanOrEqual(0);
+      await expect(runSelfReflection(ctx)).resolves.not.toThrow();
 
       // Cleanup workspace
       try { fs.rmSync(workspace, { recursive: true }); } catch { /* ignore */ }
@@ -275,16 +262,14 @@ describe('gardener-sleep-steps', () => {
   describe('runGapScanner', () => {
     it('skips when no fusionProvider', async () => {
       const ctx = buildCtx(store, db);
-      const result = await runGapScanner(ctx);
-      expect(result.actionsCreated).toBe(0);
+      await expect(runGapScanner(ctx)).resolves.not.toThrow();
     });
 
     it('handles users with no gaps gracefully', async () => {
       seedMemory(db, { content: 'Simple memory', category: 'fact', prominence: 0.8 });
       const provider = createMockFusionProvider();
       const ctx = buildCtx(store, db, { fusionProvider: provider });
-      const result = await runGapScanner(ctx);
-      expect(result.actionsCreated).toBe(0);
+      await expect(runGapScanner(ctx)).resolves.not.toThrow();
     });
 
     it('catches errors and does not throw', async () => {

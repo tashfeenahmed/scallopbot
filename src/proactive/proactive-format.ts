@@ -54,13 +54,15 @@ export function formatProactiveForWebSocket(input: ProactiveFormatInput): Proact
 
 /**
  * Route proactive message formatting to the appropriate channel formatter.
+ * Always returns a string — Telegram gets the message as-is,
+ * WebSocket gets a JSON-serialized structured object.
  */
 export function formatProactiveMessage(
   channel: 'telegram' | 'api',
   input: ProactiveFormatInput,
-): string | ProactiveWebSocketOutput {
+): string {
   if (channel === 'telegram') {
     return formatProactiveForTelegram(input);
   }
-  return formatProactiveForWebSocket(input);
+  return JSON.stringify(formatProactiveForWebSocket(input));
 }

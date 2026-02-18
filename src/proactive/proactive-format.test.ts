@@ -95,20 +95,20 @@ describe('formatProactiveMessage', () => {
     expect(result as string).toBe(input.message);
   });
 
-  it('routes to websocket formatter for api channel', () => {
+  it('routes to websocket formatter for api channel (returns JSON string)', () => {
     const input = makeInput();
     const result = formatProactiveMessage('api', input);
-    // Should return an object (WebSocket format)
-    expect(typeof result).toBe('object');
-    expect((result as Record<string, unknown>).type).toBe('proactive');
+    expect(typeof result).toBe('string');
+    const parsed = JSON.parse(result);
+    expect(parsed.type).toBe('proactive');
   });
 
   it('handles task_result source correctly', () => {
     const input = makeInput({ source: 'task_result', gapType: undefined });
     const result = formatProactiveMessage('api', input);
-    expect(typeof result).toBe('object');
-    const wsResult = result as { type: string; source: string; category: string };
-    expect(wsResult.source).toBe('task_result');
-    expect(wsResult.category).toBe('general');
+    expect(typeof result).toBe('string');
+    const parsed = JSON.parse(result);
+    expect(parsed.source).toBe('task_result');
+    expect(parsed.category).toBe('general');
   });
 });
