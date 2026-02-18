@@ -415,6 +415,8 @@ export class ApiChannel implements Channel, TriggerSource {
         await this.handleListSessions(res);
       } else if (urlPath === '/api/sessions/current' && method === 'GET') {
         this.handleGetCurrentSession(res);
+      } else if (urlPath === '/api/messages' && method === 'GET') {
+        this.handleGetAllMessages(res, url);
       } else if (urlPath.match(/^\/api\/sessions\/[^/]+\/messages$/) && method === 'GET') {
         const sessionId = urlPath.split('/')[3];
         this.handleGetSessionMessages(res, sessionId, url);
@@ -765,6 +767,21 @@ export class ApiChannel implements Channel, TriggerSource {
       return;
     }
     this.sendJson(res, 200, { id: session.id, createdAt: session.createdAt, updatedAt: session.updatedAt });
+  }
+
+  /**
+   * Handle GET /api/messages?limit=50&before=123 — unified cross-channel history
+   */
+  private handleGetAllMessages(res: ServerResponse, url: URL): void {
+    if (!this.db) {
+      this.sendJson(res, 503, { error: 'Database not available' });
+      return;
+    }
+    const limit = Math.min(parseInt(url.searchParams.get('limit') || '50', 10) || 50, 100);
+    const beforeParam = url.searchParams.get('before');
+    const before = beforeParam ? parseInt(beforeParam, 10) : undefined;
+    const { messages, hasMore } = this.db.getAllMessagesPaginated(limit, before);
+    this.sendJson(res, 200, { messages, hasMore });
   }
 
   /**

@@ -240,27 +240,18 @@ export default function App() {
     enabled: authState === 'authenticated',
   });
 
-  // Load chat history when connected
+  // Load chat history when connected (unified across all channels)
   useEffect(() => {
     if (status !== 'connected' || historyLoaded) return;
 
     const loadHistory = async () => {
       try {
-        // Get current session
-        const sessionRes = await fetch('/api/sessions/current');
-        if (!sessionRes.ok) {
+        const res = await fetch('/api/messages?limit=50');
+        if (!res.ok) {
           setHistoryLoaded(true);
           return;
         }
-        const session = await sessionRes.json();
-
-        // Fetch latest messages
-        const msgRes = await fetch(`/api/sessions/${session.id}/messages?limit=50`);
-        if (!msgRes.ok) {
-          setHistoryLoaded(true);
-          return;
-        }
-        const { messages: dbMessages, hasMore: more } = await msgRes.json();
+        const { messages: dbMessages, hasMore: more } = await res.json();
 
         if (dbMessages && dbMessages.length > 0) {
           const chatMessages: ChatMessage[] = dbMessages
@@ -303,19 +294,6 @@ export default function App() {
 
     if (oldestDbId === undefined) return;
 
-    // Get sessionId from the current session endpoint
-    let sid = sessionId;
-    if (!sid) {
-      try {
-        const res = await fetch('/api/sessions/current');
-        if (res.ok) {
-          const data = await res.json();
-          sid = data.id;
-        }
-      } catch { /* ignore */ }
-    }
-    if (!sid) return;
-
     setIsLoadingMore(true);
 
     // Save scroll position before prepending
@@ -323,7 +301,7 @@ export default function App() {
     const prevScrollHeight = el?.scrollHeight || 0;
 
     try {
-      const res = await fetch(`/api/sessions/${sid}/messages?limit=50&before=${oldestDbId}`);
+      const res = await fetch(`/api/messages?limit=50&before=${oldestDbId}`);
       if (!res.ok) {
         setIsLoadingMore(false);
         return;
@@ -358,7 +336,7 @@ export default function App() {
     }
 
     setIsLoadingMore(false);
-  }, [isLoadingMore, hasMore, messages, sessionId]);
+  }, [isLoadingMore, hasMore, messages]);
 
   const handleSend = useCallback(
     (text: string) => {
