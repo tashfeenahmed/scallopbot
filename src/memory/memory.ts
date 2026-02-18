@@ -52,6 +52,8 @@ export interface BackgroundGardenerOptions {
   disableArchival?: boolean;
   /** Resolve IANA timezone for a user (defaults to server timezone) */
   getTimezone?: (userId: string) => string;
+  /** Callback fired once when transitioning out of quiet hours (morning digest) */
+  onMorningDigest?: (userId: string) => Promise<void>;
 }
 
 /**
@@ -84,6 +86,8 @@ export class BackgroundGardener {
   private workspace?: string;
   private disableArchival: boolean;
   private getTimezone: (userId: string) => string;
+  private onMorningDigest?: (userId: string) => Promise<void>;
+  private wasInQuietHours = false;
 
   /** Deep consolidation runs every DEEP_EVERY light ticks.
    *  With default 5-min interval: 72 ticks × 5 min = 6 hours */
@@ -103,6 +107,7 @@ export class BackgroundGardener {
     this.workspace = options.workspace;
     this.disableArchival = options.disableArchival ?? false;
     this.getTimezone = options.getTimezone ?? (() => Intl.DateTimeFormat().resolvedOptions().timeZone);
+    this.onMorningDigest = options.onMorningDigest;
   }
 
   start(): void {
@@ -185,6 +190,15 @@ export class BackgroundGardener {
         this.logger.warn({ error: (err as Error).message }, 'Sleep tick failed');
       });
     }
+
+    // Detect quiet-hours → active-hours transition for morning digest
+    const currentlyQuiet = this.isQuietHours();
+    if (this.wasInQuietHours && !currentlyQuiet && this.onMorningDigest) {
+      this.onMorningDigest(DEFAULT_USER_ID).catch(err => {
+        this.logger.warn({ error: (err as Error).message }, 'Morning digest failed');
+      });
+    }
+    this.wasInQuietHours = currentlyQuiet;
   }
 
   private buildContext(): GardenerContext {

@@ -70,6 +70,8 @@ export interface TrustScoreResult {
 
 export interface TrustScoreOptions {
   existingScore?: number;
+  /** Injectable timestamp for testing (defaults to Date.now()) */
+  now?: number;
 }
 
 // ============ Helpers ============
@@ -110,8 +112,7 @@ function clamp01(value: number): number {
  * Compute session return rate: sessions per week, normalized to 0-1.
  * sigmoid(x/7) where 7 sessions/week = ~1.0
  */
-function computeSessionReturnRate(sessions: SessionInput[]): number {
-  const now = Date.now();
+function computeSessionReturnRate(sessions: SessionInput[], now: number): number {
   const recentSessions = sessions.filter(
     (s) => now - s.startTime <= WEEK_MS,
   );
@@ -196,9 +197,11 @@ export function computeTrustScore(
     return null;
   }
 
+  const now = options?.now ?? Date.now();
+
   // Compute individual signals
   const signals: TrustSignals = {
-    sessionReturnRate: computeSessionReturnRate(sessions),
+    sessionReturnRate: computeSessionReturnRate(sessions, now),
     avgSessionDuration: computeAvgSessionDuration(sessions),
     proactiveAcceptRate: computeProactiveAcceptRate(scheduledItems),
     proactiveDismissRate: computeProactiveDismissRate(scheduledItems),

@@ -42,6 +42,8 @@ export interface GapPipelineInput {
   existingItems: ExistingItemForDedup[];
   userId: string;
   now?: number;
+  /** Number of agent-sourced items already created today (for daily budget enforcement) */
+  todayItemCount?: number;
 }
 
 // ============ Constants ============
@@ -279,7 +281,8 @@ export async function runGapPipeline(
 
     // Code-level post-processing
     const budgetCap = DIAL_THRESHOLDS[input.dial].maxDailyNotifications;
-    const effectiveCap = Math.min(budgetCap, MAX_ITEMS_PER_TICK);
+    const remainingBudget = Math.max(0, budgetCap - (input.todayItemCount ?? 0));
+    const effectiveCap = Math.min(remainingBudget, MAX_ITEMS_PER_TICK);
     const filtered: GapScheduledItem[] = [];
 
     for (const item of items) {
