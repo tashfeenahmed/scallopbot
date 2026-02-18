@@ -207,6 +207,7 @@ export default function App() {
 
   const { status, sendMessage, sendStop } = useWebSocket({
     onMessage: handleWsMessage,
+    enabled: authState === 'authenticated',
   });
 
   const handleSend = useCallback(

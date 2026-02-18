@@ -21,9 +21,10 @@ export interface WsMessage {
 
 interface UseWebSocketOptions {
   onMessage: (data: WsMessage) => void;
+  enabled?: boolean;
 }
 
-export function useWebSocket({ onMessage }: UseWebSocketOptions) {
+export function useWebSocket({ onMessage, enabled = true }: UseWebSocketOptions) {
   const [status, setStatus] = useState<ConnectionStatus>('disconnected');
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectAttemptsRef = useRef(0);
@@ -111,6 +112,14 @@ export function useWebSocket({ onMessage }: UseWebSocketOptions) {
   }, []);
 
   useEffect(() => {
+    if (!enabled) {
+      // Not authenticated yet — don't connect
+      clearTimeout(reconnectTimerRef.current);
+      clearInterval(heartbeatRef.current);
+      wsRef.current?.close();
+      return;
+    }
+
     connect();
 
     heartbeatRef.current = setInterval(() => {
@@ -124,7 +133,7 @@ export function useWebSocket({ onMessage }: UseWebSocketOptions) {
       clearInterval(heartbeatRef.current);
       wsRef.current?.close();
     };
-  }, [connect]);
+  }, [connect, enabled]);
 
   return { status, sendMessage, sendStop };
 }

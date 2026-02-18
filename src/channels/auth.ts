@@ -74,10 +74,10 @@ function setSessionCookie(
   req: IncomingMessage,
 ): void {
   const maxAge = Math.floor(ttlMs / 1000);
-  const host = req.headers.host || '';
-  const isLocalhost = host.startsWith('localhost') || host.startsWith('127.0.0.1');
+  const proto = req.headers['x-forwarded-proto'] || '';
+  const isSecure = proto === 'https' || (req.socket as { encrypted?: boolean }).encrypted === true;
   let cookie = `${SESSION_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}`;
-  if (!isLocalhost) cookie += '; Secure';
+  if (isSecure) cookie += '; Secure';
   res.setHeader('Set-Cookie', cookie);
 }
 
