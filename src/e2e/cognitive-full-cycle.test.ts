@@ -382,12 +382,11 @@ describe('E2E Cognitive Full Cycle', () => {
       expect(typeof telegramResult).toBe('string');
       expect(telegramResult as string).toBe(testInput.message);
 
-      // API (WebSocket) channel should return an object
+      // API (WebSocket) channel should return a JSON string
       const apiResult = formatProactiveMessage('api', testInput);
-      expect(typeof apiResult).toBe('object');
-      expect(apiResult).not.toBeNull();
+      expect(typeof apiResult).toBe('string');
 
-      const wsResult = apiResult as { type: string; content: string };
+      const wsResult = JSON.parse(apiResult);
       expect(wsResult.type).toBe('proactive');
       expect(wsResult.content).toBe(testInput.message);
     });

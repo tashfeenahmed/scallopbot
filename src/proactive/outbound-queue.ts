@@ -1,18 +1,16 @@
 /**
- * OutboundQueue — Delivery-layer rate limiter for proactive messages.
+ * OutboundQueue — Delivery layer for proactive messages.
  *
- * Wraps the raw message-send handler to enforce:
- * - Minimum gap between deliveries (default: 5 minutes)
- * - Per-hour cap (default: 6 messages/hour)
+ * Wraps the raw message-send handler to provide:
  * - LLM-powered message combining when multiple messages pile up
+ * - Queue size cap to prevent unbounded growth
  *
- * When 2+ messages accumulate for the same user within the batch window,
- * the queue uses an LLM to combine them into a single natural message
- * instead of sending them as separate Telegram pings.
+ * This is a single-user system. When 2+ messages accumulate while a
+ * drain is in progress, the queue uses an LLM to combine them into
+ * a single natural Telegram message instead of separate pings.
  *
  * All proactive subsystems (scheduler, gardener, fact-extractor) route
- * through this queue, ensuring a unified delivery cadence regardless
- * of how many subsystems are generating messages simultaneously.
+ * through this queue so simultaneous messages get merged.
  */
 
 import type { Logger } from 'pino';
@@ -20,24 +18,11 @@ import type { Router } from '../routing/router.js';
 
 // ============ Constants ============
 
-/** Minimum gap between consecutive proactive deliveries */
-const DEFAULT_MIN_GAP_MS = 5 * 60 * 1000; // 5 minutes
-
-/** Maximum deliveries per hour */
-const DEFAULT_MAX_PER_HOUR = 6;
-
-/** Queue drain interval */
+/** Queue drain interval (safety net for stuck messages) */
 const DRAIN_INTERVAL_MS = 30 * 1000; // 30 seconds
 
 /** Maximum queue size (prevent unbounded growth) */
 const MAX_QUEUE_SIZE = 20;
-
-/**
- * Batch collection delay — after the first enqueue into an empty queue,
- * wait this long before draining so messages from different subsystems
- * have time to arrive and get combined.
- */
-const BATCH_DELAY_MS = 2 * 60 * 1000; // 2 minutes
 
 // ============ LLM Combine Prompt ============
 
@@ -64,12 +49,6 @@ export interface OutboundQueueOptions {
   logger: Logger;
   /** LLM router for message combining (optional — falls back to join if missing) */
   router?: Router;
-  /** Minimum gap between deliveries in ms (default: 5 min) */
-  minGapMs?: number;
-  /** Maximum messages per hour (default: 6) */
-  maxPerHour?: number;
-  /** Batch collection delay in ms (default: 2 min) */
-  batchDelayMs?: number;
 }
 
 interface QueuedMessage {
@@ -84,15 +63,8 @@ export class OutboundQueue {
   private sendMessage: (userId: string, message: string) => Promise<boolean>;
   private logger: Logger;
   private router: Router | undefined;
-  private minGapMs: number;
-  private maxPerHour: number;
-  private batchDelayMs: number;
 
   private queue: QueuedMessage[] = [];
-  private deliveryTimestamps: number[] = [];
-  private lastDeliveryAt = 0;
-  /** Timestamp of first enqueue into an empty queue (for batch delay) */
-  private firstEnqueueAt: number | null = null;
   private drainHandle: ReturnType<typeof setInterval> | null = null;
   private draining = false;
 
@@ -100,13 +72,11 @@ export class OutboundQueue {
     this.sendMessage = options.sendMessage;
     this.logger = options.logger.child({ component: 'outbound-queue' });
     this.router = options.router;
-    this.minGapMs = options.minGapMs ?? DEFAULT_MIN_GAP_MS;
-    this.maxPerHour = options.maxPerHour ?? DEFAULT_MAX_PER_HOUR;
-    this.batchDelayMs = options.batchDelayMs ?? BATCH_DELAY_MS;
   }
 
   /**
-   * Start the queue drain loop
+   * Start the queue drain loop (safety net for messages that arrive
+   * while a drain is already in progress).
    */
   start(): void {
     if (this.drainHandle) return;
@@ -129,7 +99,7 @@ export class OutboundQueue {
   }
 
   /**
-   * Enqueue a proactive message for rate-limited delivery.
+   * Enqueue a proactive message for delivery.
    * Returns true if the message was queued, false if it was dropped (queue full).
    */
   enqueue(userId: string, message: string): boolean {
@@ -140,11 +110,6 @@ export class OutboundQueue {
         'Outbound queue full, dropping message'
       );
       return false;
-    }
-
-    // Track when collection started (for batch delay)
-    if (this.queue.length === 0) {
-      this.firstEnqueueAt = Date.now();
     }
 
     this.queue.push({ userId, message, enqueuedAt: Date.now() });
@@ -164,7 +129,6 @@ export class OutboundQueue {
     return async (userId: string, message: string): Promise<boolean> => {
       const queued = this.enqueue(userId, message);
       if (queued) {
-        // Try an immediate drain (will respect batch delay + min gap)
         await this.drain();
       }
       return queued;
@@ -172,94 +136,37 @@ export class OutboundQueue {
   }
 
   /**
-   * Drain the queue: deliver messages respecting rate limits.
-   * Groups messages by user and combines when 2+ exist for the same user.
+   * Drain the queue: deliver all pending messages immediately.
+   * Combines 2+ messages into one via LLM before sending.
    */
   private async drain(): Promise<void> {
     if (this.draining || this.queue.length === 0) return;
     this.draining = true;
 
     try {
-      const now = Date.now();
-
-      // Batch delay: wait for messages to accumulate before draining
-      if (this.firstEnqueueAt && now - this.firstEnqueueAt < this.batchDelayMs) {
-        return;
-      }
-
-      // Prune old delivery timestamps (keep only last hour)
-      this.deliveryTimestamps = this.deliveryTimestamps.filter(
-        ts => now - ts < 60 * 60 * 1000
-      );
-
-      // Check per-hour cap
-      if (this.deliveryTimestamps.length >= this.maxPerHour) {
-        this.logger.debug(
-          { deliveredThisHour: this.deliveryTimestamps.length, max: this.maxPerHour },
-          'Per-hour cap reached, deferring delivery'
-        );
-        return;
-      }
-
-      // Check minimum gap
-      if (now - this.lastDeliveryAt < this.minGapMs) {
-        return;
-      }
-
-      // Group all queued messages by userId
-      const byUser = new Map<string, QueuedMessage[]>();
-      for (const msg of this.queue) {
-        const group = byUser.get(msg.userId) || [];
-        group.push(msg);
-        byUser.set(msg.userId, group);
-      }
-
-      // Pick the user whose oldest message came first
-      let earliestUser: string | null = null;
-      let earliestTime = Infinity;
-      for (const [userId, messages] of byUser) {
-        const oldest = messages[0].enqueuedAt;
-        if (oldest < earliestTime) {
-          earliestTime = oldest;
-          earliestUser = userId;
-        }
-      }
-
-      if (!earliestUser) return;
-
-      const userMessages = byUser.get(earliestUser)!;
-
-      // Remove these messages from the queue
-      this.queue = this.queue.filter(m => m.userId !== earliestUser);
-
-      // Reset batch delay tracking
-      if (this.queue.length === 0) {
-        this.firstEnqueueAt = null;
-      } else {
-        // Reset to oldest remaining message
-        this.firstEnqueueAt = Math.min(...this.queue.map(m => m.enqueuedAt));
-      }
+      // Take ownership of all queued messages
+      const messages = this.queue;
+      const userId = messages[0].userId;
+      this.queue = [];
 
       // Combine or pass through
       let finalMessage: string;
-      if (userMessages.length === 1) {
-        finalMessage = userMessages[0].message;
+      if (messages.length === 1) {
+        finalMessage = messages[0].message;
       } else {
-        finalMessage = await this.combineMessages(userMessages);
+        finalMessage = await this.combineMessages(messages);
         this.logger.info(
-          { userId: earliestUser, messageCount: userMessages.length },
+          { messageCount: messages.length },
           'Combined multiple proactive messages via LLM'
         );
       }
 
       try {
-        const sent = await this.sendMessage(earliestUser, finalMessage);
+        const sent = await this.sendMessage(userId, finalMessage);
         if (sent) {
-          this.lastDeliveryAt = now;
-          this.deliveryTimestamps.push(now);
           this.logger.debug(
-            { queueRemaining: this.queue.length, combined: userMessages.length > 1 },
-            'Proactive message delivered via queue'
+            { combined: messages.length > 1 },
+            'Proactive message delivered'
           );
         }
       } catch (err) {

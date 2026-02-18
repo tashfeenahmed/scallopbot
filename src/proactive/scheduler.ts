@@ -254,12 +254,7 @@ export class UnifiedScheduler {
       'Processing nudge'
     );
 
-    if (item.source === 'agent') {
-      await this.sendFormattedMessage(item, item.message);
-    } else {
-      // User-sourced: send directly
-      await this.onSendMessage(item.userId, item.message);
-    }
+    await this.sendFormattedMessage(item, item.message);
   }
 
   /**
@@ -388,11 +383,7 @@ export class UnifiedScheduler {
         };
 
         const formatted = formatProactiveMessage((channel ?? 'telegram') as 'telegram' | 'api', formatInput);
-        const formattedStr = typeof formatted === 'string'
-          ? formatted
-          : JSON.stringify(formatted);
-
-        await this.onSendMessage(item.userId, formattedStr);
+        await this.onSendMessage(item.userId, formatted);
         return;
       }
     }

@@ -18,6 +18,7 @@ import type { LLMProvider } from '../providers/types.js';
 import { performHealthPing } from './health-ping.js';
 import type { GardenerContext } from './gardener-context.js';
 import { DEFAULT_USER_ID } from './gardener-context.js';
+import { isInQuietHours } from '../proactive/timing-model.js';
 import {
   runFullDecay,
   runSessionSummarization,
@@ -273,14 +274,11 @@ export class BackgroundGardener {
   /**
    * Check if the current hour falls within configured quiet hours.
    * Uses the first known user's timezone (single-user system) instead of server time.
-   * Supports wrap-around ranges (e.g., start: 23, end: 5).
    */
   private isQuietHours(): boolean {
     let hour: number;
     try {
-      // Resolve timezone from the single default user
-      const userId = DEFAULT_USER_ID;
-      const tz = this.getTimezone(userId);
+      const tz = this.getTimezone(DEFAULT_USER_ID);
       const parts = new Intl.DateTimeFormat('en-US', {
         timeZone: tz,
         hour: 'numeric',
@@ -293,11 +291,7 @@ export class BackgroundGardener {
       hour = new Date().getHours();
     }
 
-    if (this.quietHours.start < this.quietHours.end) {
-      return hour >= this.quietHours.start && hour < this.quietHours.end;
-    }
-    // Handle wrap-around (e.g., start: 23, end: 5)
-    return hour >= this.quietHours.start || hour < this.quietHours.end;
+    return isInQuietHours(hour, this.quietHours);
   }
 
   /**
