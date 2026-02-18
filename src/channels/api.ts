@@ -33,6 +33,8 @@ import type { ScallopDatabase } from '../memory/db.js';
 import { AuthService } from './auth.js';
 import { nanoid } from 'nanoid';
 import type { InterruptQueue } from '../agent/interrupt-queue.js';
+import type { BotConfigManager } from './bot-config.js';
+import type { ProviderRegistry } from '../providers/registry.js';
 
 /** Maximum request body size (1MB) */
 const MAX_BODY_SIZE = 1024 * 1024;
@@ -69,6 +71,10 @@ export interface ApiChannelConfig {
   interruptQueue?: InterruptQueue;
   /** Callback when a WebSocket user sends a message (for engagement tracking) */
   onUserMessage?: (prefixedUserId: string) => void;
+  /** Bot config manager for /settings and /model commands (optional) */
+  configManager?: BotConfigManager;
+  /** Provider registry for /model command (optional) */
+  providerRegistry?: ProviderRegistry;
 }
 
 /** Content-Type mapping for static files */
@@ -172,7 +178,7 @@ interface WsResponse {
 export class ApiChannel implements Channel, TriggerSource {
   name = 'api';
 
-  private config: Required<Omit<ApiChannelConfig, 'apiKey' | 'allowedOrigins' | 'staticDir' | 'costTracker' | 'memoryStore' | 'db' | 'interruptQueue' | 'onUserMessage'>> & {
+  private config: Required<Omit<ApiChannelConfig, 'apiKey' | 'allowedOrigins' | 'staticDir' | 'costTracker' | 'memoryStore' | 'db' | 'interruptQueue' | 'onUserMessage' | 'configManager' | 'providerRegistry'>> & {
     apiKey?: string;
     allowedOrigins: string[];
     staticDir?: string;
@@ -193,6 +199,11 @@ export class ApiChannel implements Channel, TriggerSource {
   private interruptQueue: InterruptQueue | null = null;
   private authService: AuthService | null = null;
   private onUserMessage?: (prefixedUserId: string) => void;
+  private configManager: BotConfigManager | null = null;
+  private providerRegistry: ProviderRegistry | null = null;
+  private db: ScallopDatabase | null = null;
+  /** Per-client verbose mode toggle */
+  private verboseClients: Set<string> = new Set();
 
   constructor(config: ApiChannelConfig) {
     this.config = {
@@ -214,6 +225,9 @@ export class ApiChannel implements Channel, TriggerSource {
     if (config.db) {
       this.authService = new AuthService(config.db);
     }
+    this.configManager = config.configManager || null;
+    this.providerRegistry = config.providerRegistry || null;
+    this.db = config.db || null;
   }
 
   async start(): Promise<void> {
@@ -966,6 +980,233 @@ export class ApiChannel implements Channel, TriggerSource {
     }
   }
 
+  /** Provider display names (matches Telegram) */
+  private static PROVIDER_LABELS: Record<string, string> = {
+    anthropic: 'Anthropic (Claude)',
+    openai: 'OpenAI (GPT)',
+    groq: 'Groq',
+    moonshot: 'Moonshot (Kimi)',
+    xai: 'xAI (Grok)',
+    ollama: 'Ollama (local)',
+    openrouter: 'OpenRouter',
+  };
+
+  private formatTokens(tokens: number): string {
+    if (tokens >= 1_000_000) return (tokens / 1_000_000).toFixed(2) + 'M';
+    if (tokens >= 1_000) return (tokens / 1_000).toFixed(1) + 'K';
+    return tokens.toString();
+  }
+
+  /**
+   * Handle built-in slash commands from WebSocket clients.
+   * Returns true if the command was handled (caller should not forward to agent).
+   */
+  private async handleSlashCommand(ws: WebSocket, clientId: string, text: string): Promise<boolean> {
+    // Only match exact /command or /command <args> (no space before slash)
+    const match = text.match(/^\/(\w+)(?:\s+(.*))?$/);
+    if (!match) return false;
+
+    const cmd = match[1].toLowerCase();
+    const args = match[2]?.trim() || '';
+
+    switch (cmd) {
+      case 'new': {
+        const userId = `ws-${clientId}`;
+        const sessionId = this.userSessions.get(userId);
+        if (sessionId) {
+          await this.config.sessionManager.deleteSession(sessionId);
+          this.userSessions.delete(userId);
+        }
+        this.sendWsMessage(ws, { type: 'response', content: 'Starting a new conversation!' });
+        return true;
+      }
+
+      case 'help': {
+        const botName = this.configManager
+          ? this.configManager.getUserConfig('default').botName
+          : 'Scallopbot';
+        const content =
+          `**${botName} — Help**\n\n` +
+          '**Commands:**\n' +
+          '/new — Start new conversation history\n' +
+          '/help — Show this help\n' +
+          '/model — Switch AI model/provider\n' +
+          '/usage — View token usage and costs\n' +
+          '/settings — View your configuration\n' +
+          '/verbose — Toggle debug output\n\n' +
+          '**Skills:**\n' +
+          '/memory\\_search `<query>` — Search long-term memory\n' +
+          '/goals `<action>` — Manage goals, milestones, and tasks\n' +
+          '/board `<action>` — View and manage the task board\n\n' +
+          'Just send me a message and I\'ll do my best to help!';
+        this.sendWsMessage(ws, { type: 'response', content });
+        return true;
+      }
+
+      case 'stop': {
+        this.stopRequests.add(clientId);
+        if (this.interruptQueue) {
+          const userId = `ws-${clientId}`;
+          const sessionId = this.userSessions.get(userId);
+          if (sessionId) this.interruptQueue.clear(sessionId);
+        }
+        const wasActive = this.activeProcessing.has(clientId);
+        if (wasActive) {
+          this.sendWsMessage(ws, { type: 'response', content: 'Stopping current task...' });
+        } else {
+          this.sendWsMessage(ws, { type: 'response', content: 'Nothing running right now.' });
+        }
+        return true;
+      }
+
+      case 'verbose': {
+        if (this.verboseClients.has(clientId)) {
+          this.verboseClients.delete(clientId);
+          this.sendWsMessage(ws, { type: 'response', content: 'Verbose mode OFF' });
+        } else {
+          this.verboseClients.add(clientId);
+          this.sendWsMessage(ws, { type: 'response', content: "Verbose mode ON — you'll see memory lookups, tool calls, and thinking." });
+        }
+        return true;
+      }
+
+      case 'usage': {
+        if (!this.db) {
+          this.sendWsMessage(ws, { type: 'response', content: 'Usage tracking is not available.' });
+          return true;
+        }
+        const allRecords = this.db.getCostUsageSince(0);
+        const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
+        const monthStart = new Date(); monthStart.setDate(1); monthStart.setHours(0, 0, 0, 0);
+        const todayRecords = allRecords.filter(r => r.timestamp >= todayStart.getTime());
+        const monthRecords = allRecords.filter(r => r.timestamp >= monthStart.getTime());
+
+        const todayTokens = todayRecords.reduce((s, r) => s + r.inputTokens + r.outputTokens, 0);
+        const todayCost = todayRecords.reduce((s, r) => s + r.cost, 0);
+        const monthTokens = monthRecords.reduce((s, r) => s + r.inputTokens + r.outputTokens, 0);
+        const monthCost = monthRecords.reduce((s, r) => s + r.cost, 0);
+        const totalTokens = allRecords.reduce((s, r) => s + r.inputTokens + r.outputTokens, 0);
+        const totalCost = allRecords.reduce((s, r) => s + r.cost, 0);
+
+        const modelUsage = new Map<string, { tokens: number; cost: number }>();
+        for (const r of monthRecords) {
+          const e = modelUsage.get(r.model) || { tokens: 0, cost: 0 };
+          e.tokens += r.inputTokens + r.outputTokens;
+          e.cost += r.cost;
+          modelUsage.set(r.model, e);
+        }
+
+        let modelBreakdown = '';
+        const sorted = [...modelUsage.entries()].sort((a, b) => b[1].cost - a[1].cost);
+        for (const [model, u] of sorted.slice(0, 5)) {
+          const short = model.length > 20 ? model.substring(0, 18) + '..' : model;
+          modelBreakdown += `  ${short}: ${this.formatTokens(u.tokens)} ($${u.cost.toFixed(4)})\n`;
+        }
+
+        const content =
+          `**Usage Statistics**\n\n` +
+          `**Today:**\n` +
+          `  Tokens: ${this.formatTokens(todayTokens)}\n` +
+          `  Cost: $${todayCost.toFixed(4)}\n\n` +
+          `**This Month:**\n` +
+          `  Tokens: ${this.formatTokens(monthTokens)}\n` +
+          `  Cost: $${monthCost.toFixed(4)}\n\n` +
+          `**All Time:**\n` +
+          `  Tokens: ${this.formatTokens(totalTokens)}\n` +
+          `  Cost: $${totalCost.toFixed(4)}\n` +
+          `  Requests: ${allRecords.length.toLocaleString()}\n\n` +
+          (modelBreakdown ? `**This Month by Model:**\n${modelBreakdown}` : '');
+        this.sendWsMessage(ws, { type: 'response', content });
+        return true;
+      }
+
+      case 'model': {
+        if (!this.providerRegistry || !this.configManager) {
+          this.sendWsMessage(ws, { type: 'response', content: 'Model switching is not available.' });
+          return true;
+        }
+        const config = this.configManager.getUserConfig('default');
+        const available = this.providerRegistry.getAvailableProviders().filter(p => p.name !== 'ollama');
+
+        if (available.length === 0) {
+          this.sendWsMessage(ws, { type: 'response', content: 'No AI providers are configured.' });
+          return true;
+        }
+
+        if (!args) {
+          const current = config.modelId === 'auto'
+            ? 'auto (smart routing)'
+            : ApiChannel.PROVIDER_LABELS[config.modelId] || config.modelId;
+
+          let list = '';
+          available.forEach((p, i) => {
+            const label = ApiChannel.PROVIDER_LABELS[p.name] || p.name;
+            const marker = config.modelId === p.name ? ' ✓' : '';
+            list += `  **${i + 1}.** \`${p.name}\` — ${label}${marker}\n`;
+          });
+          const autoMarker = config.modelId === 'auto' ? ' ✓' : '';
+          list += `  **${available.length + 1}.** \`auto\` — Smart routing (picks by complexity)${autoMarker}\n`;
+
+          this.sendWsMessage(ws, {
+            type: 'response',
+            content: `**Current model:** ${current}\n\n**Available:**\n${list}\nReply \`/model <number or name>\` to switch.`,
+          });
+          return true;
+        }
+
+        // Parse selection
+        let selectedName: string;
+        const num = parseInt(args, 10);
+        if (!isNaN(num) && num >= 1 && num <= available.length + 1) {
+          selectedName = num === available.length + 1 ? 'auto' : available[num - 1].name;
+        } else {
+          selectedName = args.toLowerCase();
+        }
+
+        if (selectedName !== 'auto' && !available.some(p => p.name === selectedName)) {
+          this.sendWsMessage(ws, { type: 'response', content: `Unknown model \`${args}\`. Use /model to see available options.` });
+          return true;
+        }
+
+        await this.configManager.updateUserConfig('default', { modelId: selectedName });
+        const label = selectedName === 'auto'
+          ? 'auto (smart routing)'
+          : ApiChannel.PROVIDER_LABELS[selectedName] || selectedName;
+        this.sendWsMessage(ws, { type: 'response', content: `Switched to **${label}**` });
+        this.logger.info({ clientId, model: selectedName }, 'WebSocket user switched model');
+        return true;
+      }
+
+      case 'settings': {
+        if (!this.configManager) {
+          this.sendWsMessage(ws, { type: 'response', content: 'Settings are not available.' });
+          return true;
+        }
+        const cfg = this.configManager.getUserConfig('default');
+        const personalityPreview = cfg.customPersonality
+          ? cfg.customPersonality.substring(0, 100) + (cfg.customPersonality.length > 100 ? '...' : '')
+          : 'Default';
+        const modelLabel = cfg.modelId === 'auto'
+          ? 'auto (smart routing)'
+          : ApiChannel.PROVIDER_LABELS[cfg.modelId] || cfg.modelId;
+
+        const content =
+          `**Your Settings**\n\n` +
+          `**Bot Name:** ${cfg.botName}\n` +
+          `**Model:** ${modelLabel}\n` +
+          `**Personality:** ${personalityPreview}\n` +
+          `**Timezone:** ${cfg.timezone}\n\n` +
+          'Use /model to switch AI provider.';
+        this.sendWsMessage(ws, { type: 'response', content });
+        return true;
+      }
+
+      default:
+        // Not a built-in command — let the agent handle it
+        return false;
+    }
+  }
+
   /**
    * Handle WebSocket messages
    */
@@ -996,6 +1237,10 @@ export class ApiChannel implements Channel, TriggerSource {
           this.sendWsMessage(ws, { type: 'error', error: 'Message is required' });
           return;
         }
+
+        // Handle slash commands before they reach the agent
+        const slashHandled = await this.handleSlashCommand(ws, clientId, message.message.trim());
+        if (slashHandled) return;
 
         // Ensure session exists before processing
         const userId = `ws-${clientId}`;

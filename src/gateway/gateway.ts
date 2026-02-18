@@ -538,6 +538,8 @@ export class Gateway {
         onUserMessage: (prefixedUserId: string) => {
           this.unifiedScheduler?.checkEngagement(prefixedUserId);
         },
+        configManager: this.configManager || undefined,
+        providerRegistry: this.providerRegistry || undefined,
       });
       await this.apiChannel.start();
 
