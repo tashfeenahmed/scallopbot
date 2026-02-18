@@ -73,6 +73,7 @@ const createMockDatabase = () => ({
     updatedAt: Date.now(),
     firedAt: null,
   })),
+  getScheduledItemsByUser: vi.fn().mockReturnValue([]),
   reinforceMemory: vi.fn(),
   addContradiction: vi.fn(),
   addRelation: vi.fn(),
