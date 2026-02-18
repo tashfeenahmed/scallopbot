@@ -172,7 +172,7 @@ interface WsResponse {
 export class ApiChannel implements Channel, TriggerSource {
   name = 'api';
 
-  private config: Required<Omit<ApiChannelConfig, 'apiKey' | 'allowedOrigins' | 'staticDir' | 'costTracker' | 'memoryStore' | 'db' | 'interruptQueue'>> & {
+  private config: Required<Omit<ApiChannelConfig, 'apiKey' | 'allowedOrigins' | 'staticDir' | 'costTracker' | 'memoryStore' | 'db' | 'interruptQueue' | 'onUserMessage'>> & {
     apiKey?: string;
     allowedOrigins: string[];
     staticDir?: string;
