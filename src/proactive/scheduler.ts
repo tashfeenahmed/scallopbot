@@ -309,7 +309,7 @@ export class UnifiedScheduler {
           task: enrichedTask,
           skills: item.taskConfig.tools,
           modelTier: item.taskConfig.modelTier ?? 'fast',
-          timeoutSeconds: 120,
+          timeoutSeconds: this.subAgentExecutor.getConfig().defaultTimeoutSeconds,
         },
       );
 

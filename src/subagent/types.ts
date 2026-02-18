@@ -81,7 +81,7 @@ export interface SubAgentConfig {
 export const DEFAULT_SUBAGENT_CONFIG: SubAgentConfig = {
   maxConcurrentPerSession: 3,
   maxConcurrentGlobal: 5,
-  defaultTimeoutSeconds: 120,
+  defaultTimeoutSeconds: 180,
   maxTimeoutSeconds: 300,
   defaultModelTier: 'fast',
   maxIterations: 20,

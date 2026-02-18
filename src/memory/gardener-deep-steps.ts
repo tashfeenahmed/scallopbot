@@ -529,9 +529,17 @@ export function runSubAgentCleanup(ctx: GardenerContext, cleanupAfterSeconds: nu
       }
     }
 
-    if (runsDeleted > 0 || sessionsDeleted > 0) {
+    // Clean up stale session references in scheduled items
+    let staleSessionsCleaned = 0;
+    try {
+      staleSessionsCleaned = ctx.db.cleanStaleScheduledItemSessions();
+    } catch {
+      // Non-critical — log and continue
+    }
+
+    if (runsDeleted > 0 || sessionsDeleted > 0 || staleSessionsCleaned > 0) {
       ctx.logger.info(
-        { runsDeleted, sessionsDeleted },
+        { runsDeleted, sessionsDeleted, staleSessionsCleaned },
         'Sub-agent cleanup complete'
       );
     }

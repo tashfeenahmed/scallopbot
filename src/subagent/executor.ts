@@ -111,6 +111,13 @@ export class SubAgentExecutor {
   }
 
   /**
+   * Expose config for external consumers (e.g. scheduler)
+   */
+  getConfig(): SubAgentConfig {
+    return this.config;
+  }
+
+  /**
    * Async spawn: starts sub-agent, enqueues result when done.
    * Returns immediately with { runId, childSessionId }.
    */
