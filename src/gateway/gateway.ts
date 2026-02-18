@@ -359,6 +359,7 @@ export class Gateway {
     this.outboundQueue = new OutboundQueue({
       sendMessage: (userId: string, message: string) => this.handleProactiveMessage(userId, message),
       logger: this.logger,
+      router: this.router || undefined,
     });
 
     // Initialize unified scheduler (handles both user reminders and agent triggers)

@@ -334,6 +334,7 @@ async function answerQA(
     : [
         'You are answering questions based on retrieved conversation memories.',
         'Answer concisely using ONLY the provided context. If the answer is not in the context, say "UNKNOWN".',
+        'Do NOT guess or infer answers that are not explicitly stated in the context. If the context does not directly answer the question, say "UNKNOWN".',
         '',
         'Context:',
         contextBlock,
