@@ -1805,6 +1805,26 @@ export class ScallopDatabase {
     return { messages: rows.map(row => this.rowToSessionMessage(row)), hasMore };
   }
 
+  /** Get paginated messages across ALL sessions (cross-channel unified history) */
+  getAllMessagesPaginated(limit: number, before?: number): { messages: SessionMessageRow[]; hasMore: boolean } {
+    let rows: Record<string, unknown>[];
+    if (before) {
+      const stmt = this.db.prepare(
+        'SELECT * FROM session_messages WHERE id < ? ORDER BY id DESC LIMIT ?'
+      );
+      rows = stmt.all(before, limit + 1) as Record<string, unknown>[];
+    } else {
+      const stmt = this.db.prepare(
+        'SELECT * FROM session_messages ORDER BY id DESC LIMIT ?'
+      );
+      rows = stmt.all(limit + 1) as Record<string, unknown>[];
+    }
+    const hasMore = rows.length > limit;
+    if (hasMore) rows = rows.slice(0, limit);
+    rows.reverse();
+    return { messages: rows.map(row => this.rowToSessionMessage(row)), hasMore };
+  }
+
   findSessionByUserId(userId: string): SessionRow | null {
     const stmt = this.db.prepare(
       "SELECT * FROM sessions WHERE json_extract(metadata, '$.userId') = ? ORDER BY updated_at DESC LIMIT 1"
