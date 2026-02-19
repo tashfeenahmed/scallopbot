@@ -71,6 +71,8 @@ export interface SubAgentConfig {
   maxTimeoutSeconds: number;
   defaultModelTier: 'fast' | 'standard' | 'capable';
   maxIterations: number;
+  /** Hard token budget — sub-agent aborts if cumulative input tokens exceed this */
+  maxInputTokens: number;
   cleanupAfterSeconds: number;
   allowMemoryWrites: boolean;
 }
@@ -84,7 +86,8 @@ export const DEFAULT_SUBAGENT_CONFIG: SubAgentConfig = {
   defaultTimeoutSeconds: 180,
   maxTimeoutSeconds: 300,
   defaultModelTier: 'fast',
-  maxIterations: 20,
+  maxIterations: 10,
+  maxInputTokens: 80_000,
   cleanupAfterSeconds: 3600,
   allowMemoryWrites: false,
 };
