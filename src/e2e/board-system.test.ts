@@ -355,7 +355,7 @@ describe('E2E Board System', () => {
     it('legacy pending items appear as scheduled or inbox', () => {
       const db = ctx.scallopStore.getDatabase();
 
-      // Create a legacy item (no boardStatus set) with triggerAt
+      // Items without explicit boardStatus now get a default based on triggerAt
       const item = db.addScheduledItem({
         userId: 'default',
         sessionId: null,
@@ -367,22 +367,12 @@ describe('E2E Board System', () => {
         triggerAt: Date.now() + 7200000,
         recurring: null,
         sourceMemoryId: null,
-        // No boardStatus — legacy item
       });
-      expect(item.boardStatus).toBeNull();
+      expect(item.boardStatus).toBe('scheduled');
 
-      // Board should show it via computeBoardStatus → 'scheduled' (has triggerAt)
+      // Board should show it in 'scheduled' column
       const board = boardService.getBoard('default');
-      const allItems = [
-        ...board.columns.inbox,
-        ...board.columns.backlog,
-        ...board.columns.scheduled,
-        ...board.columns.in_progress,
-        ...board.columns.waiting,
-        ...board.columns.done,
-        ...board.columns.archived,
-      ];
-      const found = allItems.find(i => i.id === item.id);
+      const found = board.columns.scheduled.find(i => i.id === item.id);
       expect(found).toBeDefined();
       expect(found!.boardStatus).toBe('scheduled');
     });

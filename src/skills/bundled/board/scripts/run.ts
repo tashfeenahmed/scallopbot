@@ -131,6 +131,9 @@ function outputResult(result: SkillResult): void {
 }
 
 // ─── Computed Board Status ────────────────────────────────────────────
+// NOTE: Duplicated from src/board/types.ts:computeBoardStatus().
+// This skill runs as a standalone subprocess and cannot import TS modules.
+// Keep both copies in sync.
 
 function computeBoardStatus(row: ScheduledItemRow): BoardStatus {
   if (row.board_status) return row.board_status as BoardStatus;

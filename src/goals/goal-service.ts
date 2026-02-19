@@ -659,6 +659,7 @@ export class GoalService {
       triggerAt,
       recurring: null,
       sourceMemoryId: goalId,
+      boardStatus: 'scheduled',
     });
 
     this.logger.info(

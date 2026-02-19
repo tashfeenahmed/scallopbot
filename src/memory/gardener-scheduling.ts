@@ -58,9 +58,29 @@ export function scheduleProactiveItem(input: ScheduleProactiveItemInput): Schedu
     recurring: null,
     sourceMemoryId: input.sourceMemoryId ?? null,
     taskConfig: input.taskConfig ?? null,
+    boardStatus: 'scheduled',
   });
 
   return { timing, itemId: item.id };
+}
+
+/** Input for createProactiveItem — same as ScheduleProactiveItemInput */
+export type CreateProactiveItemInput = ScheduleProactiveItemInput;
+
+export type CreateProactiveItemResult =
+  | { created: false }
+  | { created: true; itemId: string; timing: DeliveryTiming };
+
+/**
+ * Deduplicate-then-schedule: checks hasSimilarPendingScheduledItem
+ * before inserting, so callers don't have to repeat the pattern.
+ */
+export function createProactiveItem(input: CreateProactiveItemInput): CreateProactiveItemResult {
+  if (input.db.hasSimilarPendingScheduledItem(input.userId, input.message)) {
+    return { created: false };
+  }
+  const { timing, itemId } = scheduleProactiveItem(input);
+  return { created: true, itemId, timing };
 }
 
 /**

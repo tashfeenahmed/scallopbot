@@ -13,7 +13,7 @@
  * no side effects.
  */
 
-import { updateEMA } from './behavioral-signals.js';
+import { updateEMA } from '../utils/ema.js';
 import { mapToEmotion, type RawAffect, type EmotionLabel } from './affect.js';
 
 // ============ Constants ============

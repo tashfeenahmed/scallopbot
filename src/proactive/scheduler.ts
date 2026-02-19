@@ -16,6 +16,7 @@ import type {
   BoardItemResult,
 } from '../memory/db.js';
 import { BoardService } from '../board/board-service.js';
+import { computeBoardStatus } from '../board/types.js';
 import type { CostTracker } from '../routing/cost.js';
 import type { GoalService } from '../goals/index.js';
 import type { SubAgentExecutor } from '../subagent/executor.js';
@@ -182,7 +183,7 @@ export class UnifiedScheduler {
         for (const depId of item.dependsOn) {
           const dep = this.db.getScheduledItem(depId);
           if (!dep) continue; // deleted dependency counts as resolved
-          const depBoard = dep.boardStatus ?? (dep.status === 'fired' || dep.status === 'acted' ? 'done' : 'pending');
+          const depBoard = computeBoardStatus(dep);
           if (depBoard !== 'done' && depBoard !== 'archived') {
             // Dependency not resolved — reset to pending with a delayed trigger
             this.db.resetScheduledItemToPending(item.id);

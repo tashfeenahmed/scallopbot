@@ -333,3 +333,16 @@ export class DecayEngine {
 export function createDecayEngine(config?: DecayConfig): DecayEngine {
   return new DecayEngine(config);
 }
+
+/**
+ * Compute utility score for a memory.
+ *
+ * Formula: prominence × ln(2 + accessCount)
+ *
+ * - prominence=0, any access → 0 (zero prominence = zero utility)
+ * - any prominence, accessCount=0 → prominence × 0.69 (baseline from prominence)
+ * - Higher access count logarithmically boosts utility
+ */
+export function computeUtilityScore(prominence: number, accessCount: number): number {
+  return prominence * Math.log(2 + accessCount);
+}

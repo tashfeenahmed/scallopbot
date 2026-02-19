@@ -72,18 +72,9 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 
 // ============ Core Function ============
 
-/**
- * Compute utility score for a memory.
- *
- * Formula: prominence × ln(2 + accessCount)
- *
- * - prominence=0, any access → 0 (zero prominence = zero utility)
- * - any prominence, accessCount=0 → prominence × 0.69 (baseline from prominence)
- * - Higher access count logarithmically boosts utility
- */
-export function computeUtilityScore(prominence: number, accessCount: number): number {
-  return prominence * Math.log(2 + accessCount);
-}
+// Canonical location: src/memory/decay.ts
+import { computeUtilityScore } from './decay.js';
+export { computeUtilityScore } from './decay.js';
 
 // ============ Query Function ============
 
@@ -159,6 +150,9 @@ export function findLowUtilityMemories(
  * pruneArchivedMemories (prominence < 0.01 threshold).
  *
  * Calls findLowUtilityMemories to get candidates, then archives up to maxPerRun.
+ *
+ * @deprecated Prefer the combined gardener step: runFullDecay() now also
+ * performs utility-based archival when !ctx.disableArchival.
  */
 export function archiveLowUtilityMemories(
   db: ScallopDatabase,
