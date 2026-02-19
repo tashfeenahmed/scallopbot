@@ -37,8 +37,8 @@ export class SessionManager {
     }
   }
 
-  async createSession(metadata?: SessionMetadata): Promise<Session> {
-    const id = nanoid();
+  async createSession(metadata?: SessionMetadata & { id?: string }): Promise<Session> {
+    const id = metadata?.id || nanoid();
     const now = Date.now();
 
     this.db.createSession(id, metadata as Record<string, unknown> | undefined);

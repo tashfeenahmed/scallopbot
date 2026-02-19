@@ -455,8 +455,9 @@ export class ApiChannel implements Channel, TriggerSource {
     // No auth configured — allow all (backward compat)
     if (!hasApiKey && !hasAuth) return true;
 
-    // Setup not yet complete — allow access so user can reach setup page
-    if (hasAuth && !this.authService!.isSetupComplete()) return true;
+    // Setup not yet complete — only allow auth endpoints and static files (handled elsewhere)
+    // Do NOT allow API access before setup to prevent unauthorized use
+    if (hasAuth && !this.authService!.isSetupComplete()) return false;
 
     // Check session cookie
     if (hasAuth && this.authService!.validateRequest(req)) return true;
@@ -655,6 +656,16 @@ export class ApiChannel implements Channel, TriggerSource {
     this.logger.debug({ sessionId, messageLength: body.message.length }, 'Chat request');
 
     try {
+      // Auto-create session if it doesn't exist
+      const existing = await this.config.sessionManager.getSession(sessionId);
+      if (!existing) {
+        await this.config.sessionManager.createSession({
+          userId: 'default',
+          channelId: 'api',
+          id: sessionId,
+        });
+      }
+
       const result = await this.config.agent.processMessage(sessionId, body.message);
 
       const chatResponse: ChatResponse = {
@@ -693,6 +704,16 @@ export class ApiChannel implements Channel, TriggerSource {
     this.logger.debug({ sessionId, messageLength: body.message.length }, 'Stream chat request');
 
     try {
+      // Auto-create session if it doesn't exist
+      const existing = await this.config.sessionManager.getSession(sessionId);
+      if (!existing) {
+        await this.config.sessionManager.createSession({
+          userId: 'default',
+          channelId: 'api',
+          id: sessionId,
+        });
+      }
+
       // Note: For now, we send the full response as a single event
       // In the future, this could be modified to stream tokens
       const result = await this.config.agent.processMessage(sessionId, body.message);
@@ -980,10 +1001,8 @@ export class ApiChannel implements Channel, TriggerSource {
         wsAuthed = true;
       }
 
-      // Pre-setup bypass: allow WS if setup not yet done
-      if (!wsAuthed && this.authService && !this.authService.isSetupComplete()) {
-        wsAuthed = true;
-      }
+      // Pre-setup: block WS until password is set up (only auth endpoints should work)
+      // if (!wsAuthed && this.authService && !this.authService.isSetupComplete()) { wsAuthed = true; }
 
       // No auth configured at all — allow
       if (!wsAuthed && !this.config.apiKey && !this.authService) {

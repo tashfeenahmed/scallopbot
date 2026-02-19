@@ -7,6 +7,7 @@
 
 import type { Logger } from 'pino';
 import type { ScallopDatabase, ScallopMemoryEntry } from '../memory/db.js';
+import type { EmbeddingProvider } from '../memory/embeddings.js';
 import type {
   GoalItem,
   GoalTree,
@@ -29,6 +30,8 @@ import { isGoalItem } from './types.js';
 export interface GoalServiceOptions {
   db: ScallopDatabase;
   logger: Logger;
+  /** Optional embedding provider for semantic search of goals */
+  embedder?: EmbeddingProvider;
 }
 
 /**
@@ -58,10 +61,22 @@ function calculateNextCheckin(frequency: CheckinFrequency): number {
 export class GoalService {
   private db: ScallopDatabase;
   private logger: Logger;
+  private embedder?: EmbeddingProvider;
 
   constructor(options: GoalServiceOptions) {
     this.db = options.db;
     this.logger = options.logger.child({ component: 'goal-service' });
+    this.embedder = options.embedder;
+  }
+
+  /** Generate embedding for goal content, swallowing errors */
+  private async generateEmbedding(content: string): Promise<number[] | null> {
+    if (!this.embedder) return null;
+    try {
+      return await this.embedder.embed(content);
+    } catch {
+      return null;
+    }
   }
 
   // ============ CRUD Operations ============
@@ -79,6 +94,8 @@ export class GoalService {
       progress: 0,
     };
 
+    const embedding = await this.generateEmbedding(options.title);
+
     const memory = this.db.addMemory({
       userId,
       content: options.title,
@@ -93,7 +110,7 @@ export class GoalService {
       lastAccessed: null,
       accessCount: 0,
       sourceChunk: null,
-      embedding: null,
+      embedding,
       metadata: metadata as Record<string, unknown>,
     });
 
@@ -132,6 +149,8 @@ export class GoalService {
       progress: 0,
     };
 
+    const embedding = await this.generateEmbedding(options.title);
+
     const memory = this.db.addMemory({
       userId: goal.userId,
       content: options.title,
@@ -146,7 +165,7 @@ export class GoalService {
       lastAccessed: null,
       accessCount: 0,
       sourceChunk: null,
-      embedding: null,
+      embedding,
       metadata: metadata as Record<string, unknown>,
     });
 
@@ -189,6 +208,8 @@ export class GoalService {
       tags: options.tags,
     };
 
+    const embedding = await this.generateEmbedding(options.title);
+
     const memory = this.db.addMemory({
       userId: milestone.userId,
       content: options.title,
@@ -203,7 +224,7 @@ export class GoalService {
       lastAccessed: null,
       accessCount: 0,
       sourceChunk: null,
-      embedding: null,
+      embedding,
       metadata: metadata as Record<string, unknown>,
     });
 

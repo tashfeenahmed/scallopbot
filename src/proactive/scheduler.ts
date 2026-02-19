@@ -77,6 +77,8 @@ export class UnifiedScheduler {
   private isRunning = false;
   private evaluating = false;
   private pendingEvaluation = false;
+  /** Counter for periodic dedup consolidation (every ~10 min) */
+  private evalTickCount = 0;
 
   constructor(options: UnifiedSchedulerOptions) {
     this.db = options.db;
@@ -169,10 +171,58 @@ export class UnifiedScheduler {
         this.logger.debug({ count: expiredCount }, 'Expired old scheduled items');
       }
 
+      // Periodic dedup consolidation (~every 10 minutes)
+      this.evalTickCount++;
+      if (this.evalTickCount % 20 === 0) {
+        try {
+          const removed = this.db.consolidateDuplicateScheduledItems();
+          if (removed > 0) {
+            this.logger.info({ duplicatesRemoved: removed }, 'Periodic duplicate consolidation');
+          }
+        } catch (err) {
+          this.logger.warn({ error: (err as Error).message }, 'Periodic consolidation failed');
+        }
+      }
+
       // Atomically claim due items (marks them 'processing' so no other tick can grab them)
       const dueItems = this.db.claimDueScheduledItems();
       if (dueItems.length === 0) {
         return;
+      }
+
+      // Quiet hours: defer agent-sourced items between 10 PM and 8 AM user-local time.
+      // User-sourced reminders always fire immediately (the user set the exact time).
+      const tz = this.getTimezone('default');
+      const hourNow = parseInt(
+        new Intl.DateTimeFormat('en-US', { timeZone: tz, hour: '2-digit', hour12: false })
+          .formatToParts(new Date())
+          .find(p => p.type === 'hour')?.value ?? '12',
+        10
+      );
+      const isQuietHours = hourNow >= 22 || hourNow < 8;
+
+      if (isQuietHours) {
+        const deferred: ScheduledItem[] = [];
+        const ready: ScheduledItem[] = [];
+        for (const item of dueItems) {
+          if (item.source === 'agent') {
+            // Reset to pending and reschedule to 8 AM
+            this.db.resetScheduledItemToPending(item.id);
+            const tomorrow8am = new Date();
+            tomorrow8am.setHours(hourNow >= 22 ? tomorrow8am.getHours() + (24 - hourNow + 8) : 8, 0, 0, 0);
+            this.db.updateScheduledItemBoard(item.id, { triggerAt: tomorrow8am.getTime() });
+            deferred.push(item);
+          } else {
+            ready.push(item);
+          }
+        }
+        if (deferred.length > 0) {
+          this.logger.debug({ count: deferred.length }, 'Deferred agent items to morning (quiet hours)');
+        }
+        if (ready.length === 0) return;
+        // Replace dueItems with only user-sourced ready items
+        dueItems.length = 0;
+        dueItems.push(...ready);
       }
 
       this.logger.info({ count: dueItems.length }, 'Found due scheduled items');

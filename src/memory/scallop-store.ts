@@ -802,6 +802,66 @@ export class ScallopMemoryStore {
   }
 
   /**
+   * Backfill embeddings for existing memories that lack them.
+   * Processes in batches to avoid overloading the embedding provider.
+   * Returns the number of memories updated.
+   */
+  async backfillEmbeddings(options?: { batchSize?: number; limit?: number }): Promise<number> {
+    if (!this.embedder) {
+      this.logger.warn('No embedding provider available, cannot backfill');
+      return 0;
+    }
+
+    const batchSize = options?.batchSize ?? 20;
+    const limit = options?.limit ?? 500;
+
+    // Find memories without embeddings
+    const rows = this.db.raw<{ id: string; content: string }>(
+      'SELECT id, content FROM memories WHERE embedding IS NULL AND is_latest = 1 ORDER BY created_at DESC LIMIT ?',
+      [limit]
+    );
+
+    if (rows.length === 0) {
+      this.logger.debug('No memories need embedding backfill');
+      return 0;
+    }
+
+    this.logger.info({ count: rows.length }, 'Starting embedding backfill');
+    let updated = 0;
+
+    for (let i = 0; i < rows.length; i += batchSize) {
+      const batch = rows.slice(i, i + batchSize);
+      try {
+        const embeddings = await this.embedder.embedBatch(batch.map(r => r.content));
+        for (let j = 0; j < batch.length; j++) {
+          if (embeddings[j]) {
+            this.db.updateMemory(batch[j].id, { embedding: embeddings[j] });
+            updated++;
+          }
+        }
+      } catch (err) {
+        this.logger.warn(
+          { error: (err as Error).message, batchStart: i, batchSize: batch.length },
+          'Batch embedding backfill failed, trying individually'
+        );
+        // Fallback: individual embedding
+        for (const row of batch) {
+          try {
+            const embedding = await this.embedder!.embed(row.content);
+            this.db.updateMemory(row.id, { embedding });
+            updated++;
+          } catch {
+            // Skip this memory
+          }
+        }
+      }
+    }
+
+    this.logger.info({ updated, total: rows.length }, 'Embedding backfill complete');
+    return updated;
+  }
+
+  /**
    * Get memory system statistics for observability
    */
   getStats(): {

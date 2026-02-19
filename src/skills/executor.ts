@@ -15,6 +15,9 @@ import type { Skill, SkillExecutionRequest, SkillExecutionResult } from './types
 /** Default timeout for script execution (60 seconds for browser operations) */
 const DEFAULT_TIMEOUT_MS = 60000;
 
+/** Maximum output size in bytes (1MB) to prevent OOM from runaway scripts */
+const MAX_OUTPUT_BYTES = 1024 * 1024;
+
 /**
  * Skill Executor class for running scripts from skill folders
  */
@@ -192,8 +195,8 @@ export class SkillExecutor {
       ...(request.userId && this.getTimezone ? { SKILL_USER_TIMEZONE: this.getTimezone(request.userId) } : {}),
     };
 
-    // Working directory: use request.cwd, or skill directory, or process.cwd()
-    const cwd = request.cwd || (skill.scriptsDir ? join(skill.scriptsDir, '..') : process.cwd());
+    // Working directory: use request.cwd, or AGENT_WORKSPACE, or process.cwd()
+    const cwd = request.cwd || process.env.AGENT_WORKSPACE || process.cwd();
 
     this.logger?.debug(
       { skill: skill.name, script: scriptPath, command, args, cwd },
@@ -204,6 +207,8 @@ export class SkillExecutor {
       const stdout: string[] = [];
       const stderr: string[] = [];
       let resolved = false;
+      let outputBytes = 0;
+      let outputTruncated = false;
 
       const done = (result: SkillExecutionResult) => {
         if (resolved) return;
@@ -229,10 +234,19 @@ export class SkillExecutor {
       }, DEFAULT_TIMEOUT_MS);
 
       child.stdout?.on('data', (data: Buffer) => {
+        if (outputTruncated) return;
+        outputBytes += data.length;
+        if (outputBytes > MAX_OUTPUT_BYTES) {
+          outputTruncated = true;
+          stdout.push('\n[OUTPUT TRUNCATED - exceeded 1MB limit]');
+          child.kill('SIGTERM');
+          return;
+        }
         stdout.push(data.toString());
       });
 
       child.stderr?.on('data', (data: Buffer) => {
+        if (outputTruncated) return;
         stderr.push(data.toString());
       });
 

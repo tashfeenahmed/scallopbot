@@ -10,7 +10,12 @@ export interface ProviderHealth {
   lastCheck: Date;
   consecutiveFailures: number;
   lastError?: string;
+  /** When the provider was marked unhealthy (for auto-recovery timing) */
+  unhealthySince?: Date;
 }
+
+/** Auto-recovery cooldown: retry unhealthy providers after this many ms (5 minutes) */
+const HEALTH_RECOVERY_MS = 5 * 60 * 1000;
 
 export interface RouterOptions {
   providerOrder?: string[];
@@ -91,20 +96,39 @@ export class Router {
         health.isHealthy = true;
         health.consecutiveFailures = 0;
         health.lastError = undefined;
+        health.unhealthySince = undefined;
       } else {
         health.consecutiveFailures++;
         health.isHealthy = health.consecutiveFailures < this.unhealthyThreshold;
+        if (!health.isHealthy && !health.unhealthySince) {
+          health.unhealthySince = new Date();
+        }
       }
     } catch (error) {
       health.consecutiveFailures++;
       health.lastError = (error as Error).message;
       health.isHealthy = health.consecutiveFailures < this.unhealthyThreshold;
+      if (!health.isHealthy && !health.unhealthySince) {
+        health.unhealthySince = new Date();
+      }
     }
 
     health.lastCheck = new Date();
     this.providerHealth.set(name, health);
 
     return health.isHealthy;
+  }
+
+  /** Check if an unhealthy provider should be retried (auto-recovery) */
+  private shouldRetryUnhealthy(health: ProviderHealth): boolean {
+    if (health.isHealthy) return true;
+    if (!health.unhealthySince) return false;
+    // Exponential backoff: 5min * 2^(failures-3), capped at 1 hour
+    const backoffMs = Math.min(
+      HEALTH_RECOVERY_MS * Math.pow(2, Math.max(0, health.consecutiveFailures - this.unhealthyThreshold)),
+      60 * 60 * 1000
+    );
+    return Date.now() - health.unhealthySince.getTime() >= backoffMs;
   }
 
   async selectProvider(tier: ModelTier): Promise<ProviderWithHealth | undefined> {
@@ -115,7 +139,16 @@ export class Router {
       if (!provider) continue;
 
       const health = this.providerHealth.get(name);
-      if (health && !health.isHealthy) continue;
+      if (health && !health.isHealthy) {
+        // Auto-recovery: retry if enough time has passed
+        if (this.shouldRetryUnhealthy(health)) {
+          health.isHealthy = true;
+          health.consecutiveFailures = 0;
+          health.unhealthySince = undefined;
+        } else {
+          continue;
+        }
+      }
 
       if (provider.isAvailable()) {
         return provider;
@@ -128,7 +161,15 @@ export class Router {
       if (!provider) continue;
 
       const health = this.providerHealth.get(name);
-      if (health && !health.isHealthy) continue;
+      if (health && !health.isHealthy) {
+        if (this.shouldRetryUnhealthy(health)) {
+          health.isHealthy = true;
+          health.consecutiveFailures = 0;
+          health.unhealthySince = undefined;
+        } else {
+          continue;
+        }
+      }
 
       if (provider.isAvailable()) {
         return provider;
