@@ -120,7 +120,7 @@ export default function ChatInput({ onSend, onStop, isWaiting, disabled, inputRe
   };
 
   return (
-    <footer className="px-[10%] py-2 border-t border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 max-md:px-3">
+    <footer className="px-[10%] py-2 bg-transparent max-md:px-3">
       <form onSubmit={handleSubmit} className="relative flex gap-2 items-center max-w-3xl mx-auto">
         {menuOpen && (
           <CommandMenu commands={filtered} activeIndex={activeIndex} onSelect={selectCommand} />
@@ -164,8 +164,9 @@ export default function ChatInput({ onSend, onStop, isWaiting, disabled, inputRe
               <rect fill="white" x="6" y="6" width="12" height="12" rx="2" />
             </svg>
           ) : (
-            <svg viewBox="0 0 24 24" width="20" height="20">
-              <path fill="white" d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" />
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="white" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <line x1="12" y1="19" x2="12" y2="5" />
+              <polyline points="5 12 12 5 19 12" />
             </svg>
           )}
         </button>
