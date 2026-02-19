@@ -47,6 +47,10 @@
 }
 
 /* Markdown content styling */
+.markdown-content {
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
 .markdown-content p {
   margin-bottom: 0.5rem;
 }
@@ -59,6 +63,7 @@
   border-radius: 0.25rem;
   font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
   font-size: 0.8125rem;
+  word-break: break-all;
 }
 .dark .markdown-content code {
   background-color: rgba(255, 255, 255, 0.1);

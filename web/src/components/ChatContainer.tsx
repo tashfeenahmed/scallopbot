@@ -44,7 +44,7 @@ const ChatContainer = forwardRef<HTMLDivElement, ChatContainerProps>(
     }, [containerRef, onLoadMore, isLoadingMore, hasMore, checkNearBottom]);
 
     return (
-      <main ref={containerRef} onScroll={handleScroll} className="flex-1 overflow-y-auto px-[10%] py-2 bg-gray-50 dark:bg-gray-950 max-md:px-3">
+      <main ref={containerRef} onScroll={handleScroll} className="flex-1 overflow-y-auto overflow-x-hidden px-[10%] py-2 bg-gray-50 dark:bg-gray-950 max-md:px-3">
         <div className="flex flex-col gap-1 max-w-3xl mx-auto">
           {isLoadingMore && (
             <div className="flex justify-center py-3">

@@ -23,21 +23,21 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
   switch (message.type) {
     case 'user':
       return (
-        <div className="self-end max-w-[65%] max-md:max-w-[85%] px-3 py-2 rounded-xl rounded-br-sm bg-blue-50 dark:bg-gray-800 text-gray-900 dark:text-gray-100 animate-[fade-in_0.15s_ease-out] whitespace-pre-wrap">
+        <div className="self-end max-w-[65%] max-md:max-w-[85%] min-w-0 px-3 py-2 rounded-xl rounded-br-sm bg-blue-50 dark:bg-gray-800 text-gray-900 dark:text-gray-100 animate-[fade-in_0.15s_ease-out] whitespace-pre-wrap break-words overflow-hidden">
           {message.content}
         </div>
       );
 
     case 'assistant':
       return (
-        <div className="self-start max-w-[65%] max-md:max-w-[85%] px-3 py-2 rounded-xl rounded-bl-sm bg-gray-100 dark:bg-gray-800 text-gray-900 dark:text-gray-100 animate-[fade-in_0.15s_ease-out]">
+        <div className="self-start max-w-[65%] max-md:max-w-[85%] min-w-0 px-3 py-2 rounded-xl rounded-bl-sm bg-gray-100 dark:bg-gray-800 text-gray-900 dark:text-gray-100 animate-[fade-in_0.15s_ease-out] overflow-hidden">
           {html ? (
             <div
               className="markdown-content leading-relaxed"
               dangerouslySetInnerHTML={{ __html: html }}
             />
           ) : (
-            <span className="whitespace-pre-wrap">{message.content}</span>
+            <span className="whitespace-pre-wrap break-words">{message.content}</span>
           )}
         </div>
       );
