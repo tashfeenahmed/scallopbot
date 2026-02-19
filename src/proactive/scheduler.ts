@@ -26,6 +26,30 @@ import { formatProactiveMessage, type ProactiveFormatInput } from './proactive-f
 import { detectProactiveEngagement } from './feedback.js';
 
 /**
+ * Strip internal markup, XML function calls, error prefixes, and thinking blocks
+ * from raw sub-agent output so it's safe to show to the user.
+ * Returns empty string if nothing meaningful remains.
+ */
+function sanitizeAgentResponse(raw: string): string {
+  if (!raw) return '';
+
+  let cleaned = raw
+    // Strip <function_calls>...</function_calls> blocks (and unclosed ones)
+    .replace(/<function_calls>[\s\S]*?(<\/function_calls>|$)/g, '')
+    // Strip <invoke ...>...</invoke> blocks
+    .replace(/<invoke[\s\S]*?(<\/invoke>|$)/g, '')
+    // Strip <*> blocks (thinking, etc.)
+    .replace(/<\w+[\s\S]*?(<\/antml:\w+>|$)/g, '')
+    // Strip "Error: ..." lines (internal errors, not user-facing)
+    .replace(/^Error:\s*.*/gm, '')
+    .trim();
+
+  // If nothing meaningful remains, return empty
+  if (cleaned.length < 5) return '';
+  return cleaned;
+}
+
+/**
  * Handler for sending messages to users
  */
 export type MessageHandler = (userId: string, message: string) => Promise<boolean>;
@@ -359,10 +383,13 @@ export class UnifiedScheduler {
         },
       );
 
-      if (result.response) {
+      // Sanitize raw agent output before any storage or display
+      const cleanResponse = sanitizeAgentResponse(result.response);
+
+      if (cleanResponse && result.taskComplete) {
         // Store result on the board item
         const boardResult: BoardItemResult = {
-          response: result.response,
+          response: cleanResponse,
           completedAt: Date.now(),
           iterationsUsed: result.iterationsUsed,
         };
@@ -372,15 +399,18 @@ export class UnifiedScheduler {
         this.db.updateScheduledItemBoard(item.id, { boardStatus: 'done' });
 
         // Send the sub-agent's result through proactive formatting
-        await this.sendFormattedMessage(item, result.response, 'task_result');
+        await this.sendFormattedMessage(item, cleanResponse, 'task_result');
         this.logger.info(
           { itemId: item.id, iterations: result.iterationsUsed, taskComplete: result.taskComplete },
           'Task completed via sub-agent'
         );
       } else {
-        // Sub-agent returned empty response — fall back to nudge
-        this.logger.warn({ itemId: item.id }, 'Sub-agent returned empty response, sending fallback nudge');
-        this.db.updateScheduledItemBoard(item.id, { boardStatus: 'done' });
+        // Sub-agent failed, timed out, or returned empty — fall back to nudge
+        this.logger.warn(
+          { itemId: item.id, taskComplete: result.taskComplete, hasResponse: !!cleanResponse },
+          'Sub-agent did not complete task, sending fallback nudge'
+        );
+        this.db.updateScheduledItemBoard(item.id, { boardStatus: 'waiting' });
         await this.sendFormattedMessage(item, item.message);
       }
     } catch (err) {
@@ -653,7 +683,15 @@ export class UnifiedScheduler {
       const result = item.result;
       const title = item.message;
       if (result) {
-        lines.push(`- ${title}: ${result.response}`);
+        // Sanitize and truncate the result for the digest
+        const clean = sanitizeAgentResponse(result.response);
+        if (clean) {
+          const truncated = clean.length > 200 ? clean.slice(0, 200) + '…' : clean;
+          lines.push(`- ${title}: ${truncated}`);
+        } else {
+          // Result was all internal markup/errors — just show the title
+          lines.push(`- ${title}`);
+        }
       } else {
         lines.push(`- ${title}`);
       }
