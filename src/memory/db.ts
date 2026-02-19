@@ -42,6 +42,11 @@ function normalizeForSimilarity(text: string): Set<string> {
   );
 }
 
+/** Strict similarity: |intersection| / |smaller set| threshold */
+const DEDUP_SIMILARITY_STRICT = 0.8;
+/** Lenient similarity: either side has this fraction overlap */
+const DEDUP_SIMILARITY_LENIENT = 0.4;
+
 /**
  * Memory types for decay calculation
  */
@@ -704,6 +709,9 @@ export class ScallopDatabase {
 
     // Migration: Add board (kanban) columns to scheduled_items
     this.migrateAddBoardColumns();
+
+    // Migration: Backfill board_status for legacy items where it's NULL
+    this.migrateBackfillBoardStatus();
   }
 
   /**
@@ -984,6 +992,32 @@ export class ScallopDatabase {
       if (error instanceof Error) {
         // eslint-disable-next-line no-console
         console.warn(`[migration] migrateAddBoardColumns: ${error.message}`);
+      }
+    }
+  }
+
+  /**
+   * Backfill board_status for legacy rows where it's NULL.
+   * Uses the same CASE logic as computeBoardStatus() in board/types.ts.
+   */
+  private migrateBackfillBoardStatus(): void {
+    try {
+      this.db.exec(`
+        UPDATE scheduled_items
+        SET board_status = CASE
+          WHEN status = 'pending' AND trigger_at > 0 THEN 'scheduled'
+          WHEN status = 'pending' THEN 'inbox'
+          WHEN status = 'processing' THEN 'in_progress'
+          WHEN status IN ('fired', 'acted') THEN 'done'
+          WHEN status IN ('dismissed', 'expired') THEN 'archived'
+          ELSE 'inbox'
+        END
+        WHERE board_status IS NULL
+      `);
+    } catch (error) {
+      if (error instanceof Error) {
+        // eslint-disable-next-line no-console
+        console.warn(`[migration] migrateBackfillBoardStatus: ${error.message}`);
       }
     }
   }
@@ -2054,7 +2088,7 @@ export class ScallopDatabase {
       item.sourceMemoryId ?? null,
       null,
       item.taskConfig ? JSON.stringify(item.taskConfig) : null,
-      item.boardStatus ?? null,
+      item.boardStatus ?? (item.triggerAt > 0 ? 'scheduled' : 'inbox'),
       item.priority ?? 'medium',
       item.labels ? JSON.stringify(item.labels) : null,
       item.dependsOn ? JSON.stringify(item.dependsOn) : null,
@@ -2068,7 +2102,7 @@ export class ScallopDatabase {
       id,
       kind: item.kind ?? 'nudge',
       taskConfig: item.taskConfig ?? null,
-      boardStatus: item.boardStatus ?? null,
+      boardStatus: item.boardStatus ?? (item.triggerAt > 0 ? 'scheduled' : 'inbox'),
       priority: item.priority ?? 'medium',
       labels: item.labels ?? null,
       result: null,
@@ -2199,7 +2233,7 @@ export class ScallopDatabase {
     const now = Date.now();
     const stmt = this.db.prepare(`
       UPDATE scheduled_items
-      SET status = 'fired', fired_at = ?, updated_at = ?
+      SET status = 'fired', board_status = 'done', fired_at = ?, updated_at = ?
       WHERE id = ? AND status IN ('pending', 'processing')
     `);
     const result = stmt.run(now, now, id);
@@ -2213,7 +2247,7 @@ export class ScallopDatabase {
     const now = Date.now();
     const stmt = this.db.prepare(`
       UPDATE scheduled_items
-      SET status = 'dismissed', updated_at = ?
+      SET status = 'dismissed', board_status = 'archived', updated_at = ?
       WHERE id = ?
     `);
     const result = stmt.run(now, id);
@@ -2227,7 +2261,7 @@ export class ScallopDatabase {
     const now = Date.now();
     const stmt = this.db.prepare(`
       UPDATE scheduled_items
-      SET status = 'acted', updated_at = ?
+      SET status = 'acted', board_status = 'done', updated_at = ?
       WHERE id = ?
     `);
     const result = stmt.run(now, id);
@@ -2424,7 +2458,7 @@ export class ScallopDatabase {
         if (b.has(word)) overlap++;
       }
       const smaller = Math.min(a.size, b.size);
-      return (overlap / smaller) >= 0.8 || (overlap / a.size) >= 0.4 || (overlap / b.size) >= 0.4;
+      return (overlap / smaller) >= DEDUP_SIMILARITY_STRICT || (overlap / a.size) >= DEDUP_SIMILARITY_LENIENT || (overlap / b.size) >= DEDUP_SIMILARITY_LENIENT;
     };
 
     // Group by user
@@ -2513,7 +2547,7 @@ export class ScallopDatabase {
 
       // Match if: all words in the shorter description overlap,
       // OR either side has 40%+ overlap (lowered from 50% to catch more dupes)
-      if (similaritySmaller >= 0.8 || similarityNew >= 0.4 || similarityExisting >= 0.4) {
+      if (similaritySmaller >= DEDUP_SIMILARITY_STRICT || similarityNew >= DEDUP_SIMILARITY_LENIENT || similarityExisting >= DEDUP_SIMILARITY_LENIENT) {
         return true;
       }
     }

@@ -7,12 +7,12 @@
  */
 
 import type { GoalItem } from '../goals/types.js';
+import { wordOverlap, DEDUP_OVERLAP_THRESHOLD } from '../utils/text-similarity.js';
 
 // ============ Constants ============
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_WARNING_WINDOW_DAYS = 7;
-const DEDUP_OVERLAP_THRESHOLD = 0.8;
 
 // ============ Types ============
 
@@ -63,26 +63,6 @@ function formatMessage(title: string, daysRemaining: number): string {
     return `Goal approaching deadline: ${title} \u2014 overdue by ${Math.abs(daysRemaining)} days`;
   }
   return `Goal approaching deadline: ${title} \u2014 due in ${daysRemaining} days`;
-}
-
-/**
- * Compute word overlap ratio between two messages.
- * Splits both into word sets, computes |intersection| / |smaller set|.
- * Returns a value between 0 and 1.
- */
-function wordOverlap(a: string, b: string): number {
-  const wordsA = new Set(a.toLowerCase().split(/\s+/).filter(Boolean));
-  const wordsB = new Set(b.toLowerCase().split(/\s+/).filter(Boolean));
-
-  if (wordsA.size === 0 || wordsB.size === 0) return 0;
-
-  let intersectionCount = 0;
-  for (const word of wordsA) {
-    if (wordsB.has(word)) intersectionCount++;
-  }
-
-  const smallerSize = Math.min(wordsA.size, wordsB.size);
-  return intersectionCount / smallerSize;
 }
 
 /**

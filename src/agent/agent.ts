@@ -731,7 +731,7 @@ Only install skills when the user asks, or when you determine a skill would help
 
     const boardPromise = Promise.resolve(
       this.boardService
-        ? (() => { try { return this.boardService!.getBoardContext(userId, userMessage); } catch (error) { this.logger.warn({ error: (error as Error).message }, 'Failed to build board context'); return null; } })()
+        ? (() => { try { return this.boardService!.getBoardContext(userId, userMessage, { excludeGoalLinked: !!this.goalService }); } catch (error) { this.logger.warn({ error: (error as Error).message }, 'Failed to build board context'); return null; } })()
         : null
     );
 

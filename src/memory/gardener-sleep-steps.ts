@@ -8,7 +8,7 @@ import * as fsPromises from 'node:fs/promises';
 import type { GardenerContext } from './gardener-context.js';
 import { safeBehavioralPatterns, DEFAULT_USER_ID } from './gardener-context.js';
 import { storeFusedMemory } from './gardener-fusion-storage.js';
-import { scheduleProactiveItem, getLastProactiveAt } from './gardener-scheduling.js';
+import { createProactiveItem, getLastProactiveAt } from './gardener-scheduling.js';
 import { dream } from './dream.js';
 import type { DreamResult } from './dream.js';
 import { reflect } from './reflection.js';
@@ -282,7 +282,7 @@ export async function runGapScanner(ctx: GardenerContext): Promise<void> {
           item.severity === 'high' ? 'high' :
           item.severity === 'medium' ? 'medium' : 'low';
 
-        scheduleProactiveItem({
+        createProactiveItem({
           db: ctx.db,
           userId,
           message: item.message,

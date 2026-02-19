@@ -92,8 +92,11 @@ export interface CreateBoardItemInput {
 }
 
 /**
- * Compute board status from legacy scheduled item fields
- * When board_status IS NULL, derive from existing fields for backward compatibility
+ * Compute board status from legacy scheduled item fields.
+ * When board_status IS NULL, derive from existing fields for backward compatibility.
+ *
+ * NOTE: Duplicated in src/skills/bundled/board/scripts/run.ts (standalone subprocess,
+ * cannot import TS modules). Keep both copies in sync.
  */
 export function computeBoardStatus(item: ScheduledItem): BoardStatus {
   if (item.boardStatus) return item.boardStatus;

@@ -13,7 +13,7 @@
  * - explicitFeedback: 0.10 (placeholder at 0.5 neutral)
  */
 
-import { updateEMA } from './behavioral-signals.js';
+import { updateEMA } from '../utils/ema.js';
 
 // ============ Constants ============
 

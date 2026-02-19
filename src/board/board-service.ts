@@ -337,8 +337,24 @@ export class BoardService {
    * Generate compact board context for the system prompt.
    * Full board shown for task/board keywords, minimal summary otherwise.
    */
-  getBoardContext(userId: string, userMessage?: string): string {
+  getBoardContext(userId: string, userMessage?: string, options?: { excludeGoalLinked?: boolean }): string {
     const board = this.getBoard(userId);
+
+    // When excludeGoalLinked is set, filter out items linked to goals
+    // (they're already shown in the goal context section)
+    if (options?.excludeGoalLinked) {
+      for (const col of BOARD_COLUMNS) {
+        board.columns[col] = board.columns[col].filter(i => !i.goalId);
+        board.counts[col] = board.columns[col].length;
+      }
+      // Recompute stats after filtering
+      const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+      board.stats.doneThisWeek = board.columns.done.filter(i => i.updatedAt > weekAgo).length;
+      board.stats.totalActive = ACTIVE_COLUMNS.reduce((sum, col) => sum + board.counts[col], 0);
+      board.stats.urgentCount = ACTIVE_COLUMNS
+        .flatMap(col => board.columns[col])
+        .filter(i => i.priority === 'urgent').length;
+    }
 
     const isFullView = userMessage && /\b(board|kanban|task|todo|remind|reminder|schedule|plate|what'?s next|priorities|progress|status|overview|how am i doing|work items)\b/i.test(userMessage);
 

@@ -6,7 +6,7 @@
 import type { GardenerContext } from './gardener-context.js';
 import { DEFAULT_USER_ID } from './gardener-context.js';
 import { storeFusedMemory } from './gardener-fusion-storage.js';
-import { scheduleProactiveItem, getLastProactiveAt } from './gardener-scheduling.js';
+import { scheduleProactiveItem, getLastProactiveAt, createProactiveItem } from './gardener-scheduling.js';
 import { findFusionClusters, fuseMemoryCluster } from './fusion.js';
 import { auditRetrievalHistory } from './retrieval-audit.js';
 import { archiveLowUtilityMemories, pruneOrphanedRelations } from './utility-score.js';
@@ -17,15 +17,33 @@ import { evaluateInnerThoughts } from './inner-thoughts.js';
 // ============ Step functions ============
 
 /**
- * B1: Full decay scan (all memories)
+ * B1: Full decay scan (all memories) + utility-based archival.
+ * Combines decay pass with low-utility archival into a single forgetting step.
  */
 export function runFullDecay(ctx: GardenerContext): { updated: number; archived: number } {
   try {
     const result = ctx.scallopStore.processFullDecay();
-    if (result.updated > 0) {
-      ctx.logger.info({ updated: result.updated, archived: result.archived }, 'Full decay processed');
+
+    // Utility-based archival (previously substep B3b)
+    let utilityArchived = 0;
+    if (!ctx.disableArchival) {
+      try {
+        const archiveResult = archiveLowUtilityMemories(ctx.db, {
+          utilityThreshold: 0.1,
+          minAgeDays: 14,
+          maxPerRun: 50,
+        });
+        utilityArchived = archiveResult.archived;
+      } catch (err) {
+        ctx.logger.warn({ error: (err as Error).message }, 'Utility-based archival failed');
+      }
     }
-    return result;
+
+    const totalArchived = result.archived + utilityArchived;
+    if (result.updated > 0 || utilityArchived > 0) {
+      ctx.logger.info({ updated: result.updated, archived: totalArchived }, 'Full decay processed');
+    }
+    return { updated: result.updated, archived: totalArchived };
   } catch (err) {
     ctx.logger.warn({ error: (err as Error).message }, 'Full decay failed');
     return { updated: 0, archived: 0 };
@@ -136,13 +154,13 @@ export async function runSessionSummarization(ctx: GardenerContext): Promise<{ s
 }
 
 /**
- * B3: Enhanced forgetting pipeline (audit + archival + prune + orphan cleanup)
+ * B3: Enhanced forgetting pipeline (audit + prune + orphan cleanup).
+ * Utility-based archival (formerly 3b) is now handled by runFullDecay (B1).
  */
 export async function runEnhancedForgetting(ctx: GardenerContext): Promise<void> {
   let auditNeverRetrieved = 0;
   let auditStaleRetrieved = 0;
   let auditCandidateCount = 0;
-  let archiveCount = 0;
   let sessionsDeleted = 0;
   let memoriesDeleted = 0;
   let orphansDeleted = 0;
@@ -174,20 +192,6 @@ export async function runEnhancedForgetting(ctx: GardenerContext): Promise<void>
     ctx.logger.warn({ error: (err as Error).message }, 'Retrieval audit failed');
   }
 
-  // 3b. Utility-based archival
-  if (!ctx.disableArchival) {
-    try {
-      const archiveResult = archiveLowUtilityMemories(ctx.db, {
-        utilityThreshold: 0.1,
-        minAgeDays: 14,
-        maxPerRun: 50,
-      });
-      archiveCount = archiveResult.archived;
-    } catch (err) {
-      ctx.logger.warn({ error: (err as Error).message }, 'Utility-based archival failed');
-    }
-  }
-
   // 3c. Hard prune truly dead memories
   if (!ctx.disableArchival) {
     try {
@@ -210,7 +214,6 @@ export async function runEnhancedForgetting(ctx: GardenerContext): Promise<void>
       auditNeverRetrieved,
       auditStaleRetrieved,
       auditCandidateCount,
-      archived: archiveCount,
       memoriesDeleted,
       sessionsDeleted,
       orphansDeleted,
@@ -321,20 +324,20 @@ export async function runGoalDeadlineCheck(ctx: GardenerContext): Promise<void> 
       const existingReminders = pendingItems.map(item => ({ message: item.message }));
       const deadlineResult = checkGoalDeadlines(goalsWithDueDates, existingReminders);
       for (const notification of deadlineResult.notifications) {
-        if (!ctx.db.hasSimilarPendingScheduledItem(notification.userId, notification.message)) {
-          ctx.db.addScheduledItem({
-            userId: notification.userId,
-            message: notification.message,
-            triggerAt: Date.now(),
-            source: 'agent',
-            kind: 'nudge',
-            type: 'goal_checkin',
-            sessionId: null,
-            context: null,
-            recurring: null,
-            sourceMemoryId: notification.goalId,
-          });
-        }
+        createProactiveItem({
+          db: ctx.db,
+          userId: notification.userId,
+          message: notification.message,
+          context: null,
+          type: 'goal_checkin',
+          kind: 'nudge',
+          quietHours: ctx.quietHours,
+          activeHours: [],
+          lastProactiveAt: null,
+          urgency: 'high',
+          sourceMemoryId: notification.goalId,
+          timezone: ctx.getTimezone?.(notification.userId),
+        });
       }
       if (deadlineResult.approaching.length > 0) {
         ctx.logger.info({ userId, approaching: deadlineResult.approaching.length, notifications: deadlineResult.notifications.length }, 'Goal deadline check complete');
@@ -381,25 +384,25 @@ export async function runInnerThoughts(ctx: GardenerContext): Promise<void> {
       }, ctx.fusionProvider);
 
       if (result.decision === 'proact' && result.message) {
-        if (!ctx.db.hasSimilarPendingScheduledItem(userId, result.message)) {
-          scheduleProactiveItem({
-            db: ctx.db,
-            userId,
-            message: result.message,
-            context: JSON.stringify({
-              source: 'inner_thoughts',
-              reason: result.reason,
-              urgency: result.urgency,
-            }),
-            type: 'follow_up',
-            kind: 'nudge',
-            quietHours: ctx.quietHours,
-            activeHours,
-            lastProactiveAt,
+        const proResult = createProactiveItem({
+          db: ctx.db,
+          userId,
+          message: result.message,
+          context: JSON.stringify({
+            source: 'inner_thoughts',
+            reason: result.reason,
             urgency: result.urgency,
-            timezone: ctx.getTimezone?.(userId),
-          });
+          }),
+          type: 'follow_up',
+          kind: 'nudge',
+          quietHours: ctx.quietHours,
+          activeHours,
+          lastProactiveAt,
+          urgency: result.urgency,
+          timezone: ctx.getTimezone?.(userId),
+        });
 
+        if (proResult.created) {
           ctx.logger.info({ userId, urgency: result.urgency, reason: result.reason }, 'Inner thoughts created proactive item');
         } else {
           ctx.logger.debug({ userId }, 'Skipping inner thoughts item - similar already pending');

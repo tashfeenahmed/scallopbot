@@ -13,6 +13,10 @@ import type { GapSignal } from './gap-scanner.js';
 import type { SmoothedAffect } from './affect-smoothing.js';
 import type { LLMProvider, CompletionRequest } from '../providers/types.js';
 import type { ScheduledItemKind, TaskConfig } from './db.js';
+import { wordOverlap, DEDUP_OVERLAP_THRESHOLD } from '../utils/text-similarity.js';
+
+// Re-export for backward compatibility
+export { wordOverlap } from '../utils/text-similarity.js';
 
 // ============ Types ============
 
@@ -51,9 +55,6 @@ export interface GapPipelineInput {
 /** Hard cap: max items per pipeline run */
 const MAX_ITEMS_PER_TICK = 3;
 
-/** Word overlap threshold for deduplication */
-const DEDUP_OVERLAP_THRESHOLD = 0.8;
-
 /** Per-dial budget caps */
 export const DIAL_THRESHOLDS: Record<
   'conservative' | 'moderate' | 'eager',
@@ -65,29 +66,6 @@ export const DIAL_THRESHOLDS: Record<
 };
 
 // ============ Helpers ============
-
-/**
- * Compute word overlap ratio between two messages.
- * |intersection| / |smaller set| on lowercase word sets (words > 2 chars).
- */
-export function wordOverlap(a: string, b: string): number {
-  const wordsA = new Set(
-    a.toLowerCase().split(/\s+/).filter((w) => w.length > 2),
-  );
-  const wordsB = new Set(
-    b.toLowerCase().split(/\s+/).filter((w) => w.length > 2),
-  );
-
-  if (wordsA.size === 0 || wordsB.size === 0) return 0;
-
-  let intersectionCount = 0;
-  for (const word of wordsA) {
-    if (wordsB.has(word)) intersectionCount++;
-  }
-
-  const smallerSize = Math.min(wordsA.size, wordsB.size);
-  return intersectionCount / smallerSize;
-}
 
 /**
  * Extract sourceIds from an existing item's context JSON.

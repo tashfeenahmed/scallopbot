@@ -15,6 +15,7 @@ import pino from 'pino';
 import { ScallopMemoryStore } from '../memory/scallop-store.js';
 import { BackgroundGardener } from '../memory/memory.js';
 import { runEnhancedForgetting } from '../memory/gardener-deep-steps.js';
+import { archiveLowUtilityMemories } from '../memory/utility-score.js';
 import { GoalService } from '../goals/goal-service.js';
 import {
   createE2EGateway,
@@ -435,15 +436,13 @@ describe('E2E Cognitive Affect & Heartbeat', () => {
     });
 
     it('should archive low-utility memories and preserve high-access ones', async () => {
-      // Call runEnhancedForgetting directly (not deepTick) so that full decay
-      // doesn't recalculate prominence — this isolates the forgetting test.
+      // Call archiveLowUtilityMemories directly to isolate the utility-based
+      // forgetting test without full decay recalculating prominence.
       const db = scallopStore.getDatabase();
-      await runEnhancedForgetting({
-        scallopStore,
-        db,
-        logger: testLogger,
-        quietHours: { start: 2, end: 5 },
-        disableArchival: false,
+      archiveLowUtilityMemories(db, {
+        utilityThreshold: 0.1,
+        minAgeDays: 14,
+        maxPerRun: 50,
       });
 
       // Check that low-utility memories are archived (is_latest=0, memory_type='superseded')
