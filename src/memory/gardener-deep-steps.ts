@@ -124,7 +124,11 @@ export async function runSessionSummarization(ctx: GardenerContext): Promise<{ s
     const cutoffMs = 2 * 60 * 60 * 1000; // 2 hours
     const cutoff = Date.now() - cutoffMs;
     const oldSessions = ctx.db.raw<{ id: string; metadata: string | null }>(
-      'SELECT id, metadata FROM sessions WHERE updated_at < ? LIMIT 20',
+      `SELECT s.id, s.metadata FROM sessions s
+       WHERE s.updated_at < ?
+         AND NOT EXISTS (SELECT 1 FROM session_summaries ss WHERE ss.session_id = s.id)
+       ORDER BY s.updated_at DESC
+       LIMIT 20`,
       [cutoff]
     ).filter(s => {
       // Skip sub-agent sessions — transient, results already in parent
