@@ -43,22 +43,87 @@ export interface ChatMessage {
   caption?: string;
 }
 
-/** Extract text from DB content — handles JSON ContentBlock[] or plain strings */
-function deserializeContent(content: string): string {
-  if (!content) return '';
-  // Try parsing as JSON ContentBlock array
+/** Content block from DB */
+interface ContentBlock {
+  type: string;
+  text?: string;
+  thinking?: string;
+  name?: string;
+  input?: Record<string, unknown>;
+  tool_use_id?: string;
+  content?: string;
+  is_error?: boolean;
+}
+
+/** Parse a DB message into ChatMessage(s) — may return 0, 1, or multiple */
+function dbMessageToChatMessages(
+  dbMsg: { id: number; role: string; content: string },
+  counter: () => number,
+): ChatMessage[] {
+  const { role, content } = dbMsg;
+  const results: ChatMessage[] = [];
+
+  // Try parsing as ContentBlock array
+  let blocks: ContentBlock[] | null = null;
   if (content.startsWith('[')) {
-    try {
-      const blocks = JSON.parse(content) as Array<{ type: string; text?: string }>;
-      return blocks
-        .filter((b) => b.type === 'text' && b.text)
-        .map((b) => b.text!)
-        .join('\n\n');
-    } catch {
-      // Not valid JSON, return as-is
-    }
+    try { blocks = JSON.parse(content); } catch { /* not JSON */ }
   }
-  return content;
+
+  if (!blocks) {
+    // Plain text message
+    if (role === 'user') {
+      results.push({ id: counter(), type: 'user', content, _dbId: dbMsg.id });
+    } else if (role === 'assistant') {
+      results.push({ id: counter(), type: 'assistant', content, isMarkdown: true, _dbId: dbMsg.id });
+    }
+    return results;
+  }
+
+  // ContentBlock array — separate text from tool/thinking
+  for (const block of blocks) {
+    if (block.type === 'text' && block.text) {
+      const type = role === 'user' ? 'user' : 'assistant';
+      results.push({
+        id: counter(),
+        type,
+        content: block.text,
+        isMarkdown: role === 'assistant',
+        _dbId: dbMsg.id,
+      });
+    } else if (block.type === 'thinking' && block.thinking) {
+      results.push({
+        id: counter(),
+        type: 'debug',
+        content: block.thinking,
+        debugType: 'thinking',
+        label: 'thinking',
+        _dbId: dbMsg.id,
+      });
+    } else if (block.type === 'tool_use' && block.name) {
+      const inputStr = block.input ? JSON.stringify(block.input).slice(0, 200) : '';
+      results.push({
+        id: counter(),
+        type: 'debug',
+        content: inputStr,
+        debugType: 'tool-start',
+        label: `tool:${block.name}`,
+        _dbId: dbMsg.id,
+      });
+    } else if (block.type === 'tool_result') {
+      const output = typeof block.content === 'string' ? block.content.slice(0, 300) : '';
+      results.push({
+        id: counter(),
+        type: 'debug',
+        content: output,
+        debugType: block.is_error ? 'tool-error' : 'tool-complete',
+        label: `tool:result`,
+        _dbId: dbMsg.id,
+      });
+    }
+    // Skip other block types (tool_result with no content, etc.)
+  }
+
+  return results;
 }
 
 let messageIdCounter = 0;
@@ -254,15 +319,12 @@ export default function App() {
         const { messages: dbMessages, hasMore: more } = await res.json();
 
         if (dbMessages && dbMessages.length > 0) {
+          const counter = () => ++messageIdCounter;
           const chatMessages: ChatMessage[] = dbMessages
             .filter((m: { role: string }) => m.role === 'user' || m.role === 'assistant')
-            .map((m: { id: number; role: string; content: string }) => ({
-              id: ++messageIdCounter,
-              type: m.role as 'user' | 'assistant',
-              content: m.role === 'assistant' ? deserializeContent(m.content) : m.content,
-              isMarkdown: m.role === 'assistant',
-              _dbId: m.id,
-            }));
+            .flatMap((m: { id: number; role: string; content: string }) =>
+              dbMessageToChatMessages(m, counter)
+            );
 
           setMessages(chatMessages);
           setHasMore(more);
@@ -309,15 +371,12 @@ export default function App() {
       const { messages: dbMessages, hasMore: more } = await res.json();
 
       if (dbMessages && dbMessages.length > 0) {
+        const counter = () => ++messageIdCounter;
         const olderMessages: ChatMessage[] = dbMessages
           .filter((m: { role: string }) => m.role === 'user' || m.role === 'assistant')
-          .map((m: { id: number; role: string; content: string }) => ({
-            id: ++messageIdCounter,
-            type: m.role as 'user' | 'assistant',
-            content: m.role === 'assistant' ? deserializeContent(m.content) : m.content,
-            isMarkdown: m.role === 'assistant',
-            _dbId: m.id,
-          }));
+          .flatMap((m: { id: number; role: string; content: string }) =>
+            dbMessageToChatMessages(m, counter)
+          );
 
         setMessages((prev) => [...olderMessages, ...prev]);
         setHasMore(more);
