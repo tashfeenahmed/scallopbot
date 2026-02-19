@@ -2510,10 +2510,13 @@ export class ScallopDatabase {
   expireOldScheduledItems(maxAgeMs: number = 24 * 60 * 60 * 1000): number {
     const now = Date.now();
     const cutoff = now - maxAgeMs;
+    // Only expire non-recurring items. Recurring items that are overdue
+    // will be picked up by the scheduler and rescheduled after firing.
     const stmt = this.db.prepare(`
       UPDATE scheduled_items
       SET status = 'expired', updated_at = ?
       WHERE status IN ('pending', 'processing') AND trigger_at < ?
+        AND recurring IS NULL
     `);
     const result = stmt.run(now, cutoff);
     return result.changes;
