@@ -272,12 +272,9 @@ export class UnifiedScheduler {
         return true;
       });
 
-      // Separate nudges and tasks — process nudges first (fast), then tasks (may block)
-      const nudges = readyItems.filter(i => i.kind !== 'task');
-      const tasks = readyItems.filter(i => i.kind === 'task');
-
-      // Process nudges first
-      for (const item of nudges) {
+      // All items delivered as nudges (pre-written message, no sub-agent).
+      // Sub-agent task execution disabled — too expensive for scheduled items.
+      for (const item of readyItems) {
         try {
           await this.processNudge(item);
           this.markItemFiredAndReschedule(item);
@@ -285,20 +282,6 @@ export class UnifiedScheduler {
           this.logger.error(
             { itemId: item.id, error: (err as Error).message },
             'Failed to process nudge'
-          );
-          this.db.resetScheduledItemToPending(item.id);
-        }
-      }
-
-      // Process tasks (may involve sub-agent execution)
-      for (const item of tasks) {
-        try {
-          await this.processTask(item);
-          this.markItemFiredAndReschedule(item);
-        } catch (err) {
-          this.logger.error(
-            { itemId: item.id, error: (err as Error).message },
-            'Failed to process task'
           );
           this.db.resetScheduledItemToPending(item.id);
         }
