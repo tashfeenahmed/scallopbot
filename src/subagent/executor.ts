@@ -10,14 +10,14 @@
  */
 
 import type { Logger } from 'pino';
-import type { LLMProvider } from '../providers/types.js';
+import type { LLMProvider, CompletionRequest, CompletionResponse } from '../providers/types.js';
 import type { SessionManager } from '../agent/session.js';
 import type { SkillRegistry } from '../skills/registry.js';
 import type { SkillExecutor } from '../skills/executor.js';
 import type { Router } from '../routing/router.js';
 import type { CostTracker } from '../routing/cost.js';
 import type { ScallopMemoryStore } from '../memory/scallop-store.js';
-import type { ContextManager } from '../routing/context.js';
+import { ContextManager } from '../routing/context.js';
 import type { ProgressCallback } from '../agent/agent.js';
 import type { Skill } from '../skills/types.js';
 import { Agent } from '../agent/agent.js';
@@ -41,6 +41,7 @@ const NEVER_ALLOWED_SKILLS = new Set([
   'send_message',     // No direct user communication
   'send_file',        // No direct user communication
   'voice_reply',      // No direct user communication
+  'manage_skills',    // No installing/uninstalling skills
 ]);
 
 /**
@@ -53,6 +54,7 @@ const DEFAULT_SUBAGENT_SKILLS = [
   'edit_file',
   'web_search',
   'agent_browser',
+  'memory_search',
 ];
 
 /**
@@ -61,7 +63,7 @@ const DEFAULT_SUBAGENT_SKILLS = [
 const SKILL_KEYWORD_MAP: Array<{ patterns: RegExp; skills: string[] }> = [
   { patterns: /search|research|find|look up|query/i, skills: ['web_search', 'agent_browser'] },
   { patterns: /file|read|code|write|edit|script/i, skills: ['read_file', 'edit_file', 'write_file', 'bash'] },
-  { patterns: /memory|remember|recall|fact/i, skills: ['memory_get'] },
+  { patterns: /memory|remember|recall|fact/i, skills: ['memory_search'] },
   { patterns: /browse|web|url|page|site/i, skills: ['agent_browser', 'web_search'] },
 ];
 
@@ -213,13 +215,24 @@ export class SubAgentExecutor {
       activeProvider = this.costTracker.wrapProvider(provider, run.childSessionId);
     }
 
-    // 3. Build minimal system prompt
-    const systemPrompt = this.buildSubAgentPrompt(run.task);
+    // 3. Wrap provider with token budget enforcement
+    activeProvider = this.createTokenBudgetProvider(activeProvider, run.id);
 
-    // 4. Create filtered skill registry
+    // 4. Build enriched system prompt (async — fetches profile + memories)
+    const systemPrompt = await this.buildSubAgentPrompt(run.task);
+
+    // 5. Create filtered skill registry
     const filteredRegistry = this.createFilteredSkillRegistry(run.allowedSkills, run.task);
 
-    // 5. Create Agent instance with sub-agent restrictions
+    // 6. Create dedicated ContextManager with tight limits for sub-agents
+    const subAgentContextManager = new ContextManager({
+      hotWindowSize: 20,
+      maxContextTokens: 50_000,
+      compressionThreshold: 0.6,
+      maxToolOutputBytes: 10_240,
+    });
+
+    // 7. Create Agent instance with sub-agent restrictions
     const agent = new Agent({
       provider: activeProvider,
       sessionManager: this.sessionManager,
@@ -227,7 +240,7 @@ export class SubAgentExecutor {
       skillExecutor: this.skillExecutor,
       // Read-only memory: pass store for reads but no factExtractor (no writes)
       scallopStore: this.config.allowMemoryWrites ? this.scallopStore : this.createReadOnlyMemoryProxy(),
-      contextManager: this.contextManager,
+      contextManager: subAgentContextManager,
       // Deliberately omitted:
       // - factExtractor (no fact extraction from sub-agent conversations)
       // - goalService (sub-agents don't manage goals)
@@ -239,14 +252,14 @@ export class SubAgentExecutor {
       systemPrompt,
     });
 
-    // 6. Set up timeout via AbortController
+    // 8. Set up timeout via AbortController
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), run.timeoutMs);
     this.activeAbortControllers.set(run.id, controller);
 
     const shouldStop = () => controller.signal.aborted;
 
-    // 7. Progress forwarding
+    // 9. Progress forwarding
     const subProgress: ProgressCallback | undefined = parentOnProgress
       ? async (update) => {
           await parentOnProgress({
@@ -324,25 +337,79 @@ export class SubAgentExecutor {
   }
 
   /**
-   * Build a minimal system prompt for sub-agents (no SOUL.md, no memory context)
+   * Build an enriched system prompt for sub-agents with user context and memory.
    */
-  private buildSubAgentPrompt(task: string): string {
+  private async buildSubAgentPrompt(task: string): Promise<string> {
     const lines = [
       'You are a focused sub-agent assigned a specific task.',
       '',
-      '## TASK',
-      task,
-      '',
-      '## RULES',
-      `1. Complete the task and respond with your findings/results.`,
-      `2. End your response with [DONE] when finished.`,
-      `3. You have a LIMITED iteration budget (${this.config.maxIterations} iterations). Be efficient.`,
-      `4. Do NOT send messages to the user, manage goals, set reminders, or spawn agents.`,
-      `5. Focus ONLY on the assigned task. Be concise.`,
-      '',
-      `Current date: ${new Date().toISOString().split('T')[0]}`,
-      `Workspace: ${this.workspace}`,
     ];
+
+    // Inject agent identity if available
+    if (this.scallopStore) {
+      const agentProfile = this.scallopStore.getProfileManager().getStaticProfile('agent');
+      if (agentProfile && Object.keys(agentProfile).length > 0) {
+        const name = agentProfile['name'] || agentProfile['agent_name'];
+        const personality = agentProfile['personality'];
+        if (name) lines.push(`Your name is ${name}.`);
+        if (personality) lines.push(`Personality: ${personality}`);
+        lines.push('');
+      }
+    }
+
+    // Inject user profile context
+    if (this.scallopStore) {
+      const userProfile = this.scallopStore.getProfileManager().getStaticProfile('default');
+      if (userProfile && Object.keys(userProfile).length > 0) {
+        lines.push('## USER CONTEXT');
+        for (const [key, value] of Object.entries(userProfile)) {
+          lines.push(`- ${key}: ${value}`);
+        }
+        lines.push('');
+      }
+    }
+
+    // Inject relevant memories
+    if (this.scallopStore) {
+      try {
+        const results = await this.scallopStore.search(task, {
+          userId: 'default',
+          limit: 5,
+          minProminence: 0.2,
+        });
+        if (results.length > 0) {
+          lines.push('## RELEVANT MEMORIES');
+          lines.push('Things you already know that may be relevant:');
+          for (const r of results) {
+            lines.push(`- ${r.memory.content}`);
+          }
+          lines.push('');
+        }
+      } catch {
+        // Memory search failure is non-fatal
+      }
+    }
+
+    lines.push('## TASK');
+    lines.push(task);
+    lines.push('');
+    lines.push('## RESEARCH WORKFLOW');
+    lines.push('1. Check the RELEVANT MEMORIES above first — avoid re-researching known facts.');
+    lines.push('2. Use **memory_search** to find additional stored knowledge before going to the web.');
+    lines.push('3. Use **web_search** (via bash) for fresh information not found in memory.');
+    lines.push('4. Use **agent_browser** only when you need to read a specific page in detail.');
+    lines.push('5. Synthesize findings concisely.');
+    lines.push('');
+    lines.push('## RULES');
+    lines.push(`1. Complete the task and respond with your findings/results.`);
+    lines.push(`2. End your response with [DONE] when finished.`);
+    lines.push(`3. You have a LIMITED iteration budget (${this.config.maxIterations} iterations). Be efficient.`);
+    lines.push(`4. Do NOT send messages to the user, manage goals, set reminders, or spawn agents.`);
+    lines.push(`5. Focus ONLY on the assigned task. Be concise.`);
+    lines.push('');
+    lines.push(`Current date: ${new Date().toISOString().split('T')[0]}`);
+    lines.push(`Workspace: ${this.workspace}`);
+
     return lines.join('\n');
   }
 
@@ -372,15 +439,35 @@ export class SubAgentExecutor {
         }
         if (prop === 'generateSkillPrompt') {
           return (options?: Record<string, unknown>) => {
-            // Generate prompt only for allowed skills
+            // Generate prompt for allowed executable skills
             const allSkills = target.getExecutableSkills();
             const filtered = allSkills.filter((s: Skill) => allowedNames.has(s.name));
-            if (filtered.length === 0) return '';
 
-            const lines = ['# Available Skills', '', 'You can invoke the following skills directly:', ''];
-            for (const skill of filtered) {
-              lines.push(`- **${skill.name}**: ${skill.description}`);
+            // Also include documentation/bash-based skills (e.g. web_search)
+            const docSkills = target.getDocumentationSkills();
+            const filteredDocs = docSkills.filter((s: Skill) => allowedNames.has(s.name));
+
+            if (filtered.length === 0 && filteredDocs.length === 0) return '';
+
+            const lines: string[] = [];
+
+            if (filtered.length > 0) {
+              lines.push('# Available Skills', '', 'You can invoke the following skills directly:', '');
+              for (const skill of filtered) {
+                lines.push(`- **${skill.name}**: ${skill.description}`);
+              }
             }
+
+            if (filteredDocs.length > 0) {
+              if (filtered.length > 0) lines.push('');
+              lines.push('# Bash-Based Skills', '');
+              lines.push('These skills are invoked via the bash tool. The description shows usage. For advanced options, read the SKILL.md at the path shown.');
+              for (const skill of filteredDocs) {
+                lines.push(`- **${skill.name}**: ${skill.description}`);
+                lines.push(`  Docs: ${skill.path}`);
+              }
+            }
+
             return lines.join('\n');
           };
         }
@@ -427,10 +514,10 @@ export class SubAgentExecutor {
       skillNames = [...autoSelected].filter((s) => !NEVER_ALLOWED_SKILLS.has(s));
     }
 
-    // Only include skills that actually exist in the registry
-    const existing = new Set(
-      this.skillRegistry.getExecutableSkills().map((s) => s.name)
-    );
+    // Only include skills that actually exist in the registry (executable or documentation)
+    const executableNames = this.skillRegistry.getExecutableSkills().map((s) => s.name);
+    const docNames = this.skillRegistry.getDocumentationSkills().map((s) => s.name);
+    const existing = new Set([...executableNames, ...docNames]);
     return new Set(skillNames.filter((s) => existing.has(s)));
   }
 
@@ -460,6 +547,40 @@ export class SubAgentExecutor {
         return Reflect.get(target, prop, receiver);
       },
     }) as ScallopMemoryStore;
+  }
+
+  /**
+   * Wrap an LLM provider with token budget enforcement.
+   * Tracks cumulative input tokens and throws when the budget is exceeded.
+   */
+  private createTokenBudgetProvider(provider: LLMProvider, runId: string): LLMProvider {
+    const maxInputTokens = this.config.maxInputTokens;
+    const logger = this.logger;
+    let cumulativeInputTokens = 0;
+
+    return {
+      name: provider.name,
+      isAvailable: () => provider.isAvailable(),
+      complete: async (request: CompletionRequest): Promise<CompletionResponse> => {
+        if (cumulativeInputTokens >= maxInputTokens) {
+          throw new Error(
+            `Sub-agent token budget exceeded: ${cumulativeInputTokens}/${maxInputTokens} input tokens used`
+          );
+        }
+        const response = await provider.complete(request);
+        cumulativeInputTokens += response.usage.inputTokens;
+        if (cumulativeInputTokens >= maxInputTokens) {
+          logger.warn(
+            { runId, cumulativeInputTokens, maxInputTokens },
+            'Sub-agent token budget reached — will abort on next call'
+          );
+        }
+        return response;
+      },
+      stream: provider.stream
+        ? (request: CompletionRequest) => provider.stream!(request)
+        : undefined,
+    };
   }
 
   /**
