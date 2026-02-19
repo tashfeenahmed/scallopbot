@@ -16,13 +16,7 @@
 import type { Logger } from 'pino';
 import type { Router } from '../routing/router.js';
 
-// ============ Constants ============
-
-/** Queue drain interval (safety net for stuck messages) */
-const DRAIN_INTERVAL_MS = 30 * 1000; // 30 seconds
-
-/** Maximum queue size (prevent unbounded growth) */
-const MAX_QUEUE_SIZE = 20;
+import { DRAIN_INTERVAL_MS, MAX_QUEUE_SIZE } from './proactive-config.js';
 
 // ============ LLM Combine Prompt ============
 

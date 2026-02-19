@@ -39,13 +39,8 @@ export interface InnerThoughtsResult {
   urgency: 'low' | 'medium' | 'high';
 }
 
-// ============ Constants ============
-
-/** 6-hour cooldown between proactive messages to prevent fatigue */
-const PROACTIVE_COOLDOWN_MS = 6 * 60 * 60 * 1000;
-
-/** Minimum session length to warrant inner thoughts evaluation */
-const MIN_SESSION_MESSAGES = 3;
+import { PROACTIVE_COOLDOWN_MS, MIN_SESSION_MESSAGES } from '../proactive/proactive-config.js';
+import { extractResponseText, extractJSON } from '../proactive/proactive-utils.js';
 
 /** Valid decision values for LLM response validation */
 const VALID_DECISIONS = new Set(['proact', 'wait', 'skip']);
@@ -201,59 +196,31 @@ export function parseInnerThoughtsResponse(
     urgency: 'low',
   };
 
-  if (!response || response.trim().length === 0) {
-    return failSafe;
-  }
+  const parsed = extractJSON(response);
+  if (!parsed) return failSafe;
 
-  // Extract JSON from response (LLM may include markdown wrapping)
-  const jsonMatch = response.match(/\{[\s\S]*\}/);
-  if (!jsonMatch) {
-    return failSafe;
-  }
-
-  try {
-    const parsed = JSON.parse(jsonMatch[0]) as Record<string, unknown>;
-
-    // Validate decision
-    const decision = parsed.decision;
-    if (typeof decision !== 'string' || !VALID_DECISIONS.has(decision)) {
-      return {
-        decision: 'skip',
-        reason: `Invalid decision value: ${String(decision)}`,
-        message: undefined,
-        urgency: 'low',
-      };
-    }
-
-    // Validate urgency (default to 'low' if missing or invalid)
-    const urgency = typeof parsed.urgency === 'string' && VALID_URGENCIES.has(parsed.urgency)
-      ? parsed.urgency as 'low' | 'medium' | 'high'
-      : 'low';
-
+  // Validate decision
+  const decision = parsed.decision;
+  if (typeof decision !== 'string' || !VALID_DECISIONS.has(decision)) {
     return {
-      decision: decision as 'proact' | 'wait' | 'skip',
-      reason: typeof parsed.reason === 'string' ? parsed.reason : '',
-      message: typeof parsed.message === 'string' ? parsed.message : undefined,
-      urgency,
+      decision: 'skip',
+      reason: `Invalid decision value: ${String(decision)}`,
+      message: undefined,
+      urgency: 'low',
     };
-  } catch {
-    return failSafe;
   }
-}
 
-// ============ Internal Helpers ============
+  // Validate urgency (default to 'low' if missing or invalid)
+  const urgency = typeof parsed.urgency === 'string' && VALID_URGENCIES.has(parsed.urgency)
+    ? parsed.urgency as 'low' | 'medium' | 'high'
+    : 'low';
 
-/**
- * Extract response text from LLM CompletionResponse content blocks.
- * Handles both ContentBlock[] and string responses.
- */
-function extractResponseText(content: unknown): string {
-  if (Array.isArray(content)) {
-    return content
-      .map((block: Record<string, unknown>) => 'text' in block ? block.text : '')
-      .join('');
-  }
-  return String(content);
+  return {
+    decision: decision as 'proact' | 'wait' | 'skip',
+    reason: typeof parsed.reason === 'string' ? parsed.reason : '',
+    message: typeof parsed.message === 'string' ? parsed.message : undefined,
+    urgency,
+  };
 }
 
 // ============ Orchestrator ============

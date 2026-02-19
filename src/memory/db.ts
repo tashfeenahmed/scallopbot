@@ -1462,12 +1462,13 @@ export class ScallopDatabase {
    * Update prominence for all memories (batch)
    */
   updateProminences(updates: Array<{ id: string; prominence: number }>): void {
-    const stmt = this.db.prepare('UPDATE memories SET prominence = ?, updated_at = ? WHERE id = ?');
-    const now = Date.now();
+    // Don't update updated_at — prominence decay is a system maintenance operation,
+    // not a user interaction. Preserves updated_at for staleness detection.
+    const stmt = this.db.prepare('UPDATE memories SET prominence = ? WHERE id = ?');
 
     const transaction = this.db.transaction(() => {
       for (const { id, prominence } of updates) {
-        stmt.run(prominence, now, id);
+        stmt.run(prominence, id);
       }
     });
 
@@ -2166,7 +2167,10 @@ export class ScallopDatabase {
       for (const row of rows) {
         const result = updateStmt.run(now, row.id);
         if (result.changes > 0) {
-          claimed.push(this.rowToScheduledItem(row));
+          // Override status to reflect the UPDATE we just performed
+          const item = this.rowToScheduledItem(row);
+          item.status = 'processing';
+          claimed.push(item);
         }
       }
 

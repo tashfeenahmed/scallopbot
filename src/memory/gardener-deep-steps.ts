@@ -12,7 +12,8 @@ import { auditRetrievalHistory } from './retrieval-audit.js';
 import { archiveLowUtilityMemories, pruneOrphanedRelations } from './utility-score.js';
 import { computeTrustScore } from './trust-score.js';
 import { checkGoalDeadlines } from './goal-deadline-check.js';
-import { evaluateInnerThoughts } from './inner-thoughts.js';
+import { evaluateProactive } from './proactive-evaluator.js';
+import { getTodayStartMs } from '../proactive/proactive-utils.js';
 
 // ============ Step functions ============
 
@@ -355,7 +356,8 @@ export async function runGoalDeadlineCheck(ctx: GardenerContext): Promise<void> 
 }
 
 /**
- * B7: Inner thoughts evaluation (for users with recent session summaries)
+ * B7: Unified proactive evaluation (session context + system gaps in one LLM call).
+ * Replaces the previous two-path approach (inner-thoughts + gap-scanner).
  */
 export async function runInnerThoughts(ctx: GardenerContext): Promise<void> {
   if (!ctx.fusionProvider) return;
@@ -364,59 +366,94 @@ export async function runInnerThoughts(ctx: GardenerContext): Promise<void> {
     const userId = DEFAULT_USER_ID;
     const sixHoursAgo = Date.now() - 6 * 60 * 60 * 1000;
 
-    const allSummaries = ctx.db.getSessionSummariesByUser(userId, 10);
+    const allSummaries = ctx.db.getSessionSummariesByUser(userId, 20);
     const recentSummaries = allSummaries.filter(s => s.createdAt >= sixHoursAgo);
+    const sessionSummary = recentSummaries.length > 0 ? recentSummaries[0] : null;
 
-    if (recentSummaries.length > 0) {
-      const sessionSummary = recentSummaries[0];
+    const behavioralPatterns = ctx.db.getBehavioralPatterns(userId);
+    const affect = behavioralPatterns?.smoothedAffect ?? null;
+    const dial = (behavioralPatterns?.responsePreferences?.proactivenessDial as 'conservative' | 'moderate' | 'eager') ?? 'moderate';
+    const activeHours = behavioralPatterns?.activeHours ?? [];
+    const lastProactiveAt = getLastProactiveAt(ctx.db, userId);
 
-      const behavioralPatterns = ctx.db.getBehavioralPatterns(userId);
-      const affect = behavioralPatterns?.smoothedAffect ?? null;
-      const dial = (behavioralPatterns?.responsePreferences?.proactivenessDial as 'conservative' | 'moderate' | 'eager') ?? 'moderate';
-      const activeHours = behavioralPatterns?.activeHours ?? [];
+    // Load goals and board items for gap scanning
+    const GoalService = (await import('../goals/goal-service.js')).GoalService;
+    const goalService = new GoalService({ db: ctx.db, logger: ctx.logger });
+    const activeGoals = await goalService.listGoals(userId, { status: 'active' });
 
-      const lastProactiveAt = getLastProactiveAt(ctx.db, userId);
+    const existingItems = ctx.db.getScheduledItemsByUser(userId);
+    const boardItems = existingItems
+      .filter(i => i.boardStatus === 'in_progress' || i.boardStatus === 'waiting')
+      .map(i => ({
+        id: i.id,
+        title: i.message,
+        boardStatus: i.boardStatus!,
+        updatedAt: i.updatedAt,
+        priority: i.priority,
+      }));
 
-      // Gap scanning removed — C3 (sleep tick gap pipeline) handles all
-      // gap-based proactive outreach. B7 focuses purely on session context:
-      // "does this specific session warrant follow-up?"
-      const result = await evaluateInnerThoughts({
-        sessionSummary,
-        recentGapSignals: [],
-        affect,
-        dial,
-        lastProactiveAt,
+    // Count today's items for budget
+    const tz = ctx.getTimezone?.(userId) ?? 'UTC';
+    const todayStart = getTodayStartMs(tz);
+    const todayItemCount = existingItems.filter(
+      i => i.source === 'agent' && i.createdAt >= todayStart
+    ).length;
+
+    const pendingItems = existingItems
+      .filter(i => i.status === 'pending' || i.status === 'fired')
+      .map(i => ({ message: i.message, context: i.context }));
+
+    const result = await evaluateProactive({
+      sessionSummary,
+      behavioralPatterns,
+      activeGoals,
+      boardItems,
+      allSessionSummaries: allSummaries,
+      existingItems: pendingItems,
+      dial,
+      affect,
+      lastProactiveAt,
+      activeHours,
+      userId,
+      todayItemCount,
+    }, ctx.fusionProvider);
+
+    // Schedule each output item
+    for (const item of result.items) {
+      const timingUrgency: 'low' | 'medium' | 'high' =
+        item.severity === 'high' ? 'high' :
+        item.severity === 'medium' ? 'medium' : 'low';
+
+      const proResult = createProactiveItem({
+        db: ctx.db,
+        userId,
+        message: item.message,
+        context: item.context,
+        type: 'follow_up',
+        kind: 'nudge',
+        quietHours: ctx.quietHours,
         activeHours,
-      }, ctx.fusionProvider);
+        lastProactiveAt,
+        urgency: timingUrgency,
+        timezone: ctx.getTimezone?.(userId),
+      });
 
-      if (result.decision === 'proact' && result.message) {
-        const proResult = createProactiveItem({
-          db: ctx.db,
-          userId,
-          message: result.message,
-          context: JSON.stringify({
-            source: 'inner_thoughts',
-            reason: result.reason,
-            urgency: result.urgency,
-          }),
-          type: 'follow_up',
-          kind: 'nudge',
-          quietHours: ctx.quietHours,
-          activeHours,
-          lastProactiveAt,
-          urgency: result.urgency,
-          timezone: ctx.getTimezone?.(userId),
-        });
-
-        if (proResult.created) {
-          ctx.logger.info({ userId, urgency: result.urgency, reason: result.reason }, 'Inner thoughts created proactive item');
-        } else {
-          ctx.logger.debug({ userId }, 'Skipping inner thoughts item - similar already pending');
-        }
+      if (proResult.created) {
+        ctx.logger.info({ userId, urgency: timingUrgency, gapType: item.gapType }, 'Proactive evaluator created item');
       }
     }
+
+    if (result.items.length > 0 || result.signalsFound > 0) {
+      ctx.logger.info({
+        userId,
+        signalsFound: result.signalsFound,
+        itemsCreated: result.items.length,
+        llmCalled: result.llmCalled,
+        skipReason: result.skipReason,
+      }, 'Proactive evaluation complete');
+    }
   } catch (err) {
-    ctx.logger.warn({ error: (err as Error).message }, 'Inner thoughts failed');
+    ctx.logger.warn({ error: (err as Error).message }, 'Proactive evaluation failed');
   }
 }
 

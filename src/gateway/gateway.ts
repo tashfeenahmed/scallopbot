@@ -377,9 +377,7 @@ export class Gateway {
       this.unifiedScheduler = new UnifiedScheduler({
         db: this.scallopMemoryStore.getDatabase(),
         logger: this.logger,
-        costTracker: this.costTracker || undefined,
         goalService: this.goalService || undefined,
-        subAgentExecutor: this.subAgentExecutor || undefined,
         sessionManager: this.sessionManager || undefined,
         interval: 30 * 1000, // Check every 30 seconds
         onSendMessage: this.outboundQueue.createHandler(),

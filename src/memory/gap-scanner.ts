@@ -38,13 +38,16 @@ export interface GapScanInput {
   now?: number;
 }
 
-// ============ Constants ============
+import {
+  STALE_GOAL_DAYS,
+  CHECKIN_RATIO_THRESHOLD,
+  UNRESOLVED_MAX_AGE_DAYS,
+  FOLLOW_UP_WINDOW_MS,
+  STALE_IN_PROGRESS_HOURS,
+  STALE_WAITING_HOURS,
+} from '../proactive/proactive-config.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-const STALE_THRESHOLD_DAYS = 14;
-const CHECKIN_RATIO_THRESHOLD = 3.0;
-const UNRESOLVED_MAX_AGE_DAYS = 7;
-const FOLLOW_UP_WINDOW_MS = 48 * 60 * 60 * 1000; // 48h
 
 /** Convert checkinFrequency to days */
 const CHECKIN_FREQUENCY_DAYS: Record<CheckinFrequency, number> = {
@@ -114,7 +117,7 @@ export function scanStaleGoals(goals: GoalItem[], now: number): GapSignal[] {
     }
 
     // Check 3: Generic stale — no dueDate and not updated in 14+ days
-    if (!metadata.dueDate && daysSinceUpdate > STALE_THRESHOLD_DAYS) {
+    if (!metadata.dueDate && daysSinceUpdate > STALE_GOAL_DAYS) {
       signals.push({
         type: 'stale_goal',
         severity: 'medium',
@@ -263,9 +266,6 @@ export function scanUnresolvedThreads(
 // ============ Orchestrator ============
 
 // ============ scanStaleBoardItems ============
-
-const STALE_IN_PROGRESS_HOURS = 48;
-const STALE_WAITING_HOURS = 72;
 
 /**
  * Scan board items for stale/blocked signals:
