@@ -30,6 +30,9 @@ const SCHEDULED_ITEM_STOP_WORDS = new Set([
   'with', 'from', 'has', 'have', 'had', 'will', 'can', 'not', 'but', 'this', 'that', 'about',
   'remind', 'reminder', 'remember', 'check', 'follow', 'up', 'user', 'upcoming', 'scheduled',
   'prepare', 'notes', 'ready', 'get', 'time', 'just', 'now', 'today', 'tomorrow',
+  // Additional words to improve dedup between board-created and agent-created items
+  'commitment', 'needs', 'need', 'should', 'must', 'gonna', 'going', 'plan', 'planning',
+  'mentioned', 'said', 'told', 'wants', 'want', 'also', 'dont', 'forget', 'make', 'sure',
 ]);
 
 /** Normalize text to significant word set for similarity matching */

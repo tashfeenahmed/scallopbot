@@ -144,9 +144,10 @@ export class CostTracker {
     this.warningThreshold = options.warningThreshold ?? 0.75;
     this.db = options.db;
 
-    // Load existing records from SQLite on startup
+    // Load only current billing period (last 31 days) from SQLite on startup
     if (this.db) {
-      const rows = this.db.getCostUsageSince(0);
+      const thirtyOneDaysAgo = Date.now() - 31 * 24 * 60 * 60 * 1000;
+      const rows = this.db.getCostUsageSince(thirtyOneDaysAgo);
       for (const row of rows) {
         this.usageHistory.push({
           model: row.model,

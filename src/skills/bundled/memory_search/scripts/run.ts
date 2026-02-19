@@ -78,12 +78,8 @@ function parseArgs(): MemorySearchArgs {
   const argsObj = args as Record<string, unknown>;
 
   if (!argsObj.query || typeof argsObj.query !== 'string') {
-    outputResult({
-      success: false,
-      output: '',
-      error: 'Missing or invalid "query" field in SKILL_ARGS',
-      exitCode: 1,
-    });
+    // Default to a broad query instead of erroring - the LLM sometimes omits this
+    argsObj.query = '*';
   }
 
   if (argsObj.limit !== undefined && (typeof argsObj.limit !== 'number' || argsObj.limit < 1)) {

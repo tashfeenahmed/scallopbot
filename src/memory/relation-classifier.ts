@@ -59,19 +59,27 @@ const CLASSIFICATION_PROMPT = `You are a memory relationship classifier. Given a
 
 Classifications:
 - NEW: The fact is completely new information, unrelated to existing facts
-- UPDATES: The new fact REPLACES an existing fact (same topic/slot, different value)
-  Examples: "Lives in Dublin" → "Lives in Wicklow" (location update)
-           "Name: John" → "Name: Johnny" (name correction)
+- UPDATES: The new fact REPLACES or SUPERSEDES an existing fact (same topic/attribute, different value)
 - EXTENDS: The new fact adds MORE information about an entity mentioned in existing facts
-  Examples: "Flatmate is Hamza" exists, new fact "Hamza works at Google" EXTENDS it
-           "Wife is Sarah" exists, new fact "Sarah likes cooking" EXTENDS it
+
+UPDATES examples (same slot, different value — the old fact becomes outdated):
+  - "Lives in Dublin" UPDATES "Lives in Wicklow" (location changed)
+  - "Works at Google" UPDATES "Works at Microsoft" (employer changed)
+  - "Name: Johnny" UPDATES "Name: John" (name correction)
+  - "Mood: stressed about deadlines" UPDATES "Mood: happy and relaxed" (mood changed)
+  - "Focus: learning Rust" UPDATES "Focus: learning Python" (focus shifted)
+  - "Prefers dark mode" UPDATES "Prefers light mode" (preference changed)
+  - "Has 2 cats" UPDATES "Has 1 cat" (quantity changed)
+
+EXTENDS examples (adding info about same entity):
+  - "Flatmate is Hamza" exists → "Hamza works at Google" EXTENDS it
+  - "Wife is Sarah" exists → "Sarah likes cooking" EXTENDS it
 
 IMPORTANT RULES:
-1. Different relationship types are NOT updates of each other:
-   - "Flatmate is Hamza" and "Wife is Hayat" are BOTH NEW (different relationships)
-   - "Name is Tash" and "Is Pakistani" are BOTH NEW (different attributes)
-2. Only classify as UPDATES if it's the SAME slot with a different value
-3. EXTENDS means adding info about the SAME entity mentioned in an existing fact
+1. Different relationship types are NOT updates: "Flatmate is Hamza" and "Wife is Hayat" are BOTH NEW
+2. UPDATES requires the SAME attribute/slot with a CHANGED value — look for contradictions
+3. When in doubt between NEW and UPDATES, check if both facts can be true simultaneously.
+   If they CANNOT both be true → UPDATES. If they CAN → NEW or EXTENDS.
 
 Respond with JSON only:
 {

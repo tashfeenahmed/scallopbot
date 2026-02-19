@@ -115,7 +115,12 @@ ACTION TYPES:
 Rules:
 1. Extract CONCRETE facts — NOT questions, greetings, opinions, or conversational filler
 2. NEVER extract: "hey how are you", "what do you know", "what time is it", "good morning", casual chat, rhetorical questions, or messages that contain no factual information about the user
-3. A valid fact includes BOTH long-term info (name, job, location, family, preferences, projects, skills, relationships) AND short-term plans/activities the user states for today (e.g., "going to the gym", "working from home", "having lunch with Sarah"). Today's plans ARE valid facts — they form the user's agenda and should be remembered within the current day.
+3. NEVER extract TRANSIENT TASK REQUESTS as facts. These are one-off instructions, not durable information about the user:
+   - BAD: "Wants TODO comments summarized", "Has a project they want help with", "Wants to know about Docker"
+   - BAD: "Has a codebase", "Has a boss", "Will be late tomorrow" (trivially obvious or ephemeral)
+   - GOOD: "Works on a TypeScript codebase called ScallopBot" (specific, durable)
+   - Only extract facts that would still be relevant and useful to recall in a FUTURE conversation
+4. A valid fact includes BOTH long-term info (name, job, location, family, preferences, projects, skills, relationships) AND short-term plans/activities the user states for today (e.g., "going to the gym", "working from home", "having lunch with Sarah"). Today's plans ARE valid facts — they form the user's agenda and should be remembered within the current day.
 4. For each fact, identify WHO it's about:
    - "user" if it's about the person speaking (their name, job, preferences, relationships, location)
    - "agent" if the user is telling the AI assistant about itself (giving it a name, personality, behavior instructions)
@@ -352,6 +357,46 @@ export class LLMFactExtractor {
         oldValue: f.old_value,
         replaces: f.replaces,
       }));
+
+      // Post-extraction noise filter: remove low-value facts before storing
+      const beforeFilter = result.facts.length;
+      result.facts = result.facts.filter(f => {
+        const lower = f.content.toLowerCase();
+
+        // Filter out transient task requests (one-off instructions, not durable user info)
+        if (/^(?:wants?|needs?|asked?|requesting?)\s+(?:to\s+)?(?:know|help|check|see|find|get|summarize|explain|look|search|run|debug|fix|test|review|create|build|write|read|list|show)\b/i.test(lower)) {
+          return false;
+        }
+
+        // Filter out trivially vague "has a ..." statements
+        if (/^has\s+(?:a|an|the|some)\s+(?:codebase|project|app|bot|tool|system|job|boss|team|meeting|computer|laptop|phone|problem|issue|question|idea|file|folder|repo|database|server)\b/i.test(lower)) {
+          return false;
+        }
+
+        // Filter out ephemeral statements about current conversation activity
+        if (/^(?:is\s+(?:asking|chatting|talking|testing|trying|working|looking|debugging|checking)\s+(?:about|with|on|at|for))\b/i.test(lower)) {
+          return false;
+        }
+
+        // Filter out facts that are too short to be meaningful
+        if (f.content.trim().length < 8) {
+          return false;
+        }
+
+        // Filter out "will be late tomorrow"-style ephemeral statements
+        if (/^(?:will\s+be\s+(?:late|early|busy|free|away|back|out))\b/i.test(lower)) {
+          return false;
+        }
+
+        return true;
+      });
+
+      if (beforeFilter > result.facts.length) {
+        this.logger.debug(
+          { before: beforeFilter, after: result.facts.length },
+          'Noise filter removed low-value facts'
+        );
+      }
 
       this.logger.debug(
         { factCount: result.facts.length, message: message.substring(0, 50) },
@@ -1205,11 +1250,39 @@ Respond with JSON only:
             }
           }
 
-          // Truncate focus to max 5 items to prevent bloat
+          // Focus stability: only update if the new value is meaningfully different
+          // and not just a transient task topic from the current conversation
           if (key === 'focus') {
             const items = trimmed.split(',').map(s => s.trim()).filter(Boolean).slice(0, 5);
-            profileManager.setStaticValue('default', key, items.join(', '));
-            this.logger.info({ key, value: items.join(', ') }, 'User profile updated via LLM');
+            const newFocus = items.join(', ');
+
+            // Skip if new focus looks like a transient task request
+            const transientPattern = /\b(?:summariz|debug|fix|test|review|help with|asked about|check|look at)\b/i;
+            if (transientPattern.test(newFocus)) {
+              this.logger.debug({ focus: newFocus }, 'Skipping transient focus update');
+              continue;
+            }
+
+            // Only update if meaningfully different from current focus
+            const currentFocus = profileManager.getStaticValue('default', 'focus');
+            if (currentFocus) {
+              const currentSet = new Set(currentFocus.toLowerCase().split(',').map(s => s.trim()));
+              const newSet = new Set(newFocus.toLowerCase().split(',').map(s => s.trim()));
+              // Count how many items are genuinely new
+              const genuinelyNew = [...newSet].filter(item => !currentSet.has(item));
+              if (genuinelyNew.length === 0) {
+                this.logger.debug({ focus: newFocus }, 'Focus unchanged, skipping');
+                continue;
+              }
+              // Merge: keep existing items and add genuinely new ones, capped at 5
+              const merged = [...new Set([...currentFocus.split(',').map(s => s.trim()), ...genuinelyNew])].filter(Boolean).slice(0, 5);
+              profileManager.setStaticValue('default', key, merged.join(', '));
+              this.logger.info({ key, value: merged.join(', '), added: genuinelyNew }, 'User focus merged via LLM');
+              continue;
+            }
+
+            profileManager.setStaticValue('default', key, newFocus);
+            this.logger.info({ key, value: newFocus }, 'User profile updated via LLM');
             continue;
           }
 

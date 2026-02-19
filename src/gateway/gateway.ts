@@ -163,10 +163,20 @@ export class Gateway {
       this.logger.info({ fieldsPopulated: backfillResult.fieldsPopulated }, 'Default user profile backfilled');
     }
 
+    // Backfill embeddings for old memories (runs in background, non-blocking)
+    this.scallopMemoryStore.backfillEmbeddings({ batchSize: 20, limit: 500 }).then(count => {
+      if (count > 0) {
+        this.logger.info({ embeddingsBackfilled: count }, 'Embedding backfill completed');
+      }
+    }).catch(err => {
+      this.logger.warn({ error: (err as Error).message }, 'Embedding backfill failed');
+    });
+
     // Goal service for hierarchical goal tracking
     this.goalService = new GoalService({
       db: this.scallopMemoryStore.getDatabase(),
       logger: this.logger,
+      embedder,
     });
     this.logger.debug('Goal service initialized');
 
