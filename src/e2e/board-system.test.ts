@@ -584,6 +584,12 @@ describe('E2E Board System', () => {
         },
       });
 
+      // Compute a timezone where the current hour is noon (always outside quiet hours 22-8)
+      const utcHour = new Date().getUTCHours();
+      const offsetToNoon = 12 - utcHour;
+      // Etc/GMT sign is inverted: Etc/GMT-5 means UTC+5
+      const gmtTz = offsetToNoon >= 0 ? `Etc/GMT-${offsetToNoon}` : `Etc/GMT+${-offsetToNoon}`;
+
       scheduler = new UnifiedScheduler({
         db,
         logger: testLogger,
@@ -592,6 +598,7 @@ describe('E2E Board System', () => {
           sentMessages.push({ userId, message });
           return true;
         },
+        getTimezone: () => gmtTz,
       });
     }, 30000);
 

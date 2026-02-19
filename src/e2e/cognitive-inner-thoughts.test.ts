@@ -40,12 +40,14 @@ describe('E2E Inner Thoughts & Proactive Feedback', () => {
       // and the GoalService.listGoals (pure DB query, no LLM).
       // Only inner thoughts itself calls the provider.
       const fusionProvider = createMockLLMProvider([
-        // Call 1: Inner thoughts evaluation response
+        // Call 1: Unified proactive evaluator response (new format)
         JSON.stringify({
-          decision: 'proact',
-          reason: 'User was working on async patterns and seemed stuck',
-          message: 'I noticed you were working on async/await patterns earlier. Would you like me to walk through some common pitfalls like error handling in Promise.all?',
-          urgency: 'medium',
+          items: [{
+            index: 1,
+            action: 'nudge',
+            message: 'I noticed you were working on async/await patterns earlier. Would you like me to walk through some common pitfalls like error handling in Promise.all?',
+            urgency: 'medium',
+          }],
         }),
       ]);
 
@@ -132,10 +134,10 @@ describe('E2E Inner Thoughts & Proactive Feedback', () => {
         item.message.toLowerCase().includes('await');
       expect(messageContainsAsyncContent).toBe(true);
 
-      // Assert item context JSON contains source: 'inner_thoughts'
+      // Assert item context JSON contains source from proactive evaluator
       expect(item.context).not.toBeNull();
       const context = JSON.parse(item.context!);
-      expect(context.source).toBe('inner_thoughts');
+      expect(context.source).toBe('proactive_evaluator');
 
       // Assert item triggerAt is a future timestamp (from timing model)
       expect(item.triggerAt).toBeGreaterThan(Date.now() - 5000); // Allow small clock drift

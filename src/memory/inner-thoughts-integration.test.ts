@@ -49,19 +49,19 @@ function createMockEmbedder(): EmbeddingProvider {
   };
 }
 
-/** Inner thoughts 'proact' LLM response */
+/** Proactive evaluator 'nudge' LLM response (acts on signal #1 — session context) */
 const INNER_THOUGHTS_PROACT_RESPONSE = JSON.stringify({
-  decision: 'proact',
-  reason: 'User mentioned wanting to learn TypeScript but session ended without resolution',
-  message: 'Hey, I noticed you were asking about TypeScript generics. Would you like me to find some good resources?',
-  urgency: 'low',
+  items: [{
+    index: 1,
+    action: 'nudge',
+    message: 'Hey, I noticed you were asking about TypeScript generics. Would you like me to find some good resources?',
+    urgency: 'low',
+  }],
 });
 
-/** Inner thoughts 'skip' LLM response */
+/** Proactive evaluator 'skip' LLM response */
 const INNER_THOUGHTS_SKIP_RESPONSE = JSON.stringify({
-  decision: 'skip',
-  reason: 'Session resolved everything',
-  urgency: 'low',
+  items: [],
 });
 
 /** Gap pipeline response — nudge for stale goal */
@@ -111,8 +111,8 @@ function createMockProvider(opts?: {
       const userMsg = req.messages[0]?.content ?? '';
       const systemMsg = req.system ?? '';
 
-      // Inner thoughts prompt — identified by "GAP SIGNALS:" + "AFFECT:"
-      if (userMsg.includes('GAP SIGNALS:') && userMsg.includes('AFFECT:')) {
+      // Unified proactive evaluator prompt — identified by "SIGNALS TO EVALUATE" or "SESSION CONTEXT"
+      if (userMsg.includes('SIGNALS TO EVALUATE') || userMsg.includes('SESSION CONTEXT')) {
         return {
           content: [{ type: 'text', text: opts?.innerThoughtsResponse ?? INNER_THOUGHTS_PROACT_RESPONSE }],
           stopReason: 'end_turn',
@@ -121,7 +121,7 @@ function createMockProvider(opts?: {
         } satisfies CompletionResponse;
       }
 
-      // Gap pipeline prompt
+      // Legacy gap pipeline prompt (backward compat)
       if (userMsg.includes('SIGNALS TO TRIAGE')) {
         return {
           content: [{ type: 'text', text: opts?.gapPipelineResponse ?? makeGapPipelineResponse() }],
@@ -301,21 +301,21 @@ describe('Inner thoughts integration', () => {
 
     await gardener.deepTick();
 
-    // Verify: no inner thoughts LLM call was made (no session summaries)
+    // Verify: no proactive evaluator LLM call was made (no session summaries or signals)
     const completeCalls = (mockProvider.complete as ReturnType<typeof vi.fn>).mock.calls;
-    const innerThoughtsCalls = completeCalls.filter(
+    const evaluatorCalls = completeCalls.filter(
       (call: unknown[]) => {
         const req = call[0] as { messages: Array<{ content: string }> };
-        return req.messages[0]?.content?.includes('GAP SIGNALS:') &&
-               req.messages[0]?.content?.includes('AFFECT:');
+        return req.messages[0]?.content?.includes('SIGNALS TO EVALUATE') ||
+               req.messages[0]?.content?.includes('SESSION CONTEXT');
       },
     );
-    expect(innerThoughtsCalls.length).toBe(0);
+    expect(evaluatorCalls.length).toBe(0);
 
     // Verify: no follow_up items from inner thoughts
     const items = db.getScheduledItemsByUser('default');
     const innerItems = items.filter(i =>
-      i.type === 'follow_up' && i.source === 'agent' && i.context?.includes('inner_thoughts'),
+      i.type === 'follow_up' && i.source === 'agent' && (i.context?.includes('proactive_evaluator') || i.context?.includes('inner_thoughts')),
     );
     expect(innerItems.length).toBe(0);
   });
@@ -361,7 +361,7 @@ describe('Inner thoughts integration', () => {
     // Verify: scheduled item was created from inner thoughts
     const items = db.getScheduledItemsByUser('default');
     const innerItems = items.filter(i =>
-      i.type === 'follow_up' && i.source === 'agent' && i.context?.includes('inner_thoughts'),
+      i.type === 'follow_up' && i.source === 'agent' && (i.context?.includes('proactive_evaluator') || i.context?.includes('inner_thoughts')),
     );
     expect(innerItems.length).toBe(1);
 
@@ -369,7 +369,7 @@ describe('Inner thoughts integration', () => {
     const item = innerItems[0];
     expect(item.message).toContain('TypeScript generics');
     const context = JSON.parse(item.context!);
-    expect(context.source).toBe('inner_thoughts');
+    expect(context.source).toBe('proactive_evaluator');
     expect(context.urgency).toBe('low');
 
     // triggerAt should NOT be exactly now + 30 min (fixed delay pattern)
@@ -424,31 +424,41 @@ describe('Inner thoughts integration', () => {
 
     await gardener.deepTick();
 
-    // Verify: inner thoughts LLM was NOT called (pre-filter rejected: distressed)
+    // Verify: proactive evaluator LLM was NOT called (pre-filter rejected: distressed)
     const completeCalls = (mockProvider.complete as ReturnType<typeof vi.fn>).mock.calls;
-    const innerThoughtsCalls = completeCalls.filter(
+    const evaluatorCalls = completeCalls.filter(
       (call: unknown[]) => {
         const req = call[0] as { messages: Array<{ content: string }> };
-        return req.messages[0]?.content?.includes('GAP SIGNALS:') &&
-               req.messages[0]?.content?.includes('AFFECT:');
+        return req.messages[0]?.content?.includes('SIGNALS TO EVALUATE') ||
+               req.messages[0]?.content?.includes('SESSION CONTEXT');
       },
     );
-    expect(innerThoughtsCalls.length).toBe(0);
+    expect(evaluatorCalls.length).toBe(0);
 
     // Verify: no inner thoughts scheduled items
     const items = db.getScheduledItemsByUser('default');
     const innerItems = items.filter(i =>
-      i.type === 'follow_up' && i.source === 'agent' && i.context?.includes('inner_thoughts'),
+      i.type === 'follow_up' && i.source === 'agent' && (i.context?.includes('proactive_evaluator') || i.context?.includes('inner_thoughts')),
     );
     expect(innerItems.length).toBe(0);
   });
 
   // ─── Test 4: Gap scanner uses computeDeliveryTime ─────
 
-  it('gap scanner uses computeDeliveryTime (not fixed 30-min delay)', async () => {
+  it('proactive evaluator uses computeDeliveryTime (not fixed 30-min delay)', async () => {
     cleanupTestDb();
     const workspace = await createTmpWorkspace();
-    const mockProvider = createMockProvider();
+    // Provide a mock that nudges on stale goal signal
+    const mockProvider = createMockProvider({
+      innerThoughtsResponse: JSON.stringify({
+        items: [{
+          index: 1,
+          action: 'nudge',
+          message: 'Check in on the stale goal.',
+          urgency: 'medium',
+        }],
+      }),
+    });
 
     store = new ScallopMemoryStore({
       dbPath: TEST_DB_PATH,
@@ -464,14 +474,23 @@ describe('Inner thoughts integration', () => {
 
     const db = store.getDatabase();
 
-    // Seed a stale goal to trigger gap scanner
+    // Seed a stale goal to trigger gap scanning in the evaluator
     seedStaleGoal(db);
     seedSessionSummary(db);
 
-    const beforeTick = Date.now();
-    await gardener.sleepTick();
+    // Set dial to moderate so evaluator runs
+    const profileManager = store.getProfileManager();
+    profileManager.updateBehavioralPatterns('default', {
+      responsePreferences: {
+        proactivenessDial: 'moderate',
+        trustScore: 0.5,
+      },
+    });
 
-    // Verify: scheduled items created
+    const beforeTick = Date.now();
+    await gardener.deepTick();
+
+    // Verify: scheduled items created by the unified evaluator
     const items = db.getScheduledItemsByUser('default');
     const gapItems = items.filter(i => i.type === 'follow_up' && i.source === 'agent');
     expect(gapItems.length).toBeGreaterThanOrEqual(1);

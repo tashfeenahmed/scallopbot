@@ -785,6 +785,12 @@ describe('Scenario 5: Tiered consolidation, behavioral patterns & stats', () => 
     ]);
     const summarizer = new SessionSummarizer({ provider, logger, embedder, minMessages: 2 });
 
+    // Seed persisted tick timestamps to "now" so deep/sleep ticks don't fire immediately.
+    // The gardener uses time-based persistence: deep tick needs 72 min, sleep tick needs 20h.
+    const nowStr = String(Date.now());
+    db.setRuntimeKey('gardener:lastDeepTickAt', nowStr);
+    db.setRuntimeKey('gardener:lastSleepTickAt', nowStr);
+
     const gardener = new BackgroundGardener({
       scallopStore: store,
       logger,
@@ -801,7 +807,7 @@ describe('Scenario 5: Tiered consolidation, behavioral patterns & stats', () => 
     // Run 5 light ticks (5 seconds)
     await vi.advanceTimersByTimeAsync(5500);
     expect(processDecaySpy).toHaveBeenCalledTimes(5);
-    // Should not have run deep tick yet (needs 72 ticks)
+    // Should not have run deep tick yet (needs 72 minutes)
     expect(processFullDecaySpy).not.toHaveBeenCalled();
 
     gardener.stop();

@@ -12,10 +12,10 @@
 
 import type { ScheduledItem } from '../memory/db.js';
 
-// ============ Constants ============
+import { ENGAGEMENT_WINDOW_MS } from './proactive-config.js';
 
-/** Default engagement window: 15 minutes in milliseconds */
-export const DEFAULT_ENGAGEMENT_WINDOW_MS = 15 * 60 * 1000;
+// Re-export for backward compatibility
+export const DEFAULT_ENGAGEMENT_WINDOW_MS = ENGAGEMENT_WINDOW_MS;
 
 // ============ Functions ============
 

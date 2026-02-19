@@ -1,11 +1,8 @@
 /**
- * Unified Scheduler - Combines triggers and reminders into a single system
+ * Unified Scheduler - Processes scheduled items and delivers messages.
  *
- * Handles both:
- * - Nudges (kind='nudge'): Pre-written messages delivered directly
- * - Tasks (kind='task'): Background work via sub-agent, result sent to user
- *
- * Supports recurring items with kind preservation across reschedules.
+ * All items are delivered as nudges (pre-written messages).
+ * Supports recurring items with automatic rescheduling.
  */
 
 import type { Logger } from 'pino';
@@ -17,9 +14,7 @@ import type {
 } from '../memory/db.js';
 import { BoardService } from '../board/board-service.js';
 import { computeBoardStatus } from '../board/types.js';
-import type { CostTracker } from '../routing/cost.js';
 import type { GoalService } from '../goals/index.js';
-import type { SubAgentExecutor } from '../subagent/executor.js';
 import type { SessionManager } from '../agent/session.js';
 import { parseUserIdPrefix } from '../triggers/types.js';
 import { formatProactiveMessage, type ProactiveFormatInput } from './proactive-format.js';
@@ -62,12 +57,8 @@ export interface UnifiedSchedulerOptions {
   db: ScallopDatabase;
   /** Logger instance */
   logger: Logger;
-  /** Cost tracker for recording sub-agent usage */
-  costTracker?: CostTracker;
   /** Goal service for goal check-in context (optional) */
   goalService?: GoalService;
-  /** Sub-agent executor for task-kind items (optional — graceful degradation if absent) */
-  subAgentExecutor?: SubAgentExecutor;
   /** Session manager for creating scheduler session */
   sessionManager?: SessionManager;
   /** Check interval in milliseconds (default: 30 seconds) */
@@ -87,9 +78,7 @@ export class UnifiedScheduler {
   private db: ScallopDatabase;
   private logger: Logger;
   private goalService?: GoalService;
-  private subAgentExecutor?: SubAgentExecutor;
   private sessionManager?: SessionManager;
-  private costTracker?: CostTracker;
   private interval: number;
   private maxItemAge: number;
   private onSendMessage: MessageHandler;
@@ -107,9 +96,7 @@ export class UnifiedScheduler {
   constructor(options: UnifiedSchedulerOptions) {
     this.db = options.db;
     this.logger = options.logger.child({ component: 'unified-scheduler' });
-    this.costTracker = options.costTracker;
     this.goalService = options.goalService;
-    this.subAgentExecutor = options.subAgentExecutor;
     this.sessionManager = options.sessionManager;
     this.interval = options.interval ?? 30 * 1000; // 30 seconds
     this.maxItemAge = options.maxItemAge ?? 24 * 60 * 60 * 1000; // 24 hours
@@ -216,7 +203,7 @@ export class UnifiedScheduler {
 
       // Quiet hours: defer agent-sourced items between 10 PM and 8 AM user-local time.
       // User-sourced reminders always fire immediately (the user set the exact time).
-      const tz = this.getTimezone('default');
+      const tz = this.getTimezone(dueItems[0].userId);
       const hourNow = parseInt(
         new Intl.DateTimeFormat('en-US', { timeZone: tz, hour: '2-digit', hour12: false })
           .formatToParts(new Date())
@@ -230,11 +217,12 @@ export class UnifiedScheduler {
         const ready: ScheduledItem[] = [];
         for (const item of dueItems) {
           if (item.source === 'agent') {
-            // Reset to pending and reschedule to 8 AM
+            // Reset to pending and reschedule to 8 AM in user's timezone.
+            // Compute hours until 8 AM from the user's current hour.
             this.db.resetScheduledItemToPending(item.id);
-            const tomorrow8am = new Date();
-            tomorrow8am.setHours(hourNow >= 22 ? tomorrow8am.getHours() + (24 - hourNow + 8) : 8, 0, 0, 0);
-            this.db.updateScheduledItemBoard(item.id, { triggerAt: tomorrow8am.getTime() });
+            const hoursUntil8am = hourNow >= 8 ? (24 - hourNow + 8) : (8 - hourNow);
+            const next8amMs = Date.now() + hoursUntil8am * 60 * 60 * 1000;
+            this.db.updateScheduledItemBoard(item.id, { triggerAt: next8amMs });
             deferred.push(item);
           } else {
             ready.push(item);
@@ -316,98 +304,6 @@ export class UnifiedScheduler {
   }
 
   /**
-   * Process a task item — spawn sub-agent, send result
-   * Falls back to nudge delivery if sub-agent is unavailable or fails
-   */
-  private async processTask(item: ScheduledItem): Promise<void> {
-    this.logger.debug(
-      { itemId: item.id, type: item.type, taskConfig: item.taskConfig },
-      'Processing task'
-    );
-
-    // If sub-agent executor is not available, fall back to nudge
-    if (!this.subAgentExecutor || !this.schedulerSessionId || !item.taskConfig) {
-      this.logger.debug({ itemId: item.id }, 'Sub-agent unavailable, falling back to nudge');
-      await this.processNudge(item);
-      return;
-    }
-
-    // Set board status to in_progress before spawning sub-agent
-    this.db.updateScheduledItemBoard(item.id, { boardStatus: 'in_progress' });
-
-    try {
-      // Enrich the task goal with context and guidance from the scheduled item
-      // so the sub-agent understands WHY it was spawned and has enough detail
-      let enrichedTask = item.taskConfig.goal;
-      if (item.context) {
-        try {
-          const ctx = JSON.parse(item.context) as Record<string, unknown>;
-          const parts: string[] = [];
-          if (ctx.original_context) {
-            parts.push(`Context: ${ctx.original_context}`);
-          }
-          if (ctx.guidance && ctx.guidance !== item.taskConfig.goal) {
-            parts.push(`Guidance: ${ctx.guidance}`);
-          }
-          parts.push(`Task: ${item.taskConfig.goal}`);
-          enrichedTask = parts.join('\n');
-        } catch {
-          // Context parsing failed, use goal as-is
-        }
-      }
-
-      const result = await this.subAgentExecutor.spawnAndWait(
-        this.schedulerSessionId,
-        {
-          task: enrichedTask,
-          skills: item.taskConfig.tools,
-          modelTier: item.taskConfig.modelTier ?? 'fast',
-          timeoutSeconds: this.subAgentExecutor.getConfig().defaultTimeoutSeconds,
-        },
-      );
-
-      // Sanitize raw agent output before any storage or display
-      const cleanResponse = sanitizeAgentResponse(result.response);
-
-      if (cleanResponse && result.taskComplete) {
-        // Store result on the board item
-        const boardResult: BoardItemResult = {
-          response: cleanResponse,
-          completedAt: Date.now(),
-          iterationsUsed: result.iterationsUsed,
-        };
-        this.boardService.storeResult(item.id, boardResult);
-
-        // Set board status to done
-        this.db.updateScheduledItemBoard(item.id, { boardStatus: 'done' });
-
-        // Send the sub-agent's result through proactive formatting
-        await this.sendFormattedMessage(item, cleanResponse, 'task_result');
-        this.logger.info(
-          { itemId: item.id, iterations: result.iterationsUsed, taskComplete: result.taskComplete },
-          'Task completed via sub-agent'
-        );
-      } else {
-        // Sub-agent failed, timed out, or returned empty — fall back to nudge
-        this.logger.warn(
-          { itemId: item.id, taskComplete: result.taskComplete, hasResponse: !!cleanResponse },
-          'Sub-agent did not complete task, sending fallback nudge'
-        );
-        this.db.updateScheduledItemBoard(item.id, { boardStatus: 'waiting' });
-        await this.sendFormattedMessage(item, item.message);
-      }
-    } catch (err) {
-      // Sub-agent failed — set to waiting with error context
-      this.db.updateScheduledItemBoard(item.id, { boardStatus: 'waiting' });
-      this.logger.warn(
-        { itemId: item.id, error: (err as Error).message },
-        'Sub-agent task failed, falling back to nudge'
-      );
-      await this.sendFormattedMessage(item, item.message);
-    }
-  }
-
-  /**
    * Send a formatted message to the user.
    * For agent-sourced items, applies per-channel proactive formatting.
    */
@@ -431,8 +327,12 @@ export class UnifiedScheduler {
             if (ctx.urgency === 'high' || ctx.urgency === 'medium' || ctx.urgency === 'low') {
               urgency = ctx.urgency as 'low' | 'medium' | 'high';
             }
-            if (!sourceOverride && ctx.source === 'inner_thoughts') {
-              source = 'inner_thoughts';
+            if (!sourceOverride) {
+              // Unified evaluator writes source: 'proactive_evaluator'.
+              // Classify by gapType: session follow-ups → inner_thoughts, rest → gap_scanner.
+              if (ctx.source === 'inner_thoughts' || ctx.source === 'proactive_evaluator') {
+                source = gapType === 'unresolved_thread' ? 'inner_thoughts' : 'gap_scanner';
+              }
             }
           } catch {
             // Context parsing failed, use defaults
@@ -461,10 +361,6 @@ export class UnifiedScheduler {
    */
   private markItemFiredAndReschedule(item: ScheduledItem): void {
     this.db.markScheduledItemFired(item.id);
-    // Also set board status to done (for nudges; tasks already set in processTask)
-    if (item.kind !== 'task') {
-      this.db.updateScheduledItemBoard(item.id, { boardStatus: 'done' });
-    }
     this.logger.info(
       { itemId: item.id, userId: item.userId, source: item.source, type: item.type, kind: item.kind },
       'Scheduled item fired'

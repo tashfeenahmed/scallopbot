@@ -9,22 +9,16 @@
  * pure functions with injectable `now` for deterministic testing.
  */
 
-// ============ Constants ============
+import {
+  DEFAULT_ACTIVE_HOURS,
+  MIN_GAP_MS,
+  MAX_DEFERRAL_MS,
+  URGENT_DELAY_MS,
+  ACTIVE_DELAY_MS,
+} from './proactive-config.js';
 
-/** Default active hours when behavioral data is unavailable (9 AM - 9 PM) */
-export const DEFAULT_ACTIVE_HOURS = [9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21];
-
-/** Minimum gap between proactive messages: 2 hours in milliseconds */
-export const MIN_GAP_MS = 2 * 60 * 60 * 1000;
-
-/** Maximum deferral: never defer more than 24 hours */
-export const MAX_DEFERRAL_MS = 24 * 60 * 60 * 1000;
-
-/** Urgent delivery delay: 5 minutes */
-export const URGENT_DELAY_MS = 5 * 60 * 1000;
-
-/** Active hours delivery delay: 15 minutes */
-export const ACTIVE_DELAY_MS = 15 * 60 * 1000;
+// Re-export for backward compatibility
+export { DEFAULT_ACTIVE_HOURS, MIN_GAP_MS, MAX_DEFERRAL_MS, URGENT_DELAY_MS, ACTIVE_DELAY_MS };
 
 /** Fallback delivery delay: 30 minutes (legacy behavior) */
 const FALLBACK_DELAY_MS = 30 * 60 * 1000;

@@ -3,7 +3,7 @@
  *
  * Validates end-to-end:
  * 1. Self-reflection via sleepTick — insight memories + SOUL.md generation
- * 2. Gap scanner detects stale goals via sleepTick — creates scheduled items
+ * 2. Gap scanner detects stale goals via deepTick — creates scheduled items
  * 3. Gap scanner respects conservative dial — filters low-severity gaps
  */
 
@@ -181,9 +181,9 @@ describe('E2E Cognitive Reflection & Gaps', () => {
   });
 
   // ---------------------------------------------------------------------------
-  // Suite 2: Gap scanner detects stale goals via sleepTick
+  // Suite 2: Gap scanner detects stale goals via deepTick
   // ---------------------------------------------------------------------------
-  describe('gap scanner detects stale goals via sleepTick', () => {
+  describe('gap scanner detects stale goals via deepTick', () => {
     let scallopStore: ScallopMemoryStore;
     let gardener: BackgroundGardener;
     let dbPath: string;
@@ -193,15 +193,11 @@ describe('E2E Cognitive Reflection & Gaps', () => {
 
       const mockEmbedder = createMockEmbeddingProvider();
 
-      // Provider call sequence for sleepTick:
-      // Dream cycle: only 1 memory (the goal) with high prominence, < 3 eligible, skips.
-      // Reflection: no workspace provided, skips.
-      // Gap scanner:
-      //   Call 1: Gap diagnosis — returns actionable stale goal diagnosis
-      // Inner thoughts (deepTick step 7 in sleepTick):
-      //   Call 2+: Inner thoughts evaluation — no proaction
+      // Provider call sequence for deepTick:
+      // B1-B6: no fusionProvider calls (no dormant memories, no workspace).
+      // B7: Unified proactive evaluator — single LLM call with gap signals.
       const fusionProvider = createMockLLMProvider([
-        // Call 1: Gap pipeline — nudge for stale goal
+        // Call 1: Unified proactive evaluator — nudge for stale goal
         JSON.stringify({
           items: [
             {
@@ -210,11 +206,6 @@ describe('E2E Cognitive Reflection & Gaps', () => {
               message: 'Check in about progress on learning Rust programming',
             },
           ],
-        }),
-        // Call 2+: Inner thoughts — silent
-        JSON.stringify({
-          decision: 'silent',
-          reason: 'No action needed',
         }),
       ]);
 
@@ -246,7 +237,7 @@ describe('E2E Cognitive Reflection & Gaps', () => {
         eventDate: null,
         prominence: 1.0,
         lastAccessed: null,
-        accessCount: 0,
+        accessCount: 5, // Non-zero so goal survives utility-based archival in deepTick B1
         sourceChunk: null,
         embedding: goalEmbedding,
         metadata: {
@@ -308,7 +299,8 @@ describe('E2E Cognitive Reflection & Gaps', () => {
     });
 
     it('should create scheduled items for stale goals', async () => {
-      await gardener.sleepTick();
+      // Gap scanning now happens in deepTick via unified proactive evaluator
+      await gardener.deepTick();
 
       const db = scallopStore.getDatabase();
 
@@ -358,12 +350,9 @@ describe('E2E Cognitive Reflection & Gaps', () => {
       const mockEmbedder = createMockEmbeddingProvider();
 
       // Provider call sequence:
-      // Dream cycle: skips (< 3 eligible memories).
-      // Reflection: skips (no workspace).
-      // Gap scanner:
-      //   Call 1: Gap diagnosis — returns low confidence, actionable but low severity
+      // B7: Unified proactive evaluator — returns skip for conservative dial
       const fusionProvider = createMockLLMProvider([
-        // Call 1: Gap pipeline — conservative dial skips non-critical signal
+        // Call 1: Unified proactive evaluator — conservative dial skips
         JSON.stringify({
           items: [
             {
@@ -371,11 +360,6 @@ describe('E2E Cognitive Reflection & Gaps', () => {
               action: 'skip',
             },
           ],
-        }),
-        // Call 2+: Inner thoughts — silent
-        JSON.stringify({
-          decision: 'silent',
-          reason: 'No action needed',
         }),
       ]);
 
@@ -404,7 +388,7 @@ describe('E2E Cognitive Reflection & Gaps', () => {
         eventDate: null,
         prominence: 1.0,
         lastAccessed: null,
-        accessCount: 0,
+        accessCount: 5, // Non-zero so goal survives utility-based archival in deepTick B1
         sourceChunk: null,
         embedding: goalEmbedding,
         metadata: {
@@ -464,7 +448,8 @@ describe('E2E Cognitive Reflection & Gaps', () => {
     });
 
     it('should NOT create scheduled items when conservative dial filters low-severity gaps', async () => {
-      await gardener.sleepTick();
+      // Gap scanning now happens in deepTick via unified proactive evaluator
+      await gardener.deepTick();
 
       const db = scallopStore.getDatabase();
 

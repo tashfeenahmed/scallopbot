@@ -102,7 +102,20 @@ function createGapScannerProvider(opts?: {
       const userMsg = req.messages[0]?.content ?? '';
       const systemMsg = req.system ?? '';
 
-      // Gap pipeline prompt — identified by "SIGNALS TO TRIAGE"
+      // Unified proactive evaluator — identified by "SIGNALS TO EVALUATE" or "SESSION CONTEXT"
+      if (userMsg.includes('SIGNALS TO EVALUATE') || userMsg.includes('SESSION CONTEXT')) {
+        if (opts?.throwOnGapPipeline) {
+          throw new Error('Proactive evaluator LLM failure');
+        }
+        return {
+          content: [{ type: 'text', text: opts?.gapPipelineResponse ?? makeGapPipelineResponse() }],
+          stopReason: 'end_turn',
+          usage: { inputTokens: 100, outputTokens: 50 },
+          model: 'mock-model',
+        } satisfies CompletionResponse;
+      }
+
+      // Legacy gap pipeline prompt
       if (userMsg.includes('SIGNALS TO TRIAGE')) {
         if (opts?.throwOnGapPipeline) {
           throw new Error('Gap pipeline LLM failure');
@@ -220,7 +233,7 @@ function seedStaleGoal(
       eventDate: null,
       prominence: 0.8,
       lastAccessed: null,
-      accessCount: 0,
+      accessCount: 5, // Non-zero so it survives utility-based archival in deepTick B1
       sourceChunk: null,
       embedding: null,
       metadata: {
@@ -333,7 +346,17 @@ describe('BackgroundGardener gap scanner integration', () => {
     // Seed a session summary so the user shows up in memory queries
     seedRecentSessionSummary(db);
 
-    await gardener.sleepTick();
+    // Set dial to moderate so the evaluator runs
+    const profileManager = store.getProfileManager();
+    profileManager.updateBehavioralPatterns('default', {
+      responsePreferences: {
+        proactivenessDial: 'moderate',
+        trustScore: 0.5,
+      },
+    });
+
+    // Gap scanning now happens in deepTick via unified proactive evaluator
+    await gardener.deepTick();
 
     // Verify: scheduled items created
     const items = db.getScheduledItemsByUser('default');
@@ -412,15 +435,17 @@ describe('BackgroundGardener gap scanner integration', () => {
     const gapItems = items.filter(i => i.type === 'follow_up' && i.source === 'agent');
     expect(gapItems.length).toBe(0);
 
-    // Verify: gap diagnosis LLM was NOT called (no signals to diagnose)
+    // Verify: evaluator LLM was NOT called (no signals to diagnose)
     const completeCalls = (fusionProvider.complete as ReturnType<typeof vi.fn>).mock.calls;
-    const gapDiagnosisCalls = completeCalls.filter(
+    const evaluatorCalls = completeCalls.filter(
       (call: unknown[]) => {
         const req = call[0] as { messages: Array<{ content: string }> };
-        return req.messages[0]?.content?.includes('SIGNALS TO TRIAGE');
+        return req.messages[0]?.content?.includes('SIGNALS TO EVALUATE') ||
+               req.messages[0]?.content?.includes('SESSION CONTEXT') ||
+               req.messages[0]?.content?.includes('SIGNALS TO TRIAGE');
       },
     );
-    expect(gapDiagnosisCalls.length).toBe(0);
+    expect(evaluatorCalls.length).toBe(0);
   });
 
   // ─── Test 4: Error isolation — gap scanner failure does not affect dream/reflection ─────
@@ -522,19 +547,21 @@ describe('BackgroundGardener gap scanner integration', () => {
       },
     });
 
-    await gardener.sleepTick();
+    // Gap scanning now happens in deepTick via unified proactive evaluator
+    await gardener.deepTick();
 
-    // Verify: gap diagnosis LLM WAS called (signals were found)
+    // Verify: evaluator LLM WAS called (signals were found)
     const completeCalls = (fusionProvider.complete as ReturnType<typeof vi.fn>).mock.calls;
-    const gapDiagnosisCalls = completeCalls.filter(
+    const evaluatorCalls = completeCalls.filter(
       (call: unknown[]) => {
         const req = call[0] as { messages: Array<{ content: string }> };
-        return req.messages[0]?.content?.includes('SIGNALS TO TRIAGE');
+        return req.messages[0]?.content?.includes('SIGNALS TO EVALUATE') ||
+               req.messages[0]?.content?.includes('SESSION CONTEXT');
       },
     );
-    expect(gapDiagnosisCalls.length).toBeGreaterThanOrEqual(1);
+    expect(evaluatorCalls.length).toBeGreaterThanOrEqual(1);
 
-    // Verify: no scheduled items created (conservative dial + low confidence = filtered)
+    // Verify: no scheduled items created (conservative dial + LLM returned skip)
     const items = db.getScheduledItemsByUser('default');
     const gapItems = items.filter(i => i.type === 'follow_up' && i.source === 'agent');
     expect(gapItems.length).toBe(0);

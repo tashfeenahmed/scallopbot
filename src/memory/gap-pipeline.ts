@@ -14,6 +14,7 @@ import type { SmoothedAffect } from './affect-smoothing.js';
 import type { LLMProvider, CompletionRequest } from '../providers/types.js';
 import type { ScheduledItemKind, TaskConfig } from './db.js';
 import { wordOverlap, DEDUP_OVERLAP_THRESHOLD } from '../utils/text-similarity.js';
+import { extractResponseText } from '../proactive/proactive-utils.js';
 
 // Re-export for backward compatibility
 export { wordOverlap } from '../utils/text-similarity.js';
@@ -50,19 +51,16 @@ export interface GapPipelineInput {
   todayItemCount?: number;
 }
 
-// ============ Constants ============
+import { MAX_ITEMS_PER_EVAL, DIAL_BUDGETS } from '../proactive/proactive-config.js';
 
-/** Hard cap: max items per pipeline run */
-const MAX_ITEMS_PER_TICK = 3;
-
-/** Per-dial budget caps */
+/** Per-dial budget caps (re-exported for backward compatibility) */
 export const DIAL_THRESHOLDS: Record<
   'conservative' | 'moderate' | 'eager',
   { maxDailyNotifications: number }
 > = {
-  conservative: { maxDailyNotifications: 1 },
-  moderate: { maxDailyNotifications: 3 },
-  eager: { maxDailyNotifications: 5 },
+  conservative: { maxDailyNotifications: DIAL_BUDGETS.conservative },
+  moderate: { maxDailyNotifications: DIAL_BUDGETS.moderate },
+  eager: { maxDailyNotifications: DIAL_BUDGETS.eager },
 };
 
 // ============ Helpers ============
@@ -260,7 +258,7 @@ export async function runGapPipeline(
     // Code-level post-processing
     const budgetCap = DIAL_THRESHOLDS[input.dial].maxDailyNotifications;
     const remainingBudget = Math.max(0, budgetCap - (input.todayItemCount ?? 0));
-    const effectiveCap = Math.min(remainingBudget, MAX_ITEMS_PER_TICK);
+    const effectiveCap = Math.min(remainingBudget, MAX_ITEMS_PER_EVAL);
     const filtered: GapScheduledItem[] = [];
 
     for (const item of items) {
@@ -278,13 +276,3 @@ export async function runGapPipeline(
   }
 }
 
-// ============ Internal ============
-
-function extractResponseText(content: unknown): string {
-  if (Array.isArray(content)) {
-    return content
-      .map((block: Record<string, unknown>) => 'text' in block ? block.text : '')
-      .join('');
-  }
-  return String(content);
-}

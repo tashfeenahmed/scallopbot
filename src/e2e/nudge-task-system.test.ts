@@ -185,6 +185,11 @@ describe('E2E Nudge/Task System', () => {
         },
       });
 
+      // Compute a timezone where the current hour is noon (always outside quiet hours 22-8)
+      const utcHour = new Date().getUTCHours();
+      const offsetToNoon = 12 - utcHour;
+      const gmtTz = offsetToNoon >= 0 ? `Etc/GMT-${offsetToNoon}` : `Etc/GMT+${-offsetToNoon}`;
+
       // Create scheduler without sub-agent executor (graceful degradation test)
       scheduler = new UnifiedScheduler({
         db,
@@ -194,6 +199,7 @@ describe('E2E Nudge/Task System', () => {
           sentMessages.push({ userId, message });
           return true;
         },
+        getTimezone: () => gmtTz,
       });
     }, 30000);
 
