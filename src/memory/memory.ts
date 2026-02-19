@@ -3,9 +3,11 @@
  * Background gardener for ScallopMemory (SQLite)
  *
  * Tiered consolidation:
- * - Tier 1 — Light tick (every 5 min): incremental decay + expire old scheduled items
- * - Tier 2 — Deep tick (every 6 hours): full decay, session summaries, pruning, behavioral inference
- * - Tier 3 — Sleep tick (every 24 hours, quiet hours only): nightly cognitive processing (Phase 27+)
+ * - Tier 1 — Light tick (every 1 min): incremental decay + expire old scheduled items
+ * - Tier 2 — Deep tick (every ~72 min): full decay, session summaries, pruning, behavioral inference
+ * - Tier 3 — Sleep tick (every ~24 hours, quiet hours only): nightly cognitive processing
+ *
+ * Deep/sleep tick timing is persisted in SQLite (runtime_keys) so it survives restarts.
  */
 
 import type { Logger } from 'pino';
@@ -60,18 +62,18 @@ export interface BackgroundGardenerOptions {
 /**
  * Background Gardener - runs tiered consolidation on memories
  *
- * Tier 1 — Light tick (every interval, default 5 min):
+ * Tier 1 — Light tick (every 1 min):
  *   - Incremental decay (bounded set of recently-changed memories)
  *   - Expire old scheduled items
  *
- * Tier 2 — Deep tick (every ~6 hours):
- *   - Full decay scan (all memories)
- *   - Generate session summaries for old sessions
- *   - Prune old sessions + archived memories
- *   - Behavioral pattern inference
+ * Tier 2 — Deep tick (every ~72 min, time-based + persisted):
+ *   - Full decay scan, session summaries, pruning, behavioral inference
+ *   - Inner thoughts evaluation for proactive follow-ups
  *
- * Tier 3 — Sleep tick (every ~24 hours, quiet hours only):
- *   - Nightly cognitive processing (Phase 27+: NREM, REM, self-reflection)
+ * Tier 3 — Sleep tick (every ~20h + quiet hours gate, time-based + persisted):
+ *   - Dream cycle (NREM + REM), self-reflection, gap scanner, board review
+ *
+ * Timing is persisted in SQLite runtime_keys to survive restarts.
  */
 export class BackgroundGardener {
   private scallopStore: ScallopMemoryStore;
@@ -81,8 +83,6 @@ export class BackgroundGardener {
   private fusionProvider?: LLMProvider;
   private timer: NodeJS.Timeout | null = null;
   private running = false;
-  private tickCount = 0;
-  private sleepTickCount = 0;
   private quietHours: { start: number; end: number };
   private workspace?: string;
   private disableArchival: boolean;
@@ -90,13 +90,15 @@ export class BackgroundGardener {
   private onMorningDigest?: (userId: string) => Promise<void>;
   private wasInQuietHours = false;
 
-  /** Deep consolidation runs every DEEP_EVERY light ticks.
-   *  With default 5-min interval: 72 ticks × 5 min = 6 hours */
-  private static readonly DEEP_EVERY = 72;
+  /** Deep tick interval in ms (default: ~72 minutes) */
+  private static readonly DEEP_INTERVAL_MS = 72 * 60 * 1000;
 
-  /** Sleep consolidation runs every SLEEP_EVERY light ticks.
-   *  With default 5-min interval: 288 ticks × 5 min = 24 hours */
-  private static readonly SLEEP_EVERY = 288;
+  /** Sleep tick interval in ms (default: ~20 hours — gives margin to hit quiet hours daily) */
+  private static readonly SLEEP_INTERVAL_MS = 20 * 60 * 60 * 1000;
+
+  /** DB keys for persisting tick timestamps across restarts */
+  private static readonly DEEP_TICK_KEY = 'gardener:lastDeepTickAt';
+  private static readonly SLEEP_TICK_KEY = 'gardener:lastSleepTickAt';
 
   constructor(options: BackgroundGardenerOptions) {
     this.scallopStore = options.scallopStore;
@@ -144,6 +146,31 @@ export class BackgroundGardener {
   }
 
   /**
+   * Read a persisted timestamp from runtime_keys. Returns 0 if not found.
+   */
+  private getPersistedTimestamp(key: string): number {
+    try {
+      const db = this.scallopStore.getDatabase();
+      const value = db.getRuntimeKey(key);
+      return value ? parseInt(value, 10) : 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
+   * Persist a timestamp to runtime_keys.
+   */
+  private setPersistedTimestamp(key: string, ts: number): void {
+    try {
+      const db = this.scallopStore.getDatabase();
+      db.setRuntimeKey(key, String(ts));
+    } catch (err) {
+      this.logger.warn({ error: (err as Error).message, key }, 'Failed to persist timestamp');
+    }
+  }
+
+  /**
    * Light tick: incremental decay + expire scheduled items
    */
   lightTick(): void {
@@ -174,19 +201,21 @@ export class BackgroundGardener {
       this.logger.warn({ error: (err as Error).message }, 'Health ping failed');
     }
 
-    // Check if it's time for a deep tick
-    this.tickCount++;
-    if (this.tickCount >= BackgroundGardener.DEEP_EVERY) {
-      this.tickCount = 0;
+    const now = Date.now();
+
+    // Check if it's time for a deep tick (time-based, persisted across restarts)
+    const lastDeepAt = this.getPersistedTimestamp(BackgroundGardener.DEEP_TICK_KEY);
+    if (now - lastDeepAt >= BackgroundGardener.DEEP_INTERVAL_MS) {
+      this.setPersistedTimestamp(BackgroundGardener.DEEP_TICK_KEY, now);
       this.deepTick().catch(err => {
         this.logger.warn({ error: (err as Error).message }, 'Deep tick failed');
       });
     }
 
-    // Check if it's time for a sleep tick (quiet hours gated)
-    this.sleepTickCount++;
-    if (this.sleepTickCount >= BackgroundGardener.SLEEP_EVERY && this.isQuietHours()) {
-      this.sleepTickCount = 0;
+    // Check if it's time for a sleep tick (time-based + quiet hours gated)
+    const lastSleepAt = this.getPersistedTimestamp(BackgroundGardener.SLEEP_TICK_KEY);
+    if (now - lastSleepAt >= BackgroundGardener.SLEEP_INTERVAL_MS && this.isQuietHours()) {
+      this.setPersistedTimestamp(BackgroundGardener.SLEEP_TICK_KEY, now);
       this.sleepTick().catch(err => {
         this.logger.warn({ error: (err as Error).message }, 'Sleep tick failed');
       });

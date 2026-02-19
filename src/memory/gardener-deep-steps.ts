@@ -119,8 +119,10 @@ export async function runSessionSummarization(ctx: GardenerContext): Promise<{ s
   if (!ctx.sessionSummarizer) return { summarized: 0 };
 
   try {
-    const cutoffDays = 1;
-    const cutoff = Date.now() - cutoffDays * 24 * 60 * 60 * 1000;
+    // Summarize sessions idle for 2+ hours (not 24h) so inner thoughts
+    // gets input sooner and proactive follow-ups can be generated.
+    const cutoffMs = 2 * 60 * 60 * 1000; // 2 hours
+    const cutoff = Date.now() - cutoffMs;
     const oldSessions = ctx.db.raw<{ id: string; metadata: string | null }>(
       'SELECT id, metadata FROM sessions WHERE updated_at < ? LIMIT 20',
       [cutoff]
