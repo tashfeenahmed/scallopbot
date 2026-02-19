@@ -2528,7 +2528,7 @@ export class ScallopDatabase {
     // Get all pending items within the time window
     const stmt = this.db.prepare(`
       SELECT message FROM scheduled_items
-      WHERE user_id = ? AND status IN ('pending', 'processing', 'fired')
+      WHERE user_id = ? AND status IN ('pending', 'processing')
         AND trigger_at BETWEEN ? AND ?
     `);
     const rows = stmt.all(userId, now - withinMs, now + withinMs * 7) as Array<{ message: string }>;
