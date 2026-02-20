@@ -5,8 +5,6 @@
  * - NEW: Completely new, unrelated information
  * - UPDATES: Replaces/contradicts an existing fact (same slot, different value)
  * - EXTENDS: Adds information about an existing entity/relationship
- *
- * Also provides inference capabilities to derive implicit connections.
  */
 
 import type { LLMProvider, CompletionRequest, ContentBlock } from '../providers/types.js';
@@ -36,18 +34,6 @@ export interface ExistingFact {
 export interface ClassificationResult {
   classification: 'NEW' | 'UPDATES' | 'EXTENDS';
   targetId?: string; // ID of the fact being updated/extended
-  confidence: number;
-  reason: string;
-}
-
-/**
- * An inferred fact derived from existing facts
- */
-export interface InferredFact {
-  content: string;
-  subject: string;
-  category: string;
-  derivedFrom: string[]; // IDs of source facts
   confidence: number;
   reason: string;
 }
@@ -88,38 +74,6 @@ Respond with JSON only:
   "confidence": 0.0-1.0,
   "reason": "brief explanation"
 }`;
-
-/**
- * Prompt for inference
- */
-const INFERENCE_PROMPT = `You are a memory inference engine. Given a set of facts, derive NEW implicit facts that logically follow.
-
-Rules:
-1. Only infer facts with HIGH confidence (>0.8)
-2. Common inferences:
-   - If X is user's flatmate and user lives in Y, then X likely lives in Y
-   - If X is user's spouse/partner, they likely share location
-   - If X works at company Y, X is likely in the same industry as Y
-3. Do NOT infer:
-   - Opinions or preferences (unless explicitly stated)
-   - Speculative information
-   - Things that require external knowledge
-
-Respond with JSON only:
-{
-  "inferences": [
-    {
-      "content": "the inferred fact",
-      "subject": "who it's about",
-      "category": "category",
-      "derivedFrom": ["id1", "id2"],
-      "confidence": 0.0-1.0,
-      "reason": "why this inference is valid"
-    }
-  ]
-}
-
-If no confident inferences can be made, return: {"inferences": []}`;
 
 /**
  * Batch classification result for multiple facts
@@ -235,32 +189,6 @@ export class RelationshipClassifier {
   }
 
   /**
-   * Infer new connections from existing facts
-   */
-  async inferConnections(existingFacts: ExistingFact[]): Promise<InferredFact[]> {
-    // Need at least 2 facts to make inferences
-    if (existingFacts.length < 2) {
-      return [];
-    }
-
-    try {
-      const prompt = this.buildInferencePrompt(existingFacts);
-
-      const request: CompletionRequest = {
-        messages: [{ role: 'user', content: prompt }],
-        temperature: 0.2,
-        maxTokens: 500,
-      };
-
-      const response = await this.provider.complete(request);
-      const content = this.extractTextContent(response.content);
-      return this.parseInferenceResponse(content);
-    } catch {
-      return [];
-    }
-  }
-
-  /**
    * Build the classification prompt
    */
   private buildClassificationPrompt(
@@ -314,22 +242,6 @@ Classify ALL new facts. Respond with a JSON array:
     ...
   ]
 }`;
-  }
-
-  /**
-   * Build the inference prompt
-   */
-  private buildInferencePrompt(existingFacts: ExistingFact[]): string {
-    const factsStr = existingFacts
-      .map((f) => `- [${f.id}] (${f.subject}, ${f.category}): "${f.content}"`)
-      .join('\n');
-
-    return `${INFERENCE_PROMPT}
-
-EXISTING FACTS:
-${factsStr}
-
-What can be inferred?`;
   }
 
   /**
@@ -426,42 +338,6 @@ What can be inferred?`;
     }
   }
 
-  /**
-   * Parse the inference response
-   */
-  private parseInferenceResponse(content: string): InferredFact[] {
-    try {
-      const jsonMatch = content.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) {
-        return [];
-      }
-
-      const parsed = JSON.parse(jsonMatch[0]);
-
-      if (!Array.isArray(parsed.inferences)) {
-        return [];
-      }
-
-      return parsed.inferences
-        .filter((inf: InferredFact) =>
-          inf.content &&
-          inf.subject &&
-          inf.category &&
-          Array.isArray(inf.derivedFrom) &&
-          inf.confidence >= 0.8 // Only high-confidence inferences
-        )
-        .map((inf: InferredFact) => ({
-          content: inf.content,
-          subject: inf.subject,
-          category: inf.category,
-          derivedFrom: inf.derivedFrom,
-          confidence: inf.confidence,
-          reason: inf.reason ?? 'Inferred from existing facts',
-        }));
-    } catch {
-      return [];
-    }
-  }
 }
 
 /**

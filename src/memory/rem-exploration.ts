@@ -6,8 +6,10 @@
  *
  * Implements the REM phase of the dream cycle:
  * - sampleSeeds: diversity-weighted seed selection with category caps
- * - buildConnectionJudgePrompt: structured LLM request for connection evaluation
- * - parseJudgeResponse: JSON parsing with NO_CONNECTION and failure handling
+ * - buildBatchConnectionJudgePrompt: batched LLM evaluation of multiple pairs per seed
+ * - parseBatchJudgeResponse: JSON array parsing for batch evaluations
+ * - buildConnectionJudgePrompt: single-pair LLM request (kept for testing/documentation)
+ * - parseJudgeResponse: single-pair JSON parsing
  * - remExplore: full pipeline orchestration with per-seed error isolation
  *
  * Pure functions following the nrem-consolidation.ts pattern:
@@ -270,6 +272,129 @@ export function parseJudgeResponse(text: string): JudgeResult | null {
   }
 }
 
+// ============ Batch Connection Judge ============
+
+/** Input tuple for batch judge evaluation */
+interface BatchJudgePair {
+  seed: ScallopMemoryEntry;
+  neighbor: ScallopMemoryEntry;
+  existingRelations: MemoryRelation[];
+}
+
+/** Parsed result from the batch LLM judge for one pair */
+interface BatchJudgeEvaluation {
+  pair: number;
+  novelty: number;
+  plausibility: number;
+  usefulness: number;
+  connection?: string;
+  confidence?: number;
+}
+
+/**
+ * Build a CompletionRequest that evaluates multiple seed-neighbor pairs
+ * in a single LLM call. Same scoring criteria as buildConnectionJudgePrompt
+ * but instructs the LLM to return a JSON array of evaluations.
+ *
+ * @param pairs - Array of {seed, neighbor, existingRelations} tuples
+ * @returns CompletionRequest ready for LLM call
+ */
+export function buildBatchConnectionJudgePrompt(
+  pairs: BatchJudgePair[],
+): CompletionRequest {
+  const system = `You are a memory connection evaluator during creative exploration. You evaluate potential novel connections between memories discovered through stochastic graph traversal.
+
+For each pair of memories, determine if there is a genuine novel insight connecting them.
+
+Evaluate three dimensions (each 1-5):
+1. NOVELTY: Is this connection non-obvious? Would it surprise the user?
+2. PLAUSIBILITY: Is there a genuine conceptual bridge between these memories?
+3. USEFULNESS: Could this connection inform future reasoning or actions?
+
+Evaluate each pair independently. Respond with a JSON object containing an evaluations array.
+
+For pairs where average score >= 3.0:
+{"pair": N, "novelty": N, "plausibility": N, "usefulness": N, "connection": "one-sentence description", "confidence": 0.0-1.0}
+
+For pairs where average score < 3.0:
+{"pair": N, "novelty": N, "plausibility": N, "usefulness": N, "connection": "NO_CONNECTION"}
+
+Respond with JSON only:
+{"evaluations": [...]}`;
+
+  const pairBlocks = pairs.map((p, i) => {
+    const relationLines = p.existingRelations.length > 0
+      ? p.existingRelations
+          .map(r => `  - ${r.sourceId} ${r.relationType} ${r.targetId} (confidence: ${r.confidence})`)
+          .join('\n')
+      : '  No existing relations between these memories.';
+
+    return `PAIR ${i + 1}:
+Seed: "${p.seed.content}" [${p.seed.category}, importance: ${p.seed.importance}]
+Neighbor: "${p.neighbor.content}" [${p.neighbor.category}, importance: ${p.neighbor.importance}]
+Relations:
+${relationLines}`;
+  }).join('\n\n');
+
+  const userMessage = `Evaluate the following ${pairs.length} memory pairs for potential connections:
+
+${pairBlocks}
+
+Respond with JSON evaluations array (one entry per pair):`;
+
+  return {
+    messages: [{ role: 'user', content: userMessage }],
+    system,
+    temperature: 0.3,
+    maxTokens: 300 * pairs.length,
+  };
+}
+
+/**
+ * Parse the batch judge LLM response into individual evaluations.
+ * Returns an empty array on parse failure (graceful degradation).
+ *
+ * @param text - Raw LLM response text
+ * @returns Array of BatchJudgeEvaluation, or empty on failure
+ */
+export function parseBatchJudgeResponse(text: string): BatchJudgeEvaluation[] {
+  if (!text || text.trim().length === 0) {
+    return [];
+  }
+
+  const jsonMatch = text.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(jsonMatch[0]) as Record<string, unknown>;
+    const evaluations = parsed.evaluations;
+
+    if (!Array.isArray(evaluations)) {
+      return [];
+    }
+
+    return evaluations
+      .filter((e: Record<string, unknown>) =>
+        typeof e.pair === 'number' &&
+        typeof e.novelty === 'number' &&
+        typeof e.plausibility === 'number' &&
+        typeof e.usefulness === 'number',
+      )
+      .map((e: Record<string, unknown>) => ({
+        pair: e.pair as number,
+        novelty: e.novelty as number,
+        plausibility: e.plausibility as number,
+        usefulness: e.usefulness as number,
+        connection: typeof e.connection === 'string' ? e.connection : undefined,
+        confidence: typeof e.confidence === 'number' ? e.confidence : undefined,
+      }));
+  } catch {
+    return [];
+  }
+}
+
 // ============ Orchestrator ============
 
 /**
@@ -371,48 +496,57 @@ export async function remExplore(
 
       if (candidates.length === 0) continue;
 
-      // Step 5-6: LLM judge each candidate
-      for (const { memory: neighbor } of candidates) {
-        try {
-          candidatesEvaluated++;
+      // Step 5-6: Batch LLM judge — evaluate all candidates for this seed in one call
+      const pairs = candidates.map(({ memory: neighbor }) => ({
+        seed,
+        neighbor,
+        existingRelations: [
+          ...getRelations(seed.id),
+          ...getRelations(neighbor.id),
+        ],
+      }));
 
-          const existingRelations = [
-            ...getRelations(seed.id),
-            ...getRelations(neighbor.id),
-          ];
+      candidatesEvaluated += pairs.length;
 
-          const request = buildConnectionJudgePrompt(seed, neighbor, existingRelations);
-          const response = await provider.complete(request);
+      try {
+        const request = buildBatchConnectionJudgePrompt(pairs);
+        const response = await provider.complete(request);
 
-          // Extract text from ContentBlock[] response
-          const responseText = Array.isArray(response.content)
-            ? response.content.map(block => 'text' in block ? block.text : '').join('')
-            : String(response.content);
+        // Extract text from ContentBlock[] response
+        const responseText = Array.isArray(response.content)
+          ? response.content.map(block => 'text' in block ? block.text : '').join('')
+          : String(response.content);
 
-          const parsed = parseJudgeResponse(responseText);
-          if (!parsed) continue;
+        const evaluations = parseBatchJudgeResponse(responseText);
+
+        // Map evaluations back to discoveries
+        for (const evalResult of evaluations) {
+          // pair is 1-indexed
+          const pairIndex = evalResult.pair - 1;
+          if (pairIndex < 0 || pairIndex >= pairs.length) continue;
 
           // Check NO_CONNECTION
-          if (parsed.connection === 'NO_CONNECTION') continue;
+          if (evalResult.connection === 'NO_CONNECTION') continue;
 
           // Check average score against minJudgeScore
-          const avgScore = (parsed.novelty + parsed.plausibility + parsed.usefulness) / 3;
+          const avgScore = (evalResult.novelty + evalResult.plausibility + evalResult.usefulness) / 3;
           if (avgScore < config.minJudgeScore) continue;
 
-          // Accepted discovery
+          const neighbor = pairs[pairIndex].neighbor;
           discoveries.push({
             seedId: seed.id,
             neighborId: neighbor.id,
-            connectionDescription: parsed.connection || '',
-            confidence: parsed.confidence ?? avgScore / 5,
-            noveltyScore: parsed.novelty,
-            plausibilityScore: parsed.plausibility,
-            usefulnessScore: parsed.usefulness,
+            connectionDescription: evalResult.connection || '',
+            confidence: evalResult.confidence ?? avgScore / 5,
+            noveltyScore: evalResult.novelty,
+            plausibilityScore: evalResult.plausibility,
+            usefulnessScore: evalResult.usefulness,
           });
-        } catch {
-          // Per-candidate failure — continue to next candidate
-          continue;
         }
+      } catch {
+        // Batch failed for this seed — skip entire seed (same isolation as before)
+        failures++;
+        continue;
       }
     } catch {
       // Per-seed error isolation

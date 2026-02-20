@@ -47,6 +47,20 @@ export interface FusionResult {
   confidence: number;
 }
 
+/** A relation context entry for enriched fusion prompts (used by NREM consolidation) */
+export interface RelationContextEntry {
+  /** 1-based index of the source memory in the cluster */
+  memoryIndex: number;
+  /** Relation type (UPDATES, EXTENDS, DERIVES) */
+  relationType: string;
+  /** 1-based index of the target memory in the cluster */
+  targetIndex: number;
+  /** Brief excerpt of target memory content (≤80 chars) */
+  targetContent: string;
+  /** Relation confidence score */
+  confidence: number;
+}
+
 /** Default fusion configuration */
 export const DEFAULT_FUSION_CONFIG: FusionConfig = {
   minClusterSize: 2,
@@ -301,13 +315,32 @@ export async function fuseMemoryCluster(
  *
  * System prompt instructs merging memories into a single coherent summary.
  * User message lists all memory contents with categories and importance.
+ * When `relationContext` is provided (NREM consolidation), adds a CONNECTIONS
+ * section and uses a deep-sleep-aware system prompt.
  * Requests JSON response with summary, importance, and category.
  * Uses low temperature (0.1) for consistency.
  *
  * Exported for testing (same pattern as buildRerankPrompt).
  */
-export function buildFusionPrompt(cluster: ScallopMemoryEntry[]): CompletionRequest {
-  const system = `You are a memory consolidation engine. Merge these related memories into a SINGLE concise summary that preserves ALL important facts.
+export function buildFusionPrompt(
+  cluster: ScallopMemoryEntry[],
+  relationContext?: RelationContextEntry[],
+): CompletionRequest {
+  const hasRelationContext = relationContext && relationContext.length > 0;
+
+  const system = hasRelationContext
+    ? `You are a memory consolidation engine performing deep sleep consolidation. Merge these related memories into a SINGLE coherent summary that captures the conceptual thread connecting them.
+
+Rules:
+1. The summary MUST be shorter than all memories combined
+2. Preserve ALL distinct facts — do not drop any unique information
+3. Synthesize cross-category connections into coherent insights
+4. Use the CONNECTIONS section to understand WHY these memories are related
+5. The summary should capture the deeper pattern, not just list facts
+
+Respond with JSON only:
+{"summary": "...", "importance": 1-10, "category": "preference|fact|event|relationship|insight"}`
+    : `You are a memory consolidation engine. Merge these related memories into a SINGLE concise summary that preserves ALL important facts.
 
 Rules:
 1. The summary MUST be shorter than all memories combined
@@ -323,15 +356,27 @@ Respond with JSON only:
 
   const memoryLines = cluster
     .map((m, i) => {
-      const dateStr = m.documentDate ? ` (date: ${new Date(m.documentDate).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })})` : '';
+      const dateStr = !hasRelationContext && m.documentDate
+        ? ` (date: ${new Date(m.documentDate).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })})`
+        : '';
       return `${i + 1}. [${m.category}]${dateStr} "${m.content}" (importance: ${m.importance})`;
     })
     .join('\n');
 
-  const userMessage = `MEMORIES TO MERGE:
-${memoryLines}
+  let userMessage = `MEMORIES TO MERGE:\n${memoryLines}`;
 
-Merge into a single concise summary (JSON only):`;
+  if (hasRelationContext) {
+    const connectionLines = relationContext!
+      .map(r => `- Memory ${r.memoryIndex} ${r.relationType} → Memory ${r.targetIndex}`)
+      .join('\n');
+
+    userMessage += `\n\nCONNECTIONS:\n${connectionLines}\n\nSynthesize into a single coherent memory (JSON only):`;
+  } else if (relationContext) {
+    // relationContext provided but empty
+    userMessage += `\n\nCONNECTIONS:\nNo explicit connections — these memories co-occur in the same semantic space.\n\nSynthesize into a single coherent memory (JSON only):`;
+  } else {
+    userMessage += `\n\nMerge into a single concise summary (JSON only):`;
+  }
 
   return {
     messages: [{ role: 'user', content: userMessage }],
@@ -349,7 +394,7 @@ Merge into a single concise summary (JSON only):`;
  * Expects JSON with { summary, importance, category }.
  * Returns null if parsing fails or required fields are missing.
  */
-function parseFusionResponse(responseText: string): { summary: string; importance: number; category: string } | null {
+export function parseFusionResponse(responseText: string): { summary: string; importance: number; category: string } | null {
   if (!responseText || responseText.trim().length === 0) {
     return null;
   }

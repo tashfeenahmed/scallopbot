@@ -12,12 +12,15 @@
  * - LLMProvider passed as argument, not constructor injection
  * - Graceful null return on any LLM error (per-cluster isolation)
  *
- * Pipeline: findFusionClusters() → buildRelationContext() → buildNremFusionPrompt() → LLM → NremResult
+ * Pipeline: findFusionClusters() → buildRelationContext() → buildFusionPrompt(cluster, ctx) → LLM → NremResult
  */
 
 import type { ScallopMemoryEntry, MemoryRelation, MemoryCategory } from './db.js';
-import type { LLMProvider, CompletionRequest } from '../providers/types.js';
-import { findFusionClusters } from './fusion.js';
+import type { LLMProvider } from '../providers/types.js';
+import { findFusionClusters, buildFusionPrompt, parseFusionResponse, type RelationContextEntry } from './fusion.js';
+
+// Re-export RelationContextEntry for backward compatibility
+export type { RelationContextEntry } from './fusion.js';
 
 // ============ Types ============
 
@@ -43,20 +46,6 @@ export const DEFAULT_NREM_CONFIG: NremConfig = {
   minClusterSize: 3,
   maxRelationsPerMemory: 3,
 };
-
-/** A relation context entry for the fusion prompt */
-export interface RelationContextEntry {
-  /** 1-based index of the source memory in the cluster */
-  memoryIndex: number;
-  /** Relation type (UPDATES, EXTENDS, DERIVES) */
-  relationType: string;
-  /** 1-based index of the target memory in the cluster */
-  targetIndex: number;
-  /** Brief excerpt of target memory content (≤80 chars) */
-  targetContent: string;
-  /** Relation confidence score */
-  confidence: number;
-}
 
 /** Result of a single NREM fusion */
 export interface NremFusionResult {
@@ -135,101 +124,6 @@ export function buildRelationContext(
   return entries;
 }
 
-// ============ Fusion Prompt ============
-
-/**
- * Build a CompletionRequest for NREM fusion with relation context.
- *
- * Extends the buildFusionPrompt pattern from fusion.ts with:
- * - System prompt mentioning "deep sleep consolidation"
- * - CONNECTIONS section showing relation types between cluster members
- * - Instruction to synthesize cross-category connections
- *
- * Exported for testing (same pattern as buildFusionPrompt).
- *
- * @param cluster - Array of memories to fuse
- * @param relationContext - Relation context entries for the prompt
- * @returns CompletionRequest ready for LLM call
- */
-export function buildNremFusionPrompt(
-  cluster: ScallopMemoryEntry[],
-  relationContext: RelationContextEntry[],
-): CompletionRequest {
-  const system = `You are a memory consolidation engine performing deep sleep consolidation. Merge these related memories into a SINGLE coherent summary that captures the conceptual thread connecting them.
-
-Rules:
-1. The summary MUST be shorter than all memories combined
-2. Preserve ALL distinct facts — do not drop any unique information
-3. Synthesize cross-category connections into coherent insights
-4. Use the CONNECTIONS section to understand WHY these memories are related
-5. The summary should capture the deeper pattern, not just list facts
-
-Respond with JSON only:
-{"summary": "...", "importance": 1-10, "category": "preference|fact|event|relationship|insight"}`;
-
-  const memoryLines = cluster
-    .map((m, i) => `${i + 1}. [${m.category}] "${m.content}" (importance: ${m.importance})`)
-    .join('\n');
-
-  const connectionLines = relationContext.length > 0
-    ? relationContext
-        .map(r => `- Memory ${r.memoryIndex} ${r.relationType} → Memory ${r.targetIndex}`)
-        .join('\n')
-    : 'No explicit connections — these memories co-occur in the same semantic space.';
-
-  const userMessage = `MEMORIES TO MERGE:
-${memoryLines}
-
-CONNECTIONS:
-${connectionLines}
-
-Synthesize into a single coherent memory (JSON only):`;
-
-  return {
-    messages: [{ role: 'user', content: userMessage }],
-    system,
-    temperature: 0.1,
-    maxTokens: 500,
-  };
-}
-
-// ============ Internal Helpers ============
-
-/**
- * Parse LLM fusion response to extract summary, importance, and category.
- * Returns null if parsing fails or required fields are missing.
- * Same pattern as parseFusionResponse in fusion.ts.
- */
-function parseFusionResponse(responseText: string): { summary: string; importance: number; category: string } | null {
-  if (!responseText || responseText.trim().length === 0) {
-    return null;
-  }
-
-  const jsonMatch = responseText.match(/\{[\s\S]*\}/);
-  if (!jsonMatch) {
-    return null;
-  }
-
-  try {
-    const parsed = JSON.parse(jsonMatch[0]) as Record<string, unknown>;
-
-    if (
-      typeof parsed.summary !== 'string' ||
-      parsed.summary.trim().length === 0
-    ) {
-      return null;
-    }
-
-    return {
-      summary: parsed.summary,
-      importance: typeof parsed.importance === 'number' ? parsed.importance : 5,
-      category: typeof parsed.category === 'string' ? parsed.category : 'fact',
-    };
-  } catch {
-    return null;
-  }
-}
-
 /**
  * Determine if a cluster spans multiple categories.
  */
@@ -289,7 +183,7 @@ export async function nremConsolidate(
   for (const cluster of clusters) {
     try {
       const relationContext = buildRelationContext(cluster, getRelations, config.maxRelationsPerMemory);
-      const request = buildNremFusionPrompt(cluster, relationContext);
+      const request = buildFusionPrompt(cluster, relationContext);
       const response = await provider.complete(request);
 
       // Extract text from ContentBlock[] response

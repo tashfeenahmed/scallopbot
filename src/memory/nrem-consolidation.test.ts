@@ -3,7 +3,7 @@
  *
  * Tests the relation-context-enriched fusion pipeline:
  * - buildRelationContext: filters intra-cluster relations, caps per memory
- * - buildNremFusionPrompt: CompletionRequest with CONNECTIONS section
+ * - buildFusionPrompt: CompletionRequest with CONNECTIONS section
  * - nremConsolidate: orchestrates pipeline with per-cluster error isolation
  */
 
@@ -12,13 +12,13 @@ import type { ScallopMemoryEntry, MemoryRelation, MemoryCategory } from './db.js
 import type { LLMProvider, CompletionResponse } from '../providers/types.js';
 import {
   buildRelationContext,
-  buildNremFusionPrompt,
   nremConsolidate,
   DEFAULT_NREM_CONFIG,
   type NremConfig,
   type NremResult,
   type RelationContextEntry,
 } from './nrem-consolidation.js';
+import { buildFusionPrompt } from './fusion.js';
 
 // ============ Test Helpers ============
 
@@ -224,7 +224,7 @@ describe('buildRelationContext', () => {
   });
 });
 
-describe('buildNremFusionPrompt', () => {
+describe('buildFusionPrompt', () => {
   it('includes system prompt mentioning deep sleep consolidation', () => {
     const cluster = [
       makeMemory({ id: 'm1', content: 'Interested in Rust', category: 'fact', importance: 7 }),
@@ -236,7 +236,7 @@ describe('buildNremFusionPrompt', () => {
       { memoryIndex: 1, relationType: 'EXTENDS', targetIndex: 3, targetContent: 'Prefers type-safe languages', confidence: 0.9 },
     ];
 
-    const prompt = buildNremFusionPrompt(cluster, relationContext);
+    const prompt = buildFusionPrompt(cluster, relationContext);
 
     expect(prompt.system).toBeDefined();
     expect(prompt.system!.toLowerCase()).toContain('deep sleep consolidation');
@@ -250,7 +250,7 @@ describe('buildNremFusionPrompt', () => {
       makeMemory({ id: 'm3', content: 'Prefers type-safe languages', category: 'preference', importance: 8 }),
     ];
 
-    const prompt = buildNremFusionPrompt(cluster, []);
+    const prompt = buildFusionPrompt(cluster, []);
     const userContent = prompt.messages[0].content as string;
 
     expect(userContent).toContain('MEMORIES TO MERGE');
@@ -277,7 +277,7 @@ describe('buildNremFusionPrompt', () => {
       { memoryIndex: 2, relationType: 'DERIVES', targetIndex: 1, targetContent: 'Interested in Rust', confidence: 0.7 },
     ];
 
-    const prompt = buildNremFusionPrompt(cluster, relationContext);
+    const prompt = buildFusionPrompt(cluster, relationContext);
     const userContent = prompt.messages[0].content as string;
 
     expect(userContent).toContain('CONNECTIONS');
@@ -294,7 +294,7 @@ describe('buildNremFusionPrompt', () => {
       makeMemory({ id: 'm3', content: 'Memory C', category: 'fact', importance: 5 }),
     ];
 
-    const prompt = buildNremFusionPrompt(cluster, []);
+    const prompt = buildFusionPrompt(cluster, []);
     const userContent = prompt.messages[0].content as string;
 
     expect(userContent).toContain('CONNECTIONS');
@@ -309,7 +309,7 @@ describe('buildNremFusionPrompt', () => {
       makeMemory({ id: 'm3', content: 'Memory C', category: 'fact', importance: 5 }),
     ];
 
-    const prompt = buildNremFusionPrompt(cluster, []);
+    const prompt = buildFusionPrompt(cluster, []);
 
     expect(prompt.temperature).toBe(0.1);
     expect(prompt.maxTokens).toBe(500);
@@ -322,7 +322,7 @@ describe('buildNremFusionPrompt', () => {
       makeMemory({ id: 'm3', content: 'Memory C', category: 'fact', importance: 5 }),
     ];
 
-    const prompt = buildNremFusionPrompt(cluster, []);
+    const prompt = buildFusionPrompt(cluster, []);
 
     expect(prompt.system).toContain('JSON');
     expect(prompt.system).toContain('summary');
