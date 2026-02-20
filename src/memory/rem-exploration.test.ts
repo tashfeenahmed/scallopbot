@@ -16,6 +16,8 @@ import {
   sampleSeeds,
   buildConnectionJudgePrompt,
   parseJudgeResponse,
+  buildBatchConnectionJudgePrompt,
+  parseBatchJudgeResponse,
   remExplore,
   DEFAULT_REM_CONFIG,
   type RemConfig,
@@ -340,6 +342,126 @@ describe('parseJudgeResponse', () => {
   });
 });
 
+// ============ Tests: buildBatchConnectionJudgePrompt ============
+
+describe('buildBatchConnectionJudgePrompt', () => {
+  it('produces CompletionRequest with system prompt and numbered pairs', () => {
+    const seed = makeMemory({ id: 'seed1', content: 'User likes hiking in mountains' });
+    const n1 = makeMemory({ id: 'n1', content: 'User reads geology textbooks' });
+    const n2 = makeMemory({ id: 'n2', content: 'User bought camping gear' });
+
+    const request = buildBatchConnectionJudgePrompt([
+      { seed, neighbor: n1, existingRelations: [] },
+      { seed, neighbor: n2, existingRelations: [] },
+    ]);
+
+    expect(request.system).toBeDefined();
+    expect(request.system!.toLowerCase()).toContain('evaluate each pair independently');
+    const userContent = request.messages[0].content as string;
+    expect(userContent).toContain('PAIR 1');
+    expect(userContent).toContain('PAIR 2');
+    expect(userContent).toContain('User reads geology textbooks');
+    expect(userContent).toContain('User bought camping gear');
+  });
+
+  it('scales maxTokens with pair count', () => {
+    const seed = makeMemory({ id: 's1', content: 'Seed' });
+    const pairs = Array.from({ length: 5 }, (_, i) => ({
+      seed,
+      neighbor: makeMemory({ id: `n${i}`, content: `Neighbor ${i}` }),
+      existingRelations: [] as MemoryRelation[],
+    }));
+
+    const request = buildBatchConnectionJudgePrompt(pairs);
+
+    expect(request.maxTokens).toBe(300 * 5);
+  });
+
+  it('uses temperature 0.3', () => {
+    const seed = makeMemory({ id: 's1', content: 'Seed' });
+    const request = buildBatchConnectionJudgePrompt([
+      { seed, neighbor: makeMemory({ id: 'n1', content: 'Neighbor' }), existingRelations: [] },
+    ]);
+
+    expect(request.temperature).toBe(0.3);
+  });
+
+  it('includes existing relations in pair block', () => {
+    const seed = makeMemory({ id: 's1', content: 'Seed memory' });
+    const neighbor = makeMemory({ id: 'n1', content: 'Neighbor memory' });
+    const relations = [makeRelation('s1', 'other1', 'EXTENDS', 0.7)];
+
+    const request = buildBatchConnectionJudgePrompt([
+      { seed, neighbor, existingRelations: relations },
+    ]);
+
+    const userContent = request.messages[0].content as string;
+    expect(userContent).toContain('EXTENDS');
+  });
+});
+
+// ============ Tests: parseBatchJudgeResponse ============
+
+describe('parseBatchJudgeResponse', () => {
+  it('parses valid batch response with multiple evaluations', () => {
+    const response = JSON.stringify({
+      evaluations: [
+        { pair: 1, novelty: 4, plausibility: 3, usefulness: 4, connection: 'Both relate to outdoor activities', confidence: 0.75 },
+        { pair: 2, novelty: 1, plausibility: 2, usefulness: 1, connection: 'NO_CONNECTION' },
+        { pair: 3, novelty: 3, plausibility: 4, usefulness: 5, connection: 'Shared interest in learning', confidence: 0.8 },
+      ],
+    });
+
+    const result = parseBatchJudgeResponse(response);
+
+    expect(result).toHaveLength(3);
+    expect(result[0].pair).toBe(1);
+    expect(result[0].novelty).toBe(4);
+    expect(result[0].connection).toBe('Both relate to outdoor activities');
+    expect(result[1].connection).toBe('NO_CONNECTION');
+    expect(result[2].confidence).toBe(0.8);
+  });
+
+  it('returns empty array for empty input', () => {
+    expect(parseBatchJudgeResponse('')).toEqual([]);
+  });
+
+  it('returns empty array for non-JSON input', () => {
+    expect(parseBatchJudgeResponse('not json at all')).toEqual([]);
+  });
+
+  it('returns empty array when evaluations is not an array', () => {
+    expect(parseBatchJudgeResponse('{"evaluations": "invalid"}')).toEqual([]);
+  });
+
+  it('filters out evaluations with missing score fields', () => {
+    const response = JSON.stringify({
+      evaluations: [
+        { pair: 1, novelty: 4, plausibility: 3, usefulness: 4, connection: 'Valid' },
+        { pair: 2, novelty: 4, connection: 'Missing scores' }, // missing plausibility and usefulness
+      ],
+    });
+
+    const result = parseBatchJudgeResponse(response);
+
+    expect(result).toHaveLength(1);
+    expect(result[0].pair).toBe(1);
+  });
+
+  it('extracts JSON from surrounding text', () => {
+    const response = 'Here are the evaluations:\n' + JSON.stringify({
+      evaluations: [
+        { pair: 1, novelty: 3, plausibility: 4, usefulness: 3, connection: 'Linked' },
+      ],
+    }) + '\nDone.';
+
+    const result = parseBatchJudgeResponse(response);
+
+    expect(result).toHaveLength(1);
+    expect(result[0].connection).toBe('Linked');
+  });
+});
+
 // ============ Tests: remExplore ============
 
 describe('remExplore', () => {
@@ -385,9 +507,9 @@ describe('remExplore', () => {
     ];
 
     const provider = createMockProvider(JSON.stringify({
-      novelty: 4, plausibility: 4, usefulness: 4,
-      connection: 'Novel link discovered',
-      confidence: 0.8,
+      evaluations: [
+        { pair: 1, novelty: 4, plausibility: 4, usefulness: 4, connection: 'Novel link discovered', confidence: 0.8 },
+      ],
     }));
 
     const result = await remExplore(memories, buildGetRelations(relations), provider);
@@ -416,12 +538,11 @@ describe('remExplore', () => {
       makeRelation('n1', 'n2', 'EXTENDS', 0.8),
     ];
 
+    // Batch format: remExplore now sends all candidates for a seed in one batch call
     const llmResponse = JSON.stringify({
-      novelty: 4,
-      plausibility: 4,
-      usefulness: 4,
-      connection: 'Both relate to the user learning new skills',
-      confidence: 0.8,
+      evaluations: [
+        { pair: 1, novelty: 4, plausibility: 4, usefulness: 4, connection: 'Both relate to the user learning new skills', confidence: 0.8 },
+      ],
     });
 
     const provider = createMockProvider(llmResponse);
@@ -472,9 +593,9 @@ describe('remExplore', () => {
         }
         return {
           content: [{ type: 'text', text: JSON.stringify({
-            novelty: 4, plausibility: 4, usefulness: 4,
-            connection: 'Novel connection found',
-            confidence: 0.75,
+            evaluations: [
+              { pair: 1, novelty: 4, plausibility: 4, usefulness: 4, connection: 'Novel connection found', confidence: 0.75 },
+            ],
           }) }],
           stopReason: 'end_turn',
           usage: { inputTokens: 100, outputTokens: 50 },
@@ -485,7 +606,7 @@ describe('remExplore', () => {
 
     const result = await remExplore(memories, buildGetRelations(relations), provider);
 
-    // Even if some seeds fail, the result should still be valid
+    // Even if some seeds fail, the result should still be valid (batch failures increment failures)
     expect(result.failures).toBeGreaterThanOrEqual(0);
     expect(result.seedsExplored).toBeGreaterThanOrEqual(0);
     // The function should not throw
@@ -501,12 +622,11 @@ describe('remExplore', () => {
       makeRelation('s1', 'n1', 'EXTENDS', 0.8),
     ];
 
-    // LLM rejects all connections with low scores
+    // Batch format: LLM rejects all connections with low scores
     const llmResponse = JSON.stringify({
-      novelty: 1,
-      plausibility: 1,
-      usefulness: 1,
-      connection: 'NO_CONNECTION',
+      evaluations: [
+        { pair: 1, novelty: 1, plausibility: 1, usefulness: 1, connection: 'NO_CONNECTION' },
+      ],
     });
 
     const provider = createMockProvider(llmResponse);

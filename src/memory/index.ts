@@ -131,20 +131,20 @@ export {
   findFusionClusters,
   fuseMemoryCluster,
   buildFusionPrompt,
+  parseFusionResponse,
   DEFAULT_FUSION_CONFIG,
   type FusionConfig,
   type FusionResult,
+  type RelationContextEntry,
 } from './fusion.js';
 
 // NREM Consolidation
 export {
   nremConsolidate,
-  buildNremFusionPrompt,
   buildRelationContext,
   DEFAULT_NREM_CONFIG,
   type NremConfig,
   type NremResult,
-  type RelationContextEntry,
 } from './nrem-consolidation.js';
 
 // REM Exploration
@@ -277,16 +277,6 @@ export {
   type GapPipelineInput,
   type ExistingItemForDedup,
 } from './gap-pipeline.js';
-
-// Inner Thoughts (Post-session proactive evaluation)
-export {
-  evaluateInnerThoughts,
-  shouldRunInnerThoughts,
-  buildInnerThoughtsPrompt,
-  parseInnerThoughtsResponse,
-  type InnerThoughtsInput,
-  type InnerThoughtsResult,
-} from './inner-thoughts.js';
 
 // Gardener shared helpers
 export { type GardenerContext, safeBehavioralPatterns } from './gardener-context.js';
