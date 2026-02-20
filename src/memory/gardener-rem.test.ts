@@ -45,22 +45,30 @@ function createMockEmbedder(): EmbeddingProvider {
   };
 }
 
-/** Valid REM judge JSON that passes the minJudgeScore threshold */
-const VALID_REM_JUDGE_RESPONSE = JSON.stringify({
-  novelty: 4,
-  plausibility: 4,
-  usefulness: 4,
-  connection: 'Both relate to morning beverage rituals',
-  confidence: 0.8,
-});
+/** Build a valid batch REM judge response for N pairs (all pass minJudgeScore) */
+function buildBatchRemResponse(pairCount: number): string {
+  const evaluations = Array.from({ length: pairCount }, (_, i) => ({
+    pair: i + 1,
+    novelty: 4,
+    plausibility: 4,
+    usefulness: 4,
+    connection: 'Both relate to morning beverage rituals',
+    confidence: 0.8,
+  }));
+  return JSON.stringify({ evaluations });
+}
 
-/** REM judge JSON with NO_CONNECTION */
-const NO_CONNECTION_RESPONSE = JSON.stringify({
-  novelty: 1,
-  plausibility: 1,
-  usefulness: 1,
-  connection: 'NO_CONNECTION',
-});
+/** Build a batch REM judge response where all pairs return NO_CONNECTION */
+function buildBatchNoConnectionResponse(pairCount: number): string {
+  const evaluations = Array.from({ length: pairCount }, (_, i) => ({
+    pair: i + 1,
+    novelty: 1,
+    plausibility: 1,
+    usefulness: 1,
+    connection: 'NO_CONNECTION',
+  }));
+  return JSON.stringify({ evaluations });
+}
 
 /** Valid NREM fusion JSON */
 const VALID_NREM_FUSION_RESPONSE = JSON.stringify({
@@ -135,9 +143,11 @@ describe('BackgroundGardener REM integration', () => {
       complete: vi.fn().mockImplementation(async (req: { messages: Array<{ content: string }> }) => {
         callCount++;
         const userMsg = req.messages[0]?.content ?? '';
-        // REM judge prompts contain "SEED MEMORY:" and "DISCOVERED NEIGHBOR:"
-        const isRem = userMsg.includes('SEED MEMORY:') && userMsg.includes('DISCOVERED NEIGHBOR:');
-        const text = isRem ? VALID_REM_JUDGE_RESPONSE : VALID_NREM_FUSION_RESPONSE;
+        // Batch REM judge prompts contain "PAIR" and "Evaluate the following"
+        const isRem = userMsg.includes('PAIR') && userMsg.includes('Evaluate the following');
+        // Count pairs from prompt to build correct batch response
+        const pairCount = isRem ? (userMsg.match(/PAIR \d+:/g) || []).length : 0;
+        const text = isRem ? buildBatchRemResponse(pairCount) : VALID_NREM_FUSION_RESPONSE;
         return {
           content: [{ type: 'text', text }],
           stopReason: 'end_turn',
@@ -240,8 +250,9 @@ describe('BackgroundGardener REM integration', () => {
       isAvailable: () => true,
       complete: vi.fn().mockImplementation(async (req: { messages: Array<{ content: string }> }) => {
         const userMsg = req.messages[0]?.content ?? '';
-        const isRem = userMsg.includes('SEED MEMORY:') && userMsg.includes('DISCOVERED NEIGHBOR:');
-        const text = isRem ? VALID_REM_JUDGE_RESPONSE : VALID_NREM_FUSION_RESPONSE;
+        const isRem = userMsg.includes('PAIR') && userMsg.includes('Evaluate the following');
+        const pairCount = isRem ? (userMsg.match(/PAIR \d+:/g) || []).length : 0;
+        const text = isRem ? buildBatchRemResponse(pairCount) : VALID_NREM_FUSION_RESPONSE;
         return {
           content: [{ type: 'text', text }],
           stopReason: 'end_turn',
@@ -311,8 +322,9 @@ describe('BackgroundGardener REM integration', () => {
       isAvailable: () => true,
       complete: vi.fn().mockImplementation(async (req: { messages: Array<{ content: string }> }) => {
         const userMsg = req.messages[0]?.content ?? '';
-        const isRem = userMsg.includes('SEED MEMORY:') && userMsg.includes('DISCOVERED NEIGHBOR:');
-        const text = isRem ? NO_CONNECTION_RESPONSE : VALID_NREM_FUSION_RESPONSE;
+        const isRem = userMsg.includes('PAIR') && userMsg.includes('Evaluate the following');
+        const pairCount = isRem ? (userMsg.match(/PAIR \d+:/g) || []).length : 0;
+        const text = isRem ? buildBatchNoConnectionResponse(pairCount) : VALID_NREM_FUSION_RESPONSE;
         return {
           content: [{ type: 'text', text }],
           stopReason: 'end_turn',
@@ -393,7 +405,7 @@ describe('BackgroundGardener REM integration', () => {
       isAvailable: () => true,
       complete: vi.fn().mockImplementation(async (req: { messages: Array<{ content: string }> }) => {
         const userMsg = req.messages[0]?.content ?? '';
-        const isRem = userMsg.includes('SEED MEMORY:') && userMsg.includes('DISCOVERED NEIGHBOR:');
+        const isRem = userMsg.includes('PAIR') && userMsg.includes('Evaluate the following');
 
         if (isRem) {
           // REM calls always throw
