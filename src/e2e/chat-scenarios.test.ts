@@ -471,7 +471,7 @@ describe('E2E Chat Scenarios', () => {
         const toolResult = content.find((b: ContentBlock) => b.type === 'tool_result') as { type: 'tool_result'; content: string; is_error?: boolean } | undefined;
         expect(toolResult).toBeDefined();
         expect(toolResult!.is_error).toBe(true);
-        expect(toolResult!.content).toContain('Unknown skill');
+        expect(toolResult!.content).toContain('Unknown tool');
       }, 30000);
     });
 
