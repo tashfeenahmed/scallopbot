@@ -163,6 +163,10 @@ export class Agent {
   /** Interrupt queue for mid-loop user message injection */
   private interruptQueue: InterruptQueue | null;
 
+  /** Doom loop detection: rolling window of recent tool calls per session */
+  private recentToolCalls: Map<string, string[]> = new Map();
+  private static readonly DOOM_LOOP_THRESHOLD = 3;
+
   constructor(options: AgentOptions) {
     this.provider = options.provider;
     this.sessionManager = options.sessionManager;
@@ -431,9 +435,22 @@ export class Agent {
       const rawMessages = currentSession?.messages || [];
 
       // Process messages through context manager (compression, deduplication)
-      const messages = this.contextManager
+      let messages = this.contextManager
         ? this.contextManager.buildContextMessages(rawMessages)
         : rawMessages;
+
+      // Proactive overflow prevention: prune before sending to avoid wasting a round-trip
+      if (this.contextManager) {
+        const estimatedTokens = this.contextManager.estimateTokens(messages);
+        const maxTokenLimit = this.contextManager.getMaxContextTokens();
+        if (estimatedTokens > maxTokenLimit * 0.85) {
+          this.logger.info(
+            { estimatedTokens, maxTokenLimit, usage: (estimatedTokens / maxTokenLimit * 100).toFixed(1) + '%' },
+            'Proactive overflow prevention: pruning tool outputs'
+          );
+          messages = this.pruneToolOutputs(messages, 6);
+        }
+      }
 
       // Enable thinking for providers that support it (complexity gating removed —
       // the model decides internally how much to think based on the query)
@@ -577,6 +594,30 @@ export class Agent {
       });
       this.logger.info({ iteration: iterations }, 'Tool results added to session, continuing loop');
 
+      // Doom loop detection: check if the model is stuck calling the same tools repeatedly
+      const toolCallSignatures = toolUses.map(t => `${t.name}:${JSON.stringify(t.input)}`);
+      const sessionToolCalls = this.recentToolCalls.get(sessionId) || [];
+      sessionToolCalls.push(...toolCallSignatures);
+      // Keep only the last N*2 signatures (enough to detect repeats)
+      const maxHistory = Agent.DOOM_LOOP_THRESHOLD * 2;
+      if (sessionToolCalls.length > maxHistory) {
+        sessionToolCalls.splice(0, sessionToolCalls.length - maxHistory);
+      }
+      this.recentToolCalls.set(sessionId, sessionToolCalls);
+
+      if (sessionToolCalls.length >= Agent.DOOM_LOOP_THRESHOLD) {
+        const lastN = sessionToolCalls.slice(-Agent.DOOM_LOOP_THRESHOLD);
+        const allIdentical = lastN.every(sig => sig === lastN[0]);
+        if (allIdentical) {
+          this.logger.warn({ sessionId, tool: toolUses[0]?.name, iterations }, 'Doom loop detected — same tool call repeated');
+          await this.sessionManager.addMessage(sessionId, {
+            role: 'user',
+            content: `[System: Detected ${Agent.DOOM_LOOP_THRESHOLD} identical consecutive tool calls (${toolUses[0]?.name}). This looks like an infinite loop. Please try a different approach or ask the user for clarification.]`,
+          });
+          // Let the loop continue one more time so the LLM sees the warning and can self-correct
+        }
+      }
+
       // Check if user requested stop after tool execution (don't wait for next iteration's LLM call)
       if (shouldStop && shouldStop()) {
         this.logger.info({ sessionId, iteration: iterations }, 'User requested stop after tool execution');
@@ -594,6 +635,9 @@ export class Agent {
         finalResponse = `I've reached the maximum iterations (${this.maxIterations}). Here's what I've done so far: ${textContent || 'Multiple tool operations completed.'}`;
       }
     }
+
+    // Clean up doom loop tracker for this session
+    this.recentToolCalls.delete(sessionId);
 
     // Record token usage
     const tokenUsage = { inputTokens: totalInputTokens, outputTokens: totalOutputTokens };
@@ -1100,9 +1144,42 @@ Only install skills when the user asks, or when you determine a skill would help
   }
 
   /**
-   * Execute LLM call with error recovery
-   * - On context overflow: emergency compress and retry
-   * - On provider error: try fallback providers via router
+   * Check if an error is a rate limit or transient server error worth retrying.
+   */
+  private isRateLimitError(error: Error & { status?: number; code?: string }): boolean {
+    if (error.status === 429 || error.status === 529) return true;
+    const msg = error.message.toLowerCase();
+    return msg.includes('too many requests') || msg.includes('rate limit') || msg.includes('overloaded');
+  }
+
+  /**
+   * Extract retry delay from error headers or use exponential backoff.
+   */
+  private getRetryDelay(error: Error & { headers?: Record<string, string> }, attempt: number): number {
+    // Check for Retry-After header
+    const headers = (error as { headers?: Record<string, string> }).headers;
+    if (headers) {
+      const retryAfterMs = headers['retry-after-ms'];
+      if (retryAfterMs) return Math.min(parseInt(retryAfterMs, 10), 30000);
+
+      const retryAfter = headers['retry-after'];
+      if (retryAfter) {
+        const secs = parseInt(retryAfter, 10);
+        if (!isNaN(secs)) return Math.min(secs * 1000, 30000);
+      }
+    }
+
+    // Exponential backoff: 2s * 2^attempt with 20% jitter, capped at 30s
+    const base = 2000 * Math.pow(2, attempt);
+    const jitter = base * 0.2 * Math.random();
+    return Math.min(base + jitter, 30000);
+  }
+
+  /**
+   * Execute LLM call with error recovery:
+   * 1. Rate limit retry with exponential backoff
+   * 2. Graduated context compaction on overflow (prune → emergency compress)
+   * 3. Provider fallback via router
    */
   private async executeWithRecovery(
     provider: LLMProvider,
@@ -1110,47 +1187,110 @@ Only install skills when the user asks, or when you determine a skill would help
     sessionId: string,
     tier: 'fast' | 'standard' | 'capable'
   ): Promise<CompletionResponse> {
-    try {
-      return await provider.complete(request);
-    } catch (error) {
-      const err = error as Error & { status?: number };
+    const MAX_RETRIES = 3;
 
-      // Check for context overflow errors (400, 413, or message contains "context" or "token")
-      if (this.isContextOverflowError(err)) {
-        this.logger.warn({ error: err.message }, 'Context overflow detected, attempting emergency compression');
+    // Layer 0: Rate limit retry with exponential backoff
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        return await provider.complete(request);
+      } catch (error) {
+        const err = error as Error & { status?: number; headers?: Record<string, string> };
 
-        // Emergency compress: keep only last 3 messages
-        if (this.contextManager && request.messages.length > 3) {
-          const compressed = request.messages.slice(-3);
-          const compressedRequest = { ...request, messages: compressed };
+        // Rate limit — retry with backoff
+        if (this.isRateLimitError(err) && attempt < MAX_RETRIES) {
+          const delay = this.getRetryDelay(err, attempt);
+          this.logger.warn(
+            { attempt: attempt + 1, maxRetries: MAX_RETRIES, delayMs: delay, provider: provider.name },
+            'Rate limited, retrying with backoff'
+          );
+          await new Promise(resolve => setTimeout(resolve, delay));
+          continue;
+        }
 
-          this.logger.info({ originalMessages: request.messages.length, compressedMessages: 3 }, 'Emergency compression applied');
+        // Not a rate limit — fall through to other recovery strategies
+        // Layer 1: Graduated context compaction on overflow
+        if (this.isContextOverflowError(err)) {
+          this.logger.warn({ error: err.message }, 'Context overflow detected, attempting graduated compaction');
 
-          try {
-            return await provider.complete(compressedRequest);
-          } catch (retryError) {
-            this.logger.error({ error: (retryError as Error).message }, 'Retry after compression failed');
+          if (this.contextManager && request.messages.length > 6) {
+            // Layer 1a: Prune old tool outputs (keep last 6 messages intact)
+            const prunedMessages = this.pruneToolOutputs(request.messages, 6);
+            const prunedRequest = { ...request, messages: prunedMessages };
+            this.logger.info(
+              { originalMessages: request.messages.length, afterPrune: prunedMessages.length },
+              'Graduated compaction: pruned old tool outputs'
+            );
+
+            try {
+              return await provider.complete(prunedRequest);
+            } catch (pruneError) {
+              this.logger.warn({ error: (pruneError as Error).message }, 'Pruned request still overflowed, trying emergency compression');
+            }
+
+            // Layer 1b: Emergency compress — keep only last 3 messages
+            const compressed = request.messages.slice(-3);
+            const compressedRequest = { ...request, messages: compressed };
+            this.logger.info({ compressedMessages: 3 }, 'Emergency compression applied');
+
+            try {
+              return await provider.complete(compressedRequest);
+            } catch (retryError) {
+              this.logger.error({ error: (retryError as Error).message }, 'Retry after emergency compression failed');
+            }
           }
         }
-      }
 
-      // Try fallback providers via router
-      if (this.router) {
-        this.logger.warn({ provider: provider.name, error: err.message }, 'Provider failed, trying fallback');
+        // Layer 2: Try fallback providers via router
+        if (this.router) {
+          this.logger.warn({ provider: provider.name, error: err.message }, 'Provider failed, trying fallback');
 
-        try {
-          const result = await this.router.executeWithFallback(request, tier);
-          this.logger.info({ fallbackProvider: result.provider, attempted: result.attemptedProviders }, 'Fallback succeeded');
-          return result.response;
-        } catch (fallbackError) {
-          this.logger.error({ error: (fallbackError as Error).message }, 'All fallback providers failed');
-          throw fallbackError;
+          try {
+            const result = await this.router.executeWithFallback(request, tier);
+            this.logger.info({ fallbackProvider: result.provider, attempted: result.attemptedProviders }, 'Fallback succeeded');
+            return result.response;
+          } catch (fallbackError) {
+            this.logger.error({ error: (fallbackError as Error).message }, 'All fallback providers failed');
+            throw fallbackError;
+          }
         }
-      }
 
-      // No recovery possible
-      throw error;
+        // No recovery possible
+        throw error;
+      }
     }
+
+    // Should not reach here, but TypeScript needs this
+    throw new Error('Exhausted retry attempts');
+  }
+
+  /**
+   * Prune old tool outputs from messages to reduce context size.
+   * Keeps the last `keepLast` messages intact, replaces tool_result content
+   * in older messages with a short placeholder.
+   */
+  private pruneToolOutputs(messages: import('../providers/types.js').Message[], keepLast: number = 6): import('../providers/types.js').Message[] {
+    if (messages.length <= keepLast) return messages;
+
+    const pruneUpTo = messages.length - keepLast;
+    return messages.map((msg, idx) => {
+      if (idx >= pruneUpTo) return msg; // Keep recent messages intact
+      if (typeof msg.content === 'string') return msg;
+
+      const prunedContent = (msg.content as ContentBlock[]).map(block => {
+        if (block.type === 'tool_result') {
+          const content = (block as { content: string }).content;
+          if (content.length > 200) {
+            return {
+              ...block,
+              content: `[pruned: ${content.length} chars]`,
+            };
+          }
+        }
+        return block;
+      });
+
+      return { ...msg, content: prunedContent as ContentBlock[] };
+    });
   }
 
   /**
@@ -1179,6 +1319,147 @@ Only install skills when the user asks, or when you determine a skill would help
     );
   }
 
+  /** Read-only tools that can safely run in parallel */
+  private static readonly PARALLEL_SAFE_TOOLS = new Set([
+    'read_file', 'ls', 'glob', 'grep', 'codesearch', 'web_search',
+    'memory_search', 'question', 'webfetch', 'goals',
+  ]);
+
+  /**
+   * Execute a single tool call and return its result.
+   */
+  private async executeSingleTool(
+    toolUse: ToolUseContent,
+    sessionId: string,
+    userId?: string,
+    onProgress?: ProgressCallback
+  ): Promise<ContentBlock> {
+    // Resolve skill — with auto-repair for hallucinated names
+    let skill = this.skillRegistry?.getSkill(toolUse.name) || null;
+
+    // Tool call repair: try case-insensitive match
+    if (!skill && this.skillRegistry) {
+      const allNames = this.skillRegistry.getToolDefinitions().map(t => t.name);
+      const lowerName = toolUse.name.toLowerCase();
+      const match = allNames.find(n => n.toLowerCase() === lowerName);
+      if (match) {
+        this.logger.info({ requested: toolUse.name, resolved: match }, 'Tool name auto-repaired');
+        skill = this.skillRegistry.getSkill(match) || null;
+      }
+    }
+
+    // Documentation-only skills cannot be invoked as tools
+    if (skill && !skill.hasScripts) {
+      this.logger.warn({ skillName: toolUse.name }, 'LLM tried to invoke documentation-only skill as tool');
+      return {
+        type: 'tool_result',
+        tool_use_id: toolUse.id,
+        content: `Error: "${toolUse.name}" is a documentation-only skill and cannot be invoked as a tool. Use the bash skill to run CLI commands instead. Refer to the skill guide in your instructions for available commands.`,
+        is_error: true,
+      };
+    }
+
+    if (skill && (skill.handler || this.skillExecutor)) {
+      this.logger.debug({ skillName: toolUse.name, input: toolUse.input, native: !!skill.handler }, 'Executing skill');
+
+      if (onProgress) {
+        await onProgress({
+          type: 'tool_start',
+          message: JSON.stringify(toolUse.input),
+          toolName: toolUse.name,
+        });
+      }
+
+      try {
+        let resultContent: string;
+        let resultSuccess: boolean;
+
+        if (skill.handler) {
+          const result = await skill.handler({
+            args: toolUse.input as Record<string, unknown>,
+            workspace: this.workspace,
+            sessionId,
+            userId,
+          });
+          resultSuccess = result.success;
+          resultContent = result.success
+            ? (result.output || 'Success')
+            : `Error: ${result.error || result.output}`;
+        } else {
+          const result = await this.skillExecutor!.execute(skill, {
+            skillName: toolUse.name,
+            args: toolUse.input,
+            cwd: this.workspace,
+            userId,
+            sessionId,
+          });
+          let skillOutput = result.output || '';
+          let skillError = result.error || '';
+          try {
+            const parsed = JSON.parse(skillOutput);
+            if (parsed && typeof parsed === 'object') {
+              skillOutput = parsed.output || parsed.error || skillOutput;
+              if (parsed.error) skillError = parsed.error;
+            }
+          } catch {
+            // Not JSON, use raw output
+          }
+          resultSuccess = result.success;
+          resultContent = result.success
+            ? (skillOutput || 'Success')
+            : `Error: ${skillError || skillOutput || 'Command failed with no error output'}`;
+        }
+
+        if (onProgress) {
+          await onProgress({
+            type: 'tool_complete',
+            message: resultContent.slice(0, 2000),
+            toolName: toolUse.name,
+          });
+        }
+
+        return {
+          type: 'tool_result',
+          tool_use_id: toolUse.id,
+          content: resultContent,
+          is_error: !resultSuccess,
+        };
+
+      } catch (error) {
+        const err = error as Error;
+        this.logger.error({ skillName: toolUse.name, error: err.message }, 'Skill execution failed');
+
+        if (onProgress) {
+          await onProgress({
+            type: 'tool_error',
+            message: err.message,
+            toolName: toolUse.name,
+          });
+        }
+
+        return {
+          type: 'tool_result',
+          tool_use_id: toolUse.id,
+          content: `Error executing skill: ${err.message}`,
+          is_error: true,
+        };
+      }
+    }
+
+    // Skill not found — provide helpful error with available tool names
+    this.logger.warn({ name: toolUse.name }, 'Unknown skill requested');
+    const availableTools = this.skillRegistry
+      ? this.skillRegistry.getToolDefinitions().map(t => t.name).join(', ')
+      : '(none)';
+
+    return {
+      type: 'tool_result',
+      tool_use_id: toolUse.id,
+      content: `Error: Unknown tool "${toolUse.name}". Available tools: ${availableTools}`,
+      is_error: true,
+    };
+  }
+
   private async executeTools(
     toolUses: ToolUseContent[],
     sessionId: string,
@@ -1186,162 +1467,57 @@ Only install skills when the user asks, or when you determine a skill would help
     onProgress?: ProgressCallback,
     shouldStop?: ShouldStopCallback
   ): Promise<ContentBlock[]> {
+    // Check for early stop
+    if (shouldStop && shouldStop()) {
+      return toolUses.map(t => ({
+        type: 'tool_result' as const,
+        tool_use_id: t.id,
+        content: 'Execution stopped by user request.',
+        is_error: true,
+      }));
+    }
+
+    // Partition tools: read-only can run in parallel, others run sequentially
+    const parallelBatch: ToolUseContent[] = [];
+    const sequentialQueue: ToolUseContent[] = [];
+
+    // Only parallelize when there are multiple tools and all read-only ones are together
+    for (const toolUse of toolUses) {
+      if (Agent.PARALLEL_SAFE_TOOLS.has(toolUse.name)) {
+        parallelBatch.push(toolUse);
+      } else {
+        sequentialQueue.push(toolUse);
+      }
+    }
+
     const results: ContentBlock[] = [];
 
-    for (const toolUse of toolUses) {
-      // Check if user requested stop between tool calls
+    // Execute parallel batch first (if any)
+    if (parallelBatch.length > 1) {
+      this.logger.info({ count: parallelBatch.length, tools: parallelBatch.map(t => t.name) }, 'Executing tools in parallel');
+      const parallelResults = await Promise.all(
+        parallelBatch.map(toolUse => this.executeSingleTool(toolUse, sessionId, userId, onProgress))
+      );
+      results.push(...parallelResults);
+    } else if (parallelBatch.length === 1) {
+      // Single tool — no need for Promise.all overhead
+      results.push(await this.executeSingleTool(parallelBatch[0], sessionId, userId, onProgress));
+    }
+
+    // Execute sequential tools one by one
+    for (const toolUse of sequentialQueue) {
       if (shouldStop && shouldStop()) {
-        this.logger.info({ remainingTools: toolUses.length - results.length }, 'User requested stop during tool execution');
+        // Fill remaining with stop messages
         results.push({
           type: 'tool_result',
           tool_use_id: toolUse.id,
           content: 'Execution stopped by user request.',
           is_error: true,
         });
-        // Skip remaining tool calls
-        for (const remaining of toolUses.slice(results.length)) {
-          if (remaining.id !== toolUse.id) {
-            results.push({
-              type: 'tool_result',
-              tool_use_id: remaining.id,
-              content: 'Execution stopped by user request.',
-              is_error: true,
-            });
-          }
-        }
-        break;
-      }
-      // Try skill first (skills are now the primary execution path)
-      const skill = this.skillRegistry?.getSkill(toolUse.name);
-
-      // Documentation-only skills cannot be invoked as tools
-      if (skill && !skill.hasScripts) {
-        this.logger.warn({ skillName: toolUse.name }, 'LLM tried to invoke documentation-only skill as tool');
-        results.push({
-          type: 'tool_result',
-          tool_use_id: toolUse.id,
-          content: `Error: "${toolUse.name}" is a documentation-only skill and cannot be invoked as a tool. Use the bash skill to run CLI commands instead. Refer to the skill guide in your instructions for available commands.`,
-          is_error: true,
-        });
         continue;
       }
 
-      if (skill && (skill.handler || this.skillExecutor)) {
-        this.logger.debug({ skillName: toolUse.name, input: toolUse.input, native: !!skill.handler }, 'Executing skill');
-
-        // Send progress: skill starting
-        if (onProgress) {
-          await onProgress({
-            type: 'tool_start',
-            message: JSON.stringify(toolUse.input),
-            toolName: toolUse.name,
-          });
-        }
-
-        try {
-          let resultContent: string;
-          let resultSuccess: boolean;
-          let resultOutput: string;
-
-          if (skill.handler) {
-            // Native in-process handler (for skills that need runtime access)
-            const result = await skill.handler({
-              args: toolUse.input as Record<string, unknown>,
-              workspace: this.workspace,
-              sessionId,
-              userId,
-            });
-            resultSuccess = result.success;
-            resultOutput = result.output || '';
-            resultContent = result.success
-              ? (result.output || 'Success')
-              : `Error: ${result.error || result.output}`;
-          } else {
-            // Subprocess execution via skill executor
-            const result = await this.skillExecutor!.execute(skill, {
-              skillName: toolUse.name,
-              args: toolUse.input,
-              cwd: this.workspace,
-              userId,
-              sessionId,
-            });
-            // Parse skill JSON output to extract clean result text
-            // Skills output JSON like {"success":true,"output":"...","error":"...","exitCode":0}
-            let skillOutput = result.output || '';
-            let skillError = result.error || '';
-            try {
-              const parsed = JSON.parse(skillOutput);
-              if (parsed && typeof parsed === 'object') {
-                skillOutput = parsed.output || parsed.error || skillOutput;
-                if (parsed.error) skillError = parsed.error;
-              }
-            } catch {
-              // Not JSON, use raw output
-            }
-            resultSuccess = result.success;
-            resultOutput = skillOutput;
-            resultContent = result.success
-              ? (skillOutput || 'Success')
-              : `Error: ${skillError || skillOutput || 'Command failed with no error output'}`;
-          }
-
-          results.push({
-            type: 'tool_result',
-            tool_use_id: toolUse.id,
-            content: resultContent,
-            is_error: !resultSuccess,
-          });
-
-          // Send progress: skill complete
-          if (onProgress) {
-            await onProgress({
-              type: 'tool_complete',
-              message: resultContent.slice(0, 2000),
-              toolName: toolUse.name,
-            });
-          }
-
-        } catch (error) {
-          const err = error as Error;
-          this.logger.error({ skillName: toolUse.name, error: err.message }, 'Skill execution failed');
-
-          // Send progress: skill error
-          if (onProgress) {
-            await onProgress({
-              type: 'tool_error',
-              message: err.message,
-              toolName: toolUse.name,
-            });
-          }
-
-          results.push({
-            type: 'tool_result',
-            tool_use_id: toolUse.id,
-            content: `Error executing skill: ${err.message}`,
-            is_error: true,
-          });
-        }
-        continue;
-      }
-
-      // Skill not found
-      this.logger.warn({ name: toolUse.name }, 'Unknown skill requested');
-
-      // Provide helpful guidance for common hallucinated tools
-      let guidance = '';
-      const lowerName = toolUse.name.toLowerCase();
-      if (lowerName.includes('search') || lowerName.includes('bing') || lowerName.includes('google')) {
-        guidance = '\n\nFor web searches, use the bash tool: bash("web-search \'your query\'")';
-      } else if (lowerName.includes('browse') || lowerName.includes('navigate') || lowerName.includes('scrape')) {
-        guidance = '\n\nFor web browsing, use the bash tool: bash("agent-browser open \'url\'")';
-      }
-
-      results.push({
-        type: 'tool_result',
-        tool_use_id: toolUse.id,
-        content: `Error: Unknown skill "${toolUse.name}". This tool does not exist.${guidance}\n\nCheck your available skills in the system prompt.`,
-        is_error: true,
-      });
+      results.push(await this.executeSingleTool(toolUse, sessionId, userId, onProgress));
     }
 
     return results;
