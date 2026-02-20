@@ -379,6 +379,7 @@ export class Gateway {
         logger: this.logger,
         goalService: this.goalService || undefined,
         sessionManager: this.sessionManager || undefined,
+        subAgentExecutor: this.subAgentExecutor || undefined,
         interval: 30 * 1000, // Check every 30 seconds
         onSendMessage: this.outboundQueue.createHandler(),
         getTimezone: (userId: string) => this.configManager!.getUserTimezone(userId),

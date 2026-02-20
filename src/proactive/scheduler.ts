@@ -1,7 +1,8 @@
 /**
  * Unified Scheduler - Processes scheduled items and delivers messages.
  *
- * All items are delivered as nudges (pre-written messages).
+ * Nudge-kind items are delivered as pre-written messages.
+ * Task-kind items are executed by a sub-agent (falls back to nudge if unavailable).
  * Supports recurring items with automatic rescheduling.
  */
 
@@ -16,6 +17,7 @@ import { BoardService } from '../board/board-service.js';
 import { computeBoardStatus } from '../board/types.js';
 import type { GoalService } from '../goals/index.js';
 import type { SessionManager } from '../agent/session.js';
+import type { SubAgentExecutor } from '../subagent/index.js';
 import { parseUserIdPrefix } from '../triggers/types.js';
 import { formatProactiveMessage, type ProactiveFormatInput } from './proactive-format.js';
 import { detectProactiveEngagement } from './feedback.js';
@@ -61,6 +63,8 @@ export interface UnifiedSchedulerOptions {
   goalService?: GoalService;
   /** Session manager for creating scheduler session */
   sessionManager?: SessionManager;
+  /** Sub-agent executor for task-kind items (optional — falls back to nudge) */
+  subAgentExecutor?: SubAgentExecutor;
   /** Check interval in milliseconds (default: 30 seconds) */
   interval?: number;
   /** Maximum age for expired items in milliseconds (default: 24 hours) */
@@ -79,6 +83,7 @@ export class UnifiedScheduler {
   private logger: Logger;
   private goalService?: GoalService;
   private sessionManager?: SessionManager;
+  private subAgentExecutor?: SubAgentExecutor;
   private interval: number;
   private maxItemAge: number;
   private onSendMessage: MessageHandler;
@@ -98,6 +103,7 @@ export class UnifiedScheduler {
     this.logger = options.logger.child({ component: 'unified-scheduler' });
     this.goalService = options.goalService;
     this.sessionManager = options.sessionManager;
+    this.subAgentExecutor = options.subAgentExecutor;
     this.interval = options.interval ?? 30 * 1000; // 30 seconds
     this.maxItemAge = options.maxItemAge ?? 24 * 60 * 60 * 1000; // 24 hours
     this.onSendMessage = options.onSendMessage;
@@ -260,16 +266,20 @@ export class UnifiedScheduler {
         return true;
       });
 
-      // All items delivered as nudges (pre-written message, no sub-agent).
-      // Sub-agent task execution disabled — too expensive for scheduled items.
       for (const item of readyItems) {
         try {
-          await this.processNudge(item);
+          // Task-kind items with taskConfig: execute via sub-agent
+          if (item.kind === 'task' && item.taskConfig && this.subAgentExecutor && this.schedulerSessionId) {
+            await this.processTask(item);
+          } else {
+            // Nudge-kind items (or tasks without executor): send pre-written message
+            await this.processNudge(item);
+          }
           this.markItemFiredAndReschedule(item);
         } catch (err) {
           this.logger.error(
             { itemId: item.id, error: (err as Error).message },
-            'Failed to process nudge'
+            'Failed to process scheduled item'
           );
           this.db.resetScheduledItemToPending(item.id);
         }
@@ -301,6 +311,56 @@ export class UnifiedScheduler {
     );
 
     await this.sendFormattedMessage(item, item.message);
+  }
+
+  /**
+   * Process a task item — execute via sub-agent, send result to user.
+   * Falls back to nudge if sub-agent fails.
+   */
+  private async processTask(item: ScheduledItem): Promise<void> {
+    const config = item.taskConfig!;
+    this.logger.info(
+      { itemId: item.id, goal: config.goal, tools: config.tools },
+      'Executing task via sub-agent'
+    );
+
+    try {
+      const result = await this.subAgentExecutor!.spawnAndWait(
+        this.schedulerSessionId!,
+        {
+          task: config.goal,
+          label: `scheduled:${item.type}`,
+          skills: config.tools,
+          modelTier: config.modelTier ?? 'fast',
+          timeoutSeconds: 180,
+          waitForResult: true,
+        },
+      );
+
+      // Store result on the item for morning digest / audit
+      this.db.updateScheduledItemResult(item.id, {
+        response: result.response,
+        completedAt: Date.now(),
+        iterationsUsed: result.iterationsUsed,
+      });
+
+      // Send sanitized result to user
+      const clean = sanitizeAgentResponse(result.response);
+      if (clean) {
+        await this.sendFormattedMessage(item, clean, 'task_result');
+      } else {
+        // Sub-agent produced no user-facing output — send the original message as fallback
+        this.logger.warn({ itemId: item.id }, 'Sub-agent returned no user-facing content, falling back to nudge');
+        await this.sendFormattedMessage(item, item.message);
+      }
+    } catch (err) {
+      this.logger.error(
+        { itemId: item.id, error: (err as Error).message },
+        'Sub-agent execution failed, falling back to nudge'
+      );
+      // Fall back to sending the pre-written message
+      await this.processNudge(item);
+    }
   }
 
   /**
