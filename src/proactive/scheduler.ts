@@ -21,6 +21,7 @@ import type { SubAgentExecutor } from '../subagent/index.js';
 import { parseUserIdPrefix } from '../triggers/types.js';
 import { formatProactiveMessage, type ProactiveFormatInput } from './proactive-format.js';
 import { detectProactiveEngagement } from './feedback.js';
+import { getRecentChatContext } from './chat-context.js';
 
 /**
  * Strip internal markup, XML function calls, error prefixes, and thinking blocks
@@ -325,6 +326,9 @@ export class UnifiedScheduler {
     );
 
     try {
+      // Fetch recent chat context so the sub-agent is aware of ongoing conversations
+      const chatContext = getRecentChatContext(this.db);
+
       const result = await this.subAgentExecutor!.spawnAndWait(
         this.schedulerSessionId!,
         {
@@ -334,6 +338,7 @@ export class UnifiedScheduler {
           modelTier: config.modelTier ?? 'fast',
           timeoutSeconds: 180,
           waitForResult: true,
+          recentChatContext: chatContext?.formattedContext,
         },
       );
 

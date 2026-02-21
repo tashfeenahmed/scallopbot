@@ -31,3 +31,9 @@ export {
   type ProactiveFormatInput,
   type ProactiveWebSocketOutput,
 } from './proactive-format.js';
+
+export {
+  getRecentChatContext,
+  type RecentChatContext,
+  type RecentChatContextOptions,
+} from './chat-context.js';
