@@ -220,7 +220,7 @@ export class SubAgentExecutor {
     activeProvider = this.createTokenBudgetProvider(activeProvider, run.id);
 
     // 4. Build enriched system prompt (async — fetches profile + memories)
-    const systemPrompt = await this.buildSubAgentPrompt(run.task);
+    const systemPrompt = await this.buildSubAgentPrompt(run.task, run.recentChatContext);
 
     // 5. Create filtered skill registry
     const filteredRegistry = this.createFilteredSkillRegistry(run.allowedSkills, run.task);
@@ -340,7 +340,7 @@ export class SubAgentExecutor {
   /**
    * Build an enriched system prompt for sub-agents with user context and memory.
    */
-  private async buildSubAgentPrompt(task: string): Promise<string> {
+  private async buildSubAgentPrompt(task: string, recentChatContext?: string): Promise<string> {
     const lines = [
       'You are a focused sub-agent assigned a specific task.',
       '',
@@ -368,6 +368,15 @@ export class SubAgentExecutor {
         }
         lines.push('');
       }
+    }
+
+    // Inject recent chat context (for proactive/scheduled sub-agents)
+    if (recentChatContext) {
+      lines.push('## RECENT CONVERSATION');
+      lines.push('Recent exchanges with the user for context. Use this to make your response');
+      lines.push('relevant to their current situation. Do NOT repeat or quote these messages.');
+      lines.push(recentChatContext);
+      lines.push('');
     }
 
     // Inject relevant memories

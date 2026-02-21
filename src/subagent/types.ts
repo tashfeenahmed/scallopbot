@@ -17,6 +17,8 @@ export interface SpawnAgentInput {
   modelTier?: 'fast' | 'standard' | 'capable';
   timeoutSeconds?: number;
   waitForResult?: boolean;
+  /** Recent chat transcript for sub-agent context (injected by scheduler) */
+  recentChatContext?: string;
 }
 
 /**
@@ -34,6 +36,8 @@ export interface SubAgentRun {
   timeoutMs: number;
   result?: SubAgentResult;
   error?: string;
+  /** Recent chat transcript for sub-agent context (injected by scheduler) */
+  recentChatContext?: string;
   tokenUsage: { inputTokens: number; outputTokens: number };
   createdAt: number;
   startedAt?: number;

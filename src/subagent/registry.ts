@@ -52,6 +52,7 @@ export class SubAgentRegistry {
       allowedSkills: input.skills || [],
       modelTier: input.modelTier || this.config.defaultModelTier,
       timeoutMs: timeoutSeconds * 1000,
+      recentChatContext: input.recentChatContext,
       tokenUsage: { inputTokens: 0, outputTokens: 0 },
       createdAt: Date.now(),
     };
