@@ -76,8 +76,9 @@ export class OpenAIProvider implements LLMProvider {
       model: this.model,
       messages,
       // Reasoning models use max_completion_tokens instead of max_tokens
+      // thinkingBudgetTokens from granular thinking levels can override the default
       ...(isReasoning
-        ? { max_completion_tokens: request.maxTokens || DEFAULT_MAX_TOKENS }
+        ? { max_completion_tokens: request.thinkingBudgetTokens || request.maxTokens || DEFAULT_MAX_TOKENS }
         : { max_tokens: request.maxTokens || DEFAULT_MAX_TOKENS }),
       ...(request.temperature !== undefined && !isReasoning && { temperature: request.temperature }),
       ...(request.stopSequences && { stop: request.stopSequences }),

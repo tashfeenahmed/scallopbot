@@ -23,6 +23,7 @@ import type { Skill } from '../skills/types.js';
 import { Agent } from '../agent/agent.js';
 import { SubAgentRegistry } from './registry.js';
 import { AnnounceQueue } from './announce-queue.js';
+import { enqueueInLane } from '../agent/command-queue.js';
 import type {
   SubAgentConfig,
   SubAgentResult,
@@ -136,8 +137,8 @@ export class SubAgentExecutor {
 
     const run = this.registry.createRun(parentSessionId, input, session.id);
 
-    // Fire and forget — result will be enqueued
-    this.executeSubAgent(run, parentOnProgress).catch((err) => {
+    // Fire and forget — result will be enqueued via lane serialization
+    enqueueInLane(`subagent:${run.id}`, () => this.executeSubAgent(run, parentOnProgress)).catch((err) => {
       this.logger.error({ runId: run.id, error: (err as Error).message }, 'Sub-agent execution failed unexpectedly');
     });
 
