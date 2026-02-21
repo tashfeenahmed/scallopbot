@@ -26,6 +26,12 @@ import type { AnnounceQueue } from '../subagent/announce-queue.js';
 import type { SubAgentExecutor } from '../subagent/executor.js';
 import type { BoardService } from '../board/board-service.js';
 import type { InterruptQueue } from './interrupt-queue.js';
+import { type ThinkLevel, booleanToThinkLevel, mapThinkLevelToProvider, pickFallbackLevel } from './thinking.js';
+import { ToolLoopDetector, type LoopDetection } from './tool-loop-detector.js';
+import { triggerHook, type HookEvent } from '../hooks/hooks.js';
+import { applyToolPolicyPipeline, type ToolPolicy } from '../skills/tool-policy.js';
+import { enqueueInLane } from './command-queue.js';
+import { progressiveCompact } from '../routing/compaction.js';
 
 export interface AgentOptions {
   provider: LLMProvider;
@@ -46,6 +52,10 @@ export interface AgentOptions {
   systemPrompt?: string;
   /** Enable extended thinking for supported providers (e.g., Kimi K2.5) */
   enableThinking?: boolean;
+  /** Granular thinking level (overrides enableThinking if set) */
+  thinkLevel?: ThinkLevel;
+  /** Global tool policy for filtering available tools */
+  toolPolicy?: ToolPolicy;
   /** Announce queue for receiving sub-agent results (main agent only) */
   announceQueue?: AnnounceQueue;
   /** Sub-agent executor for cancellation propagation (main agent only) */
@@ -154,6 +164,10 @@ export class Agent {
   private lastAssistantResponses: Map<string, string> = new Map();
   /** Enable extended thinking for supported providers */
   private enableThinking: boolean;
+  /** Granular thinking level */
+  private thinkLevel: ThinkLevel;
+  /** Global tool policy */
+  private toolPolicy: ToolPolicy | undefined;
   /** Announce queue for receiving sub-agent results */
   private announceQueue: AnnounceQueue | null;
   /** Sub-agent executor for cancellation propagation */
@@ -163,9 +177,8 @@ export class Agent {
   /** Interrupt queue for mid-loop user message injection */
   private interruptQueue: InterruptQueue | null;
 
-  /** Doom loop detection: rolling window of recent tool calls per session */
-  private recentToolCalls: Map<string, string[]> = new Map();
-  private static readonly DOOM_LOOP_THRESHOLD = 3;
+  /** Enhanced tool loop detector */
+  private toolLoopDetector = new ToolLoopDetector();
 
   constructor(options: AgentOptions) {
     this.provider = options.provider;
@@ -185,6 +198,8 @@ export class Agent {
     this.maxIterations = options.maxIterations;
     this.baseSystemPrompt = options.systemPrompt || DEFAULT_SYSTEM_PROMPT;
     this.enableThinking = options.enableThinking ?? false;
+    this.thinkLevel = options.thinkLevel ?? booleanToThinkLevel(this.enableThinking);
+    this.toolPolicy = options.toolPolicy;
     this.announceQueue = options.announceQueue || null;
     this.subAgentExecutor = options.subAgentExecutor || null;
     this.boardService = options.boardService || null;
@@ -206,10 +221,44 @@ export class Agent {
     shouldStop?: ShouldStopCallback,
     providerOverride?: LLMProvider
   ): Promise<AgentResult> {
+    // Session lane serialization: ensure sequential processing per session
+    return enqueueInLane(`session:${sessionId}`, async () => {
+      return this._processMessageInner(sessionId, userMessage, attachments, onProgress, shouldStop, providerOverride);
+    }, { warnAfterMs: 5000 });
+  }
+
+  /**
+   * Inner processMessage implementation (called within session lane).
+   */
+  private async _processMessageInner(
+    sessionId: string,
+    userMessage: string,
+    attachments?: Attachment[],
+    onProgress?: ProgressCallback,
+    shouldStop?: ShouldStopCallback,
+    providerOverride?: LLMProvider
+  ): Promise<AgentResult> {
     const session = await this.sessionManager.getSession(sessionId);
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
     }
+
+    // Emit agent:start and message:received hooks
+    triggerHook({
+      type: 'agent',
+      action: 'start',
+      sessionId,
+      context: { userMessage: userMessage.slice(0, 200) },
+      timestamp: new Date(),
+    }).catch(() => {}); // Fire and forget
+
+    triggerHook({
+      type: 'message',
+      action: 'received',
+      sessionId,
+      context: { messageLength: userMessage.length },
+      timestamp: new Date(),
+    }).catch(() => {});
 
     // Single-user bot: use canonical 'default' userId for all memory operations.
     // This keeps memories unified across channels (Telegram, WebSocket, etc.).
@@ -416,9 +465,17 @@ export class Agent {
       }
 
       // Refresh tool definitions each iteration so hot-loaded skills appear immediately
-      const tools = this.skillRegistry
+      // Apply tool policy pipeline to filter available tools
+      let tools = this.skillRegistry
         ? this.skillRegistry.getToolDefinitions()
         : [];
+      if (tools.length > 0) {
+        const channelId = session?.metadata?.channelId as string | undefined;
+        tools = applyToolPolicyPipeline(tools, [
+          { label: 'global', policy: this.toolPolicy },
+          { label: `channel:${channelId || 'unknown'}` },
+        ]);
+      }
 
       // Check budget before each iteration
       if (this.costTracker) {
@@ -452,21 +509,22 @@ export class Agent {
         }
       }
 
-      // Enable thinking for providers that support it (complexity gating removed —
-      // the model decides internally how much to think based on the query)
+      // Map granular thinking level to provider-specific params
       const providerSupportsThinking = activeProvider.name === 'moonshot' || activeProvider.name === 'openai';
-      const useThinking = this.enableThinking && providerSupportsThinking;
+      const effectiveThinkLevel = providerSupportsThinking ? this.thinkLevel : 'off';
+      const thinkParams = mapThinkLevelToProvider(effectiveThinkLevel, activeProvider.name, '');
 
       // Build completion request
       // Reasoning models (GPT-5.2, o3, etc.) need higher token limit since
       // reasoning tokens count against max_completion_tokens
-      const maxTokens = useThinking && activeProvider.name === 'openai' ? 16384 : 4096;
+      const maxTokens = thinkParams.enableThinking && activeProvider.name === 'openai' ? 16384 : 4096;
       const request: CompletionRequest = {
         messages,
         system: systemPrompt,
         tools: tools.length > 0 ? tools : undefined,
         maxTokens,
-        enableThinking: useThinking,
+        enableThinking: thinkParams.enableThinking,
+        thinkingBudgetTokens: thinkParams.thinkingBudgetTokens,
       };
 
       this.logger.info({ iteration: iterations, messageCount: messages.length, provider: activeProvider.name }, 'Agent iteration starting');
@@ -594,27 +652,43 @@ export class Agent {
       });
       this.logger.info({ iteration: iterations }, 'Tool results added to session, continuing loop');
 
-      // Doom loop detection: check if the model is stuck calling the same tools repeatedly
-      const toolCallSignatures = toolUses.map(t => `${t.name}:${JSON.stringify(t.input)}`);
-      const sessionToolCalls = this.recentToolCalls.get(sessionId) || [];
-      sessionToolCalls.push(...toolCallSignatures);
-      // Keep only the last N*2 signatures (enough to detect repeats)
-      const maxHistory = Agent.DOOM_LOOP_THRESHOLD * 2;
-      if (sessionToolCalls.length > maxHistory) {
-        sessionToolCalls.splice(0, sessionToolCalls.length - maxHistory);
+      // Enhanced tool loop detection via ToolLoopDetector
+      for (const t of toolUses) {
+        this.toolLoopDetector.recordToolCall(sessionId, t.name, t.input, t.id);
       }
-      this.recentToolCalls.set(sessionId, sessionToolCalls);
+      // Record outcomes from tool results
+      for (const result of toolResults) {
+        if (result.type === 'tool_result') {
+          const tr = result as { tool_use_id: string; content: string };
+          this.toolLoopDetector.recordToolOutcome(sessionId, tr.tool_use_id, tr.content);
+        }
+      }
 
-      if (sessionToolCalls.length >= Agent.DOOM_LOOP_THRESHOLD) {
-        const lastN = sessionToolCalls.slice(-Agent.DOOM_LOOP_THRESHOLD);
-        const allIdentical = lastN.every(sig => sig === lastN[0]);
-        if (allIdentical) {
-          this.logger.warn({ sessionId, tool: toolUses[0]?.name, iterations }, 'Doom loop detected — same tool call repeated');
-          await this.sessionManager.addMessage(sessionId, {
-            role: 'user',
-            content: `[System: Detected ${Agent.DOOM_LOOP_THRESHOLD} identical consecutive tool calls (${toolUses[0]?.name}). This looks like an infinite loop. Please try a different approach or ask the user for clarification.]`,
-          });
-          // Let the loop continue one more time so the LLM sees the warning and can self-correct
+      const loopDetection = this.toolLoopDetector.detect(sessionId);
+      if (loopDetection) {
+        this.logger.warn(
+          { sessionId, kind: loopDetection.kind, severity: loopDetection.severity, tool: loopDetection.toolName, count: loopDetection.count },
+          'Tool loop detected'
+        );
+
+        // Emit hook
+        triggerHook({
+          type: 'tool',
+          action: 'loop_detected',
+          sessionId,
+          context: { kind: loopDetection.kind, severity: loopDetection.severity, toolName: loopDetection.toolName, count: loopDetection.count },
+          timestamp: new Date(),
+        }).catch(() => {});
+
+        await this.sessionManager.addMessage(sessionId, {
+          role: 'user',
+          content: `[System: ${loopDetection.message}]`,
+        });
+
+        // On block severity, force exit the loop
+        if (loopDetection.severity === 'block') {
+          finalResponse = `I got stuck in a loop and had to stop. ${loopDetection.message}`;
+          break;
         }
       }
 
@@ -636,8 +710,17 @@ export class Agent {
       }
     }
 
-    // Clean up doom loop tracker for this session
-    this.recentToolCalls.delete(sessionId);
+    // Clean up tool loop detector for this session
+    this.toolLoopDetector.clearSession(sessionId);
+
+    // Emit agent:complete hook
+    triggerHook({
+      type: 'agent',
+      action: 'complete',
+      sessionId,
+      context: { iterations, inputTokens: totalInputTokens, outputTokens: totalOutputTokens },
+      timestamp: new Date(),
+    }).catch(() => {});
 
     // Record token usage
     const tokenUsage = { inputTokens: totalInputTokens, outputTokens: totalOutputTokens };
@@ -683,6 +766,15 @@ export class Agent {
         this.logger.warn({ error: (error as Error).message }, 'Post-image fact extraction failed');
       });
     }
+
+    // Emit message:sent hook
+    triggerHook({
+      type: 'message',
+      action: 'sent',
+      sessionId,
+      context: { responseLength: finalResponse.length, iterations },
+      timestamp: new Date(),
+    }).catch(() => {});
 
     return {
       response: finalResponse,
@@ -1227,7 +1319,38 @@ Only install skills when the user asks, or when you determine a skill would help
               this.logger.warn({ error: (pruneError as Error).message }, 'Pruned request still overflowed, trying emergency compression');
             }
 
-            // Layer 1b: Emergency compress — keep only last 3 messages
+            // Layer 1b: Progressive compaction — summarize older messages, keep recent 6
+            try {
+              const compactionResult = await progressiveCompact(
+                request.messages,
+                provider,
+                this.contextManager?.getMaxContextTokens() || 128000,
+                { preserveLastN: 6 }
+              );
+              if (compactionResult.summary) {
+                this.logger.info(
+                  { originalMessages: request.messages.length, compactedMessages: compactionResult.compactedMessages.length },
+                  'Progressive compaction applied'
+                );
+                // Emit compaction hook
+                triggerHook({
+                  type: 'agent',
+                  action: 'compaction',
+                  sessionId,
+                  context: { messagesBefore: request.messages.length, messagesAfter: compactionResult.compactedMessages.length },
+                  timestamp: new Date(),
+                }).catch(() => {});
+                try {
+                  return await provider.complete({ ...request, messages: compactionResult.compactedMessages });
+                } catch (compactError) {
+                  this.logger.warn({ error: (compactError as Error).message }, 'Progressive compaction still overflowed');
+                }
+              }
+            } catch (compactErr) {
+              this.logger.warn({ error: (compactErr as Error).message }, 'Progressive compaction failed, trying emergency compress');
+            }
+
+            // Layer 1c: Emergency compress — keep only last 3 messages
             const compressed = request.messages.slice(-3);
             const compressedRequest = { ...request, messages: compressed };
             this.logger.info({ compressedMessages: 3 }, 'Emergency compression applied');
@@ -1334,6 +1457,15 @@ Only install skills when the user asks, or when you determine a skill would help
     userId?: string,
     onProgress?: ProgressCallback
   ): Promise<ContentBlock> {
+    // Emit tool:before_call hook
+    triggerHook({
+      type: 'tool',
+      action: 'before_call',
+      sessionId,
+      context: { toolName: toolUse.name, input: toolUse.input },
+      timestamp: new Date(),
+    }).catch(() => {});
+
     // Resolve skill — with auto-repair for hallucinated names
     let skill = this.skillRegistry?.getSkill(toolUse.name) || null;
 

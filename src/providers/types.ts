@@ -68,6 +68,8 @@ export interface CompletionRequest {
   stopSequences?: string[];
   /** Enable extended thinking for supported models (e.g., Kimi K2.5) */
   enableThinking?: boolean;
+  /** Token budget for thinking/reasoning (used by thinking levels system) */
+  thinkingBudgetTokens?: number;
 }
 
 // Token usage tracking

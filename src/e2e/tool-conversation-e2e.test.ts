@@ -795,20 +795,27 @@ describe('E2E Tool Conversation', () => {
       const lastRequest = allRequests[allRequests.length - 1];
       const lastMessages = lastRequest.messages || [];
 
-      // Check that there's a warning message about repetition/doom loop
+      // Check that there's a warning message about repetition/doom loop/no-progress
       const hasWarning = lastMessages.some(m => {
         if (typeof m.content === 'string') {
-          return m.content.toLowerCase().includes('loop') ||
-                 m.content.toLowerCase().includes('repetitive') ||
-                 m.content.toLowerCase().includes('same tool');
+          const lc = m.content.toLowerCase();
+          return lc.includes('loop') ||
+                 lc.includes('repetitive') ||
+                 lc.includes('same tool') ||
+                 lc.includes('no-progress') ||
+                 lc.includes('same args');
         }
         if (Array.isArray(m.content)) {
           return (m.content as Array<{ type: string; text?: string }>).some(
-            b => b.type === 'text' && (
-              b.text?.toLowerCase().includes('loop') ||
-              b.text?.toLowerCase().includes('repetitive') ||
-              b.text?.toLowerCase().includes('same tool')
-            )
+            b => {
+              if (b.type !== 'text' || !b.text) return false;
+              const lc = b.text.toLowerCase();
+              return lc.includes('loop') ||
+                     lc.includes('repetitive') ||
+                     lc.includes('same tool') ||
+                     lc.includes('no-progress') ||
+                     lc.includes('same args');
+            }
           );
         }
         return false;

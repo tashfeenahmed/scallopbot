@@ -686,6 +686,19 @@ export class ScallopDatabase {
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
       );
+
+      -- Transcript chunks for cross-session recall (#9)
+      CREATE TABLE IF NOT EXISTS transcript_chunks (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        content TEXT NOT NULL,
+        message_range_start INTEGER NOT NULL,
+        message_range_end INTEGER NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_transcript_chunks_session ON transcript_chunks(session_id);
+      CREATE INDEX IF NOT EXISTS idx_transcript_chunks_user ON transcript_chunks(user_id);
     `);
 
     // Migration: Add source column to existing databases
@@ -715,6 +728,9 @@ export class ScallopDatabase {
 
     // Migration: Backfill board_status for legacy items where it's NULL
     this.migrateBackfillBoardStatus();
+
+    // Migration: Create FTS5 virtual table for transcript chunk search
+    this.migrateCreateTranscriptFTS();
   }
 
   /**
@@ -1021,6 +1037,24 @@ export class ScallopDatabase {
       if (error instanceof Error) {
         // eslint-disable-next-line no-console
         console.warn(`[migration] migrateBackfillBoardStatus: ${error.message}`);
+      }
+    }
+  }
+
+  /**
+   * Create FTS5 virtual table for transcript chunk full-text search
+   */
+  private migrateCreateTranscriptFTS(): void {
+    try {
+      // FTS5 content table for BM25 keyword search over transcript chunks
+      this.db.exec(`
+        CREATE VIRTUAL TABLE IF NOT EXISTS transcript_chunks_fts
+        USING fts5(content, content_rowid='rowid');
+      `);
+    } catch (error) {
+      if (error instanceof Error) {
+        // eslint-disable-next-line no-console
+        console.warn(`[migration] migrateCreateTranscriptFTS: ${error.message}`);
       }
     }
   }

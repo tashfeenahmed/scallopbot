@@ -37,6 +37,7 @@ import {
   runGapScanner,
   runBoardReview,
 } from './gardener-sleep-steps.js';
+import { triggerHook } from '../hooks/hooks.js';
 
 export interface BackgroundGardenerOptions {
   scallopStore: ScallopMemoryStore;
@@ -252,6 +253,14 @@ export class BackgroundGardener {
     this.logger.info('Deep tick: full consolidation starting');
     const ctx = this.buildContext();
 
+    triggerHook({
+      type: 'memory',
+      action: 'consolidate',
+      sessionId: '',
+      context: { phase: 'deep_tick_start' },
+      timestamp: new Date(),
+    }).catch(() => {});
+
     runFullDecay(ctx);
     // Memory fusion removed — NREM consolidation (sleep tick) is a strict superset
     // with wider prominence window, cross-category clustering, and relation context.
@@ -267,6 +276,14 @@ export class BackgroundGardener {
     if (this.workspace) {
       await this.cleanupOutputDir(this.workspace);
     }
+
+    triggerHook({
+      type: 'memory',
+      action: 'consolidate',
+      sessionId: '',
+      context: { phase: 'deep_tick_complete' },
+      timestamp: new Date(),
+    }).catch(() => {});
 
     this.logger.info('Deep tick complete');
   }

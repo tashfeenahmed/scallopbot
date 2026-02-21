@@ -126,6 +126,25 @@ const memorySchema = z.object({
   persist: z.boolean().default(true),
   /** Path to SQLite database (relative to workspace) */
   dbPath: z.string().default('memories.db'),
+  /** Enable MMR (Maximal Marginal Relevance) for search diversity */
+  mmrEnabled: z.boolean().default(false),
+  /** MMR lambda: balance between relevance (1.0) and diversity (0.0) */
+  mmrLambda: z.number().min(0).max(1).default(0.7),
+});
+
+// Tool policy configuration schema
+const toolPolicyEntrySchema = z.object({
+  allow: z.array(z.string()).optional(),
+  deny: z.array(z.string()).optional(),
+});
+
+const toolPolicySchema = z.object({
+  /** Global tool policy — owner-controlled defaults */
+  policy: toolPolicyEntrySchema.optional(),
+  /** Per-channel tool policies */
+  channelPolicies: z.record(z.string(), toolPolicyEntrySchema).optional(),
+  /** Named tool profiles */
+  profiles: z.record(z.string(), toolPolicyEntrySchema).optional(),
 });
 
 // Gateway configuration schema
@@ -163,7 +182,8 @@ export const configSchema = z.object({
   routing: routingSchema.default({ providerOrder: ['anthropic', 'openai', 'groq', 'ollama'], enableComplexityAnalysis: true }),
   cost: costSchema.default({ warningThreshold: 0.75 }),
   context: contextSchema.default({ hotWindowSize: 200, maxContextTokens: 128000, compressionThreshold: 0.7, maxToolOutputBytes: 30000 }),
-  memory: memorySchema.default({ filePath: 'memories.jsonl', persist: true, dbPath: 'memories.db' }),
+  memory: memorySchema.default({ filePath: 'memories.jsonl', persist: true, dbPath: 'memories.db', mmrEnabled: false, mmrLambda: 0.7 }),
+  tools: toolPolicySchema.default({}),
   gateway: gatewaySchema.default({ port: DEFAULT_API_PORT, host: DEFAULT_HOST }),
   tailscale: tailscaleSchema.default({ mode: 'off', resetOnExit: true }),
   subagent: subagentSchema.default({
@@ -191,6 +211,7 @@ export type MemoryConfig = z.infer<typeof memorySchema>;
 export type GatewayConfig = z.infer<typeof gatewaySchema>;
 export type TailscaleConfig = z.infer<typeof tailscaleSchema>;
 export type SubagentConfig = z.infer<typeof subagentSchema>;
+export type ToolPolicyConfig = z.infer<typeof toolPolicySchema>;
 
 /**
  * Load configuration from environment variables
@@ -294,7 +315,10 @@ export function loadConfig(): Config {
       filePath: process.env.MEMORY_FILE_PATH || 'memories.jsonl',
       persist: process.env.MEMORY_PERSIST !== 'false',
       dbPath: process.env.MEMORY_DB_PATH || 'memories.db',
+      mmrEnabled: process.env.MMR_ENABLED === 'true',
+      mmrLambda: process.env.MMR_LAMBDA ? parseFloat(process.env.MMR_LAMBDA) : 0.7,
     },
+    tools: {},
     gateway: {
       port: process.env.GATEWAY_PORT ? parseInt(process.env.GATEWAY_PORT, 10) : DEFAULT_API_PORT,
       host: process.env.GATEWAY_HOST || DEFAULT_HOST,

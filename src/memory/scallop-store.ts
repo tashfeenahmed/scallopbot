@@ -27,6 +27,7 @@ import { calculateBM25Score, buildDocFreqMap, SEARCH_WEIGHTS, type BM25Options }
 import { rerankResults, type RerankCandidate } from './reranker.js';
 import type { LLMProvider } from '../providers/types.js';
 import { projectTo3D } from '../utils/pca.js';
+import { applyMMR, type MMRItem } from './mmr.js';
 
 /**
  * Options for ScallopMemoryStore
@@ -50,6 +51,10 @@ export interface ScallopMemoryStoreOptions {
   relationsProvider?: LLMProvider;
   /** Optional spreading activation config for related memory retrieval */
   activationConfig?: ActivationConfig;
+  /** Enable MMR (Maximal Marginal Relevance) for search diversity */
+  mmrEnabled?: boolean;
+  /** MMR lambda: balance between relevance (1.0) and diversity (0.0). Default: 0.7 */
+  mmrLambda?: number;
 }
 
 /**
@@ -113,6 +118,8 @@ export class ScallopMemoryStore {
   private embedder?: EmbeddingProvider;
   private rerankProvider?: LLMProvider;
   private activationConfig?: ActivationConfig;
+  private mmrEnabled: boolean;
+  private mmrLambda: number;
   private decayEngine: DecayEngine;
   private relationGraph: RelationGraph;
   private profileManager: ProfileManager;
@@ -125,6 +132,8 @@ export class ScallopMemoryStore {
     this.embedder = options.embedder ? new CachedEmbedder(options.embedder) : undefined;
     this.rerankProvider = options.rerankProvider;
     this.activationConfig = options.activationConfig;
+    this.mmrEnabled = options.mmrEnabled ?? false;
+    this.mmrLambda = options.mmrLambda ?? 0.7;
 
     // Initialize components
     this.decayEngine = new DecayEngine(options.decayConfig);
@@ -533,6 +542,17 @@ export class ScallopMemoryStore {
         this.logger.warn({ error: (err as Error).message }, 'LLM re-ranking failed, using original scores');
         topResults = topResults.slice(0, limit);
       }
+    }
+
+    // Apply MMR for search diversity (after reranking, before related memory expansion)
+    if (this.mmrEnabled && topResults.length >= 3) {
+      const mmrItems: MMRItem<ScallopSearchResult>[] = topResults.map(r => ({
+        item: r,
+        score: r.score,
+        getText: () => r.memory.content,
+      }));
+      const mmrResults = applyMMR(mmrItems, { lambda: this.mmrLambda });
+      topResults = mmrResults.map(r => r.item);
     }
 
     // Add related memories using spreading activation (ranked by activation score)

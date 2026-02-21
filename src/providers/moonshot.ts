@@ -133,10 +133,14 @@ export class MoonshotProvider implements LLMProvider {
 
     // Use higher token budget for thinking mode since reasoning tokens count against max_tokens
     const defaultTokens = enableThinking ? THINKING_MAX_TOKENS : DEFAULT_MAX_TOKENS;
+    // thinkingBudgetTokens from granular thinking levels overrides the default max_tokens
+    const effectiveMaxTokens = request.thinkingBudgetTokens && enableThinking
+      ? Math.max(request.thinkingBudgetTokens, defaultTokens)
+      : (request.maxTokens || defaultTokens);
     const params: OpenAI.ChatCompletionCreateParams & { thinking?: { type: string } } = {
       model: this.model,
       messages,
-      max_tokens: request.maxTokens || defaultTokens,
+      max_tokens: effectiveMaxTokens,
       temperature,
       ...(topP !== undefined && { top_p: topP }),
       ...(request.stopSequences && { stop: request.stopSequences }),
