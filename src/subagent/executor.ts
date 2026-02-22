@@ -411,11 +411,11 @@ export class SubAgentExecutor {
     lines.push('5. Synthesize findings concisely.');
     lines.push('');
     lines.push('## RULES');
-    lines.push(`1. Complete the task and respond with your findings/results.`);
+    lines.push(`1. Complete the task, then write a short user-facing summary of what you did and what the result was. This summary is sent directly to the user — don't just say "Done", describe the outcome.`);
     lines.push(`2. End your response with [DONE] when finished.`);
     lines.push(`3. You have a LIMITED iteration budget (${this.config.maxIterations} iterations). Be efficient.`);
     lines.push(`4. Do NOT send messages to the user, manage goals, set reminders, or spawn agents.`);
-    lines.push(`5. Focus ONLY on the assigned task. Be concise.`);
+    lines.push(`5. Focus ONLY on the assigned task.`);
     lines.push('');
     lines.push(`Current date: ${new Date().toISOString().split('T')[0]}`);
     lines.push(`Workspace: ${this.workspace}`);

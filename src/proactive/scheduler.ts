@@ -43,7 +43,7 @@ function sanitizeAgentResponse(raw: string): string {
     .trim();
 
   // If nothing meaningful remains, return empty
-  if (cleaned.length < 5) return '';
+  if (cleaned.length === 0) return '';
   return cleaned;
 }
 
