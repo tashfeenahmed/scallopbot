@@ -22,6 +22,12 @@ import { parseUserIdPrefix } from '../triggers/types.js';
 import { formatProactiveMessage, type ProactiveFormatInput } from './proactive-format.js';
 import { detectProactiveEngagement } from './feedback.js';
 import { getRecentChatContext } from './chat-context.js';
+import { wordOverlap } from '../utils/text-similarity.js';
+
+/** How long to remember recently sent messages for dedup (30 minutes) */
+const SEND_DEDUP_WINDOW_MS = 30 * 60 * 1000;
+/** Word overlap threshold to consider two proactive messages "the same" */
+const SEND_DEDUP_THRESHOLD = 0.5;
 
 /**
  * Strip internal markup, XML function calls, error prefixes, and thinking blocks
@@ -98,6 +104,8 @@ export class UnifiedScheduler {
   private pendingEvaluation = false;
   /** Counter for periodic dedup consolidation (every ~10 min) */
   private evalTickCount = 0;
+  /** Recently sent messages per user for send-time dedup: userId → [{message, time}] */
+  private recentSends = new Map<string, { message: string; time: number }[]>();
 
   constructor(options: UnifiedSchedulerOptions) {
     this.db = options.db;
@@ -377,6 +385,13 @@ export class UnifiedScheduler {
     message: string,
     sourceOverride?: 'task_result' | 'inner_thoughts' | 'gap_scanner',
   ): Promise<void> {
+    // Send-time dedup: skip if a similar message was sent recently to this user
+    if (this.isDuplicateSend(item.userId, message)) {
+      this.logger.info({ itemId: item.id, userId: item.userId }, 'Skipping proactive message — similar one sent recently');
+      return;
+    }
+    this.recordSend(item.userId, message);
+
     if (item.source === 'agent') {
       const { channel } = parseUserIdPrefix(item.userId);
 
@@ -419,6 +434,32 @@ export class UnifiedScheduler {
 
     // User-sourced items or unknown channels: send as-is
     await this.onSendMessage(item.userId, message);
+  }
+
+  /**
+   * Check if a similar message was sent to this user recently.
+   */
+  private isDuplicateSend(userId: string, message: string): boolean {
+    const now = Date.now();
+    const recent = this.recentSends.get(userId);
+    if (!recent) return false;
+
+    // Prune expired entries
+    const valid = recent.filter(r => now - r.time < SEND_DEDUP_WINDOW_MS);
+    if (valid.length !== recent.length) {
+      this.recentSends.set(userId, valid);
+    }
+
+    return valid.some(r => wordOverlap(r.message, message, { minWordLength: 2 }) >= SEND_DEDUP_THRESHOLD);
+  }
+
+  /**
+   * Record a message as sent for future dedup checks.
+   */
+  private recordSend(userId: string, message: string): void {
+    const list = this.recentSends.get(userId) || [];
+    list.push({ message, time: Date.now() });
+    this.recentSends.set(userId, list);
   }
 
   /**
