@@ -44,8 +44,13 @@ function sanitizeAgentResponse(raw: string): string {
     .replace(/<invoke[\s\S]*?(<\/invoke>|$)/g, '')
     // Strip <*> blocks (thinking, etc.)
     .replace(/<\w+[\s\S]*?(<\/antml:\w+>|$)/g, '')
+    // Strip leaked <tool>...</tool>, <query>...</query>, <command>...</command> etc.
+    .replace(/<(tool|query|command|result|output|search_query|input|args|parameters|tool_name|tool_input)\b[^>]*>[\s\S]*?<\/\1>/g, '')
     // Strip "Error: ..." lines (internal errors, not user-facing)
     .replace(/^Error:\s*.*/gm, '')
+    // Collapse excess whitespace left behind by stripping
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
     .trim();
 
   // If nothing meaningful remains, return empty
@@ -275,6 +280,15 @@ export class UnifiedScheduler {
         return true;
       });
 
+      // Sort: tasks before nudges so task results establish dedup priority.
+      // When a task fires first, its description gets recorded in recentSends,
+      // so a companion nudge with similar wording gets suppressed.
+      readyItems.sort((a, b) => {
+        if (a.kind === 'task' && b.kind !== 'task') return -1;
+        if (a.kind !== 'task' && b.kind === 'task') return 1;
+        return 0;
+      });
+
       for (const item of readyItems) {
         try {
           // Task-kind items with taskConfig: execute via sub-agent
@@ -324,7 +338,7 @@ export class UnifiedScheduler {
 
   /**
    * Process a task item — execute via sub-agent, send result to user.
-   * Falls back to nudge if sub-agent fails.
+   * Silently skips if sub-agent fails (no fallback to raw task description).
    */
   private async processTask(item: ScheduledItem): Promise<void> {
     const config = item.taskConfig!;
@@ -361,18 +375,23 @@ export class UnifiedScheduler {
       const clean = sanitizeAgentResponse(result.response);
       if (clean) {
         await this.sendFormattedMessage(item, clean, 'task_result');
+        // Record task description & goal for dedup so companion nudges get suppressed
+        this.recordSend(item.userId, item.message);
+        if (config.goal && config.goal !== item.message) {
+          this.recordSend(item.userId, config.goal);
+        }
       } else {
-        // Sub-agent produced no user-facing output — send the original message as fallback
-        this.logger.warn({ itemId: item.id }, 'Sub-agent returned no user-facing content, falling back to nudge');
-        await this.sendFormattedMessage(item, item.message);
+        // Sub-agent produced no user-facing output (error, empty, or all-markup response).
+        // Don't send the raw task description — it reads like an internal to-do, not a message.
+        this.logger.warn({ itemId: item.id }, 'Sub-agent returned no user-facing content, skipping message');
       }
     } catch (err) {
+      // Infrastructure failure (no provider, session error, etc.) — don't confuse user
+      // with a raw task description. Just log and skip.
       this.logger.error(
         { itemId: item.id, error: (err as Error).message },
-        'Sub-agent execution failed, falling back to nudge'
+        'Sub-agent execution failed, skipping message'
       );
-      // Fall back to sending the pre-written message
-      await this.processNudge(item);
     }
   }
 
