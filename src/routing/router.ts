@@ -191,6 +191,17 @@ export class Router {
     request: CompletionRequest,
     tier: ModelTier
   ): Promise<ExecutionResult> {
+    // Sanitize messages before sending to any fallback provider
+    const sanitizedMessages = request.messages.filter(msg => {
+      if (msg.content == null) return false;
+      if (typeof msg.content === 'string') return msg.content.length > 0;
+      if (Array.isArray(msg.content)) return msg.content.length > 0;
+      return true;
+    });
+    const sanitizedRequest = sanitizedMessages.length !== request.messages.length
+      ? { ...request, messages: sanitizedMessages }
+      : request;
+
     const tierProviders = this.tierMapping[tier] || [];
     const attemptedProviders: string[] = [];
     const errors: Error[] = [];
@@ -208,7 +219,7 @@ export class Router {
       attemptedProviders.push(name);
 
       try {
-        const response = await provider.complete(request);
+        const response = await provider.complete(sanitizedRequest);
         return {
           response,
           provider: name,
@@ -235,7 +246,7 @@ export class Router {
       attemptedProviders.push(name);
 
       try {
-        const response = await provider.complete(request);
+        const response = await provider.complete(sanitizedRequest);
         return {
           response,
           provider: name,

@@ -153,15 +153,19 @@ export class OpenAIProvider implements LLMProvider {
             });
 
           if (msg.role === 'assistant') {
-            messages.push({
-              role: 'assistant',
-              content: textContent || null,
-              ...(toolCalls.length > 0 && { tool_calls: toolCalls }),
-            });
+            // Assistant messages can have null content when tool_calls are present
+            if (textContent || toolCalls.length > 0) {
+              messages.push({
+                role: 'assistant',
+                content: textContent || null,
+                ...(toolCalls.length > 0 && { tool_calls: toolCalls }),
+              });
+            }
           } else {
+            // User messages must have non-empty content — use placeholder if empty
             messages.push({
               role: 'user',
-              content: textContent,
+              content: textContent || '[continue]',
             });
           }
         }

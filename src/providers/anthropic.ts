@@ -103,13 +103,21 @@ export class AnthropicProvider implements LLMProvider {
   }
 
   private formatMessages(messages: CompletionRequest['messages']): Anthropic.MessageParam[] {
-    return messages.map((msg) => ({
-      role: msg.role,
-      // Filter out 'thinking' blocks from other providers (e.g., Moonshot)
-      content: Array.isArray(msg.content)
-        ? msg.content.filter((b) => b.type !== 'thinking') as unknown as Anthropic.ContentBlockParam[]
-        : msg.content,
-    }));
+    return messages
+      .filter((msg) => {
+        // Skip messages with empty/null content to avoid API errors
+        if (msg.content == null) return false;
+        if (typeof msg.content === 'string') return msg.content.length > 0;
+        if (Array.isArray(msg.content)) return msg.content.length > 0;
+        return true;
+      })
+      .map((msg) => ({
+        role: msg.role,
+        // Filter out 'thinking' blocks from other providers (e.g., Moonshot)
+        content: Array.isArray(msg.content)
+          ? msg.content.filter((b) => b.type !== 'thinking') as unknown as Anthropic.ContentBlockParam[]
+          : msg.content,
+      }));
   }
 
   private formatTools(tools: NonNullable<CompletionRequest['tools']>): Anthropic.Tool[] {
