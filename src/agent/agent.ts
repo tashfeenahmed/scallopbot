@@ -405,6 +405,7 @@ export class Agent {
     let totalInputTokens = 0;
     let totalOutputTokens = 0;
     let iterations = 0;
+    let maxTokensContinuations = 0;
     let finalResponse = '';
 
     // Agent loop
@@ -491,10 +492,19 @@ export class Agent {
       const currentSession = await this.sessionManager.getSession(sessionId);
       const rawMessages = currentSession?.messages || [];
 
+      // Sanitize messages: remove entries with empty/null content that would cause API errors
+      // (e.g., from max_tokens responses with no content, or empty tool result arrays)
+      const sanitizedMessages = rawMessages.filter(msg => {
+        if (msg.content == null) return false;
+        if (typeof msg.content === 'string') return msg.content.length > 0;
+        if (Array.isArray(msg.content)) return msg.content.length > 0;
+        return true;
+      });
+
       // Process messages through context manager (compression, deduplication)
       let messages = this.contextManager
-        ? this.contextManager.buildContextMessages(rawMessages)
-        : rawMessages;
+        ? this.contextManager.buildContextMessages(sanitizedMessages)
+        : sanitizedMessages;
 
       // Proactive overflow prevention: prune before sending to avoid wasting a round-trip
       if (this.contextManager) {
@@ -579,6 +589,39 @@ export class Agent {
         } catch (e) {
           this.logger.warn({ error: (e as Error).message }, 'Thinking progress callback failed');
         }
+      }
+
+      // Handle max_tokens with no tool use — the response was truncated
+      if (response.stopReason === 'max_tokens' && toolUses.length === 0) {
+        maxTokensContinuations++;
+
+        // Avoid infinite continuation loops
+        if (maxTokensContinuations >= 3) {
+          finalResponse = textContent || 'My response was too long and got cut off. Please try a more specific request.';
+          if (response.content.length > 0) {
+            await this.sessionManager.addMessage(sessionId, {
+              role: 'assistant',
+              content: response.content,
+            });
+          }
+          break;
+        }
+
+        // Save any partial content the LLM produced
+        if (response.content.length > 0) {
+          await this.sessionManager.addMessage(sessionId, {
+            role: 'assistant',
+            content: response.content,
+          });
+        }
+
+        // Prompt continuation so the LLM can finish
+        await this.sessionManager.addMessage(sessionId, {
+          role: 'user',
+          content: '[System: Your response was truncated due to length. Please continue or summarize concisely.]',
+        });
+        this.logger.warn({ iteration: iterations, stopReason: 'max_tokens', continuations: maxTokensContinuations }, 'Response truncated, adding continuation prompt');
+        continue;
       }
 
       // If task is explicitly complete OR no tool use with end_turn, we're done
