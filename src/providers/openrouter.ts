@@ -10,6 +10,20 @@ import { DEFAULT_MAX_RETRIES, RETRY_DELAY_MS } from './constants.js';
 const DEFAULT_MODEL = 'anthropic/claude-3.5-sonnet';
 const API_URL = 'https://openrouter.ai/api/v1/chat/completions';
 
+/** Models that support extended thinking/reasoning via OpenRouter */
+const REASONING_MODELS = new Set([
+  'qwen/qwen3-235b-a22b',
+  'qwen/qwen3-235b-a22b:free',
+  'qwen/qwen3-30b-a3b',
+  'qwen/qwen3-30b-a3b:free',
+  'qwen/qwen3-32b',
+  'qwen/qwen3-32b:free',
+  'qwen/qwen3.6-plus',
+  'qwen/qwen3.6-plus:free',
+  'deepseek/deepseek-r1',
+  'deepseek/deepseek-r1:free',
+]);
+
 export interface ProviderCharacteristics {
   speed: 'fast' | 'standard' | 'slow';
   costPerMillionTokens: number;
@@ -21,6 +35,7 @@ interface OpenRouterMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
   content: string | null;
   tool_call_id?: string;
+  reasoning_content?: string;
   tool_calls?: Array<{
     id: string;
     type: 'function';
@@ -35,6 +50,7 @@ interface OpenRouterResponse {
   choices: Array<{
     message: {
       content: string | null;
+      reasoning_content?: string | null;
       tool_calls?: Array<{
         id: string;
         type: 'function';
@@ -80,13 +96,18 @@ export class OpenRouterProvider implements LLMProvider {
     return !!this.apiKey && this.apiKey.length > 0;
   }
 
+  private isReasoningModel(): boolean {
+    return REASONING_MODELS.has(this.model) || this.model.includes('qwen3');
+  }
+
   async complete(request: CompletionRequest): Promise<CompletionResponse> {
     const messages = this.formatMessages(request);
+    const isReasoning = this.isReasoningModel();
 
     const body: Record<string, unknown> = {
       model: this.model,
       messages,
-      max_tokens: request.maxTokens || 4096,
+      max_tokens: isReasoning ? (request.maxTokens || 8192) : (request.maxTokens || 4096),
     };
 
     if (request.temperature !== undefined) {
@@ -134,6 +155,7 @@ export class OpenRouterProvider implements LLMProvider {
 
   private formatMessages(request: CompletionRequest): OpenRouterMessage[] {
     const messages: OpenRouterMessage[] = [];
+    const isReasoning = this.isReasoningModel();
 
     // Add system message if present
     if (request.system) {
@@ -186,11 +208,21 @@ export class OpenRouterProvider implements LLMProvider {
             });
 
           if (msg.role === 'assistant') {
+            // For reasoning models, preserve thinking content in history
+            let reasoningContent: string | undefined;
+            if (isReasoning) {
+              const thinkingBlocks = msg.content
+                .filter((c) => c.type === 'thinking')
+                .map((c) => (c as { type: 'thinking'; thinking: string }).thinking);
+              reasoningContent = thinkingBlocks.length > 0 ? thinkingBlocks.join('\n') : undefined;
+            }
+
             messages.push({
               role: 'assistant',
               content: textContent || null,
               ...(toolCalls.length > 0 && { tool_calls: toolCalls }),
-            });
+              ...(isReasoning && reasoningContent && { reasoning_content: reasoningContent }),
+            } as OpenRouterMessage);
           } else {
             messages.push({
               role: 'user',
@@ -207,6 +239,11 @@ export class OpenRouterProvider implements LLMProvider {
   private formatResponse(data: OpenRouterResponse): CompletionResponse {
     const choice = data.choices[0];
     const content: ContentBlock[] = [];
+
+    // Extract reasoning/thinking content if present (Qwen3, DeepSeek-R1, etc.)
+    if (choice.message.reasoning_content) {
+      content.push({ type: 'thinking', thinking: choice.message.reasoning_content });
+    }
 
     if (choice.message.content) {
       content.push({ type: 'text', text: choice.message.content });

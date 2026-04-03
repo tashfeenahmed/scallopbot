@@ -166,6 +166,129 @@ describe('OpenRouterProvider', () => {
     });
   });
 
+  describe('reasoning support', () => {
+    it('should extract reasoning_content from response as ThinkingContent', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            choices: [
+              {
+                message: {
+                  reasoning_content: 'Let me think about this step by step...',
+                  content: 'The answer is 42.',
+                  tool_calls: null,
+                },
+                finish_reason: 'stop',
+              },
+            ],
+            usage: { prompt_tokens: 20, completion_tokens: 30 },
+            model: 'qwen/qwen3.6-plus:free',
+          }),
+      });
+
+      const qwenProvider = new OpenRouterProvider({
+        apiKey: 'test-key',
+        model: 'qwen/qwen3.6-plus:free',
+      });
+
+      const response = await qwenProvider.complete({
+        messages: [{ role: 'user', content: 'What is the meaning of life?' }],
+      });
+
+      expect(response.content).toHaveLength(2);
+      expect(response.content[0]).toEqual({
+        type: 'thinking',
+        thinking: 'Let me think about this step by step...',
+      });
+      expect(response.content[1]).toEqual({
+        type: 'text',
+        text: 'The answer is 42.',
+      });
+    });
+
+    it('should use higher max_tokens for reasoning models', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            choices: [{ message: { content: 'OK' }, finish_reason: 'stop' }],
+            usage: { prompt_tokens: 10, completion_tokens: 5 },
+            model: 'qwen/qwen3.6-plus:free',
+          }),
+      });
+
+      const qwenProvider = new OpenRouterProvider({
+        apiKey: 'test-key',
+        model: 'qwen/qwen3.6-plus:free',
+      });
+
+      await qwenProvider.complete({
+        messages: [{ role: 'user', content: 'Hi' }],
+      });
+
+      const requestBody = JSON.parse(mockFetch.mock.calls[0][1].body);
+      expect(requestBody.max_tokens).toBe(8192);
+    });
+
+    it('should preserve thinking blocks in assistant message history', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            choices: [{ message: { content: 'Follow-up' }, finish_reason: 'stop' }],
+            usage: { prompt_tokens: 30, completion_tokens: 10 },
+            model: 'qwen/qwen3.6-plus:free',
+          }),
+      });
+
+      const qwenProvider = new OpenRouterProvider({
+        apiKey: 'test-key',
+        model: 'qwen/qwen3.6-plus:free',
+      });
+
+      await qwenProvider.complete({
+        messages: [
+          { role: 'user', content: 'What is 2+2?' },
+          {
+            role: 'assistant',
+            content: [
+              { type: 'thinking', thinking: 'Simple arithmetic: 2+2=4' },
+              { type: 'text', text: 'The answer is 4.' },
+            ],
+          },
+          { role: 'user', content: 'Are you sure?' },
+        ],
+      });
+
+      const requestBody = JSON.parse(mockFetch.mock.calls[0][1].body);
+      const assistantMsg = requestBody.messages.find(
+        (m: { role: string }) => m.role === 'assistant'
+      );
+      expect(assistantMsg.reasoning_content).toBe('Simple arithmetic: 2+2=4');
+      expect(assistantMsg.content).toBe('The answer is 4.');
+    });
+
+    it('should not add reasoning fields for non-reasoning models', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            choices: [{ message: { content: 'OK' }, finish_reason: 'stop' }],
+            usage: { prompt_tokens: 10, completion_tokens: 5 },
+            model: 'anthropic/claude-3.5-sonnet',
+          }),
+      });
+
+      await provider.complete({
+        messages: [{ role: 'user', content: 'Hi' }],
+      });
+
+      const requestBody = JSON.parse(mockFetch.mock.calls[0][1].body);
+      expect(requestBody.max_tokens).toBe(4096);
+    });
+  });
+
   describe('model routing', () => {
     it('should support switching models dynamically', () => {
       expect(provider.model).toBe('anthropic/claude-3.5-sonnet');
