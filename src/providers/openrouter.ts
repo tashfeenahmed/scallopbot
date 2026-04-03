@@ -51,6 +51,7 @@ interface OpenRouterResponse {
     message: {
       content: string | null;
       reasoning_content?: string | null;
+      reasoning?: string | null;
       tool_calls?: Array<{
         id: string;
         type: 'function';
@@ -241,8 +242,10 @@ export class OpenRouterProvider implements LLMProvider {
     const content: ContentBlock[] = [];
 
     // Extract reasoning/thinking content if present (Qwen3, DeepSeek-R1, etc.)
-    if (choice.message.reasoning_content) {
-      content.push({ type: 'thinking', thinking: choice.message.reasoning_content });
+    // OpenRouter returns reasoning in either `reasoning_content` or `reasoning` depending on model
+    const reasoning = choice.message.reasoning_content || choice.message.reasoning;
+    if (reasoning) {
+      content.push({ type: 'thinking', thinking: reasoning });
     }
 
     if (choice.message.content) {

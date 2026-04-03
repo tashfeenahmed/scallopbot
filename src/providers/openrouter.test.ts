@@ -207,6 +207,46 @@ describe('OpenRouterProvider', () => {
       });
     });
 
+    it('should extract reasoning field (Qwen3 format) as ThinkingContent', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            choices: [
+              {
+                message: {
+                  reasoning: 'Step 1: analyze the question...',
+                  content: 'Here is my answer.',
+                  tool_calls: null,
+                },
+                finish_reason: 'stop',
+              },
+            ],
+            usage: { prompt_tokens: 20, completion_tokens: 30 },
+            model: 'qwen/qwen3.6-plus:free',
+          }),
+      });
+
+      const qwenProvider = new OpenRouterProvider({
+        apiKey: 'test-key',
+        model: 'qwen/qwen3.6-plus:free',
+      });
+
+      const response = await qwenProvider.complete({
+        messages: [{ role: 'user', content: 'Explain something' }],
+      });
+
+      expect(response.content).toHaveLength(2);
+      expect(response.content[0]).toEqual({
+        type: 'thinking',
+        thinking: 'Step 1: analyze the question...',
+      });
+      expect(response.content[1]).toEqual({
+        type: 'text',
+        text: 'Here is my answer.',
+      });
+    });
+
     it('should use higher max_tokens for reasoning models', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
