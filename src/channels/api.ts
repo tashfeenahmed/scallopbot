@@ -1075,8 +1075,15 @@ export class ApiChannel implements Channel, TriggerSource {
     moonshot: 'Moonshot (Kimi)',
     xai: 'xAI (Grok)',
     ollama: 'Ollama (local)',
-    openrouter: 'OpenRouter',
   };
+
+  /** Get display label for a provider, including model name for multi-model providers like OpenRouter */
+  private getProviderLabel(provider: { name: string; model?: string }): string {
+    if (provider.name === 'openrouter' && provider.model) {
+      return `OpenRouter (${provider.model})`;
+    }
+    return ApiChannel.PROVIDER_LABELS[provider.name] || provider.name;
+  }
 
   private formatTokens(tokens: number): string {
     if (tokens >= 1_000_000) return (tokens / 1_000_000).toFixed(2) + 'M';
@@ -1221,13 +1228,14 @@ export class ApiChannel implements Channel, TriggerSource {
         }
 
         if (!args) {
+          const currentProvider = available.find(p => p.name === config.modelId);
           const current = config.modelId === 'auto'
             ? 'auto (smart routing)'
-            : ApiChannel.PROVIDER_LABELS[config.modelId] || config.modelId;
+            : currentProvider ? this.getProviderLabel(currentProvider as { name: string; model?: string }) : config.modelId;
 
           let list = '';
           available.forEach((p, i) => {
-            const label = ApiChannel.PROVIDER_LABELS[p.name] || p.name;
+            const label = this.getProviderLabel(p as { name: string; model?: string });
             const marker = config.modelId === p.name ? ' ✓' : '';
             list += `  **${i + 1}.** \`${p.name}\` — ${label}${marker}\n`;
           });
@@ -1256,9 +1264,10 @@ export class ApiChannel implements Channel, TriggerSource {
         }
 
         await this.configManager.updateUserConfig('default', { modelId: selectedName });
+        const selectedProvider = available.find(p => p.name === selectedName);
         const label = selectedName === 'auto'
           ? 'auto (smart routing)'
-          : ApiChannel.PROVIDER_LABELS[selectedName] || selectedName;
+          : selectedProvider ? this.getProviderLabel(selectedProvider as { name: string; model?: string }) : selectedName;
         this.sendWsMessage(ws, { type: 'response', content: `Switched to **${label}**` });
         this.logger.info({ clientId, model: selectedName }, 'WebSocket user switched model');
         return true;
@@ -1273,9 +1282,10 @@ export class ApiChannel implements Channel, TriggerSource {
         const personalityPreview = cfg.customPersonality
           ? cfg.customPersonality.substring(0, 100) + (cfg.customPersonality.length > 100 ? '...' : '')
           : 'Default';
+        const modelProv = this.providerRegistry?.getProvider(cfg.modelId);
         const modelLabel = cfg.modelId === 'auto'
           ? 'auto (smart routing)'
-          : ApiChannel.PROVIDER_LABELS[cfg.modelId] || cfg.modelId;
+          : modelProv ? this.getProviderLabel(modelProv as { name: string; model?: string }) : cfg.modelId;
 
         const content =
           `**Your Settings**\n\n` +

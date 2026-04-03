@@ -4,9 +4,12 @@ import * as path from 'path';
 import * as os from 'os';
 import { execFileSync } from 'child_process';
 
+const projectRoot = path.resolve(__dirname, '../../../../..');
+const tsxBin = path.join(projectRoot, 'node_modules', '.bin', 'tsx');
+
 function runSkill(args: Record<string, unknown>, cwd: string): { success: boolean; output: string; error?: string; exitCode: number } {
   try {
-    const result = execFileSync('npx', ['tsx', path.join(__dirname, 'run.ts')], {
+    const result = execFileSync(tsxBin, [path.join(__dirname, 'run.ts')], {
       env: {
         ...process.env,
         SKILL_ARGS: JSON.stringify(args),

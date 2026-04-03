@@ -2,9 +2,12 @@ import { describe, it, expect } from 'vitest';
 import * as path from 'path';
 import { execFileSync } from 'child_process';
 
+const projectRoot = path.resolve(__dirname, '../../../../..');
+const tsxBin = path.join(projectRoot, 'node_modules', '.bin', 'tsx');
+
 function runSkill(args: Record<string, unknown>): { success: boolean; output: string; error?: string; exitCode: number } {
   try {
-    const result = execFileSync('npx', ['tsx', path.join(__dirname, 'run.ts')], {
+    const result = execFileSync(tsxBin, [path.join(__dirname, 'run.ts')], {
       env: {
         ...process.env,
         SKILL_ARGS: JSON.stringify(args),
@@ -59,7 +62,7 @@ describe('question skill', () => {
 
   it('should error on missing SKILL_ARGS', () => {
     try {
-      const result = execFileSync('npx', ['tsx', path.join(__dirname, 'run.ts')], {
+      const result = execFileSync(tsxBin, [path.join(__dirname, 'run.ts')], {
         env: { ...process.env, SKILL_ARGS: undefined },
         encoding: 'utf-8',
         timeout: 10000,

@@ -1,3 +1,4 @@
+import { join } from 'path';
 import { Bot, Context, InputFile } from 'grammy';
 import type { Logger } from 'pino';
 import type { Agent, ProgressCallback } from '../agent/agent.js';
@@ -478,9 +479,10 @@ export class TelegramChannel {
       ? config.customPersonality.substring(0, 100) + (config.customPersonality.length > 100 ? '...' : '')
       : 'Default';
 
+    const modelProvider = this.providerRegistry?.getProvider(config.modelId);
     const modelLabel = config.modelId === 'auto'
       ? 'auto (smart routing)'
-      : TelegramChannel.PROVIDER_LABELS[config.modelId] || config.modelId;
+      : modelProvider ? this.getProviderLabel(modelProvider as { name: string; model?: string }) : config.modelId;
 
     await ctx.reply(
       '<b>Your Settings</b>\n\n' +
@@ -588,8 +590,15 @@ export class TelegramChannel {
     moonshot: 'Moonshot (Kimi)',
     xai: 'xAI (Grok)',
     ollama: 'Ollama (local)',
-    openrouter: 'OpenRouter',
   };
+
+  /** Get display label for a provider, including model name for multi-model providers like OpenRouter */
+  private getProviderLabel(provider: { name: string; model?: string }): string {
+    if (provider.name === 'openrouter' && provider.model) {
+      return `OpenRouter (${provider.model})`;
+    }
+    return TelegramChannel.PROVIDER_LABELS[provider.name] || provider.name;
+  }
 
   /**
    * Handle /model command — show or switch AI provider
@@ -615,13 +624,14 @@ export class TelegramChannel {
 
     if (!args) {
       // Show current model and list available options
+      const currentProvider = available.find(p => p.name === config.modelId);
       const current = config.modelId === 'auto'
         ? 'auto (smart routing)'
-        : TelegramChannel.PROVIDER_LABELS[config.modelId] || config.modelId;
+        : currentProvider ? this.getProviderLabel(currentProvider as { name: string; model?: string }) : config.modelId;
 
       let list = '';
       available.forEach((p, i) => {
-        const label = TelegramChannel.PROVIDER_LABELS[p.name] || p.name;
+        const label = this.getProviderLabel(p as { name: string; model?: string });
         const marker = config.modelId === p.name ? ' ✓' : '';
         list += `  <b>${i + 1}.</b> <code>${p.name}</code> — ${label}${marker}\n`;
       });
@@ -665,9 +675,10 @@ export class TelegramChannel {
     // Save preference
     await this.configManager.updateUserConfig(userId, { modelId: selectedName });
 
+    const selectedProvider = available.find(p => p.name === selectedName);
     const label = selectedName === 'auto'
       ? 'auto (smart routing)'
-      : TelegramChannel.PROVIDER_LABELS[selectedName] || selectedName;
+      : selectedProvider ? this.getProviderLabel(selectedProvider as { name: string; model?: string }) : selectedName;
 
     await ctx.reply(`Switched to <b>${label}</b>`, { parse_mode: 'HTML' });
     this.logger.info({ userId, model: selectedName }, 'User switched model');
@@ -1130,21 +1141,35 @@ export class TelegramChannel {
     const typingInterval = this.startTypingIndicator(ctx);
 
     try {
-      // Create attachments for all photos
-      const attachments: Attachment[] = photos.map((photo, index) => ({
-        type: 'image' as const,
-        data: photo.buffer,
-        mimeType: photo.mimeType,
-        filename: `photo_${index + 1}.${photo.mimeType.split('/')[1] || 'jpg'}`,
-        size: photo.buffer.length,
-      }));
+      // Save photos to disk so skills (e.g. image-gen) can reference them by path
+      const workspace = process.env.AGENT_WORKSPACE || process.cwd();
+      const outputDir = join(workspace, 'output');
+      const { mkdirSync, writeFileSync } = await import('fs');
+      mkdirSync(outputDir, { recursive: true });
 
-      // Build prompt
+      const savedPaths: string[] = [];
+      const attachments: Attachment[] = photos.map((photo, index) => {
+        const ext = photo.mimeType.split('/')[1] || 'jpg';
+        const filename = `photo_${index + 1}.${ext}`;
+        const filePath = join(outputDir, `user-photo-${Date.now()}-${index + 1}.${ext}`);
+        writeFileSync(filePath, photo.buffer);
+        savedPaths.push(filePath);
+        return {
+          type: 'image' as const,
+          data: photo.buffer,
+          mimeType: photo.mimeType,
+          filename,
+          size: photo.buffer.length,
+        };
+      });
+
+      // Build prompt — include saved file paths so LLM can pass them to tools
       const photoCount = photos.length;
       const photoWord = photoCount === 1 ? 'photo' : `${photoCount} photos`;
+      const pathList = savedPaths.join(', ');
       const prompt = caption
-        ? `The user sent ${photoWord}. Caption: "${caption}"`
-        : `The user sent ${photoWord}. Describe what you see.`;
+        ? `The user sent ${photoWord} (saved to: ${pathList}). Caption: "${caption}"`
+        : `The user sent ${photoWord} (saved to: ${pathList}). Describe what you see.`;
 
       // Process through agent WITH attachments
       const sessionId = await this.getOrCreateSession(userId);
@@ -1554,11 +1579,19 @@ export class TelegramChannel {
 
     try {
       const file = new InputFile(filePath);
-      await this.bot.api.sendDocument(chatId, file, {
+      const ext = filePath.toLowerCase().split('.').pop();
+      const isImage = ['jpg', 'jpeg', 'png', 'gif', 'webp'].includes(ext || '');
+      const captionOpts = {
         caption: caption ? formatMarkdownToHtml(caption) : undefined,
-        parse_mode: caption ? 'HTML' : undefined,
-      });
-      this.logger.info({ chatId, filePath }, 'File sent successfully');
+        parse_mode: caption ? 'HTML' as const : undefined,
+      };
+
+      if (isImage) {
+        await this.bot.api.sendPhoto(chatId, file, captionOpts);
+      } else {
+        await this.bot.api.sendDocument(chatId, file, captionOpts);
+      }
+      this.logger.info({ chatId, filePath, isImage }, 'File sent successfully');
       return true;
     } catch (error) {
       this.logger.error({ chatId, filePath, error: (error as Error).message }, 'Failed to send file');
