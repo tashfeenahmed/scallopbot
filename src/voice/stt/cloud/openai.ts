@@ -21,7 +21,7 @@ export class OpenAISTT implements STTProvider {
   private available: boolean | null = null;
 
   constructor(config: OpenAISTTConfig) {
-    this.client = new OpenAI({ apiKey: config.apiKey });
+    this.client = new OpenAI({ apiKey: config.apiKey, baseURL: 'https://api.openai.com/v1' });
     this.model = config.model || 'whisper-1';
   }
 

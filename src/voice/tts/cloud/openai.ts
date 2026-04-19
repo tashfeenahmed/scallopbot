@@ -26,7 +26,7 @@ export class OpenAITTS implements TTSProvider {
   private available: boolean | null = null;
 
   constructor(config: OpenAITTSConfig) {
-    this.client = new OpenAI({ apiKey: config.apiKey });
+    this.client = new OpenAI({ apiKey: config.apiKey, baseURL: 'https://api.openai.com/v1' });
     this.model = config.model || 'tts-1';
     this.defaultVoice = config.voice || 'alloy';
   }

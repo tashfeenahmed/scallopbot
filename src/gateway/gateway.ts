@@ -409,6 +409,7 @@ export class Gateway {
     const openaiConfig = this.config.providers.openai;
     if (openaiConfig.apiKey) {
       const openai = new OpenAIProvider({
+        ...(openaiConfig.baseUrl && { baseUrl: openaiConfig.baseUrl }),
         apiKey: openaiConfig.apiKey,
         model: openaiConfig.model,
         timeout: 60000,

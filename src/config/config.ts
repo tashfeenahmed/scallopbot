@@ -17,6 +17,7 @@ const anthropicProviderSchema = z.object({
 
 const openaiProviderSchema = z.object({
   apiKey: z.string().default(''),
+  baseUrl: z.string().optional(),
   model: z.string().default('gpt-4.1'),
 });
 
@@ -240,6 +241,7 @@ export function loadConfig(): Config {
       },
       openai: {
         apiKey: openaiApiKey || '',
+        baseUrl: process.env.OPENAI_BASE_URL || undefined,
         model: process.env.OPENAI_MODEL || 'gpt-4o',
       },
       groq: {

@@ -41,7 +41,7 @@ export class VoiceManager {
    * Create a VoiceManager from environment config
    */
   static fromEnv(logger?: Logger): VoiceManager {
-    const openaiKey = process.env.OPENAI_API_KEY || '';
+    const openaiKey = process.env.VOICE_OPENAI_KEY || process.env.OPENAI_API_KEY || '';
     const groqKey = process.env.GROQ_API_KEY || '';
 
     // Check for local voice model preferences
