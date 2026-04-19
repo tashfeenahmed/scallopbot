@@ -590,7 +590,7 @@ export class RelationGraph {
 
   /**
    * Normalize a value by stripping prepositions and trimming.
-   * "at Metropolis" -> "dublin", "in Metropolis" -> "dublin", "is Metropolis" -> "dublin"
+   * "at Metropolis" -> "metropolis", "in Metropolis" -> "metropolis", "is Metropolis" -> "metropolis"
    */
   private normalizeValue(value: string): string {
     return value

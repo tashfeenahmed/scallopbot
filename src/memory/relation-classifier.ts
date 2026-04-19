@@ -50,7 +50,7 @@ Classifications:
 
 UPDATES examples (same slot, different value — the old fact becomes outdated):
   - "Lives in Metropolis" UPDATES "Lives in Springfield" (location changed)
-  - "Works at Google" UPDATES "Works at Acme Corp" (employer changed)
+  - "Works at Acme Corp" UPDATES "Works at Globex" (employer changed)
   - "Name: Johnny" UPDATES "Name: John" (name correction)
   - "Mood: stressed about deadlines" UPDATES "Mood: happy and relaxed" (mood changed)
   - "Focus: learning Rust" UPDATES "Focus: learning Python" (focus shifted)

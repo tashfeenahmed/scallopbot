@@ -178,7 +178,7 @@ describe('Scenario 1: Fact storage, embedding cache & search weights', () => {
     // Turn 2: user mentions location
     const mem2 = await store.add({
       userId: 'default',
-      content: 'Lives in Metropolis, Ireland',
+      content: 'Lives in Metropolis',
       category: 'fact',
       importance: 6,
       sourceChunk: 'I live in Metropolis',
@@ -481,8 +481,8 @@ describe('Scenario 4: Session summaries and past-conversation search', () => {
   it('should generate and store session summaries', async () => {
     const provider = createSequentialProvider([
       JSON.stringify({
-        summary: 'User discussed their work at Acme Corp and preference for TypeScript. They mentioned living in Metropolis and planning a trip to Japan.',
-        topics: ['work', 'Acme Corp', 'TypeScript', 'Metropolis', 'Japan', 'travel'],
+        summary: 'User discussed their work at Acme Corp and preference for TypeScript. They mentioned living in Metropolis and planning a trip to Italy.',
+        topics: ['work', 'Acme Corp', 'TypeScript', 'Metropolis', 'Italy', 'travel'],
       }),
     ]);
 
@@ -500,8 +500,8 @@ describe('Scenario 4: Session summaries and past-conversation search', () => {
     db.addSessionMessage(sessionId, 'assistant', 'That sounds like an exciting role!');
     db.addSessionMessage(sessionId, 'user', 'Yeah, I mostly write TypeScript. I live in Metropolis');
     db.addSessionMessage(sessionId, 'assistant', 'Metropolis is lovely! What do you enjoy there?');
-    db.addSessionMessage(sessionId, 'user', 'Planning a trip to Japan next month for sushi and culture');
-    db.addSessionMessage(sessionId, 'assistant', 'Japan is wonderful, especially for food!');
+    db.addSessionMessage(sessionId, 'user', 'Planning a trip to Italy next month for sushi and culture');
+    db.addSessionMessage(sessionId, 'assistant', 'Italy is wonderful, especially for food!');
 
     // Summarize
     const success = await summarizer.summarizeAndStore(db, sessionId, 'default');
@@ -563,11 +563,11 @@ describe('Scenario 4: Session summaries and past-conversation search', () => {
     db.addSessionSummary({
       sessionId: 'sess-b',
       userId: 'default',
-      summary: 'Talked about cooking sushi and planning a trip to Japan with wife',
-      topics: ['cooking', 'sushi', 'Japan', 'travel'],
+      summary: 'Talked about cooking sushi and planning a trip to Italy with wife',
+      topics: ['cooking', 'sushi', 'Italy', 'travel'],
       messageCount: 6,
       durationMs: 90000,
-      embedding: await embedder.embed('cooking sushi Japan travel'),
+      embedding: await embedder.embed('cooking sushi Italy travel'),
     });
 
     // Search for programming-related session
@@ -576,9 +576,9 @@ describe('Scenario 4: Session summaries and past-conversation search', () => {
     expect(apiResults[0].summary.summary).toContain('API');
 
     // Search for travel-related session
-    const travelResults = await store.searchSessions('Japan sushi', { userId: 'default' });
+    const travelResults = await store.searchSessions('Italy sushi', { userId: 'default' });
     expect(travelResults.length).toBeGreaterThanOrEqual(1);
-    expect(travelResults[0].summary.summary).toContain('Japan');
+    expect(travelResults[0].summary.summary).toContain('Italy');
 
     // Verify session summary count in stats
     const stats = store.getStats();
@@ -859,7 +859,7 @@ describe('Scenario E2E: Full multi-turn conversation with fact extraction', () =
       ]},
       // Turn 4: Travel plans
       { facts: [
-        { content: 'Planning trip to Japan next month', subject: 'user', category: 'event' },
+        { content: 'Planning trip to Italy next month', subject: 'user', category: 'event' },
       ]},
       // Turn 5: Preferences
       { facts: [
@@ -903,8 +903,8 @@ describe('Scenario E2E: Full multi-turn conversation with fact extraction', () =
     // Turn 4: travel plans
     const r4 = await simulateTurn(
       extractor, db, sessionId, 'default',
-      "We're planning a trip to Japan next month. Can't wait for the sushi!",
-      "Japan is incredible! You'll love it."
+      "We're planning a trip to Italy next month. Can't wait for the sushi!",
+      "Italy is incredible! You'll love it."
     );
     expect(r4.facts.length).toBeGreaterThanOrEqual(1);
 
@@ -1060,7 +1060,7 @@ describe('Optimizations: reduced embedding & search calls', () => {
     // Store with detectRelations: false (what fact-extractor now does)
     await store.add({
       userId: 'default',
-      content: 'Lives in Metropolis, Ireland',
+      content: 'Lives in Metropolis',
       category: 'fact',
       detectRelations: false,
     });
