@@ -32,9 +32,20 @@ export interface ProviderCharacteristics {
   pricingType: 'fixed' | 'routed';
 }
 
+/**
+ * Content part for messages. OpenRouter accepts either a plain string or an
+ * array of text parts. For Claude models, we use the array form with
+ * cache_control to trigger Anthropic prompt caching through OpenRouter.
+ */
+interface OpenRouterContentPart {
+  type: 'text';
+  text: string;
+  cache_control?: { type: 'ephemeral' };
+}
+
 interface OpenRouterMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
-  content: string | null;
+  content: string | OpenRouterContentPart[] | null;
   tool_call_id?: string;
   reasoning_content?: string;
   tool_calls?: Array<{
@@ -105,6 +116,42 @@ export class OpenRouterProvider implements LLMProvider {
     return REASONING_MODELS.has(this.model) || this.model.includes('qwen3');
   }
 
+  /**
+   * Claude models routed via OpenRouter support Anthropic-style prompt caching
+   * when cache_control is attached to content parts. OpenRouter passes the
+   * directive through to Anthropic unchanged.
+   */
+  private supportsCacheControl(): boolean {
+    return this.model.startsWith('anthropic/');
+  }
+
+  /**
+   * Format the system prompt. For Claude models, emit structured content parts
+   * with cache_control on the stable portion. For other models, fall back to a
+   * plain string — OpenRouter ignores cache_control for non-Anthropic backends
+   * and some of them reject the array form entirely.
+   */
+  private formatSystemContent(
+    system: NonNullable<CompletionRequest['system']>
+  ): string | OpenRouterContentPart[] {
+    if (!this.supportsCacheControl()) {
+      return flattenSystem(system);
+    }
+
+    // Claude model via OpenRouter: emit structured form with cache boundary.
+    if (typeof system === 'string') {
+      return [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }];
+    }
+
+    const parts: OpenRouterContentPart[] = [
+      { type: 'text', text: system.stable, cache_control: { type: 'ephemeral' } },
+    ];
+    if (system.dynamic && system.dynamic.length > 0) {
+      parts.push({ type: 'text', text: system.dynamic });
+    }
+    return parts;
+  }
+
   async complete(request: CompletionRequest): Promise<CompletionResponse> {
     const messages = this.formatMessages(request);
     const isReasoning = this.isReasoningModel();
@@ -165,7 +212,7 @@ export class OpenRouterProvider implements LLMProvider {
 
     // Add system message if present
     if (request.system) {
-      messages.push({ role: 'system', content: flattenSystem(request.system) });
+      messages.push({ role: 'system', content: this.formatSystemContent(request.system) });
     }
 
     // Add conversation messages

@@ -166,6 +166,102 @@ describe('OpenRouterProvider', () => {
     });
   });
 
+  describe('prompt caching (Anthropic via OpenRouter)', () => {
+    const okResponse = () => ({
+      ok: true,
+      json: () =>
+        Promise.resolve({
+          choices: [{ message: { content: 'OK' }, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 10, completion_tokens: 5 },
+          model: 'anthropic/claude-sonnet-4-5',
+        }),
+    });
+
+    const getSentBody = () => {
+      const call = mockFetch.mock.calls[0];
+      return JSON.parse((call[1] as { body: string }).body);
+    };
+
+    it('should emit structured system content with cache_control for Claude models', async () => {
+      mockFetch.mockResolvedValueOnce(okResponse());
+
+      const claude = new OpenRouterProvider({
+        apiKey: 'test-key',
+        model: 'anthropic/claude-sonnet-4-5',
+      });
+
+      await claude.complete({
+        messages: [{ role: 'user', content: 'Hi' }],
+        system: { stable: 'You are persona X', dynamic: 'Time is now' },
+      });
+
+      const body = getSentBody();
+      const sys = body.messages[0];
+      expect(sys.role).toBe('system');
+      expect(Array.isArray(sys.content)).toBe(true);
+      expect(sys.content).toEqual([
+        { type: 'text', text: 'You are persona X', cache_control: { type: 'ephemeral' } },
+        { type: 'text', text: 'Time is now' },
+      ]);
+    });
+
+    it('should cache the whole system prompt when string form is passed to Claude model', async () => {
+      mockFetch.mockResolvedValueOnce(okResponse());
+
+      const claude = new OpenRouterProvider({
+        apiKey: 'test-key',
+        model: 'anthropic/claude-sonnet-4-5',
+      });
+
+      await claude.complete({
+        messages: [{ role: 'user', content: 'Hi' }],
+        system: 'You are helpful',
+      });
+
+      const body = getSentBody();
+      expect(body.messages[0].content).toEqual([
+        { type: 'text', text: 'You are helpful', cache_control: { type: 'ephemeral' } },
+      ]);
+    });
+
+    it('should fall back to plain string for non-Claude models', async () => {
+      mockFetch.mockResolvedValueOnce(okResponse());
+
+      const qwen = new OpenRouterProvider({
+        apiKey: 'test-key',
+        model: 'qwen/qwen3-235b-a22b',
+      });
+
+      await qwen.complete({
+        messages: [{ role: 'user', content: 'Hi' }],
+        system: { stable: 'stable part', dynamic: 'dynamic part' },
+      });
+
+      const body = getSentBody();
+      expect(typeof body.messages[0].content).toBe('string');
+      expect(body.messages[0].content).toBe('stable partdynamic part');
+    });
+
+    it('should omit the dynamic part when it is empty (Claude model)', async () => {
+      mockFetch.mockResolvedValueOnce(okResponse());
+
+      const claude = new OpenRouterProvider({
+        apiKey: 'test-key',
+        model: 'anthropic/claude-sonnet-4-5',
+      });
+
+      await claude.complete({
+        messages: [{ role: 'user', content: 'Hi' }],
+        system: { stable: 'stable only', dynamic: '' },
+      });
+
+      const body = getSentBody();
+      expect(body.messages[0].content).toEqual([
+        { type: 'text', text: 'stable only', cache_control: { type: 'ephemeral' } },
+      ]);
+    });
+  });
+
   describe('reasoning support', () => {
     it('should extract reasoning_content from response as ThinkingContent', async () => {
       mockFetch.mockResolvedValueOnce({
