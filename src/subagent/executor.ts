@@ -276,7 +276,9 @@ export class SubAgentExecutor {
         run.task,
         undefined,
         subProgress,
-        shouldStop
+        shouldStop,
+        undefined, // providerOverride
+        controller.signal // abortSignal — terminates in-flight LLM HTTP call on timeout/cancel
       );
 
       // Determine if task was completed based on response content

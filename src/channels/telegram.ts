@@ -124,7 +124,10 @@ export class TelegramChannel {
   private providerRegistry: ProviderRegistry | null = null;
   private onUserMessage?: (prefixedUserId: string) => void;
   private interruptQueue: InterruptQueue | null = null;
-  // Buffer for collecting media group photos (multiple photos sent at once)
+  // Buffer for collecting media group photos (multiple photos sent at once).
+  // Bounded to prevent OOM if a user spams groups or the process never calls
+  // stop(); timers are explicitly cancelled in stop() to avoid firing on a
+  // closed bot.
   private mediaGroupBuffer: Map<string, {
     photos: Array<{ buffer: Buffer; mimeType: string }>;
     caption?: string;
@@ -132,6 +135,8 @@ export class TelegramChannel {
     chatId: number;
     timer: NodeJS.Timeout;
   }> = new Map();
+  private static readonly MAX_MEDIA_GROUPS = 20;
+  private static readonly MAX_PHOTOS_PER_GROUP = 10;
 
   constructor(options: TelegramChannelOptions) {
     this.bot = new Bot(options.botToken);
@@ -1063,16 +1068,30 @@ export class TelegramChannel {
       if (mediaGroupId) {
         const existing = this.mediaGroupBuffer.get(mediaGroupId);
         if (existing) {
-          // Add to existing buffer
-          existing.photos.push({ buffer: photoBuffer, mimeType });
+          // Cap per-group size so a runaway client can't blow up memory.
+          if (existing.photos.length < TelegramChannel.MAX_PHOTOS_PER_GROUP) {
+            existing.photos.push({ buffer: photoBuffer, mimeType });
+          }
           if (caption && !existing.caption) {
             existing.caption = caption;
           }
         } else {
-          // Create new buffer with a timer to process after delay
+          // Cap total concurrent groups. On overflow, drop the oldest entry
+          // (its timer is cancelled) so we can accept the new one.
+          if (this.mediaGroupBuffer.size >= TelegramChannel.MAX_MEDIA_GROUPS) {
+            const oldestKey = this.mediaGroupBuffer.keys().next().value;
+            if (oldestKey !== undefined) {
+              const oldest = this.mediaGroupBuffer.get(oldestKey);
+              if (oldest) clearTimeout(oldest.timer);
+              this.mediaGroupBuffer.delete(oldestKey);
+            }
+          }
+
           const timer = setTimeout(() => {
-            this.processMediaGroup(mediaGroupId, ctx);
-          }, 500); // Wait 500ms for more photos in the group
+            this.processMediaGroup(mediaGroupId, ctx).catch((err) => {
+              this.logger.warn({ err: (err as Error).message, mediaGroupId }, 'processMediaGroup failed');
+            });
+          }, 500);
 
           this.mediaGroupBuffer.set(mediaGroupId, {
             photos: [{ buffer: photoBuffer, mimeType }],
@@ -1537,6 +1556,13 @@ export class TelegramChannel {
     await this.configManager.saveNow();
 
     this.userQueues.clear();
+
+    // Cancel any pending media-group timers so they don't fire after stop.
+    for (const group of this.mediaGroupBuffer.values()) {
+      clearTimeout(group.timer);
+    }
+    this.mediaGroupBuffer.clear();
+
     await this.bot.stop();
     this.isRunning = false;
     this.logger.info('Telegram bot stopped');

@@ -212,6 +212,8 @@ export class Agent {
    * Process a message with optional attachments
    * @param onProgress - Optional callback for streaming progress updates
    * @param shouldStop - Optional callback to check if user requested stop
+   * @param abortSignal - Optional AbortSignal forwarded to the LLM provider so
+   *   in-flight HTTP calls are cancelled on abort (sub-agent timeouts etc.).
    */
   async processMessage(
     sessionId: string,
@@ -219,11 +221,12 @@ export class Agent {
     attachments?: Attachment[],
     onProgress?: ProgressCallback,
     shouldStop?: ShouldStopCallback,
-    providerOverride?: LLMProvider
+    providerOverride?: LLMProvider,
+    abortSignal?: AbortSignal
   ): Promise<AgentResult> {
     // Session lane serialization: ensure sequential processing per session
     return enqueueInLane(`session:${sessionId}`, async () => {
-      return this._processMessageInner(sessionId, userMessage, attachments, onProgress, shouldStop, providerOverride);
+      return this._processMessageInner(sessionId, userMessage, attachments, onProgress, shouldStop, providerOverride, abortSignal);
     }, { warnAfterMs: 5000 });
   }
 
@@ -236,7 +239,8 @@ export class Agent {
     attachments?: Attachment[],
     onProgress?: ProgressCallback,
     shouldStop?: ShouldStopCallback,
-    providerOverride?: LLMProvider
+    providerOverride?: LLMProvider,
+    abortSignal?: AbortSignal
   ): Promise<AgentResult> {
     const session = await this.sessionManager.getSession(sessionId);
     if (!session) {
@@ -536,6 +540,7 @@ export class Agent {
         maxTokens,
         enableThinking: thinkParams.enableThinking,
         thinkingBudgetTokens: thinkParams.thinkingBudgetTokens,
+        ...(abortSignal && { signal: abortSignal }),
       };
 
       this.logger.info({ iteration: iterations, messageCount: messages.length, provider: activeProvider.name }, 'Agent iteration starting');

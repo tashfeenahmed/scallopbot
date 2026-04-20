@@ -192,6 +192,7 @@ export class OpenRouterProvider implements LLMProvider {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify(body),
+        ...(request.signal ? { signal: request.signal } : {}),
       })
     );
 

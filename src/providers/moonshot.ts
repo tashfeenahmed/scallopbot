@@ -161,7 +161,9 @@ export class MoonshotProvider implements LLMProvider {
 
     try {
       const response = await this.executeWithRetry(() =>
-        this.client.chat.completions.create(params)
+        request.signal
+          ? this.client.chat.completions.create(params, { signal: request.signal })
+          : this.client.chat.completions.create(params)
       );
 
       // Debug logging - log the response

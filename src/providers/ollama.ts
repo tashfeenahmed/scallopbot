@@ -103,11 +103,19 @@ export class OllamaProvider implements LLMProvider {
       }));
     }
 
+    // Combine the per-request timeout with any caller-supplied abort signal
+    // (e.g. sub-agent cancellation). AbortSignal.any() aborts when either
+    // source fires. Requires Node 20+, which we target.
+    const timeoutSignal = AbortSignal.timeout(this.timeout);
+    const signal = request.signal
+      ? AbortSignal.any([timeoutSignal, request.signal])
+      : timeoutSignal;
+
     const response = await fetch(`${this.baseUrl}/api/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(this.timeout),
+      signal,
     });
 
     if (!response.ok) {

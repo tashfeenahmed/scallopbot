@@ -93,6 +93,13 @@ export interface CompletionRequest {
   enableThinking?: boolean;
   /** Token budget for thinking/reasoning (used by thinking levels system) */
   thinkingBudgetTokens?: number;
+  /**
+   * Abort signal to cancel an in-flight request. Providers that support
+   * cancellation (Anthropic, OpenAI, OpenRouter, Moonshot via fetch/SDK
+   * signal plumbing) will terminate the underlying HTTP call; others
+   * ignore the signal silently.
+   */
+  signal?: AbortSignal;
 }
 
 // Token usage tracking

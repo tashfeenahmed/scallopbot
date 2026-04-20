@@ -104,13 +104,17 @@ export class UnifiedScheduler {
   private boardService: BoardService;
   private schedulerSessionId: string | null = null;
   private intervalHandle: ReturnType<typeof setInterval> | null = null;
+  private pendingImmediateHandle: ReturnType<typeof setImmediate> | null = null;
   private isRunning = false;
+  private isStopping = false;
   private evaluating = false;
   private pendingEvaluation = false;
   /** Counter for periodic dedup consolidation (every ~10 min) */
   private evalTickCount = 0;
-  /** Recently sent messages per user for send-time dedup: userId → [{message, time}] */
+  /** Recently sent messages per user for send-time dedup: userId → [{message, time}].
+   *  Bounded by pruning empty arrays after each dedup check to keep memory flat. */
   private recentSends = new Map<string, { message: string; time: number }[]>();
+  private static readonly MAX_RECENT_SEND_USERS = 500;
 
   constructor(options: UnifiedSchedulerOptions) {
     this.db = options.db;
@@ -171,13 +175,21 @@ export class UnifiedScheduler {
   }
 
   /**
-   * Stop the scheduler
+   * Stop the scheduler. Safe to call mid-evaluate: in-flight evaluate() exits
+   * at the next await point via the isStopping guard, and any deferred
+   * setImmediate is cancelled so it can't fire after shutdown.
    */
   stop(): void {
+    this.isStopping = true;
     if (this.intervalHandle) {
       clearInterval(this.intervalHandle);
       this.intervalHandle = null;
     }
+    if (this.pendingImmediateHandle) {
+      clearImmediate(this.pendingImmediateHandle);
+      this.pendingImmediateHandle = null;
+    }
+    this.pendingEvaluation = false;
     this.isRunning = false;
     this.logger.info('UnifiedScheduler stopped');
   }
@@ -186,6 +198,10 @@ export class UnifiedScheduler {
    * Evaluate and process due items
    */
   async evaluate(): Promise<void> {
+    // Bail immediately if we're shutting down — a tick may have been queued
+    // via setInterval or setImmediate moments before stop() was called.
+    if (this.isStopping) return;
+
     // Prevent overlapping evaluations — if a previous tick is still processing
     // (e.g. waiting on sub-agent), defer this tick so it runs after the current one finishes
     if (this.evaluating) {
@@ -310,12 +326,13 @@ export class UnifiedScheduler {
     } finally {
       this.evaluating = false;
 
-      // If a tick was deferred while we were evaluating, run it now
-      if (this.pendingEvaluation) {
+      // If a tick was deferred while we were evaluating, run it now — unless
+      // we're shutting down. Track the handle so stop() can cancel it.
+      if (this.pendingEvaluation && !this.isStopping) {
         this.pendingEvaluation = false;
         this.logger.debug('Running deferred scheduler evaluation');
-        // Use setImmediate to avoid deep recursion under sustained load
-        setImmediate(() => {
+        this.pendingImmediateHandle = setImmediate(() => {
+          this.pendingImmediateHandle = null;
           this.evaluate().catch(err => {
             this.logger.error({ error: (err as Error).message }, 'Deferred scheduler evaluation failed');
           });
@@ -463,9 +480,12 @@ export class UnifiedScheduler {
     const recent = this.recentSends.get(userId);
     if (!recent) return false;
 
-    // Prune expired entries
+    // Prune expired entries. If all expired, drop the user entry entirely so
+    // the outer Map doesn't grow without bound for users who never return.
     const valid = recent.filter(r => now - r.time < SEND_DEDUP_WINDOW_MS);
-    if (valid.length !== recent.length) {
+    if (valid.length === 0) {
+      this.recentSends.delete(userId);
+    } else if (valid.length !== recent.length) {
       this.recentSends.set(userId, valid);
     }
 
@@ -473,12 +493,23 @@ export class UnifiedScheduler {
   }
 
   /**
-   * Record a message as sent for future dedup checks.
+   * Record a message as sent for future dedup checks. Caps the per-user list
+   * and the top-level user count to prevent unbounded growth.
    */
   private recordSend(userId: string, message: string): void {
     const list = this.recentSends.get(userId) || [];
     list.push({ message, time: Date.now() });
+    // Per-user cap: only the last 20 messages matter for dedup.
+    if (list.length > 20) list.splice(0, list.length - 20);
     this.recentSends.set(userId, list);
+
+    // Global cap: evict the oldest user entry (Map iteration order is
+    // insertion order) if we've somehow accumulated too many.
+    while (this.recentSends.size > UnifiedScheduler.MAX_RECENT_SEND_USERS) {
+      const oldest = this.recentSends.keys().next().value;
+      if (oldest === undefined) break;
+      this.recentSends.delete(oldest);
+    }
   }
 
   /**

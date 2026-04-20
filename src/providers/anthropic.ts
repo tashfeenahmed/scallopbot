@@ -78,7 +78,9 @@ export class AnthropicProvider implements LLMProvider {
     };
 
     const response = await this.executeWithRetry(() =>
-      this.client.messages.create(params)
+      request.signal
+        ? this.client.messages.create(params, { signal: request.signal })
+        : this.client.messages.create(params)
     );
 
     return this.formatResponse(response);
@@ -96,7 +98,9 @@ export class AnthropicProvider implements LLMProvider {
       ...(request.tools && { tools: this.formatTools(request.tools) }),
     };
 
-    const stream = await this.client.messages.create(params);
+    const stream = request.signal
+      ? await this.client.messages.create(params, { signal: request.signal })
+      : await this.client.messages.create(params);
 
     for await (const event of stream as AsyncIterable<Anthropic.MessageStreamEvent>) {
       yield this.formatStreamEvent(event);
