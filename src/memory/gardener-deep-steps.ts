@@ -364,15 +364,23 @@ export async function runInnerThoughts(ctx: GardenerContext): Promise<void> {
 
   try {
     const userId = DEFAULT_USER_ID;
-    const sixHoursAgo = Date.now() - 6 * 60 * 60 * 1000;
+    // Widened from 6h to 48h — between active chat windows the evaluator was
+    // seeing zero session context, which left it with only low-severity
+    // anomaly signals and the LLM always returned empty items.
+    const SESSION_CONTEXT_WINDOW_MS = 48 * 60 * 60 * 1000;
+    const contextCutoff = Date.now() - SESSION_CONTEXT_WINDOW_MS;
 
     const allSummaries = ctx.db.getSessionSummariesByUser(userId, 20);
-    const recentSummaries = allSummaries.filter(s => s.createdAt >= sixHoursAgo);
-    const sessionSummary = recentSummaries.length > 0 ? recentSummaries[0] : null;
+    const recentSummaries = allSummaries.filter(s => s.createdAt >= contextCutoff);
+    // Fall back to the most recent summary of any age if the 48h window has
+    // nothing — better stale context than no context when deciding to check in.
+    const sessionSummary = recentSummaries.length > 0
+      ? recentSummaries[0]
+      : (allSummaries.length > 0 ? allSummaries[0] : null);
 
     const behavioralPatterns = ctx.db.getBehavioralPatterns(userId);
     const affect = behavioralPatterns?.smoothedAffect ?? null;
-    const dial = (behavioralPatterns?.responsePreferences?.proactivenessDial as 'conservative' | 'moderate' | 'eager') ?? 'moderate';
+    const storedDial = (behavioralPatterns?.responsePreferences?.proactivenessDial as 'conservative' | 'moderate' | 'eager') ?? 'moderate';
     const activeHours = behavioralPatterns?.activeHours ?? [];
     const lastProactiveAt = getLastProactiveAt(ctx.db, userId);
 
@@ -403,6 +411,25 @@ export async function runInnerThoughts(ctx: GardenerContext): Promise<void> {
       .filter(i => i.status === 'pending' || i.status === 'fired')
       .map(i => ({ message: i.message, context: i.context }));
 
+    // Pull user-stated preferences relevant to proactive behavior so the
+    // evaluator prompt can honor them. Keyword filter is intentional — we only
+    // care about preferences that tell the bot how often to check in, not
+    // generic lifestyle facts.
+    const PROACTIVE_PREF_RE = /\b(proactive|proactively|check in|check-in|remind|follow[- ]?up|ping me|nudge|initiate|reach out)\b/i;
+    const userPreferences = ctx.db
+      .getMemoriesByUser(userId, { limit: 100 })
+      .filter(m => PROACTIVE_PREF_RE.test(m.content))
+      .slice(0, 5)
+      .map(m => m.content);
+
+    // Elevate dial to 'eager' when the user has explicitly asked for more
+    // proactive check-ins — overrides whatever got auto-set in behavioral
+    // patterns. Without this, moderate's "skip low-severity" rule dominates
+    // even though the user's stated preference says otherwise.
+    const dial = (userPreferences.length > 0 && storedDial !== 'eager')
+      ? 'eager'
+      : storedDial;
+
     const result = await evaluateProactive({
       sessionSummary,
       behavioralPatterns,
@@ -416,6 +443,7 @@ export async function runInnerThoughts(ctx: GardenerContext): Promise<void> {
       activeHours,
       userId,
       todayItemCount,
+      userPreferences,
     }, ctx.fusionProvider);
 
     // Schedule each output item

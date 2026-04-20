@@ -185,12 +185,15 @@ export function scanBehavioralAnomalies(
     });
   }
 
-  // Check 3: Response length decline
+  // Check 3: Response length decline.
+  // Promoted from 'low' to 'medium' — a sustained drop in user response length
+  // is a useful cue for a check-in, and under the moderate dial the evaluator
+  // was silently skipping every 'low' signal, rendering this check inert.
   const rl = signals.responseLength;
   if (rl && rl.trend === 'decreasing') {
     results.push({
       type: 'behavioral_anomaly',
-      severity: 'low',
+      severity: 'medium',
       description: `Response length is trending shorter (avg ${rl.avgLength.toFixed(0)} chars)`,
       context: {
         avgLength: rl.avgLength,
@@ -207,9 +210,14 @@ export function scanBehavioralAnomalies(
 
 /**
  * Scan session summaries for unresolved threads:
- * - Topics containing "?" with no follow-up session within 48h
- * - Only considers summaries within the last 7 days
- * - Skips summaries with messageCount < 3 AND age < 48h (too fresh/short)
+ * - Sessions with no follow-up session within FOLLOW_UP_WINDOW_MS — treated as
+ *   a candidate open thread regardless of whether a topic contained "?".
+ *   (The "?" heuristic was too strict: real conversations don't phrase
+ *   topics as questions, so the old rule never fired.)
+ * - Sessions where a topic contains "?" are flagged as 'medium' severity;
+ *   otherwise 'low' so the evaluator can still decide.
+ * - Only considers summaries within the last 7 days.
+ * - Skips summaries with messageCount < 3 AND age < FOLLOW_UP_WINDOW_MS (too fresh/short).
  */
 export function scanUnresolvedThreads(
   summaries: SessionSummaryRow[],
@@ -230,10 +238,6 @@ export function scanUnresolvedThreads(
     // Skip too fresh/short summaries (messageCount < 3 AND age < 48h)
     if (summary.messageCount < 3 && ageMs < FOLLOW_UP_WINDOW_MS) continue;
 
-    // Check if any topic contains a question mark
-    const hasQuestion = summary.topics.some((t) => t.includes('?'));
-    if (!hasQuestion) continue;
-
     // Check if there is a follow-up summary within 48h after this one
     const hasFollowUp = sorted.some(
       (other) =>
@@ -243,12 +247,18 @@ export function scanUnresolvedThreads(
     );
     if (hasFollowUp) continue;
 
-    // Unresolved thread detected
+    // Unresolved thread candidate. Elevate severity when the session had an
+    // explicit question in its topics; otherwise 'low' — evaluator decides.
     const questionTopics = summary.topics.filter((t) => t.includes('?'));
+    const severity: 'low' | 'medium' = questionTopics.length > 0 ? 'medium' : 'low';
+    const topicBlurb = questionTopics.length > 0
+      ? questionTopics.join(', ')
+      : summary.topics.slice(0, 3).join(', ') || summary.summary.slice(0, 80);
+
     results.push({
       type: 'unresolved_thread',
-      severity: 'medium',
-      description: `Unresolved question from ${Math.floor(ageDays)} days ago: ${questionTopics.join(', ')}`,
+      severity,
+      description: `Thread from ${Math.floor(ageDays)} days ago with no follow-up: ${topicBlurb}`,
       context: {
         topics: summary.topics,
         questionTopics,

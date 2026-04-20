@@ -59,6 +59,8 @@ export interface ProactiveEvalInput {
   boardSummary?: string;
   /** Number of agent-sourced items created today */
   todayItemCount?: number;
+  /** User-stated preferences relevant to proactiveness (e.g. "agent should check in frequently") */
+  userPreferences?: string[];
   /** Injectable now for testing */
   now?: number;
 }
@@ -123,20 +125,37 @@ export function buildEvaluatorPrompt(
 ): CompletionRequest {
   const mood = input.affect?.emotion ?? 'unknown';
 
-  const dialGuidance: Record<string, string> = {
-    conservative: 'Only act on clearly stale, overdue, or critical items. Skip anything uncertain.',
-    moderate: 'Act on items that are meaningfully stale or unresolved. Skip low-severity or uncertain signals.',
-    eager: 'Act on most signals unless they are clearly noise. Be proactive.',
-  };
+  // If the user has explicitly asked for proactive behavior, loosen the skip
+  // guidance across all dials — otherwise the evaluator will reject every
+  // low-severity signal and never generate any items, even when that's
+  // exactly what the user wants.
+  const prefsWantProactive = (input.userPreferences ?? []).some(p =>
+    /\b(proactive|check in|remind|follow[- ]?up|ping me|nudge|initiate)\b/i.test(p)
+  );
+
+  const dialGuidance: Record<string, string> = prefsWantProactive
+    ? {
+        conservative: 'Act on clearly stale, overdue, or critical items. Also act on low-severity signals when the user has explicitly asked for more proactive check-ins (see STATED PREFERENCES below).',
+        moderate: 'Act on items that are meaningfully stale or unresolved. Act on low-severity signals too when the user has asked for more proactive check-ins (see STATED PREFERENCES below).',
+        eager: 'Act on most signals unless they are clearly noise. The user has explicitly asked for proactive behavior — err toward sending a nudge rather than staying silent.',
+      }
+    : {
+        conservative: 'Only act on clearly stale, overdue, or critical items. Skip anything uncertain.',
+        moderate: 'Act on items that are meaningfully stale or unresolved. Skip low-severity or uncertain signals.',
+        eager: 'Act on most signals unless they are clearly noise. Be proactive.',
+      };
+
+  const prefsBlock = (input.userPreferences ?? []).length > 0
+    ? `\n\nSTATED PREFERENCES (the user has told the assistant these things — honor them):\n${(input.userPreferences ?? []).map(p => `- ${p}`).join('\n')}`
+    : '';
 
   const system = `You are a proactive personal assistant deciding whether to send follow-up messages.
 
 Rules:
-- When in doubt, skip. False silence is better than false alarm.
 - Proactiveness dial: ${input.dial}. ${dialGuidance[input.dial]}
 - User's current mood: ${mood}
 - Write nudge messages that feel natural and warm, like a helpful friend. 1-3 sentences max.
-- Respond with JSON only. No additional text outside the JSON object.
+- Respond with JSON only. No additional text outside the JSON object.${prefsBlock}
 
 Response format:
 {"items": [{"index": <signal index, 1-based>, "action": "skip" | "nudge", "message": "<message for nudge>", "urgency": "low" | "medium" | "high"}]}

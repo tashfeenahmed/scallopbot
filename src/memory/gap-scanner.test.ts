@@ -435,7 +435,8 @@ describe('scanBehavioralAnomalies', () => {
     );
     expect(lengthSignal).toBeDefined();
     expect(lengthSignal!.type).toBe('behavioral_anomaly');
-    expect(lengthSignal!.severity).toBe('low');
+    // Promoted from 'low' so the moderate dial stops silently skipping this signal
+    expect(lengthSignal!.severity).toBe('medium');
   });
 
   it('does not flag response length when trend is stable', () => {
@@ -484,7 +485,9 @@ describe('scanBehavioralAnomalies', () => {
     const result = scanBehavioralAnomalies(signals, NOW);
     expect(result.length).toBe(3);
     expect(result.every((s) => s.type === 'behavioral_anomaly')).toBe(true);
-    expect(result.every((s) => s.severity === 'low')).toBe(true);
+    // Two frequency/engagement anomalies remain 'low'; response_length is now 'medium'
+    expect(result.filter((s) => s.severity === 'low').length).toBe(2);
+    expect(result.filter((s) => s.severity === 'medium').length).toBe(1);
   });
 
   it('returns empty when no anomaly conditions met', () => {
@@ -593,7 +596,10 @@ describe('scanUnresolvedThreads', () => {
     expect(result[0].sourceId).toBe('s5');
   });
 
-  it('does not flag topics without question marks', () => {
+  it('flags topics without question marks as low-severity unresolved threads', () => {
+    // Previously required a "?" in topics, which meant normal conversations
+    // never became signals. New behavior: any session with no follow-up
+    // within 48h is a candidate, with severity 'low' when no question mark.
     const summary = makeSummary({
       id: 's6',
       topics: ['deployment', 'infrastructure'],
@@ -601,7 +607,9 @@ describe('scanUnresolvedThreads', () => {
       messageCount: 10,
     });
     const result = scanUnresolvedThreads([summary], NOW);
-    expect(result).toEqual([]);
+    expect(result).toHaveLength(1);
+    expect(result[0].severity).toBe('low');
+    expect(result[0].sourceId).toBe('s6');
   });
 
   it('does not flag summaries older than 7 days', () => {
@@ -637,7 +645,7 @@ describe('scanUnresolvedThreads', () => {
         createdAt: NOW - 5 * DAY_MS + 12 * 60 * 60 * 1000, // 12h later
         messageCount: 8,
       }),
-      // No question: no signal
+      // No question: still flagged (as 'low') because there's no follow-up.
       makeSummary({
         id: 'no-question',
         topics: ['general chat'],
@@ -646,8 +654,13 @@ describe('scanUnresolvedThreads', () => {
       }),
     ];
     const result = scanUnresolvedThreads(summaries, NOW);
-    expect(result).toHaveLength(1);
-    expect(result[0].sourceId).toBe('unresolved');
+    // Both the question-with-no-followup AND the no-question thread are
+    // candidates. The resolved-q+follow-up pair is excluded.
+    expect(result).toHaveLength(2);
+    const unresolved = result.find(r => r.sourceId === 'unresolved');
+    expect(unresolved?.severity).toBe('medium');
+    const noQuestion = result.find(r => r.sourceId === 'no-question');
+    expect(noQuestion?.severity).toBe('low');
   });
 
   it('detects question mark anywhere in topics array', () => {
@@ -679,7 +692,9 @@ describe('scanForGaps', () => {
         },
       }),
       sessionSummaries: [
-        makeSummary({ id: 's1', topics: ['general'], createdAt: NOW - 1 * DAY_MS }),
+        // Empty/no-sessions is the truly clean state — any dangling session
+        // without a follow-up now surfaces as a low-severity signal, which
+        // is correct behavior (callers decide to act or not).
       ],
       now: NOW,
     };
