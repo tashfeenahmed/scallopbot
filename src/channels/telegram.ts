@@ -1412,8 +1412,8 @@ export class TelegramChannel {
           .replace(/</g, '&lt;')
           .replace(/>/g, '&gt;');
         await ctx.reply(`<code>${escaped}</code>`, { parse_mode: 'HTML', disable_notification: true });
-      } catch {
-        // Silently ignore send failures for debug messages
+      } catch (err) {
+        this.logger.debug({ err: (err as Error).message }, 'Debug reply send failed (non-critical)');
       }
     };
   }
@@ -1492,18 +1492,24 @@ export class TelegramChannel {
     this.logger.info('Starting Telegram bot...');
     this.isRunning = true;
 
-    // Register bot commands with Telegram (makes them show in menu)
-    // Note: /start is intentionally omitted - it still works but doesn't clutter the menu
-    await this.bot.api.setMyCommands([
-      { command: 'help', description: 'Show available commands' },
-      { command: 'model', description: 'Switch AI model/provider' },
-      { command: 'usage', description: 'View token usage and costs' },
-      { command: 'stop', description: 'Stop current task' },
-      { command: 'settings', description: 'View your current settings' },
-      { command: 'setup', description: 'Reconfigure bot (name, personality, timezone)' },
-      { command: 'new', description: 'Start a new conversation' },
-      { command: 'verbose', description: 'Toggle debug output (memory, tools, thinking)' },
-    ]);
+    // Register bot commands with Telegram (makes them show in menu).
+    // Note: /start is intentionally omitted - it still works but doesn't clutter the menu.
+    // Wrapped in try/catch because 429 rate-limits here used to kill startup and
+    // send PM2 into a restart loop that compounded the ban (up to ~35 min silence).
+    try {
+      await this.bot.api.setMyCommands([
+        { command: 'help', description: 'Show available commands' },
+        { command: 'model', description: 'Switch AI model/provider' },
+        { command: 'usage', description: 'View token usage and costs' },
+        { command: 'stop', description: 'Stop current task' },
+        { command: 'settings', description: 'View your current settings' },
+        { command: 'setup', description: 'Reconfigure bot (name, personality, timezone)' },
+        { command: 'new', description: 'Start a new conversation' },
+        { command: 'verbose', description: 'Toggle debug output (memory, tools, thinking)' },
+      ]);
+    } catch (err) {
+      this.logger.warn({ err: (err as Error).message }, 'setMyCommands failed (non-critical, continuing startup)');
+    }
 
     // bot.start() runs grammy's long-polling loop and NEVER resolves.
     // Fire-and-forget so gateway.start() can continue registering trigger sources.

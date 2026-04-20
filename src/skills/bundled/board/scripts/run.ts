@@ -195,13 +195,25 @@ function parseTime(input: string): { hour: number; minute: number } | null {
   return null;
 }
 
+/**
+ * Convert a wall-clock time in USER_TIMEZONE to a UTC Date, independent of
+ * the Node process's system timezone. Uses Intl.DateTimeFormat.formatToParts
+ * to compute the offset by rendering an approximate UTC value in the target
+ * TZ and diffing.
+ */
 function tzToUtc(y: number, m: number, d: number, h: number, min: number): Date {
-  const dateStr = `${y}-${String(m + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}T${String(h).padStart(2, '0')}:${String(min).padStart(2, '0')}:00`;
-  const utcDate = new Date(dateStr + 'Z');
-  const localStr = utcDate.toLocaleString('en-US', { timeZone: USER_TIMEZONE });
-  const localDate = new Date(localStr);
-  const offsetMs = localDate.getTime() - utcDate.getTime();
-  return new Date(new Date(dateStr + 'Z').getTime() - offsetMs);
+  const approxUtcMs = Date.UTC(y, m, d, h, min);
+  const fmt = new Intl.DateTimeFormat('en-US', {
+    timeZone: USER_TIMEZONE,
+    hourCycle: 'h23',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+  });
+  const parts = fmt.formatToParts(new Date(approxUtcMs));
+  const get = (t: string) => parseInt(parts.find(p => p.type === t)?.value || '0', 10);
+  const tzAsUtcMs = Date.UTC(get('year'), get('month') - 1, get('day'), get('hour'), get('minute'), get('second'));
+  const offsetMs = tzAsUtcMs - approxUtcMs;
+  return new Date(approxUtcMs - offsetMs);
 }
 
 function getUserNowParts() {
@@ -229,11 +241,13 @@ function getUserNowParts() {
 function getNextOccurrence(schedule: RecurringSchedule): Date {
   const userNow = getUserNowParts();
   let { year, month, day } = userNow;
+  // Use UTC math so date advancement doesn't depend on the Node process's system TZ
   const advance = () => {
-    const d = new Date(year, month, day + 1);
-    day = d.getDate(); month = d.getMonth(); year = d.getFullYear();
+    const ms = Date.UTC(year, month, day + 1);
+    const d = new Date(ms);
+    day = d.getUTCDate(); month = d.getUTCMonth(); year = d.getUTCFullYear();
   };
-  const getDow = () => new Date(year, month, day).getDay();
+  const getDow = () => new Date(Date.UTC(year, month, day)).getUTCDay();
   const todayTarget = tzToUtc(year, month, day, schedule.hour, schedule.minute);
 
   switch (schedule.type) {
@@ -520,6 +534,14 @@ function addItem(args: BoardArgs): SkillResult {
     boardStatus = 'backlog';
   }
 
+  // Guard against obviously-wrong far-future triggers (often from an LLM that
+  // misparsed a date or persisted an error-response as a scheduled task).
+  const MAX_FUTURE_MS = 180 * 24 * 60 * 60 * 1000;
+  if (triggerAt > 0 && triggerAt > Date.now() + MAX_FUTURE_MS) {
+    db.close();
+    return { success: false, output: '', error: `trigger_time is more than 180 days in the future (${new Date(triggerAt).toISOString()}). If that's intentional, file a board item with kind='task' and no trigger_time.`, exitCode: 1 };
+  }
+
   const priority = args.priority || 'medium';
   const type = kind === 'task' ? 'event_prep' : 'reminder';
 
@@ -623,11 +645,41 @@ function updateItem(args: BoardArgs): SkillResult {
     changes.push(`kind → ${args.kind}`);
   }
   if (args.trigger_time) {
-    const parsed = parseTriggerTime(args.trigger_time);
-    if (parsed) {
-      sets.push('trigger_at = ?'); params.push(parsed.triggerAt);
+    // If user passed a recurring phrase ("every day at 9am"), rewrite the full
+    // recurring schedule. This replaces any existing recurring rule.
+    const inferredRecurring = parseRecurringString(args.trigger_time);
+    if (inferredRecurring) {
+      sets.push('recurring = ?'); params.push(JSON.stringify(inferredRecurring));
+      sets.push('trigger_at = ?'); params.push(getNextOccurrence(inferredRecurring).getTime());
       sets.push('board_status = ?'); params.push('scheduled');
-      changes.push(`scheduled → ${parsed.description}`);
+      changes.push(`recurring → ${formatRecurringDescription(inferredRecurring)}`);
+    } else {
+      const parsed = parseTriggerTime(args.trigger_time);
+      if (parsed) {
+        sets.push('trigger_at = ?'); params.push(parsed.triggerAt);
+        sets.push('board_status = ?'); params.push('scheduled');
+        changes.push(`scheduled → ${parsed.description}`);
+        // If item currently has a recurring rule and the new trigger_time is a
+        // plain time like "9am", realign recurring.hour/minute so future
+        // occurrences use the new time too (otherwise the next recurrence
+        // would snap back to the old schedule).
+        if (row.recurring) {
+          try {
+            const existing = JSON.parse(row.recurring) as RecurringSchedule;
+            const plainTimeMatch = args.trigger_time.trim().toLowerCase().match(/^(?:at\s+)?(\d{1,2}(?::\d{2})?\s*(?:am|pm)?|\d{1,2}:\d{2})$/);
+            if (plainTimeMatch) {
+              const t = parseTime(plainTimeMatch[1]);
+              if (t) {
+                const updated: RecurringSchedule = { ...existing, hour: t.hour, minute: t.minute };
+                sets.push('recurring = ?'); params.push(JSON.stringify(updated));
+                changes.push(`recurring realigned to ${formatRecurringDescription(updated)}`);
+              }
+            }
+          } catch {
+            // Malformed existing recurring JSON — leave it alone
+          }
+        }
+      }
     }
   }
 

@@ -78,6 +78,8 @@ export interface TokenUsage {
   outputTokens: number;
   /** Reasoning/thinking tokens consumed (e.g., Kimi K2.5 thinking mode) */
   reasoningTokens?: number;
+  /** Input tokens served from prompt cache (subset of inputTokens) */
+  cachedInputTokens?: number;
 }
 
 // Completion response

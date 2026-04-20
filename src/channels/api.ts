@@ -242,19 +242,47 @@ export class ApiChannel implements Channel, TriggerSource {
     this.wss = new WebSocketServer({ server: this.server });
     this.wss.on('connection', (ws, req) => this.handleWebSocket(ws, req));
 
-    // Start listening
-    await new Promise<void>((resolve, reject) => {
-      this.server!.listen(this.config.port, this.config.host, () => {
-        this.logger.info(
-          { port: this.config.port, host: this.config.host },
-          'API channel started'
-        );
-        resolve();
-      });
-      this.server!.on('error', reject);
-    });
-
-    this.running = true;
+    // Start listening, with retry on EADDRINUSE. Prior PM2 restart loops hit this
+    // because the previous process hadn't fully released the port yet. Log and
+    // retry a few times instead of crashing (which used to ping-pong into a
+    // Telegram rate-limit ban on setMyCommands).
+    const maxAttempts = 5;
+    const retryDelayMs = 1000;
+    let lastErr: unknown;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const onError = (err: NodeJS.ErrnoException) => {
+            this.server!.removeListener('error', onError);
+            reject(err);
+          };
+          this.server!.once('error', onError);
+          this.server!.listen(this.config.port, this.config.host, () => {
+            this.server!.removeListener('error', onError);
+            this.logger.info(
+              { port: this.config.port, host: this.config.host },
+              'API channel started'
+            );
+            resolve();
+          });
+        });
+        this.running = true;
+        return;
+      } catch (err) {
+        lastErr = err;
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code === 'EADDRINUSE' && attempt < maxAttempts) {
+          this.logger.warn(
+            { port: this.config.port, attempt, maxAttempts },
+            'Port in use, retrying after previous process releases it'
+          );
+          await new Promise(resolve => setTimeout(resolve, retryDelayMs));
+          continue;
+        }
+        break;
+      }
+    }
+    throw lastErr;
   }
 
   async stop(): Promise<void> {

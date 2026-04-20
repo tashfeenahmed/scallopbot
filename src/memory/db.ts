@@ -1212,9 +1212,13 @@ export class ScallopDatabase {
       query += ' AND prominence >= ?';
       params.push(options.minProminence);
     }
+    // Default to is_latest=1 so superseded rows don't leak into normal retrieval.
+    // Callers that need superseded rows (decay, cleanup) pass isLatest: false.
     if (options.isLatest !== undefined) {
       query += ' AND is_latest = ?';
       params.push(options.isLatest ? 1 : 0);
+    } else {
+      query += ' AND is_latest = 1';
     }
 
     query += ' ORDER BY prominence DESC, document_date DESC';
@@ -1249,6 +1253,8 @@ export class ScallopDatabase {
     if (options.isLatest !== undefined) {
       query += ' AND is_latest = ?';
       params.push(options.isLatest ? 1 : 0);
+    } else {
+      query += ' AND is_latest = 1';
     }
 
     query += ' ORDER BY document_date DESC';
@@ -1354,9 +1360,12 @@ export class ScallopDatabase {
       query += ' AND prominence >= ?';
       params.push(options.minProminence);
     }
+    // Default is_latest=1 filter — keeps superseded rows out of retrieval.
     if (options.isLatest !== undefined) {
       query += ' AND is_latest = ?';
       params.push(options.isLatest ? 1 : 0);
+    } else {
+      query += ' AND is_latest = 1';
     }
 
     query += ' ORDER BY prominence DESC, document_date DESC';
@@ -1390,6 +1399,8 @@ export class ScallopDatabase {
     if (options.isLatest !== undefined) {
       query += ' AND is_latest = ?';
       params.push(options.isLatest ? 1 : 0);
+    } else {
+      query += ' AND is_latest = 1';
     }
 
     query += ' ORDER BY document_date DESC';

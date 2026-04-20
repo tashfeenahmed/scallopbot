@@ -395,8 +395,8 @@ export class SubAgentExecutor {
           }
           lines.push('');
         }
-      } catch {
-        // Memory search failure is non-fatal
+      } catch (err) {
+        this.logger.debug({ err: (err as Error).message }, 'Memory search failed (non-fatal, sub-agent continues without context)');
       }
     }
 

@@ -130,6 +130,16 @@ Rules:
 5. If a message references something from context (like "that's my office"), use the context to form a complete fact
 6. DETECT ACTIONS: Look for forget requests, corrections, and preference updates
 
+CRITICAL - Never extract meta-analysis about the assistant's own behavior:
+Do NOT create "facts" that describe how the assistant should behave, what patterns
+work well in conversation, or observations about the user's communication style.
+These are not facts the user stated — they're self-reflection that pollutes memory.
+- BAD: "User responds well to binary confirmation prompts" (meta-analysis)
+- BAD: "Progressive task disclosure keeps focus managed" (assistant coaching itself)
+- BAD: "Greeting-only openings should propose 2-3 next actions" (prompt engineering)
+- GOOD: "Prefers concise, direct answers" (a preference the user stated)
+If an input looks like an assistant's internal reasoning about itself, extract nothing.
+
 CRITICAL - Relationship facts:
 When the user says "My [relationship] is [name]" (wife, husband, flatmate, friend, etc.):
 - The RELATIONSHIP fact has subject: "user" (because it's the user's relationship)

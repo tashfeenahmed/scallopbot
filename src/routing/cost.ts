@@ -124,9 +124,8 @@ const DEFAULT_PRICING: Record<string, ModelPricing> = {
   // OpenRouter
   'anthropic/claude-3.5-sonnet': { inputPerMillion: 6, outputPerMillion: 30 },
   'anthropic/claude-sonnet-4.5': { inputPerMillion: 3, outputPerMillion: 15 },
-  'qwen/qwen3.6-plus:free': { inputPerMillion: 0, outputPerMillion: 0 },
-  'qwen/qwen3.6-plus-04-02:free': { inputPerMillion: 0, outputPerMillion: 0 },
   'qwen/qwen3.6-plus': { inputPerMillion: 0.8, outputPerMillion: 4 },
+  'qwen/qwen3.6-plus-04-02': { inputPerMillion: 0.8, outputPerMillion: 4 },
 
   // Free/Local
   'llama3.2': { inputPerMillion: 0, outputPerMillion: 0 },

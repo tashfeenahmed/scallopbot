@@ -41,10 +41,13 @@ export interface LoopDetection {
   count: number;
 }
 
+// Thresholds: 3 identical calls → warning (injects a system message so the LLM
+// sees it's stuck), 4 identical calls → block (force-exits the loop). Previously
+// critical=6 let the bot grind through 5-6 identical calls before stopping.
 const DEFAULT_CONFIG: ToolLoopDetectorConfig = {
   historySize: 20,
   warningThreshold: 3,
-  criticalThreshold: 6,
+  criticalThreshold: 4,
   circuitBreakerThreshold: 15,
 };
 
@@ -281,8 +284,9 @@ export class ToolLoopDetector {
     if (count >= this.config.criticalThreshold) {
       return {
         kind: 'generic_repeat',
-        severity: 'critical',
-        message: `Repetitive tool loop detected: ${last.toolName} called ${count} times with the same arguments. Stop repeating the same tool and try a different approach.`,
+        // 'block' so the agent force-exits instead of just logging and continuing
+        severity: 'block',
+        message: `Repetitive tool loop detected: ${last.toolName} called ${count} times with the same arguments. Stopping to avoid wasting iterations on a failing approach.`,
         toolName: last.toolName,
         count,
       };

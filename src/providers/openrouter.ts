@@ -19,7 +19,7 @@ const REASONING_MODELS = new Set([
   'qwen/qwen3-32b',
   'qwen/qwen3-32b:free',
   'qwen/qwen3.6-plus',
-  'qwen/qwen3.6-plus:free',
+  'qwen/qwen3.6-plus-04-02',
   'deepseek/deepseek-r1',
   'deepseek/deepseek-r1:free',
 ]);
@@ -66,6 +66,9 @@ interface OpenRouterResponse {
   usage: {
     prompt_tokens: number;
     completion_tokens: number;
+    prompt_tokens_details?: {
+      cached_tokens?: number;
+    };
   };
   model: string;
 }
@@ -109,6 +112,7 @@ export class OpenRouterProvider implements LLMProvider {
       model: this.model,
       messages,
       max_tokens: isReasoning ? (request.maxTokens || 8192) : (request.maxTokens || 4096),
+      usage: { include: true },
     };
 
     if (request.temperature !== undefined) {
@@ -269,12 +273,15 @@ export class OpenRouterProvider implements LLMProvider {
       }
     }
 
+    const cachedInputTokens = data.usage.prompt_tokens_details?.cached_tokens;
+
     return {
       content,
       stopReason: this.mapStopReason(choice.finish_reason),
       usage: {
         inputTokens: data.usage.prompt_tokens,
         outputTokens: data.usage.completion_tokens,
+        ...(cachedInputTokens !== undefined && { cachedInputTokens }),
       },
       model: data.model,
     };

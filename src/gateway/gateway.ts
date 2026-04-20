@@ -184,11 +184,23 @@ export class Gateway {
     this.boardService = new BoardService(this.scallopMemoryStore.getDatabase(), this.logger);
     this.logger.debug('Board service initialized');
 
-    // Initialize LLM-based fact extractor
-    // Use a chat-capable provider (not Ollama which may only have embedding models)
-    // This runs asynchronously and doesn't block the main conversation
+    // Initialize LLM-based fact extractor.
+    // Prefer providers in PROVIDER_ORDER (respects the user's chosen default)
+    // so the extractor uses the same provider as the main chat. Falls back to
+    // any non-Ollama provider (Ollama is embed-only). Ollama is excluded
+    // because it may not have a chat-capable model loaded.
     const availableProviders = this.providerRegistry.getAvailableProviders();
-    const factExtractionProvider = availableProviders.find(p => p.name !== 'ollama')
+    const providerOrder = this.config.routing.providerOrder;
+    let factExtractionProvider: LLMProvider | undefined;
+    for (const name of providerOrder) {
+      const p = this.providerRegistry.getProvider(name);
+      if (p && p.name !== 'ollama' && p.isAvailable()) {
+        factExtractionProvider = p;
+        break;
+      }
+    }
+    factExtractionProvider = factExtractionProvider
+      || availableProviders.find(p => p.name !== 'ollama')
       || this.providerRegistry.getDefaultProvider();
 
     if (factExtractionProvider && this.scallopMemoryStore) {
@@ -1068,7 +1080,15 @@ export class Gateway {
           }
           case 'list': {
             const installed = await pkgManager.listInstalled();
-            return { success: true, output: installed.length ? installed.join('\n') : 'No skills installed' };
+            const available = registry.getAvailableSkills().map(s => s.name);
+            const lines: string[] = [];
+            if (available.length) {
+              lines.push(`Available skills (already loaded — call these directly as tools):\n${available.join(', ')}`);
+            }
+            if (installed.length) {
+              lines.push(`ClawHub-installed skills:\n${installed.join('\n')}`);
+            }
+            return { success: true, output: lines.length ? lines.join('\n\n') : 'No skills available' };
           }
           case 'set_key': {
             const keyName = ctx.args.key_name as string | undefined;

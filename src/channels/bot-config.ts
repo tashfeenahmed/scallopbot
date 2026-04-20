@@ -81,9 +81,22 @@ export class BotConfigManager {
   }
 
   /**
+   * Normalize userId to canonical form (strip channel prefix).
+   * Different code paths used to pass bare userIds, "telegram:{id}", and
+   * "default" interchangeably — that created 3 divergent rows for the same
+   * user. Canonical form is the raw id without prefix.
+   */
+  private normalizeUserId(userId: string): string {
+    if (userId.startsWith('telegram:')) return userId.slice('telegram:'.length);
+    if (userId.startsWith('api:')) return userId.slice('api:'.length);
+    return userId;
+  }
+
+  /**
    * Get user config, creating default if not exists
    */
   getUserConfig(userId: string): UserBotConfig {
+    userId = this.normalizeUserId(userId);
     const row = this.db.getBotConfig(userId);
     if (row) {
       return this.rowToUserConfig(row);
@@ -108,6 +121,7 @@ export class BotConfigManager {
    * Update user config
    */
   async updateUserConfig(userId: string, updates: Partial<UserBotConfig>): Promise<UserBotConfig> {
+    userId = this.normalizeUserId(userId);
     // Ensure user exists first
     this.getUserConfig(userId);
 
@@ -128,7 +142,7 @@ export class BotConfigManager {
    * Check if user has completed onboarding
    */
   hasCompletedOnboarding(userId: string): boolean {
-    const row = this.db.getBotConfig(userId);
+    const row = this.db.getBotConfig(this.normalizeUserId(userId));
     return row?.onboardingComplete ?? false;
   }
 
@@ -152,6 +166,7 @@ export class BotConfigManager {
    * Reset user to defaults
    */
   async resetUserConfig(userId: string): Promise<void> {
+    userId = this.normalizeUserId(userId);
     const existing = this.db.getBotConfig(userId);
     const now = new Date().toISOString();
     this.db.upsertBotConfig(userId, {

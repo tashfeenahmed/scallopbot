@@ -329,6 +329,56 @@ describe('OpenRouterProvider', () => {
     });
   });
 
+  describe('prompt caching', () => {
+    it('should request detailed usage and parse cached tokens', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            choices: [{ message: { content: 'Cached reply' }, finish_reason: 'stop' }],
+            usage: {
+              prompt_tokens: 1500,
+              completion_tokens: 20,
+              prompt_tokens_details: { cached_tokens: 1200 },
+            },
+            model: 'qwen/qwen3.6-plus',
+          }),
+      });
+
+      const qwenProvider = new OpenRouterProvider({
+        apiKey: 'test-key',
+        model: 'qwen/qwen3.6-plus',
+      });
+
+      const response = await qwenProvider.complete({
+        messages: [{ role: 'user', content: 'Hi' }],
+      });
+
+      const requestBody = JSON.parse(mockFetch.mock.calls[0][1].body);
+      expect(requestBody.usage).toEqual({ include: true });
+      expect(response.usage.inputTokens).toBe(1500);
+      expect(response.usage.cachedInputTokens).toBe(1200);
+    });
+
+    it('should omit cachedInputTokens when not provided', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            choices: [{ message: { content: 'OK' }, finish_reason: 'stop' }],
+            usage: { prompt_tokens: 10, completion_tokens: 5 },
+            model: 'anthropic/claude-3.5-sonnet',
+          }),
+      });
+
+      const response = await provider.complete({
+        messages: [{ role: 'user', content: 'Hi' }],
+      });
+
+      expect(response.usage.cachedInputTokens).toBeUndefined();
+    });
+  });
+
   describe('model routing', () => {
     it('should support switching models dynamically', () => {
       expect(provider.model).toBe('anthropic/claude-3.5-sonnet');

@@ -574,29 +574,36 @@ export class UnifiedScheduler {
     const dayNames: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
     const userDayOfWeek = dayNames[getPart('weekday')] ?? now.getDay();
 
-    // Helper: build a UTC timestamp for a given date in the user's timezone
+    // Helper: build a UTC timestamp for a given date in the user's timezone.
+    // Uses Intl.DateTimeFormat.formatToParts offset-diff pattern so it's
+    // independent of the Node process's system timezone.
     const toUtc = (y: number, m: number, d: number, h: number, min: number): number => {
-      // Format as ISO-ish string and interpret in the user's timezone
-      const dateStr = `${y}-${String(m + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}T${String(h).padStart(2, '0')}:${String(min).padStart(2, '0')}:00`;
-      // Use a trick: compute the offset between the user's timezone and UTC
-      const utcDate = new Date(dateStr + 'Z');
-      const localStr = utcDate.toLocaleString('en-US', { timeZone: tz });
-      const localDate = new Date(localStr);
-      const offsetMs = localDate.getTime() - utcDate.getTime();
-      return new Date(dateStr + 'Z').getTime() - offsetMs;
+      const approxUtcMs = Date.UTC(y, m, d, h, min);
+      const partsFmt = new Intl.DateTimeFormat('en-US', {
+        timeZone: tz,
+        hourCycle: 'h23',
+        year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', second: '2-digit',
+      });
+      const p = partsFmt.formatToParts(new Date(approxUtcMs));
+      const g = (t: string) => parseInt(p.find(x => x.type === t)?.value || '0', 10);
+      const tzAsUtcMs = Date.UTC(g('year'), g('month') - 1, g('day'), g('hour'), g('minute'), g('second'));
+      const offsetMs = tzAsUtcMs - approxUtcMs;
+      return approxUtcMs - offsetMs;
     };
 
-    // Start from "today" in user timezone, at the scheduled time
+    // Start from "today" in user timezone, at the scheduled time.
+    // Use UTC date math so advance() doesn't depend on system TZ.
     let targetDay = userDay;
     let targetMonth = userMonth;
     let targetYear = userYear;
     const advance = () => {
-      const d = new Date(targetYear, targetMonth, targetDay + 1);
-      targetDay = d.getDate();
-      targetMonth = d.getMonth();
-      targetYear = d.getFullYear();
+      const d = new Date(Date.UTC(targetYear, targetMonth, targetDay + 1));
+      targetDay = d.getUTCDate();
+      targetMonth = d.getUTCMonth();
+      targetYear = d.getUTCFullYear();
     };
-    const getDow = () => new Date(targetYear, targetMonth, targetDay).getDay();
+    const getDow = () => new Date(Date.UTC(targetYear, targetMonth, targetDay)).getUTCDay();
 
     switch (schedule.type) {
       case 'daily':

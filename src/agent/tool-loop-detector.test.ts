@@ -49,7 +49,7 @@ describe('ToolLoopDetector', () => {
       expect(result!.count).toBe(4);
     });
 
-    it('detects critical after higher threshold', () => {
+    it('escalates to block after critical threshold to force-exit the loop', () => {
       for (let i = 0; i < 7; i++) {
         detector.recordToolCall(SESSION, 'web_search', { q: 'weather' });
       }
@@ -57,7 +57,7 @@ describe('ToolLoopDetector', () => {
       const result = detector.detect(SESSION);
       expect(result).not.toBeNull();
       expect(result!.kind).toBe('generic_repeat');
-      expect(result!.severity).toBe('critical');
+      expect(result!.severity).toBe('block');
     });
   });
 
