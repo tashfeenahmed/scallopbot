@@ -98,7 +98,13 @@ describe('AnthropicProvider', () => {
       expect(mockCreate).toHaveBeenCalledWith({
         model: 'claude-sonnet-4-5-20250929',
         messages: [{ role: 'user', content: 'Hello' }],
-        system: 'You are a helpful assistant',
+        system: [
+          {
+            type: 'text',
+            text: 'You are a helpful assistant',
+            cache_control: { type: 'ephemeral' },
+          },
+        ],
         max_tokens: 1024,
       });
 
