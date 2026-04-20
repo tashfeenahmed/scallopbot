@@ -12,8 +12,8 @@ import { constants } from 'fs';
 import type { Logger } from 'pino';
 import type { Skill, SkillExecutionRequest, SkillExecutionResult } from './types.js';
 
-/** Default timeout for script execution (60 seconds for browser operations) */
-const DEFAULT_TIMEOUT_MS = 60000;
+/** Default timeout for script execution (120 seconds for browser/screenshot operations) */
+const DEFAULT_TIMEOUT_MS = 120000;
 
 /** Maximum output size in bytes (1MB) to prevent OOM from runaway scripts */
 const MAX_OUTPUT_BYTES = 1024 * 1024;
@@ -23,6 +23,8 @@ const MAX_OUTPUT_BYTES = 1024 * 1024;
  */
 export class SkillExecutor {
   private getTimezone?: (userId: string) => string;
+  private scriptPathCache = new Map<string, string | null>();
+
   constructor(private logger?: Logger, getTimezone?: (userId: string) => string) {
     this.getTimezone = getTimezone;
   }
@@ -83,12 +85,25 @@ export class SkillExecutor {
       return null;
     }
 
-    const scriptsDir = skill.scriptsDir;
+    // Skill scripts are immutable at runtime — cache the resolved path so
+    // we don't pay 3-9 fs.access() syscalls on every tool invocation.
+    const cacheKey = `${skill.name}|${action || ''}`;
+    if (this.scriptPathCache.has(cacheKey)) {
+      return this.scriptPathCache.get(cacheKey)!;
+    }
+
+    const resolved = await this.resolveScriptUncached(skill, action);
+    this.scriptPathCache.set(cacheKey, resolved);
+    return resolved;
+  }
+
+  private async resolveScriptUncached(skill: Skill, action?: string): Promise<string | null> {
+    const scriptsDir = skill.scriptsDir!;
     const frontmatterScripts = skill.frontmatter.scripts;
 
     // 1. Check frontmatter scripts mapping
     if (action && frontmatterScripts?.[action]) {
-      const scriptPath = join(skill.scriptsDir, '..', frontmatterScripts[action]);
+      const scriptPath = join(scriptsDir, '..', frontmatterScripts[action]);
       if (await this.fileExists(scriptPath)) {
         return scriptPath;
       }

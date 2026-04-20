@@ -1030,21 +1030,23 @@ Only install skills when the user asks, or when you determine a skill would help
 
       // Phase 0: Short-term memory buffer — things the user just told us
       const SHORT_TERM_WINDOW_MS = 6 * 60 * 60 * 1000; // 6 hours
-      const recentFacts = this.scallopStore.getRecentMemories(userId, SHORT_TERM_WINDOW_MS);
 
-      // Phase 1: Long-term prominent facts
-      const userFacts = this.scallopStore.getByUser(userId, {
-        minProminence: 0.3,
-        isLatest: true,
-        limit: 20,
-      });
-
-      // Phase 2: Query-relevant facts via hybrid search (now includes recency boost)
-      const relevantResults = await this.scallopStore.search(userMessage, {
-        userId,
-        minProminence: 0.1,
-        limit: 10,
-      });
+      // Run all three phases concurrently. Phases 0 and 1 are sync against SQLite
+      // but wrapping them in Promise.all lets phase 2 (async hybrid search with
+      // embeddings) overlap their CPU/IO time instead of waiting in series.
+      const [recentFacts, userFacts, relevantResults] = await Promise.all([
+        Promise.resolve(this.scallopStore.getRecentMemories(userId, SHORT_TERM_WINDOW_MS)),
+        Promise.resolve(this.scallopStore.getByUser(userId, {
+          minProminence: 0.3,
+          isLatest: true,
+          limit: 20,
+        })),
+        this.scallopStore.search(userMessage, {
+          userId,
+          minProminence: 0.1,
+          limit: 10,
+        }),
+      ]);
 
       // Combine: recent first (short-term), then search-relevant, then prominent
       const seenIds = new Set<string>();

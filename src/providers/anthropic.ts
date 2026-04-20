@@ -70,7 +70,7 @@ export class AnthropicProvider implements LLMProvider {
       model: this.model,
       messages: this.formatMessages(request.messages),
       max_tokens: request.maxTokens || DEFAULT_MAX_TOKENS,
-      ...(request.system && { system: request.system }),
+      ...(request.system && { system: this.formatSystem(request.system) }),
       ...(request.temperature !== undefined && { temperature: request.temperature }),
       ...(request.stopSequences && { stop_sequences: request.stopSequences }),
       ...(request.tools && { tools: this.formatTools(request.tools) }),
@@ -89,7 +89,7 @@ export class AnthropicProvider implements LLMProvider {
       messages: this.formatMessages(request.messages),
       max_tokens: request.maxTokens || DEFAULT_MAX_TOKENS,
       stream: true,
-      ...(request.system && { system: request.system }),
+      ...(request.system && { system: this.formatSystem(request.system) }),
       ...(request.temperature !== undefined && { temperature: request.temperature }),
       ...(request.stopSequences && { stop_sequences: request.stopSequences }),
       ...(request.tools && { tools: this.formatTools(request.tools) }),
@@ -120,11 +120,24 @@ export class AnthropicProvider implements LLMProvider {
       }));
   }
 
+  private formatSystem(system: string): Anthropic.TextBlockParam[] {
+    return [
+      {
+        type: 'text',
+        text: system,
+        cache_control: { type: 'ephemeral' },
+      },
+    ];
+  }
+
   private formatTools(tools: NonNullable<CompletionRequest['tools']>): Anthropic.Tool[] {
-    return tools.map((tool) => ({
+    return tools.map((tool, index) => ({
       name: tool.name,
       description: tool.description,
       input_schema: tool.input_schema as Anthropic.Tool.InputSchema,
+      ...(index === tools.length - 1 && {
+        cache_control: { type: 'ephemeral' as const },
+      }),
     }));
   }
 
