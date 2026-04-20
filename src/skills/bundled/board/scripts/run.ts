@@ -259,6 +259,62 @@ function getNextOccurrence(schedule: RecurringSchedule): Date {
   return tzToUtc(year, month, day, schedule.hour, schedule.minute);
 }
 
+/** Map day name (full or short) to day-of-week index (0=Sun..6=Sat) */
+function parseDayOfWeek(input: string): number | null {
+  const days: Record<string, number> = {
+    'sunday': 0, 'sun': 0,
+    'monday': 1, 'mon': 1,
+    'tuesday': 2, 'tue': 2, 'tues': 2,
+    'wednesday': 3, 'wed': 3,
+    'thursday': 4, 'thu': 4, 'thur': 4, 'thurs': 4,
+    'friday': 5, 'fri': 5,
+    'saturday': 6, 'sat': 6,
+  };
+  return days[input.toLowerCase().trim()] ?? null;
+}
+
+/**
+ * Detect recurring patterns inside a natural-language time string.
+ * Returns a RecurringSchedule if the input matches one of:
+ *   "every day at 8am" / "daily at 9:30am"
+ *   "every Monday at 10am"
+ *   "weekdays at 9am" / "every weekday at 9am"
+ *   "weekends at 10am"
+ * Returns null otherwise (caller should fall back to one-off parsing).
+ */
+function parseRecurringString(input: string): RecurringSchedule | null {
+  const lower = input.toLowerCase().trim();
+
+  const dailyMatch = lower.match(/^(?:every\s*day|daily)\s+(?:at\s+)?(\d{1,2}(?::\d{2})?\s*(?:am|pm)?|\d{1,2}:\d{2})$/i);
+  if (dailyMatch) {
+    const time = parseTime(dailyMatch[1]);
+    if (time) return { type: 'daily', hour: time.hour, minute: time.minute };
+  }
+
+  const weeklyMatch = lower.match(/^every\s+(sunday|monday|tuesday|wednesday|thursday|friday|saturday|sun|mon|tue|tues|wed|thu|thur|thurs|fri|sat)\s+(?:at\s+)?(\d{1,2}(?::\d{2})?\s*(?:am|pm)?|\d{1,2}:\d{2})$/i);
+  if (weeklyMatch) {
+    const dayOfWeek = parseDayOfWeek(weeklyMatch[1]);
+    const time = parseTime(weeklyMatch[2]);
+    if (dayOfWeek !== null && time) {
+      return { type: 'weekly', hour: time.hour, minute: time.minute, dayOfWeek };
+    }
+  }
+
+  const weekdaysMatch = lower.match(/^(?:every\s+)?weekdays?\s+(?:at\s+)?(\d{1,2}(?::\d{2})?\s*(?:am|pm)?|\d{1,2}:\d{2})$/i);
+  if (weekdaysMatch) {
+    const time = parseTime(weekdaysMatch[1]);
+    if (time) return { type: 'weekdays', hour: time.hour, minute: time.minute };
+  }
+
+  const weekendsMatch = lower.match(/^(?:every\s+)?weekends?\s+(?:at\s+)?(\d{1,2}(?::\d{2})?\s*(?:am|pm)?|\d{1,2}:\d{2})$/i);
+  if (weekendsMatch) {
+    const time = parseTime(weekendsMatch[1]);
+    if (time) return { type: 'weekends', hour: time.hour, minute: time.minute };
+  }
+
+  return null;
+}
+
 function parseTriggerTime(input: string): { triggerAt: number; description: string } | null {
   const lower = input.toLowerCase().trim();
 
@@ -442,14 +498,24 @@ function addItem(args: BoardArgs): SkillResult {
     scheduleDesc = formatRecurringDescription(recurring);
     boardStatus = 'scheduled';
   } else if (args.trigger_time) {
-    const parsed = parseTriggerTime(args.trigger_time);
-    if (!parsed) {
-      db.close();
-      return { success: false, output: '', error: `Could not parse time: "${args.trigger_time}". Try: "in 30 min", "at 10am", "tomorrow 9am"`, exitCode: 1 };
+    // Defense in depth: detect recurring patterns the LLM packed into trigger_time
+    // ("every day at 8am", "every Monday at 9am", "weekdays at 9am", etc.)
+    const inferredRecurring = parseRecurringString(args.trigger_time);
+    if (inferredRecurring) {
+      recurring = inferredRecurring;
+      triggerAt = getNextOccurrence(recurring).getTime();
+      scheduleDesc = formatRecurringDescription(recurring);
+      boardStatus = 'scheduled';
+    } else {
+      const parsed = parseTriggerTime(args.trigger_time);
+      if (!parsed) {
+        db.close();
+        return { success: false, output: '', error: `Could not parse time: "${args.trigger_time}". Try: "in 30 min", "at 10am", "tomorrow 9am", or for recurring use the recurring object (e.g. {"type":"daily","hour":8,"minute":0}).`, exitCode: 1 };
+      }
+      triggerAt = parsed.triggerAt;
+      scheduleDesc = parsed.description;
+      boardStatus = 'scheduled';
     }
-    triggerAt = parsed.triggerAt;
-    scheduleDesc = parsed.description;
-    boardStatus = 'scheduled';
   } else {
     boardStatus = 'backlog';
   }

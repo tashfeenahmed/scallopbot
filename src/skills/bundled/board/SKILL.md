@@ -33,20 +33,24 @@ inputSchema:
       description: "nudge=message reminder, task=sub-agent work (for add/update)"
     trigger_time:
       type: string
-      description: "When to trigger, e.g. 'in 30 min', 'tomorrow 9am', 'at 3pm' (for add/update/snooze)"
+      description: "For ONE-OFF items only: 'in 30 min', 'tomorrow 9am', 'at 3pm', 'today 7pm'. For recurring schedules (every day / daily / every Monday / weekdays / weekends) use the `recurring` object instead — do NOT put 'every day at 8am' in trigger_time."
     recurring:
       type: object
-      description: "Recurring schedule (for add)"
+      description: "USE THIS for any user request containing 'every day', 'daily', 'every Monday/Tuesday/...', 'weekdays', or 'weekends'. Example: user says 'remind me every day at 8am to take vitamins' → pass recurring={type:'daily',hour:8,minute:0} and leave trigger_time unset. The item will automatically re-fire on the next occurrence after each trigger."
       properties:
         type:
           type: string
           enum: [daily, weekly, weekdays, weekends]
+          description: "daily=every day, weekly=one specific day of the week (requires dayOfWeek), weekdays=Mon-Fri, weekends=Sat-Sun"
         hour:
           type: integer
+          description: "Hour in 24h format (0-23). For '8am' use 8, for '8pm' use 20."
         minute:
           type: integer
+          description: "Minute (0-59)"
         dayOfWeek:
           type: integer
+          description: "Day of week for type='weekly': 0=Sunday, 1=Monday, 2=Tuesday, 3=Wednesday, 4=Thursday, 5=Friday, 6=Saturday"
     labels:
       type: array
       items:
@@ -115,3 +119,25 @@ urgent > high > medium (default) > low
 ## Item Kinds
 - `nudge`: A message/reminder delivered to the user
 - `task`: Sub-agent work that runs autonomously and stores results
+
+## Recurring vs one-off
+
+The system supports both. **Pick the right one:**
+
+- **One-off**: use `trigger_time` — e.g. "remind me tomorrow at 9am" → `trigger_time: "tomorrow 9am"`. Fires once, then done.
+- **Recurring**: use the `recurring` object — e.g. "remind me every day at 8am" → `recurring: {"type":"daily","hour":8,"minute":0}`. Automatically re-fires on each next occurrence forever until the user archives it.
+
+If the user says any of these, they want **recurring** (never `trigger_time`):
+
+| User says | Use |
+|---|---|
+| "every day at 8am" / "daily at 8am" | `recurring: {"type":"daily","hour":8,"minute":0}` |
+| "every Monday at 9am" | `recurring: {"type":"weekly","hour":9,"minute":0,"dayOfWeek":1}` |
+| "every weekday at 9am" / "weekdays at 9am" | `recurring: {"type":"weekdays","hour":9,"minute":0}` |
+| "every weekend at 10am" / "weekends at 10am" | `recurring: {"type":"weekends","hour":10,"minute":0}` |
+
+`dayOfWeek`: 0=Sun, 1=Mon, 2=Tue, 3=Wed, 4=Thu, 5=Fri, 6=Sat.
+
+`hour` is 24h: 8am=8, noon=12, 2pm=14, 8pm=20.
+
+**Never** put "every day at 8am" as a string into `trigger_time` — use the `recurring` object.
