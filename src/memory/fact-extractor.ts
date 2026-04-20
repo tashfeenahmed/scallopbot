@@ -1088,15 +1088,24 @@ PREFERENCES LEARNED:
 - Format: { "domain": "category", "prefers": "X", "over": "Y", "strength": 0.5-1.0 }
 - Domains: communication, technology, lifestyle, work, food, entertainment, etc.
 
+RECENT TOPICS:
+- 1-3 SPECIFIC entities/concepts this message is about (noun phrases, lowercase, <=25 chars each).
+- Prefer concrete named things over broad categories:
+  GOOD: "notion", "leg press", "qatar flight", "tyre service", "calf raises", "parents travel"
+  BAD:  "fitness", "work", "travel" (too broad)
+  BAD:  "the user discussed their workout" (whole sentences)
+- Empty array if the message has no distinctive topic (greetings, acks, yes/no).
+
 RULES:
 - superseded: IDs of memories replaced by new facts. Empty array if none.
 - user_profile: Only fields that CHANGED or are NEW based on the message. Empty object if no updates.
 - agent_profile: Only if user is addressing the bot about its identity. Empty object if not.
 - preferences_learned: Array of preference objects. Empty array if no clear preferences.
+- recent_topics: Array of 1-3 short topic strings (see above). Empty array if none.
 - Do NOT echo back unchanged profile values.
 
 Respond with JSON only:
-{"superseded": [], "user_profile": {}, "agent_profile": {}, "preferences_learned": []}`;
+{"superseded": [], "user_profile": {}, "agent_profile": {}, "preferences_learned": [], "recent_topics": []}`;
 
     try {
       const response = await this.provider.complete({
@@ -1123,6 +1132,7 @@ Respond with JSON only:
           over: string;
           strength?: number;
         }>;
+        recent_topics?: string[];
       };
 
       // 1. Supersede outdated memories
@@ -1169,7 +1179,9 @@ Respond with JSON only:
           // Focus stability: only update if the new value is meaningfully different
           // and not just a transient task topic from the current conversation
           if (key === 'focus') {
-            const items = trimmed.split(',').map(s => s.trim()).filter(Boolean).slice(0, 5);
+            // Cap each item to 25 chars so one long run-on doesn't dominate the field.
+            const capItem = (s: string) => s.length > 25 ? s.slice(0, 22).trim() + '…' : s;
+            const items = trimmed.split(',').map(s => s.trim()).filter(Boolean).map(capItem).slice(0, 5);
             const newFocus = items.join(', ');
 
             // Skip if new focus looks like a transient task request
@@ -1179,26 +1191,38 @@ Respond with JSON only:
               continue;
             }
 
-            // Only update if meaningfully different from current focus
-            const currentFocus = profileManager.getStaticValue('default', 'focus');
-            if (currentFocus) {
+            // Supermemory-style aging: if existing focus hasn't been touched for
+            // FOCUS_TTL_MS (14 days), treat it as stale and fully replace instead of
+            // merging. Each successful update effectively reinforces the whole field
+            // by refreshing user_profiles.updated_at.
+            const FOCUS_TTL_MS = 14 * 24 * 60 * 60 * 1000;
+            const currentEntry = this.scallopStore.getDatabase().getProfileValue('default', 'focus');
+            const currentFocus = currentEntry?.value ?? null;
+            const isStale = currentEntry ? (Date.now() - currentEntry.updatedAt > FOCUS_TTL_MS) : true;
+
+            if (currentFocus && !isStale) {
               const currentSet = new Set(currentFocus.toLowerCase().split(',').map(s => s.trim()));
               const newSet = new Set(newFocus.toLowerCase().split(',').map(s => s.trim()));
-              // Count how many items are genuinely new
               const genuinelyNew = [...newSet].filter(item => !currentSet.has(item));
               if (genuinelyNew.length === 0) {
-                this.logger.debug({ focus: newFocus }, 'Focus unchanged, skipping');
+                // Still touch updated_at to reinforce the existing focus as fresh
+                profileManager.setStaticValue('default', key, currentFocus);
+                this.logger.debug({ focus: newFocus }, 'Focus unchanged, reinforced freshness');
                 continue;
               }
-              // Merge: keep existing items and add genuinely new ones, capped at 5
-              const merged = [...new Set([...currentFocus.split(',').map(s => s.trim()), ...genuinelyNew])].filter(Boolean).slice(0, 5);
+              // Merge existing + new, re-cap per item, cap total to 5
+              const merged = [...new Set([
+                ...currentFocus.split(',').map(s => s.trim()).map(capItem),
+                ...genuinelyNew.map(capItem),
+              ])].filter(Boolean).slice(0, 5);
               profileManager.setStaticValue('default', key, merged.join(', '));
               this.logger.info({ key, value: merged.join(', '), added: genuinelyNew }, 'User focus merged via LLM');
               continue;
             }
 
+            // No existing focus OR stale focus → replace wholesale with the new value
             profileManager.setStaticValue('default', key, newFocus);
-            this.logger.info({ key, value: newFocus }, 'User profile updated via LLM');
+            this.logger.info({ key, value: newFocus, replacedStale: isStale && !!currentFocus }, 'User focus set via LLM');
             continue;
           }
 
@@ -1272,6 +1296,17 @@ Respond with JSON only:
               'Preference learned from user feedback'
             );
           }
+        }
+      }
+
+      // 5. Update dynamic profile recent_topics (piggybacking on this LLM call
+      // instead of making a separate one — topics come from the same prompt).
+      if (parsed.recent_topics && Array.isArray(parsed.recent_topics) && parsed.recent_topics.length > 0) {
+        for (const raw of parsed.recent_topics) {
+          if (typeof raw !== 'string') continue;
+          const topic = raw.trim().toLowerCase().slice(0, 25);
+          if (!topic || topic.length < 2) continue;
+          profileManager.addRecentTopic(userId, topic);
         }
       }
 
