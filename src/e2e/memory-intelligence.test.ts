@@ -18,6 +18,7 @@ import {
   type WsClient,
 } from './helpers.js';
 import type { LLMProvider, CompletionRequest, CompletionResponse, ContentBlock } from '../providers/types.js';
+import { flattenSystem } from '../providers/types.js';
 
 // ---------------------------------------------------------------------------
 // Custom mock rerank provider: inspects candidate content and assigns
@@ -234,7 +235,7 @@ describe('E2E Memory Intelligence', () => {
       const lastRequest = ctx.mockProvider.lastRequest;
       expect(lastRequest).not.toBeNull();
 
-      const systemPrompt = lastRequest!.system || '';
+      const systemPrompt = lastRequest!.system ? flattenSystem(lastRequest!.system) : '';
 
       // Food-related memories should be in the context
       const hasItalianFood = systemPrompt.includes('Italian food');
@@ -366,7 +367,7 @@ describe('E2E Memory Intelligence', () => {
       const lastRequest = ctx.mockProvider.lastRequest;
       expect(lastRequest).not.toBeNull();
 
-      const systemPrompt = lastRequest!.system || '';
+      const systemPrompt = lastRequest!.system ? flattenSystem(lastRequest!.system) : '';
       const hasJobFact = systemPrompt.includes('Google') && systemPrompt.includes('engineer');
       const hasSalaryFact = systemPrompt.includes('$200k') || systemPrompt.includes('salary');
       // At least the job fact should be in the context (directly matched by query)
@@ -459,7 +460,7 @@ describe('E2E Memory Intelligence', () => {
       const lastRequest = ctx.mockProvider.lastRequest;
       expect(lastRequest).not.toBeNull();
 
-      const systemPrompt = lastRequest!.system || '';
+      const systemPrompt = lastRequest!.system ? flattenSystem(lastRequest!.system) : '';
 
       // San Francisco should definitely be there (direct search match)
       expect(systemPrompt).toContain('San Francisco');

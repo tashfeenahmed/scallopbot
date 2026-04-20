@@ -19,6 +19,7 @@ import {
   type E2EGatewayContext,
   type WsClient,
 } from './helpers.js';
+import { flattenSystem } from '../providers/types.js';
 
 // ---------------------------------------------------------------------------
 // Mock responses
@@ -161,7 +162,7 @@ describe('E2E Full Multi-Turn Conversation', () => {
     // Verify: memory search was triggered (check if system prompt includes memories)
     const lastRequest3 = ctx.mockProvider.lastRequest;
     expect(lastRequest3).not.toBeNull();
-    const systemPrompt3 = lastRequest3!.system || '';
+    const systemPrompt3 = lastRequest3!.system ? flattenSystem(lastRequest3!.system) : '';
 
     // The system prompt should reference hiking (from Turn 1 memories)
     const hasHikingInContext = systemPrompt3.toLowerCase().includes('hiking');

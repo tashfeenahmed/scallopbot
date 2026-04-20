@@ -18,6 +18,7 @@ import {
 } from './helpers.js';
 import { defineSkill } from '../skills/sdk.js';
 import type { ContentBlock } from '../providers/types.js';
+import { flattenSystem } from '../providers/types.js';
 
 // ---------------------------------------------------------------------------
 // Helper: register a native test skill on the gateway's skill registry
@@ -803,7 +804,7 @@ describe('E2E Chat Scenarios', () => {
 
         // Inspect the system prompt of the last LLM call
         const lastRequest = ctx.mockProvider.lastRequest!;
-        const systemPrompt = lastRequest.system || '';
+        const systemPrompt = lastRequest.system ? flattenSystem(lastRequest.system) : '';
         expect(systemPrompt).toContain('Emotion:');
         expect(systemPrompt).toContain('Valence:');
       }, 30000);

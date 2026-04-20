@@ -58,10 +58,33 @@ export interface ToolDefinition {
   };
 }
 
+/**
+ * System prompt with cache boundary.
+ *
+ * `stable`: cacheable prefix — persona, skills, tools docs, profiles. Should not
+ *   change between turns of the same session.
+ * `dynamic`: per-turn content — timestamps, affect, query-relevant memory,
+ *   iteration counters. Excluded from prompt cache.
+ *
+ * Providers that support prompt caching (Anthropic) emit two blocks with
+ * cache_control on the stable one. Providers without caching concatenate
+ * stable + dynamic into a single system message.
+ */
+export interface SystemPrompt {
+  stable: string;
+  dynamic?: string;
+}
+
+/** Collapse SystemPrompt | string to a flat string for providers without cache support. */
+export function flattenSystem(system: string | SystemPrompt): string {
+  if (typeof system === 'string') return system;
+  return system.dynamic ? `${system.stable}${system.dynamic}` : system.stable;
+}
+
 // Completion request
 export interface CompletionRequest {
   messages: Message[];
-  system?: string;
+  system?: string | SystemPrompt;
   tools?: ToolDefinition[];
   maxTokens?: number;
   temperature?: number;

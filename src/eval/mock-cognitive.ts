@@ -19,6 +19,7 @@
  */
 
 import type { LLMProvider, CompletionRequest, CompletionResponse, ContentBlock } from '../providers/types.js';
+import { flattenSystem } from '../providers/types.js';
 
 // ============ Types ============
 
@@ -263,7 +264,7 @@ export function createCognitiveMockProvider(): CognitiveMockProvider {
       provider.callCount++;
 
       // Extract system and user prompts
-      const systemPrompt = request.system ?? '';
+      const systemPrompt = request.system ? flattenSystem(request.system) : '';
       const userPrompt = (request.messages ?? [])
         .filter(m => m.role === 'user')
         .map(m => {

@@ -23,6 +23,7 @@ import {
 } from './helpers.js';
 import { BoardService } from '../board/board-service.js';
 import { UnifiedScheduler } from '../proactive/scheduler.js';
+import { flattenSystem } from '../providers/types.js';
 import pino from 'pino';
 
 const testLogger = pino({ level: 'silent' });
@@ -793,7 +794,7 @@ describe('E2E Board System', () => {
       // (We check the mock provider's last request for the system prompt)
       const lastRequest = ctx.mockProvider.lastRequest;
       expect(lastRequest).not.toBeNull();
-      const systemPrompt = lastRequest!.system ?? '';
+      const systemPrompt = lastRequest!.system ? flattenSystem(lastRequest!.system) : '';
       // "plate" matches "what's next" / "plate" trigger in getBoardContext
       // The board should be visible in the system prompt
       expect(systemPrompt.length).toBeGreaterThan(0);

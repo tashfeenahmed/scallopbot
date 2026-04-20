@@ -13,6 +13,7 @@ import {
   type E2EGatewayContext,
   type WsClient,
 } from './helpers.js';
+import { flattenSystem } from '../providers/types.js';
 
 // Fact extraction JSON that the mock LLM returns when used as fact extractor
 const FACT_EXTRACTION_RESPONSE = JSON.stringify({
@@ -166,7 +167,7 @@ describe('E2E WebSocket Integration', () => {
     expect(lastRequest).not.toBeNull();
 
     // The system prompt should contain our pre-seeded memory
-    const systemPrompt = lastRequest!.system || '';
+    const systemPrompt = lastRequest!.system ? flattenSystem(lastRequest!.system) : '';
     const hasMemoryInContext =
       systemPrompt.includes('SpaceX') ||
       systemPrompt.includes('robotics');

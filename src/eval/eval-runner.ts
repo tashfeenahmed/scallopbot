@@ -28,6 +28,7 @@ import { type EvalModeConfig, createModeSearch } from './modes.js';
 import { cosineSimilarity, OllamaEmbedder, type EmbeddingProvider } from '../memory/embeddings.js';
 import { MoonshotProvider } from '../providers/moonshot.js';
 import type { LLMProvider, CompletionRequest, CompletionResponse, ContentBlock } from '../providers/types.js';
+import { flattenSystem } from '../providers/types.js';
 
 // ============ Environment ============
 
@@ -46,7 +47,7 @@ export interface TrackedProvider extends LLMProvider {
 }
 
 function detectOperationType(request: CompletionRequest): string {
-  const sys = (request.system ?? '').toLowerCase();
+  const sys = request.system ? flattenSystem(request.system).toLowerCase() : '';
   if (sys.includes('nrem') || (sys.includes('deep sleep') && sys.includes('consolidat'))) return 'nrem';
   if (sys.includes('fuse') || sys.includes('fusion') || sys.includes('consolidat') || sys.includes('merge memories')) return 'fusion';
   if (sys.includes('novelty') && sys.includes('plausibility')) return 'rem_judge';

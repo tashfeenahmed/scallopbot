@@ -5,6 +5,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { pino } from 'pino';
 import type { CompletionResponse, LLMProvider, Message } from '../providers/types.js';
+import { flattenSystem } from '../providers/types.js';
 import { ScallopDatabase } from '../memory/db.js';
 import { ScallopMemoryStore } from '../memory/scallop-store.js';
 
@@ -343,8 +344,9 @@ describe('Agent', () => {
       await agent.processMessage(session.id, 'Hello');
 
       const callArgs = (provider.complete as any).mock.calls[0][0];
-      expect(callArgs.system).toContain('You are a helpful assistant.');
-      expect(callArgs.system).toContain(testDir);
+      const systemPrompt = flattenSystem(callArgs.system);
+      expect(systemPrompt).toContain('You are a helpful assistant.');
+      expect(systemPrompt).toContain(testDir);
     });
 
     it('should load SOUL.md if present in workspace', async () => {
@@ -379,7 +381,7 @@ describe('Agent', () => {
       await agent.processMessage(session.id, 'Hello');
 
       const callArgs = (provider.complete as any).mock.calls[0][0];
-      expect(callArgs.system).toContain(soulContent);
+      expect(flattenSystem(callArgs.system)).toContain(soulContent);
     });
 
     it('should track token usage in session', async () => {
@@ -737,7 +739,7 @@ describe('Agent', () => {
       await agent.processMessage(session.id, 'ok test');
 
       const callArgs = (provider.complete as any).mock.calls[0][0];
-      const systemPrompt: string = callArgs.system;
+      const systemPrompt: string = flattenSystem(callArgs.system);
 
       // Verify affect observation block is present
       expect(systemPrompt).toContain('## USER AFFECT CONTEXT');
@@ -780,7 +782,7 @@ describe('Agent', () => {
       await agent.processMessage(session.id, 'Hello there');
 
       const callArgs = (provider.complete as any).mock.calls[0][0];
-      const systemPrompt: string = callArgs.system;
+      const systemPrompt: string = flattenSystem(callArgs.system);
 
       // Verify affect observation block is NOT present
       expect(systemPrompt).not.toContain('## USER AFFECT CONTEXT');
@@ -855,7 +857,7 @@ describe('Agent', () => {
       await agent.processMessage(session.id, 'ok test');
 
       const callArgs = (provider.complete as any).mock.calls[0][0];
-      const systemPrompt: string = callArgs.system;
+      const systemPrompt: string = flattenSystem(callArgs.system);
 
       // Verify all behavioral signal types are present
       expect(systemPrompt).toContain('USER BEHAVIORAL PATTERNS');
@@ -924,7 +926,7 @@ describe('Agent', () => {
       await agent.processMessage(session.id, 'ok test');
 
       const callArgs = (provider.complete as any).mock.calls[0][0];
-      const systemPrompt: string = callArgs.system;
+      const systemPrompt: string = flattenSystem(callArgs.system);
 
       // Verify affect block is present but without mood trend (goalSignal is 'stable')
       expect(systemPrompt).toContain('## USER AFFECT CONTEXT');

@@ -22,6 +22,7 @@ import type {
   ContentBlock,
   ToolResultContent,
 } from './types.js';
+import { flattenSystem } from './types.js';
 import { DEFAULT_MAX_RETRIES, RETRY_STATUS_CODES, RETRY_DELAY_MS } from './constants.js';
 
 /**
@@ -209,7 +210,7 @@ export class MoonshotProvider implements LLMProvider {
 
     // Add system message if present
     if (request.system) {
-      messages.push({ role: 'system', content: request.system });
+      messages.push({ role: 'system', content: flattenSystem(request.system) });
     }
 
     // Add conversation messages

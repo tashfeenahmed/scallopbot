@@ -382,7 +382,8 @@ export class Agent {
       }
     }
 
-    // Build system prompt with memory context
+    // Build system prompt with memory context. systemPrompt is {stable, dynamic}
+    // so providers that support prompt caching (Anthropic) can cache the stable portion.
     const { prompt: systemPrompt, memoryStats, memoryItems } = await this.buildSystemPrompt(userMessage, sessionId, resolvedUserId);
 
     // Report memory usage if we found any memories
@@ -827,54 +828,46 @@ export class Agent {
   }
 
   private async buildSystemPrompt(userMessage: string, sessionId: string, userId: string = 'default'): Promise<{
-    prompt: string;
+    prompt: { stable: string; dynamic: string };
     memoryStats: { factsFound: number; conversationsFound: number };
     memoryItems: { type: 'fact' | 'conversation'; content: string; subject?: string }[];
   }> {
-    let prompt = this.baseSystemPrompt;
+    // The prompt is split into two portions so Anthropic prompt caching works:
+    //   stable — cacheable across turns (persona, skills, SOUL, profiles)
+    //   dynamic — per-turn (timestamp, affect, query-relevant memory, iteration counter)
+    // Anything added to `stable` that changes between turns will bust the cache prefix.
+    let stable = this.baseSystemPrompt;
+    let dynamic = '';
 
-    // Add iteration budget so the LLM knows its limits
-    const iterationBudget = Math.floor(this.maxIterations / 2);
-    prompt += `\n\n## ITERATION BUDGET\nYou have **${iterationBudget} iterations** to complete this task. Each tool call costs one iteration. After that, your response will be cut off. Plan accordingly — gather info quickly, then synthesize and respond with [DONE].`;
-
-    // Resolve user timezone from config
+    // Resolve user timezone from config (stable per user)
     const session = await this.sessionManager.getSession(sessionId);
     const rawUserId = session?.metadata?.userId as string | undefined;
     let userTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone; // server fallback
     if (this.configManager && rawUserId) {
-      // Strip channel prefix (e.g. "telegram:12345" → "12345")
       const cleanUserId = rawUserId.includes(':') ? rawUserId.split(':')[1] : rawUserId;
       userTimezone = this.configManager.getUserTimezone(cleanUserId);
     }
 
-    // Add date, time, and workspace context
-    const now = new Date();
-    const tzOptions = { timeZone: userTimezone };
-    prompt += `\n\nCurrent date and time: ${now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', ...tzOptions })} at ${now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true, ...tzOptions })}`;
-    prompt += `\nTimezone: ${userTimezone}`;
-    prompt += `\nWorkspace: ${this.workspace}`;
+    // Stable: timezone + workspace + channel
+    stable += `\nTimezone: ${userTimezone}\nWorkspace: ${this.workspace}`;
 
-    // Add channel context from session metadata (reuse session fetched above)
     const channelId = session?.metadata?.channelId as string | undefined;
     const channelName = channelId === 'telegram' ? 'Telegram' : channelId === 'api' ? 'the web interface' : channelId || 'unknown';
-    prompt += `\n\n## CHANNEL\nYou are chatting with the user via **${channelName}**.`;
+    stable += `\n\n## CHANNEL\nYou are chatting with the user via **${channelName}**.`;
 
-    // Add file sending instructions
-    prompt += `\n\n## FILE SENDING
+    stable += `\n\n## FILE SENDING
 For **text content** (posts, emails, summaries, replies, drafts), type it directly in the chat — NEVER write it to a .txt or .md file just to send it.
 Only use write_file + send_file for **binary/generated files** (PDFs, images, archives, diagrams). Save them under the **output/** subdirectory (e.g., output/report.pdf), not the workspace root. Never just tell the user a file path — call send_file to deliver it.
 - For text updates along the way, use **send_message**`;
 
-    // Add skills prompt if registry is available
     if (this.skillRegistry) {
       const skillPrompt = this.skillRegistry.generateSkillPrompt();
       if (skillPrompt) {
-        prompt += `\n\n${skillPrompt}`;
+        stable += `\n\n${skillPrompt}`;
       }
     }
 
-    // Add skill management instructions
-    prompt += `\n\n## SKILL MANAGEMENT
+    stable += `\n\n## SKILL MANAGEMENT
 You can search for and install new skills from ClawHub (clawhub.ai) using the manage_skills tool.
 - To find skills: manage_skills with action="search", query="<what you need>"
 - To install: manage_skills with action="install", slug="owner/skill-name"
@@ -887,19 +880,23 @@ Keys take effect immediately and persist across restarts. After setting a key, s
 When a user provides an API key, always store it via set_key so it persists.
 Only install skills when the user asks, or when you determine a skill would help accomplish the user's request and they confirm.`;
 
-    // Load SOUL.md if present
     const soulPath = path.join(this.workspace, 'SOUL.md');
     try {
       const soulContent = await fs.readFile(soulPath, 'utf-8');
-      prompt += `\n\n## Behavioral Guidelines (from SOUL.md)\n${soulContent}`;
+      stable += `\n\n## Behavioral Guidelines (from SOUL.md)\n${soulContent}`;
     } catch {
       // SOUL.md not found, that's fine
     }
 
-    // Build memory, goal, and board context in parallel
+    // Memory, goal, board in parallel. Memory now returns {stable, dynamic}.
     const memoryPromise = this.scallopStore
       ? this.buildMemoryContext(userMessage, sessionId, userId)
-      : Promise.resolve({ context: '', stats: { factsFound: 0, conversationsFound: 0 }, items: [] as { type: 'fact' | 'conversation'; content: string; subject?: string }[] });
+      : Promise.resolve({
+          stableContext: '',
+          dynamicContext: '',
+          stats: { factsFound: 0, conversationsFound: 0 },
+          items: [] as { type: 'fact' | 'conversation'; content: string; subject?: string }[],
+        });
 
     const goalPromise = this.goalService
       ? this.goalService.getGoalContext(userId, userMessage).catch((error: Error) => {
@@ -922,84 +919,101 @@ Only install skills when the user asks, or when you determine a skill would help
 
     const memoryStats = memoryResult.stats;
     const memoryItems = memoryResult.items;
-    if (memoryResult.context) {
-      prompt += memoryResult.context;
-      this.logger.debug({ memoryContextLength: memoryResult.context.length, preview: memoryResult.context.substring(0, 300) }, 'Memory context added to prompt');
+
+    // Stable memory: profiles + behavioral patterns (don't change between turns)
+    if (memoryResult.stableContext) {
+      stable += memoryResult.stableContext;
+    }
+
+    // --- end of cached region ---
+
+    // Dynamic: iteration budget + timestamp + per-turn memory + affect + goal/board
+    const iterationBudget = Math.floor(this.maxIterations / 2);
+    dynamic += `\n\n## ITERATION BUDGET\nYou have **${iterationBudget} iterations** to complete this task. Each tool call costs one iteration. After that, your response will be cut off. Plan accordingly — gather info quickly, then synthesize and respond with [DONE].`;
+
+    const now = new Date();
+    const tzOptions = { timeZone: userTimezone };
+    dynamic += `\n\nCurrent date and time: ${now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', ...tzOptions })} at ${now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true, ...tzOptions })}`;
+
+    if (memoryResult.dynamicContext) {
+      dynamic += memoryResult.dynamicContext;
+      this.logger.debug({ dynamicMemoryLength: memoryResult.dynamicContext.length }, 'Dynamic memory added to prompt');
     }
     if (goalContext) {
-      prompt += goalContext;
+      dynamic += goalContext;
       this.logger.debug({ goalContextLength: goalContext.length }, 'Goal context added to prompt');
     }
     if (boardContext) {
-      prompt += boardContext;
+      dynamic += boardContext;
       this.logger.debug({ boardContextLength: boardContext.length }, 'Board context added to prompt');
     }
 
-    return { prompt, memoryStats, memoryItems };
+    return { prompt: { stable, dynamic }, memoryStats, memoryItems };
   }
 
   /**
-   * Build memory context for system prompt using ScallopMemoryStore (SQLite)
+   * Build memory context split by cache stability:
+   *   stableContext — identity, static profile, behavioral patterns (changes weekly at most)
+   *   dynamicContext — memory facts (change as new info is extracted), session matches,
+   *                    affect observation (changes per message)
    */
   private async buildMemoryContext(userMessage: string, _sessionId: string, userId: string = 'default'): Promise<{
-    context: string;
+    stableContext: string;
+    dynamicContext: string;
     stats: { factsFound: number; conversationsFound: number };
     items: { type: 'fact' | 'conversation'; content: string; subject?: string }[];
   }> {
-    // Dynamic memory budget: use ~15% of remaining context space
-    // Estimate current prompt size (base prompt + skills + profile ~ 4K chars typical)
-    // 128K tokens ≈ 512K chars; 15% of remaining ≈ up to 16K for memory
-    const estimatedPromptChars = 16000; // conservative base prompt estimate
-    const totalContextChars = 512000; // ~128K tokens
+    const estimatedPromptChars = 16000;
+    const totalContextChars = 512000;
     const remainingChars = totalContextChars - estimatedPromptChars;
     const MAX_MEMORY_CHARS = Math.max(2000, Math.min(16000, Math.floor(remainingChars * 0.15)));
-    let context = '';
+    let stableContext = '';
+    let dynamicContext = '';
     const items: { type: 'fact' | 'conversation'; content: string; subject?: string }[] = [];
 
     if (!this.scallopStore) {
-      return { context: '', stats: { factsFound: 0, conversationsFound: 0 }, items: [] };
+      return { stableContext: '', dynamicContext: '', stats: { factsFound: 0, conversationsFound: 0 }, items: [] };
     }
 
     try {
-      // Tier 1: Ambient profiles — always injected, never searched, never decays
+      // Tier 1: Ambient profiles — always injected, never searched, never decays.
+      // These go in the STABLE portion: they change rarely (user profile edits,
+      // weekly behavioral refresh), not per-turn.
       const profileManager = this.scallopStore.getProfileManager();
 
-      // Agent identity profile
       const agentProfile = profileManager.getStaticProfile('agent');
       if (Object.keys(agentProfile).length > 0) {
         let agentText = '';
         for (const [key, value] of Object.entries(agentProfile)) {
           agentText += `- ${key}: ${value}\n`;
         }
-        context += `\n\n## YOUR IDENTITY\nThis is who you are. Embody this personality in all responses:\n${agentText}`;
+        stableContext += `\n\n## YOUR IDENTITY\nThis is who you are. Embody this personality in all responses:\n${agentText}`;
       }
 
-      // User profile
       const staticProfile = profileManager.getStaticProfile('default');
       if (Object.keys(staticProfile).length > 0) {
         let profileText = '';
         for (const [key, value] of Object.entries(staticProfile)) {
           profileText += `- ${key}: ${value}\n`;
         }
-        context += `\n\n## USER PROFILE\nUse this automatically for all relevant queries (weather → use location, time → use timezone, etc.):\n${profileText}`;
+        stableContext += `\n\n## USER PROFILE\nUse this automatically for all relevant queries (weather → use location, time → use timezone, etc.):\n${profileText}`;
       }
 
-      // Behavioral patterns (all signals via formatProfileContext)
+      // Behavioral patterns — slow-changing aggregates (messaging pace, topics, style).
+      // Affect is handled separately below because it changes per message.
       try {
         const profileContext = profileManager.formatProfileContext(userId);
         const behavioralText = profileContext.behavioralPatterns;
-        // formatProfileContext returns a string starting with '\nBehavioral Patterns:'
-        // Extract the content lines (skip the header, use our own section header)
         const behavioralLines = behavioralText
           .split('\n')
           .filter(line => line.startsWith('  - ') && !line.includes('Current affect:') && !line.includes('Mood signal:'))
           .map(line => line.trim())
           .join('\n');
         if (behavioralLines) {
-          context += `\n\n## USER BEHAVIORAL PATTERNS\n${behavioralLines}`;
+          stableContext += `\n\n## USER BEHAVIORAL PATTERNS\n${behavioralLines}`;
         }
 
-        // Dedicated affect observation block (observation only, not instruction)
+        // Dynamic: affect observation (valence/arousal floats change per message).
         const behavioral = profileManager.getBehavioralPatterns(userId);
         if (behavioral?.smoothedAffect) {
           const sa = behavioral.smoothedAffect;
@@ -1011,29 +1025,23 @@ Only install skills when the user asks, or when you determine a skill would help
           if (sa.goalSignal !== 'stable') {
             affectBlock += `\n- Mood trend: ${sa.goalSignal}`;
           }
-          context += affectBlock;
+          dynamicContext += affectBlock;
         }
       } catch {
         // Behavioral patterns not available, that's fine
       }
 
-      // Tier 2: Memory retrieval — three-phase approach modelling human memory:
-      //  Phase 0 (short-term): Recently stored facts — always available (last 6h)
-      //  Phase 1 (long-term):  High-prominence facts — core identity/knowledge
-      //  Phase 2 (search):     Query-relevant facts — associative retrieval
-
-      // Filter: only exclude memories with an explicit eventDate that has passed
+      // Tier 2: Memory retrieval — three-phase approach modelling human memory.
+      // Results go in DYNAMIC: recent facts change as new memories arrive,
+      // search results change per query, prominent facts are stable but are
+      // kept with recent+search to preserve the combined dedupe ordering.
       const EVENT_EXPIRY_MS = 24 * 60 * 60 * 1000;
       const isPastEvent = (mem: { eventDate: number | null }): boolean => {
         return !!(mem.eventDate && mem.eventDate < Date.now() - EVENT_EXPIRY_MS);
       };
 
-      // Phase 0: Short-term memory buffer — things the user just told us
-      const SHORT_TERM_WINDOW_MS = 6 * 60 * 60 * 1000; // 6 hours
+      const SHORT_TERM_WINDOW_MS = 6 * 60 * 60 * 1000;
 
-      // Run all three phases concurrently. Phases 0 and 1 are sync against SQLite
-      // but wrapping them in Promise.all lets phase 2 (async hybrid search with
-      // embeddings) overlap their CPU/IO time instead of waiting in series.
       const [recentFacts, userFacts, relevantResults] = await Promise.all([
         Promise.resolve(this.scallopStore.getRecentMemories(userId, SHORT_TERM_WINDOW_MS)),
         Promise.resolve(this.scallopStore.getByUser(userId, {
@@ -1048,11 +1056,9 @@ Only install skills when the user asks, or when you determine a skill would help
         }),
       ]);
 
-      // Combine: recent first (short-term), then search-relevant, then prominent
       const seenIds = new Set<string>();
       const allFactTexts: { content: string; subject?: string }[] = [];
 
-      // Phase 0: Recent facts — highest priority (user just said these)
       for (const fact of recentFacts) {
         if (!seenIds.has(fact.id) && !isPastEvent(fact)) {
           seenIds.add(fact.id);
@@ -1060,7 +1066,6 @@ Only install skills when the user asks, or when you determine a skill would help
           allFactTexts.push({ content: fact.content, subject });
         }
       }
-      // Phase 2: Search-relevant facts
       for (const result of relevantResults) {
         if (!seenIds.has(result.memory.id) && !isPastEvent(result.memory)) {
           seenIds.add(result.memory.id);
@@ -1068,7 +1073,6 @@ Only install skills when the user asks, or when you determine a skill would help
           allFactTexts.push({ content: result.memory.content, subject });
         }
       }
-      // Phase 1: Long-term prominent facts (fill remaining space)
       for (const fact of userFacts) {
         if (!seenIds.has(fact.id) && !isPastEvent(fact)) {
           seenIds.add(fact.id);
@@ -1096,11 +1100,11 @@ Only install skills when the user asks, or when you determine a skill would help
         }
 
         if (memoriesText) {
-          context += `\n\n## MEMORIES FROM THE PAST\nThese are facts you've learned about the user and people they've mentioned:\n${memoriesText}`;
+          dynamicContext += `\n\n## MEMORIES FROM THE PAST\nThese are facts you've learned about the user and people they've mentioned:\n${memoriesText}`;
         }
       }
 
-      // Tier 3: Session summaries for past-conversation references
+      // Tier 3: Session summaries — query-dependent, stays in dynamic.
       let conversationsFound = 0;
       const sessionPatterns = /\b(what did we (discuss|talk about)|last time|yesterday|previous (session|conversation)|before|earlier)\b/i;
       if (sessionPatterns.test(userMessage)) {
@@ -1126,7 +1130,7 @@ Only install skills when the user asks, or when you determine a skill would help
               });
             }
             if (sessionText) {
-              context += `\n\n## PAST CONVERSATIONS\n${sessionText}`;
+              dynamicContext += `\n\n## PAST CONVERSATIONS\n${sessionText}`;
             }
           }
         } catch (err) {
@@ -1135,13 +1139,14 @@ Only install skills when the user asks, or when you determine a skill would help
       }
 
       return {
-        context,
+        stableContext,
+        dynamicContext,
         stats: { factsFound: items.filter((i) => i.type === 'fact').length, conversationsFound },
         items,
       };
     } catch (error) {
       this.logger.warn({ error: (error as Error).message }, 'Failed to build memory context');
-      return { context: '', stats: { factsFound: 0, conversationsFound: 0 }, items: [] };
+      return { stableContext: '', dynamicContext: '', stats: { factsFound: 0, conversationsFound: 0 }, items: [] };
     }
   }
 

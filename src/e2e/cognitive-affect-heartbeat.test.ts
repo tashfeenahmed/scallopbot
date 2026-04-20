@@ -26,6 +26,7 @@ import {
   testLogger,
   type E2EGatewayContext,
 } from './helpers.js';
+import { flattenSystem } from '../providers/types.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -138,11 +139,7 @@ describe('E2E Cognitive Affect & Heartbeat', () => {
         expect(lastRequest).not.toBeNull();
 
         // The system prompt should contain the affect context block
-        const systemPrompt = typeof lastRequest!.system === 'string'
-          ? lastRequest!.system
-          : Array.isArray(lastRequest!.system)
-            ? lastRequest!.system.map((b: { text?: string }) => b.text || '').join('\n')
-            : '';
+        const systemPrompt = lastRequest!.system ? flattenSystem(lastRequest!.system) : '';
 
         expect(systemPrompt).toContain('USER AFFECT CONTEXT');
 

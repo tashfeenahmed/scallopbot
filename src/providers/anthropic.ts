@@ -6,6 +6,7 @@ import type {
   CompletionResponse,
   ContentBlock,
   StreamEvent,
+  SystemPrompt,
 } from './types.js';
 import { DEFAULT_MAX_RETRIES, RETRY_STATUS_CODES, RETRY_DELAY_MS } from './constants.js';
 
@@ -120,14 +121,21 @@ export class AnthropicProvider implements LLMProvider {
       }));
   }
 
-  private formatSystem(system: string): Anthropic.TextBlockParam[] {
-    return [
-      {
-        type: 'text',
-        text: system,
-        cache_control: { type: 'ephemeral' },
-      },
+  private formatSystem(system: string | SystemPrompt): Anthropic.TextBlockParam[] {
+    // Single-string form: cache the whole prompt.
+    if (typeof system === 'string') {
+      return [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }];
+    }
+
+    // Structured form: cache_control marks the END of the cacheable prefix.
+    // Stable portion is cached; dynamic portion follows uncached.
+    const blocks: Anthropic.TextBlockParam[] = [
+      { type: 'text', text: system.stable, cache_control: { type: 'ephemeral' } },
     ];
+    if (system.dynamic && system.dynamic.length > 0) {
+      blocks.push({ type: 'text', text: system.dynamic });
+    }
+    return blocks;
   }
 
   private formatTools(tools: NonNullable<CompletionRequest['tools']>): Anthropic.Tool[] {

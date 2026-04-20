@@ -12,6 +12,7 @@ import type {
   CompletionResponse,
   ContentBlock,
 } from './types.js';
+import { flattenSystem } from './types.js';
 import { DEFAULT_MAX_RETRIES, RETRY_STATUS_CODES, RETRY_DELAY_MS } from './constants.js';
 
 const DEFAULT_MODEL = 'llama-3.3-70b-versatile';
@@ -77,7 +78,7 @@ export class GroqProvider implements LLMProvider {
 
     // Add system message if present
     if (request.system) {
-      messages.push({ role: 'system', content: request.system });
+      messages.push({ role: 'system', content: flattenSystem(request.system) });
     }
 
     // Add conversation messages

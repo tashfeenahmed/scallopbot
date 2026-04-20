@@ -4,6 +4,7 @@ import type {
   CompletionResponse,
   ContentBlock,
 } from './types.js';
+import { flattenSystem } from './types.js';
 import { nanoid } from 'nanoid';
 
 const DEFAULT_MODEL = 'llama3.2';
@@ -122,7 +123,7 @@ export class OllamaProvider implements LLMProvider {
 
     // Add system message if present
     if (request.system) {
-      messages.push({ role: 'system', content: request.system });
+      messages.push({ role: 'system', content: flattenSystem(request.system) });
     }
 
     // Add conversation messages

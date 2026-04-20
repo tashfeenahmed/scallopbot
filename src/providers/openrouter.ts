@@ -5,6 +5,7 @@ import type {
   CompletionResponse,
   ContentBlock,
 } from './types.js';
+import { flattenSystem } from './types.js';
 import { DEFAULT_MAX_RETRIES, RETRY_DELAY_MS } from './constants.js';
 
 const DEFAULT_MODEL = 'anthropic/claude-3.5-sonnet';
@@ -164,7 +165,7 @@ export class OpenRouterProvider implements LLMProvider {
 
     // Add system message if present
     if (request.system) {
-      messages.push({ role: 'system', content: request.system });
+      messages.push({ role: 'system', content: flattenSystem(request.system) });
     }
 
     // Add conversation messages
