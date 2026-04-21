@@ -24,10 +24,18 @@ import { detectProactiveEngagement } from './feedback.js';
 import { getRecentChatContext } from './chat-context.js';
 import { wordOverlap } from '../utils/text-similarity.js';
 
-/** How long to remember recently sent messages for dedup (30 minutes) */
-const SEND_DEDUP_WINDOW_MS = 30 * 60 * 1000;
-/** Word overlap threshold to consider two proactive messages "the same" */
-const SEND_DEDUP_THRESHOLD = 0.5;
+/** How long to remember recently sent messages for dedup (2 hours).
+ *  Extended from 30min so a recurring cognitive-layer signal that fires every
+ *  60-90min doesn't slip through with rephrased wording. */
+const SEND_DEDUP_WINDOW_MS = 2 * 60 * 60 * 1000;
+/** Word overlap threshold to consider two proactive messages "the same".
+ *  Lowered from 0.5 → 0.3 since LLM-generated nudges about the same topic
+ *  often phrase it differently (e.g. "hope legs aren't sore" vs
+ *  "how are you feeling after the leg workout"). */
+const SEND_DEDUP_THRESHOLD = 0.3;
+/** Hard floor on time between any two agent-sourced proactive sends to the
+ *  same user. Bypassed for user-set reminders (they have explicit times). */
+const MIN_AGENT_PROACTIVE_GAP_MS = 60 * 60 * 1000;
 
 /**
  * Strip internal markup, XML function calls, error prefixes, and thinking blocks
@@ -85,6 +93,10 @@ export interface UnifiedSchedulerOptions {
   onSendMessage: MessageHandler;
   /** Callback to resolve IANA timezone for a user (defaults to server timezone) */
   getTimezone?: (userId: string) => string;
+  /** Hard floor in ms between two agent-sourced proactive sends to the same
+   *  user. Defaults to 1h. Set to 0 in tests that need multiple agent items
+   *  to fire in a single tick. */
+  minAgentProactiveGapMs?: number;
 }
 
 /**
@@ -111,9 +123,11 @@ export class UnifiedScheduler {
   private pendingEvaluation = false;
   /** Counter for periodic dedup consolidation (every ~10 min) */
   private evalTickCount = 0;
-  /** Recently sent messages per user for send-time dedup: userId → [{message, time}].
+  /** Recently sent messages per user for send-time dedup: userId → [{message, time, source}].
+   *  Hydrated from SQLite on start() so dedup history survives process restarts.
    *  Bounded by pruning empty arrays after each dedup check to keep memory flat. */
-  private recentSends = new Map<string, { message: string; time: number }[]>();
+  private recentSends = new Map<string, { message: string; time: number; source: string }[]>();
+  private minAgentProactiveGapMs: number;
   private static readonly MAX_RECENT_SEND_USERS = 500;
 
   constructor(options: UnifiedSchedulerOptions) {
@@ -126,6 +140,7 @@ export class UnifiedScheduler {
     this.maxItemAge = options.maxItemAge ?? 24 * 60 * 60 * 1000; // 24 hours
     this.onSendMessage = options.onSendMessage;
     this.getTimezone = options.getTimezone ?? (() => Intl.DateTimeFormat().resolvedOptions().timeZone);
+    this.minAgentProactiveGapMs = options.minAgentProactiveGapMs ?? MIN_AGENT_PROACTIVE_GAP_MS;
     this.boardService = new BoardService(this.db, this.logger);
   }
 
@@ -160,6 +175,26 @@ export class UnifiedScheduler {
       }
     } catch (err) {
       this.logger.error({ error: (err as Error).message }, 'Failed to consolidate duplicates on startup');
+    }
+
+    // Hydrate the in-memory dedup map from SQLite so we don't lose history
+    // on restart. Without this, a redeploy opens a SEND_DEDUP_WINDOW_MS
+    // window in which the cognitive layer can re-emit similar nudges.
+    try {
+      const since = Date.now() - SEND_DEDUP_WINDOW_MS;
+      const recent = this.db.getRecentProactiveSends(since);
+      for (const r of recent) {
+        const list = this.recentSends.get(r.userId) || [];
+        list.push({ message: r.message, time: r.sentAt, source: r.source });
+        this.recentSends.set(r.userId, list);
+      }
+      if (recent.length > 0) {
+        this.logger.info({ entries: recent.length, users: this.recentSends.size }, 'Hydrated proactive send-dedup map from SQLite');
+      }
+      // Opportunistic prune: drop log rows older than 2× the window.
+      this.db.pruneProactiveSendLog(Date.now() - 2 * SEND_DEDUP_WINDOW_MS);
+    } catch (err) {
+      this.logger.warn({ error: (err as Error).message }, 'Failed to hydrate proactive send log');
     }
 
     // Run immediately, then on interval
@@ -393,9 +428,9 @@ export class UnifiedScheduler {
       if (clean) {
         await this.sendFormattedMessage(item, clean, 'task_result');
         // Record task description & goal for dedup so companion nudges get suppressed
-        this.recordSend(item.userId, item.message);
+        this.recordSend(item.userId, item.message, item.source);
         if (config.goal && config.goal !== item.message) {
-          this.recordSend(item.userId, config.goal);
+          this.recordSend(item.userId, config.goal, item.source);
         }
       } else {
         // Sub-agent produced no user-facing output (error, empty, or all-markup response).
@@ -421,12 +456,27 @@ export class UnifiedScheduler {
     message: string,
     sourceOverride?: 'task_result' | 'inner_thoughts' | 'gap_scanner',
   ): Promise<void> {
+    // Hard min-gap throttle for agent-sourced sends: never two within
+    // MIN_AGENT_PROACTIVE_GAP_MS. User-set reminders bypass — they have
+    // explicit times the user chose.
+    if (item.source === 'agent' && this.isWithinMinAgentGap(item.userId)) {
+      this.logger.info({ itemId: item.id, userId: item.userId }, 'Suppressing agent proactive — within min-gap of last agent send');
+      // Push trigger forward so it can fire after the gap window.
+      try {
+        this.db.updateScheduledItemBoard(item.id, { triggerAt: Date.now() + this.minAgentProactiveGapMs });
+        this.db.resetScheduledItemToPending(item.id);
+      } catch (err) {
+        this.logger.warn({ err: (err as Error).message, itemId: item.id }, 'Failed to defer min-gap-throttled item');
+      }
+      return;
+    }
+
     // Send-time dedup: skip if a similar message was sent recently to this user
     if (this.isDuplicateSend(item.userId, message)) {
       this.logger.info({ itemId: item.id, userId: item.userId }, 'Skipping proactive message — similar one sent recently');
       return;
     }
-    this.recordSend(item.userId, message);
+    this.recordSend(item.userId, message, item.source);
 
     if (item.source === 'agent') {
       const { channel } = parseUserIdPrefix(item.userId);
@@ -493,15 +543,37 @@ export class UnifiedScheduler {
   }
 
   /**
-   * Record a message as sent for future dedup checks. Caps the per-user list
-   * and the top-level user count to prevent unbounded growth.
+   * Has an agent-sourced proactive message been sent to this user within the
+   * min-gap window? User-source items are excluded from the check.
    */
-  private recordSend(userId: string, message: string): void {
+  private isWithinMinAgentGap(userId: string): boolean {
+    if (this.minAgentProactiveGapMs <= 0) return false;
+    const recent = this.recentSends.get(userId);
+    if (!recent) return false;
+    const cutoff = Date.now() - this.minAgentProactiveGapMs;
+    return recent.some(r => r.source === 'agent' && r.time >= cutoff);
+  }
+
+  /**
+   * Record a message as sent for future dedup checks. Caps the per-user list
+   * and the top-level user count to prevent unbounded growth. Also persists
+   * to SQLite so the dedup state survives a restart.
+   */
+  private recordSend(userId: string, message: string, source: string = 'agent'): void {
+    const now = Date.now();
     const list = this.recentSends.get(userId) || [];
-    list.push({ message, time: Date.now() });
+    list.push({ message, time: now, source });
     // Per-user cap: only the last 20 messages matter for dedup.
     if (list.length > 20) list.splice(0, list.length - 20);
     this.recentSends.set(userId, list);
+
+    // Persist for restart-time hydration. Best-effort: failure to persist
+    // shouldn't block the send.
+    try {
+      this.db.recordProactiveSend(userId, message, source, now);
+    } catch (err) {
+      this.logger.warn({ err: (err as Error).message }, 'Failed to persist proactive send log entry');
+    }
 
     // Global cap: evict the oldest user entry (Map iteration order is
     // insertion order) if we've somehow accumulated too many.

@@ -232,25 +232,33 @@ describe('Refactor Smoke Test', () => {
   // ====================================================================
   // 7. Dedup constants used in consolidation
   // ====================================================================
-  it('consolidateDuplicateScheduledItems deduplicates similar items', () => {
+  it('addScheduledItem pre-creation gate suppresses near-duplicate agent items', () => {
     const db = ctx.scallopStore.getDatabase();
     const now = Date.now();
 
-    db.addScheduledItem({
+    const first = db.addScheduledItem({
       userId: 'default', sessionId: null, source: 'agent',
       kind: 'nudge', type: 'follow_up',
       message: 'Remind Alice about the meeting with John',
       context: null, triggerAt: now + 3600000, recurring: null, sourceMemoryId: null,
     });
-    db.addScheduledItem({
+    // Second insert with similar wording should return the SAME item (gate hit)
+    const second = db.addScheduledItem({
       userId: 'default', sessionId: null, source: 'agent',
       kind: 'nudge', type: 'follow_up',
       message: 'Remind Alice about meeting with John soon',
       context: null, triggerAt: now + 3600000, recurring: null, sourceMemoryId: null,
     });
+    expect(second.id).toBe(first.id);
 
-    const removed = db.consolidateDuplicateScheduledItems();
-    expect(removed).toBeGreaterThanOrEqual(1);
+    // User-source items bypass the gate even if they look similar
+    const userItem = db.addScheduledItem({
+      userId: 'default', sessionId: null, source: 'user',
+      kind: 'nudge', type: 'reminder',
+      message: 'Remind Alice about the meeting with John',
+      context: null, triggerAt: now + 3600000, recurring: null, sourceMemoryId: null,
+    });
+    expect(userItem.id).not.toBe(first.id);
   });
 
   // ====================================================================

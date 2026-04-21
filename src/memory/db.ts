@@ -47,8 +47,11 @@ function normalizeForSimilarity(text: string): Set<string> {
 
 /** Strict similarity: |intersection| / |smaller set| threshold */
 const DEDUP_SIMILARITY_STRICT = 0.8;
-/** Lenient similarity: either side has this fraction overlap */
-const DEDUP_SIMILARITY_LENIENT = 0.4;
+/** Lenient similarity: either side has this fraction overlap.
+ *  Lowered from 0.4 → 0.3 to catch LLM-generated wording variations like
+ *  "Day 6: Kitchen area + 1 cupboard" vs "Day 7: Kitchen area + 1 cupboard"
+ *  that previously slipped through and caused proactive-message bursts. */
+const DEDUP_SIMILARITY_LENIENT = 0.3;
 
 /**
  * Memory types for decay calculation
@@ -699,6 +702,20 @@ export class ScallopDatabase {
       );
       CREATE INDEX IF NOT EXISTS idx_transcript_chunks_session ON transcript_chunks(session_id);
       CREATE INDEX IF NOT EXISTS idx_transcript_chunks_user ON transcript_chunks(user_id);
+
+      -- Persistent log of recently sent proactive messages so the in-memory
+      -- dedup map (UnifiedScheduler.recentSends) survives restarts. Without
+      -- this, every restart loses the dedup history, opening a window where
+      -- recurring proactive items can fire with rephrased wording.
+      CREATE TABLE IF NOT EXISTS proactive_send_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT NOT NULL,
+        message TEXT NOT NULL,
+        source TEXT NOT NULL,
+        sent_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_proactive_send_log_user_time
+        ON proactive_send_log(user_id, sent_at DESC);
     `);
 
     // Migration: Add source column to existing databases
@@ -2113,6 +2130,17 @@ export class ScallopDatabase {
     const now = Date.now();
     const status = item.status ?? 'pending';
 
+    // Pre-creation dedup gate (agent-source only). Prevents the cognitive
+    // layer from inserting near-duplicate items in a single planning burst —
+    // the most common cause of duplicate proactive messages. User-source
+    // items (explicit reminders the user set) are never blocked here.
+    if (item.source === 'agent') {
+      const existing = this.findSimilarAgentScheduledItem(item.userId, item.message, item.triggerAt);
+      if (existing) {
+        return existing;
+      }
+    }
+
     const stmt = this.db.prepare(`
       INSERT INTO scheduled_items (
         id, user_id, session_id, source, kind, type, message, context,
@@ -2550,6 +2578,41 @@ export class ScallopDatabase {
   }
 
   /**
+   * Record a proactive message that was sent to a user. Persists to SQLite so
+   * the in-memory dedup history survives process restarts.
+   */
+  recordProactiveSend(userId: string, message: string, source: string, sentAt: number = Date.now()): void {
+    this.db.prepare(`
+      INSERT INTO proactive_send_log (user_id, message, source, sent_at)
+      VALUES (?, ?, ?, ?)
+    `).run(userId, message, source, sentAt);
+  }
+
+  /**
+   * Load recent proactive sends since `sinceMs` for restart-time dedup hydration.
+   * Returns rows for ALL users; the scheduler bucket-sorts them into the
+   * per-user in-memory map.
+   */
+  getRecentProactiveSends(sinceMs: number): Array<{ userId: string; message: string; source: string; sentAt: number }> {
+    const rows = this.db.prepare(`
+      SELECT user_id, message, source, sent_at
+      FROM proactive_send_log
+      WHERE sent_at >= ?
+      ORDER BY sent_at ASC
+    `).all(sinceMs) as Array<{ user_id: string; message: string; source: string; sent_at: number }>;
+    return rows.map(r => ({ userId: r.user_id, message: r.message, source: r.source, sentAt: r.sent_at }));
+  }
+
+  /**
+   * Prune proactive_send_log entries older than `cutoffMs`. Called periodically
+   * to keep the table small.
+   */
+  pruneProactiveSendLog(cutoffMs: number): number {
+    const result = this.db.prepare('DELETE FROM proactive_send_log WHERE sent_at < ?').run(cutoffMs);
+    return result.changes;
+  }
+
+  /**
    * Expire old pending items (older than maxAgeMs past their trigger time)
    */
   expireOldScheduledItems(maxAgeMs: number = 24 * 60 * 60 * 1000): number {
@@ -2565,6 +2628,50 @@ export class ScallopDatabase {
     `);
     const result = stmt.run(now, cutoff);
     return result.changes;
+  }
+
+  /**
+   * Find a similar pending agent-source scheduled item near `triggerAt` for the
+   * same user. Used by addScheduledItem to suppress duplicate creation by the
+   * cognitive layer. Returns the existing item if a match is found, else null.
+   *
+   * Window is ±2h around the new triggerAt — narrower than
+   * hasSimilarPendingScheduledItem so legitimately distinct items at different
+   * times of day still go through.
+   */
+  findSimilarAgentScheduledItem(userId: string, message: string, triggerAt: number): ScheduledItem | null {
+    const WINDOW_MS = 2 * 60 * 60 * 1000;
+    const newWords = normalizeForSimilarity(message);
+    if (newWords.size === 0) return null;
+
+    const stmt = this.db.prepare(`
+      SELECT * FROM scheduled_items
+      WHERE user_id = ? AND source = 'agent' AND status IN ('pending', 'processing')
+        AND trigger_at BETWEEN ? AND ?
+    `);
+    const rows = stmt.all(userId, triggerAt - WINDOW_MS, triggerAt + WINDOW_MS) as Record<string, unknown>[];
+
+    for (const row of rows) {
+      const existingMessage = (row.message ?? '') as string;
+      const existingWords = normalizeForSimilarity(existingMessage);
+      if (existingWords.size === 0) continue;
+
+      let overlap = 0;
+      for (const word of newWords) {
+        if (existingWords.has(word)) overlap++;
+      }
+      const smaller = Math.min(newWords.size, existingWords.size);
+      const similaritySmaller = overlap / smaller;
+      const similarityNew = overlap / newWords.size;
+      const similarityExisting = overlap / existingWords.size;
+
+      if (similaritySmaller >= DEDUP_SIMILARITY_STRICT
+          || similarityNew >= DEDUP_SIMILARITY_LENIENT
+          || similarityExisting >= DEDUP_SIMILARITY_LENIENT) {
+        return this.rowToScheduledItem(row);
+      }
+    }
+    return null;
   }
 
   /**

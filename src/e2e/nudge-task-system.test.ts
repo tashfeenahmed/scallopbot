@@ -200,6 +200,7 @@ describe('E2E Nudge/Task System', () => {
           return true;
         },
         getTimezone: () => gmtTz,
+        minAgentProactiveGapMs: 0, // disable for tests that fire multiple agent items in one tick
       });
     }, 30000);
 

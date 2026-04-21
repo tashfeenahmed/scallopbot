@@ -600,6 +600,7 @@ describe('E2E Board System', () => {
           return true;
         },
         getTimezone: () => gmtTz,
+        minAgentProactiveGapMs: 0,
       });
     }, 30000);
 
