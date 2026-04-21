@@ -262,6 +262,14 @@ export class OpenRouterProvider implements LLMProvider {
             });
 
           if (msg.role === 'assistant') {
+            // Skip thinking-only assistant messages (no text, no tool_use).
+            // These come from aborted/interrupted LLM calls. Sending content:null
+            // triggers "got an object" from Alibaba (typeof null === 'object')
+            // and "assistant must not be empty" from OpenAI-compat strict
+            // implementations. Dropping them is safe — reasoning content alone
+            // has no downstream value.
+            if (!textContent && toolCalls.length === 0) continue;
+
             // For reasoning models, preserve thinking content in history
             let reasoningContent: string | undefined;
             if (isReasoning) {

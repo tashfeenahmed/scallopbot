@@ -167,6 +167,8 @@ export class XAIProvider implements LLMProvider {
             });
 
           if (msg.role === 'assistant') {
+            // Skip thinking-only assistant messages — cause HTTP 400 on replay.
+            if (!textContent && toolCalls.length === 0) continue;
             messages.push({
               role: 'assistant',
               content: textContent || null,

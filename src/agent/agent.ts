@@ -605,20 +605,14 @@ export class Agent {
         if (maxTokensContinuations >= 3) {
           finalResponse = textContent || 'My response was too long and got cut off. Please try a more specific request.';
           if (response.content.length > 0) {
-            await this.sessionManager.addMessage(sessionId, {
-              role: 'assistant',
-              content: response.content,
-            });
+            await this.persistAssistantMessage(sessionId, response.content);
           }
           break;
         }
 
         // Save any partial content the LLM produced
         if (response.content.length > 0) {
-          await this.sessionManager.addMessage(sessionId, {
-            role: 'assistant',
-            content: response.content,
-          });
+          await this.persistAssistantMessage(sessionId, response.content);
         }
 
         // Prompt continuation so the LLM can finish
@@ -635,10 +629,7 @@ export class Agent {
         // Before breaking, check if user sent new messages during this LLM call
         if (this.interruptQueue?.hasPending(sessionId)) {
           // Save assistant response, but DON'T break — continue loop to drain interrupts
-          await this.sessionManager.addMessage(sessionId, {
-            role: 'assistant',
-            content: response.content,
-          });
+          await this.persistAssistantMessage(sessionId, response.content);
           this.logger.info({ sessionId }, 'Pending user interrupts detected at exit — continuing loop');
           continue;
         }
@@ -650,10 +641,7 @@ export class Agent {
           : textContent || '';
 
         // Add assistant response to session
-        await this.sessionManager.addMessage(sessionId, {
-          role: 'assistant',
-          content: response.content,
-        });
+        await this.persistAssistantMessage(sessionId, response.content);
 
         break;
       }
@@ -676,10 +664,7 @@ export class Agent {
       }
 
       // Add assistant message with tool use
-      await this.sessionManager.addMessage(sessionId, {
-        role: 'assistant',
-        content: response.content,
-      });
+      await this.persistAssistantMessage(sessionId, response.content);
 
       // Execute tools and gather results
       this.logger.info({ toolCount: toolUses.length, tools: toolUses.map(t => t.name) }, 'Executing tools');
@@ -1160,6 +1145,37 @@ Only install skills when the user asks, or when you determine a skill would help
       .filter((block): block is { type: 'thinking'; thinking: string } => block.type === 'thinking')
       .map((block) => block.thinking)
       .join('\n');
+  }
+
+  /**
+   * Sanitize assistant content blocks before persisting. If the LLM was
+   * aborted mid-response (abort signal, network drop, recovery fallback),
+   * we may end up with only a `thinking` block and nothing else. Replaying
+   * such a message to any provider fails:
+   *   - Anthropic/Moonshot/OpenAI: "assistant message must not be empty"
+   *   - OpenRouter → Alibaba: content becomes null → typeof null === 'object'
+   *     → "expected string or array of objects, got an object"
+   * Return null to skip persistence entirely when there's nothing useful.
+   */
+  private sanitizeAssistantContent(content: ContentBlock[]): ContentBlock[] | null {
+    if (content.length === 0) return null;
+    const hasUseful = content.some(
+      (b) => b.type === 'text' || b.type === 'tool_use' || b.type === 'image'
+    );
+    return hasUseful ? content : null;
+  }
+
+  private async persistAssistantMessage(sessionId: string, content: ContentBlock[]): Promise<boolean> {
+    const sanitized = this.sanitizeAssistantContent(content);
+    if (!sanitized) {
+      this.logger.warn({ sessionId, blockTypes: content.map((b) => b.type) }, 'Skipping persistence of thinking-only assistant response');
+      return false;
+    }
+    await this.sessionManager.addMessage(sessionId, {
+      role: 'assistant',
+      content: sanitized,
+    });
+    return true;
   }
 
   private extractTextContent(content: ContentBlock[]): string {

@@ -289,6 +289,10 @@ export class MoonshotProvider implements LLMProvider {
             });
 
           if (msg.role === 'assistant') {
+            // Skip thinking-only assistant messages (no text, no tool_use, no image).
+            // Moonshot rejects with "assistant message must not be empty" on replay.
+            if (!textContent && toolCalls.length === 0 && imageBlocks.length === 0) continue;
+
             // Extract preserved reasoning_content from ThinkingContent blocks
             const thinkingBlocks = msg.content
               .filter((c) => c.type === 'thinking')
