@@ -113,8 +113,14 @@ export class Gateway {
       this.logger.debug({ model: 'nomic-embed-text', baseUrl: ollamaConfig.baseUrl }, 'Using Ollama for semantic embeddings');
     }
 
-    // Initialize memory system — ScallopMemory (SQLite) is always the primary backend
-    const dbPath = path.join(this.config.agent.workspace, this.config.memory.dbPath);
+    // Initialize memory system — ScallopMemory (SQLite) is always the primary backend.
+    // If MEMORY_DB_PATH is absolute, use it as-is (lets workspace and DB be decoupled
+    // — important when AGENT_WORKSPACE points to a skill scratch dir, not the data dir).
+    // Otherwise resolve relative to the workspace.
+    const configuredDbPath = this.config.memory.dbPath;
+    const dbPath = path.isAbsolute(configuredDbPath)
+      ? configuredDbPath
+      : path.join(this.config.agent.workspace, configuredDbPath);
 
     // Get a fast-tier provider for LLM re-ranking of search results (opt-in, graceful degradation)
     let rerankProvider: LLMProvider | undefined;
