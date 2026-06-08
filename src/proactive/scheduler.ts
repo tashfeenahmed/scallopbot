@@ -461,6 +461,13 @@ export class UnifiedScheduler {
     // explicit times the user chose.
     if (item.source === 'agent' && this.isWithinMinAgentGap(item.userId)) {
       this.logger.info({ itemId: item.id, userId: item.userId }, 'Suppressing agent proactive — within min-gap of last agent send');
+      this.db.recordProactiveDecision({
+        userId: item.userId,
+        stage: 'deliver',
+        outcome: 'suppressed',
+        reason: 'min_gap',
+        detail: { itemId: item.id },
+      });
       // Push trigger forward so it can fire after the gap window.
       try {
         this.db.updateScheduledItemBoard(item.id, { triggerAt: Date.now() + this.minAgentProactiveGapMs });
@@ -474,9 +481,23 @@ export class UnifiedScheduler {
     // Send-time dedup: skip if a similar message was sent recently to this user
     if (this.isDuplicateSend(item.userId, message)) {
       this.logger.info({ itemId: item.id, userId: item.userId }, 'Skipping proactive message — similar one sent recently');
+      this.db.recordProactiveDecision({
+        userId: item.userId,
+        stage: 'deliver',
+        outcome: 'suppressed',
+        reason: 'send_dedup',
+        detail: { itemId: item.id },
+      });
       return;
     }
     this.recordSend(item.userId, message, item.source);
+    this.db.recordProactiveDecision({
+      userId: item.userId,
+      stage: 'deliver',
+      outcome: 'queued',
+      reason: 'queued',
+      detail: { itemId: item.id, source: item.source },
+    });
 
     if (item.source === 'agent') {
       const { channel } = parseUserIdPrefix(item.userId);

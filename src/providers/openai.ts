@@ -8,6 +8,10 @@ import type {
 } from './types.js';
 import { flattenSystem } from './types.js';
 import { DEFAULT_MAX_RETRIES, RETRY_STATUS_CODES, RETRY_DELAY_MS } from './constants.js';
+import { buildCredentialPool, type CredentialPool } from './credential-pool.js';
+
+/** Status codes that mean "this key is exhausted/blocked — try another." */
+const KEY_ROTATION_STATUS = new Set([401, 403, 429]);
 
 /**
  * OpenAI Model IDs
@@ -32,7 +36,10 @@ export const OPENAI_MODELS = {
 const REASONING_MODELS = new Set(['gpt-5.2', 'gpt-5.2-pro', 'o3', 'o4-mini']);
 
 const DEFAULT_MODEL = 'gpt-4.1';
-const DEFAULT_MAX_TOKENS = 4096;
+// Bumped from 4096 so thinking-heavy models (qwen3.6 on Dell) don't burn the whole
+// budget on reasoning_content and return empty visible output. 8192 leaves room for
+// ~4k thinking + ~4k actual reply.
+const DEFAULT_MAX_TOKENS = 8192;
 
 export interface ProviderCharacteristics {
   speed: 'fast' | 'standard' | 'slow';
@@ -52,20 +59,35 @@ export class OpenAIProvider implements LLMProvider {
   private client: OpenAI;
   private apiKey: string;
   private maxRetries: number;
+  private baseUrl?: string;
+  private timeout?: number;
+  /** Multi-key rotation pool (null when only one key is configured). */
+  private credentialPool: CredentialPool | null;
 
   constructor(options: ProviderOptions) {
-    this.apiKey = options.apiKey;
     this.model = options.model || DEFAULT_MODEL;
     this.maxRetries = options.maxRetries || DEFAULT_MAX_RETRIES;
+    this.baseUrl = options.baseUrl;
+    this.timeout = options.timeout;
 
-    this.client = new OpenAI({
-      apiKey: this.apiKey,
-      ...(options.baseUrl && { baseURL: options.baseUrl }),
-      ...(options.timeout && { timeout: options.timeout }),
+    // Credential pool: rotate across multiple free keys to dodge rate limits.
+    // Falls back to the single-key path when ≤1 key is supplied.
+    this.credentialPool = buildCredentialPool(options.apiKey, options.apiKeys);
+    this.apiKey = this.credentialPool ? this.credentialPool.next() : options.apiKey;
+
+    this.client = this.buildClient(this.apiKey);
+  }
+
+  private buildClient(apiKey: string): OpenAI {
+    return new OpenAI({
+      apiKey,
+      ...(this.baseUrl && { baseURL: this.baseUrl }),
+      ...(this.timeout && { timeout: this.timeout }),
     });
   }
 
   isAvailable(): boolean {
+    if (this.credentialPool) return this.credentialPool.availableCount() > 0;
     return !!this.apiKey && this.apiKey.length > 0;
   }
 
@@ -257,12 +279,31 @@ export class OpenAIProvider implements LLMProvider {
 
     for (let attempt = 0; attempt < this.maxRetries; attempt++) {
       try {
-        return await fn();
+        const result = await fn();
+        // Successful call — mark the active key healthy so it leaves cooldown.
+        this.credentialPool?.reportSuccess(this.apiKey);
+        return result;
       } catch (error) {
         lastError = error as Error;
 
         if (error instanceof OpenAI.APIError) {
-          if (RETRY_STATUS_CODES.includes(error.status)) {
+          const status = error.status;
+
+          // Key-level failure (auth/rate-limit): bench this key and rotate to
+          // the next one in the pool before retrying, so one exhausted free key
+          // doesn't sink the whole request.
+          if (KEY_ROTATION_STATUS.has(status) && this.credentialPool?.canRotate()) {
+            this.credentialPool.reportFailure(this.apiKey);
+            const nextKey = this.credentialPool.next();
+            if (nextKey !== this.apiKey) {
+              this.apiKey = nextKey;
+              this.client = this.buildClient(nextKey);
+            }
+            await this.delay(RETRY_DELAY_MS * Math.pow(2, attempt));
+            continue;
+          }
+
+          if (RETRY_STATUS_CODES.includes(status)) {
             await this.delay(RETRY_DELAY_MS * Math.pow(2, attempt));
             continue;
           }

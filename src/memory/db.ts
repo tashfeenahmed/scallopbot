@@ -20,6 +20,16 @@ import type {
 } from './behavioral-signals.js';
 import type { AffectEMAState, SmoothedAffect } from './affect-smoothing.js';
 
+/** Parse a JSON detail blob, returning null on malformed input. */
+function parseDetailJSON(raw: string): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Shared stop words for scheduled-item text similarity matching.
  * Used by consolidation, dedup, and cascade cancellation.
@@ -716,6 +726,22 @@ export class ScallopDatabase {
       );
       CREATE INDEX IF NOT EXISTS idx_proactive_send_log_user_time
         ON proactive_send_log(user_id, sent_at DESC);
+
+      -- Observability log of proactive DECISIONS (not just sends): every time
+      -- the evaluator or scheduler decides to create / skip / suppress / deliver
+      -- a proactive message, it records why here. Powers the why-no-proact
+      -- diagnostic so a silent "nothing fired" can be traced to the exact gate.
+      CREATE TABLE IF NOT EXISTS proactive_decisions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT NOT NULL,
+        at INTEGER NOT NULL,
+        stage TEXT NOT NULL,
+        outcome TEXT NOT NULL,
+        reason TEXT,
+        detail TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_proactive_decisions_at
+        ON proactive_decisions(at DESC);
     `);
 
     // Migration: Add source column to existing databases
@@ -2609,6 +2635,71 @@ export class ScallopDatabase {
    */
   pruneProactiveSendLog(cutoffMs: number): number {
     const result = this.db.prepare('DELETE FROM proactive_send_log WHERE sent_at < ?').run(cutoffMs);
+    return result.changes;
+  }
+
+  /**
+   * Record a proactive DECISION for observability (powers `why-no-proact`).
+   * `detail` is JSON-serialized. Never throws — diagnostics must not break the
+   * gardener/scheduler.
+   */
+  recordProactiveDecision(decision: {
+    userId: string;
+    stage: string;
+    outcome: string;
+    reason?: string | null;
+    detail?: Record<string, unknown> | null;
+    at?: number;
+  }): void {
+    try {
+      this.db.prepare(`
+        INSERT INTO proactive_decisions (user_id, at, stage, outcome, reason, detail)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `).run(
+        decision.userId,
+        decision.at ?? Date.now(),
+        decision.stage,
+        decision.outcome,
+        decision.reason ?? null,
+        decision.detail ? JSON.stringify(decision.detail) : null
+      );
+    } catch {
+      // Observability is best-effort; swallow.
+    }
+  }
+
+  /**
+   * Load the most recent proactive decisions (newest first), for the diagnostic.
+   */
+  getRecentProactiveDecisions(limit: number = 30): Array<{
+    id: number;
+    userId: string;
+    at: number;
+    stage: string;
+    outcome: string;
+    reason: string | null;
+    detail: Record<string, unknown> | null;
+  }> {
+    const rows = this.db.prepare(`
+      SELECT id, user_id, at, stage, outcome, reason, detail
+      FROM proactive_decisions
+      ORDER BY at DESC
+      LIMIT ?
+    `).all(limit) as Array<{ id: number; user_id: string; at: number; stage: string; outcome: string; reason: string | null; detail: string | null }>;
+    return rows.map(r => ({
+      id: r.id,
+      userId: r.user_id,
+      at: r.at,
+      stage: r.stage,
+      outcome: r.outcome,
+      reason: r.reason,
+      detail: r.detail ? parseDetailJSON(r.detail) : null,
+    }));
+  }
+
+  /** Prune proactive_decisions older than `cutoffMs`. */
+  pruneProactiveDecisions(cutoffMs: number): number {
+    const result = this.db.prepare('DELETE FROM proactive_decisions WHERE at < ?').run(cutoffMs);
     return result.changes;
   }
 

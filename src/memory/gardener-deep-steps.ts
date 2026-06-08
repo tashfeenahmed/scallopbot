@@ -14,6 +14,7 @@ import { computeTrustScore } from './trust-score.js';
 import { checkGoalDeadlines } from './goal-deadline-check.js';
 import { evaluateProactive } from './proactive-evaluator.js';
 import { getTodayStartMs } from '../proactive/proactive-utils.js';
+import { DIAL_BUDGETS, PROACTIVE_COOLDOWN_MS } from '../proactive/proactive-config.js';
 
 // ============ Step functions ============
 
@@ -468,6 +469,15 @@ export async function runInnerThoughts(ctx: GardenerContext): Promise<void> {
 
       if (proResult.created) {
         ctx.logger.info({ userId, urgency: timingUrgency, gapType: item.gapType }, 'Proactive evaluator created item');
+      } else {
+        // Item generated but a near-identical one was already pending.
+        ctx.db.recordProactiveDecision({
+          userId,
+          stage: 'create',
+          outcome: 'deduped',
+          reason: 'pre_create_dedup',
+          detail: { gapType: item.gapType, message: item.message.slice(0, 120) },
+        });
       }
     }
 
@@ -480,6 +490,32 @@ export async function runInnerThoughts(ctx: GardenerContext): Promise<void> {
         skipReason: result.skipReason,
       }, 'Proactive evaluation complete');
     }
+
+    // Observability: record the evaluation outcome so `why-no-proact` can
+    // explain exactly which gate fired (cooldown / budget / no-signals / the
+    // LLM skipping everything) instead of failing silently.
+    const evalNow = Date.now();
+    const reason = result.skipReason
+      ?? (result.items.length === 0 && result.llmCalled ? 'llm_skipped_all' : undefined);
+    ctx.db.recordProactiveDecision({
+      userId,
+      at: evalNow,
+      stage: 'evaluate',
+      outcome: result.items.length > 0 ? 'created' : 'skipped',
+      reason,
+      detail: {
+        dial,
+        signalsFound: result.signalsFound,
+        itemsCreated: result.items.length,
+        llmCalled: result.llmCalled,
+        todayItemCount,
+        budgetCap: DIAL_BUDGETS[dial],
+        lastProactiveAt,
+        ...(result.skipReason === 'cooldown' && lastProactiveAt
+          ? { cooldownRemainingMs: Math.max(0, PROACTIVE_COOLDOWN_MS - (evalNow - lastProactiveAt)) }
+          : {}),
+      },
+    });
   } catch (err) {
     ctx.logger.warn({ error: (err as Error).message }, 'Proactive evaluation failed');
   }

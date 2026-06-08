@@ -31,7 +31,8 @@ import { ToolLoopDetector, type LoopDetection } from './tool-loop-detector.js';
 import { triggerHook, type HookEvent } from '../hooks/hooks.js';
 import { applyToolPolicyPipeline, type ToolPolicy } from '../skills/tool-policy.js';
 import { enqueueInLane } from './command-queue.js';
-import { progressiveCompact } from '../routing/compaction.js';
+import { compact, compactSync, estimateMessagesTokens } from '../routing/compaction-pipeline.js';
+import { selectBest, scoreResponseHeuristic } from './critic.js';
 
 export interface AgentOptions {
   provider: LLMProvider;
@@ -64,6 +65,22 @@ export interface AgentOptions {
   boardService?: BoardService;
   /** Interrupt queue for mid-loop user message injection */
   interruptQueue?: InterruptQueue;
+  /**
+   * Inference-time scaling: number of candidate final responses to sample when
+   * best-of-N escalates, keeping the best per the response critic. 1 (default)
+   * disables best-of-N. Higher values trade cost for quality.
+   *
+   * Best-of-N is ADAPTIVE: it only resamples on high-stakes (capable-tier) turns
+   * whose first answer scores below `bestOfNThreshold`, so good answers ship
+   * immediately at no extra cost.
+   */
+  bestOfN?: number;
+  /**
+   * Quality bar (0-1) below which a first answer triggers best-of-N resampling.
+   * Default 0.85. Lower = resample less often (faster, lower quality floor);
+   * higher = resample more eagerly.
+   */
+  bestOfNThreshold?: number;
 }
 
 export interface AgentResult {
@@ -176,6 +193,10 @@ export class Agent {
   private boardService: BoardService | null;
   /** Interrupt queue for mid-loop user message injection */
   private interruptQueue: InterruptQueue | null;
+  /** Best-of-N sample count for high-stakes turns (1 = disabled) */
+  private bestOfN: number;
+  /** Quality bar below which best-of-N resampling kicks in */
+  private bestOfNThreshold: number;
 
   /** Enhanced tool loop detector */
   private toolLoopDetector = new ToolLoopDetector();
@@ -204,8 +225,10 @@ export class Agent {
     this.subAgentExecutor = options.subAgentExecutor || null;
     this.boardService = options.boardService || null;
     this.interruptQueue = options.interruptQueue || null;
+    this.bestOfN = Math.max(1, options.bestOfN ?? 1);
+    this.bestOfNThreshold = options.bestOfNThreshold ?? 0.85;
 
-    this.logger.info({ enableThinking: this.enableThinking }, 'Agent thinking mode configured');
+    this.logger.info({ enableThinking: this.enableThinking, bestOfN: this.bestOfN, bestOfNThreshold: this.bestOfNThreshold }, 'Agent thinking mode configured');
   }
 
   /**
@@ -409,8 +432,10 @@ export class Agent {
     // Track usage across iterations
     let totalInputTokens = 0;
     let totalOutputTokens = 0;
+    let peakInputTokens = 0;
     let iterations = 0;
     let maxTokensContinuations = 0;
+    let emptyEndTurnRetries = 0;
     let finalResponse = '';
 
     // Agent loop
@@ -511,16 +536,28 @@ export class Agent {
         ? this.contextManager.buildContextMessages(sanitizedMessages)
         : sanitizedMessages;
 
-      // Proactive overflow prevention: prune before sending to avoid wasting a round-trip
+      // Proactive overflow prevention: run the cheapest-first compaction stages
+      // BEFORE sending, so we don't waste a round-trip hitting the context wall.
+      // Only the cheap synchronous stages (dedupe → snip → drop-thinking → prune)
+      // run here; the expensive LLM-summary escalation stays in the recovery path.
       if (this.contextManager) {
-        const estimatedTokens = this.contextManager.estimateTokens(messages);
+        const estimatedTokens = estimateMessagesTokens(messages);
         const maxTokenLimit = this.contextManager.getMaxContextTokens();
         if (estimatedTokens > maxTokenLimit * 0.85) {
+          const result = compactSync(messages, {
+            targetTokens: Math.floor(maxTokenLimit * 0.8),
+            preserveLastN: 6,
+          });
           this.logger.info(
-            { estimatedTokens, maxTokenLimit, usage: (estimatedTokens / maxTokenLimit * 100).toFixed(1) + '%' },
-            'Proactive overflow prevention: pruning tool outputs'
+            {
+              before: result.estimatedTokensBefore,
+              after: result.estimatedTokensAfter,
+              stages: result.stagesApplied,
+              usage: (estimatedTokens / maxTokenLimit * 100).toFixed(1) + '%',
+            },
+            'Proactive graduated compaction applied'
           );
-          messages = this.pruneToolOutputs(messages, 6);
+          messages = result.messages;
         }
       }
 
@@ -562,9 +599,11 @@ export class Agent {
         }, 'LLM call failed after recovery attempts');
         throw error;
       }
-      // Track token usage
+      // Track token usage. totalInputTokens sums across iterations (billing);
+      // peakInputTokens is the largest single prompt (context pressure).
       totalInputTokens += response.usage.inputTokens;
       totalOutputTokens += response.usage.outputTokens;
+      if (response.usage.inputTokens > peakInputTokens) peakInputTokens = response.usage.inputTokens;
 
       // Process response content
       const textContent = this.extractTextContent(response.content);
@@ -626,6 +665,25 @@ export class Agent {
 
       // If task is explicitly complete OR no tool use with end_turn, we're done
       if (taskComplete || (response.stopReason === 'end_turn' && toolUses.length === 0)) {
+        // Edge case: model returned end_turn with literally empty content (no text,
+        // no tool calls — common after a long tool loop where the model gave up or
+        // burned its budget on reasoning_content). Don't dump silence on the user;
+        // re-prompt once for a final summary using the work the model already did.
+        const isEmptyEndTurn =
+          !taskComplete &&
+          response.stopReason === 'end_turn' &&
+          toolUses.length === 0 &&
+          !textContent.trim();
+        if (isEmptyEndTurn && emptyEndTurnRetries < 1) {
+          emptyEndTurnRetries++;
+          await this.sessionManager.addMessage(sessionId, {
+            role: 'user',
+            content: '[System: Your last response was empty. Please send a clear final reply to the user summarizing what you did and any remaining steps. If files were written, mention their paths. Do NOT call any more tools.]',
+          });
+          this.logger.warn({ iteration: iterations, retry: emptyEndTurnRetries }, 'Empty end_turn — retrying with summary nudge');
+          continue;
+        }
+
         // Before breaking, check if user sent new messages during this LLM call
         if (this.interruptQueue?.hasPending(sessionId)) {
           // Save assistant response, but DON'T break — continue loop to drain interrupts
@@ -640,8 +698,55 @@ export class Agent {
           ? this.stripDoneMarker(textContent)
           : textContent || '';
 
+        // Last-resort fallback if the retry above also came back empty — never let
+        // the user see silence. This is a graceful "I tried" rather than the
+        // earlier user-facing fallback that told them to do work.
+        if (!finalResponse.trim() && emptyEndTurnRetries > 0) {
+          finalResponse = "I worked through that but my final reply came back empty — give me a moment and try once more, or rephrase if it keeps happening.";
+        }
+
+        // Adaptive inference-time scaling (best-of-N).
+        //
+        // Resampling N answers on every turn would be brutally slow, so we make
+        // it CONDITIONAL: score the first answer with the zero-cost heuristic
+        // critic and only bother resampling when it falls below the quality bar
+        // (a refusal, an empty/leaked answer, etc.). A good first answer ships
+        // immediately at no extra cost. Two gates keep it cheap:
+        //   1. tier gate  — only high-stakes (capable) turns are eligible, so
+        //      trivial turns (greetings, "Done!") never trigger resampling.
+        //   2. score gate — even on eligible turns, only weak first answers
+        //      escalate; strong ones short-circuit.
+        let persistContent = response.content;
+        if (
+          this.bestOfN > 1 &&
+          complexity.suggestedModelTier === 'capable' &&
+          finalResponse.trim()
+        ) {
+          const firstScore = scoreResponseHeuristic(finalResponse, userMessage).score;
+          if (firstScore < this.bestOfNThreshold) {
+            this.logger.info(
+              { firstScore: Number(firstScore.toFixed(2)), threshold: this.bestOfNThreshold },
+              'First answer below quality bar — escalating to best-of-N'
+            );
+            try {
+              const improved = await this.generateBestResponse(request, finalResponse, userMessage, activeProvider);
+              if (improved && improved !== finalResponse) {
+                finalResponse = improved;
+                persistContent = [{ type: 'text', text: improved }];
+              }
+            } catch (e) {
+              this.logger.warn({ error: (e as Error).message }, 'Best-of-N selection failed; keeping original response');
+            }
+          } else {
+            this.logger.debug(
+              { firstScore: Number(firstScore.toFixed(2)), threshold: this.bestOfNThreshold },
+              'First answer good enough — skipping best-of-N'
+            );
+          }
+        }
+
         // Add assistant response to session
-        await this.persistAssistantMessage(sessionId, response.content);
+        await this.persistAssistantMessage(sessionId, persistContent);
 
         break;
       }
@@ -757,7 +862,7 @@ export class Agent {
     }).catch(() => {});
 
     // Record token usage
-    const tokenUsage = { inputTokens: totalInputTokens, outputTokens: totalOutputTokens };
+    const tokenUsage = { inputTokens: totalInputTokens, outputTokens: totalOutputTokens, peakInputTokens };
     await this.sessionManager.recordTokenUsage(sessionId, tokenUsage);
 
     // Log cost summary (recording now happens per-call via wrapProvider)
@@ -773,7 +878,7 @@ export class Agent {
     // User message triggers are already extracted via extractFacts() (Path A).
 
     this.logger.info(
-      { sessionId, iterations, inputTokens: totalInputTokens, outputTokens: totalOutputTokens, provider: activeProvider.name },
+      { sessionId, iterations, inputTokens: totalInputTokens, outputTokens: totalOutputTokens, peakInputTokens, provider: activeProvider.name },
       'Message processed'
     );
 
@@ -1376,58 +1481,43 @@ Only install skills when the user asks, or when you determine a skill would help
           this.logger.warn({ error: err.message }, 'Context overflow detected, attempting graduated compaction');
 
           if (this.contextManager && request.messages.length > 6) {
-            // Layer 1a: Prune old tool outputs (keep last 6 messages intact)
-            const prunedMessages = this.pruneToolOutputs(request.messages, 6);
-            const prunedRequest = { ...request, messages: prunedMessages };
-            this.logger.info(
-              { originalMessages: request.messages.length, afterPrune: prunedMessages.length },
-              'Graduated compaction: pruned old tool outputs'
-            );
+            const maxTokens = this.contextManager.getMaxContextTokens();
 
+            // Graduated cheapest-first pipeline: dedupe → snip → drop-thinking →
+            // prune → (LLM) summarize, stopping as soon as we fit. The provider
+            // is passed so the summary stage can escalate only if the cheap
+            // stages aren't enough.
             try {
-              return await provider.complete(prunedRequest);
-            } catch (pruneError) {
-              this.logger.warn({ error: (pruneError as Error).message }, 'Pruned request still overflowed, trying emergency compression');
-            }
-
-            // Layer 1b: Progressive compaction — summarize older messages, keep recent 6
-            try {
-              const compactionResult = await progressiveCompact(
-                request.messages,
+              const result = await compact(request.messages, {
+                targetTokens: Math.floor(maxTokens * 0.7),
+                preserveLastN: 6,
                 provider,
-                this.contextManager?.getMaxContextTokens() || 128000,
-                { preserveLastN: 6 }
+                contextWindowTokens: maxTokens,
+              });
+              this.logger.info(
+                { stages: result.stagesApplied, before: result.estimatedTokensBefore, after: result.estimatedTokensAfter },
+                'Graduated compaction (recovery) applied'
               );
-              if (compactionResult.summary) {
-                this.logger.info(
-                  { originalMessages: request.messages.length, compactedMessages: compactionResult.compactedMessages.length },
-                  'Progressive compaction applied'
-                );
-                // Emit compaction hook
-                triggerHook({
-                  type: 'agent',
-                  action: 'compaction',
-                  sessionId,
-                  context: { messagesBefore: request.messages.length, messagesAfter: compactionResult.compactedMessages.length },
-                  timestamp: new Date(),
-                }).catch(() => {});
-                try {
-                  return await provider.complete({ ...request, messages: compactionResult.compactedMessages });
-                } catch (compactError) {
-                  this.logger.warn({ error: (compactError as Error).message }, 'Progressive compaction still overflowed');
-                }
+              triggerHook({
+                type: 'agent',
+                action: 'compaction',
+                sessionId,
+                context: { messagesBefore: request.messages.length, messagesAfter: result.messages.length, stages: result.stagesApplied },
+                timestamp: new Date(),
+              }).catch(() => {});
+
+              try {
+                return await provider.complete({ ...request, messages: result.messages });
+              } catch (compactError) {
+                this.logger.warn({ error: (compactError as Error).message }, 'Compacted request still overflowed, trying emergency slice');
               }
             } catch (compactErr) {
-              this.logger.warn({ error: (compactErr as Error).message }, 'Progressive compaction failed, trying emergency compress');
+              this.logger.warn({ error: (compactErr as Error).message }, 'Graduated compaction failed, trying emergency slice');
             }
 
-            // Layer 1c: Emergency compress — keep only last 3 messages
-            const compressed = request.messages.slice(-3);
-            const compressedRequest = { ...request, messages: compressed };
-            this.logger.info({ compressedMessages: 3 }, 'Emergency compression applied');
-
+            // Last resort: keep only the most recent 3 messages.
             try {
-              return await provider.complete(compressedRequest);
+              return await provider.complete({ ...request, messages: request.messages.slice(-3) });
             } catch (retryError) {
               this.logger.error({ error: (retryError as Error).message }, 'Retry after emergency compression failed');
             }
@@ -1458,33 +1548,59 @@ Only install skills when the user asks, or when you determine a skill would help
   }
 
   /**
-   * Prune old tool outputs from messages to reduce context size.
-   * Keeps the last `keepLast` messages intact, replaces tool_result content
-   * in older messages with a short placeholder.
+   * Best-of-N final-response selection (inference-time scaling).
+   *
+   * Treats the already-produced answer as candidate #0, then samples
+   * `bestOfN - 1` additional final answers CONCURRENTLY (tools disabled, higher
+   * temperature for diversity) and returns whichever the heuristic critic scores
+   * highest. Any sampling failure is swallowed — worst case we return the
+   * original. Callers should gate this on a low first-answer score so it only
+   * runs when a retry is actually warranted.
    */
-  private pruneToolOutputs(messages: import('../providers/types.js').Message[], keepLast: number = 6): import('../providers/types.js').Message[] {
-    if (messages.length <= keepLast) return messages;
-
-    const pruneUpTo = messages.length - keepLast;
-    return messages.map((msg, idx) => {
-      if (idx >= pruneUpTo) return msg; // Keep recent messages intact
-      if (typeof msg.content === 'string') return msg;
-
-      const prunedContent = (msg.content as ContentBlock[]).map(block => {
-        if (block.type === 'tool_result') {
-          const content = (block as { content: string }).content;
-          if (content.length > 200) {
-            return {
-              ...block,
-              content: `[pruned: ${content.length} chars]`,
-            };
-          }
+  private async generateBestResponse(
+    baseRequest: CompletionRequest,
+    originalText: string,
+    userMessage: string,
+    provider: LLMProvider
+  ): Promise<string> {
+    // Sample the extra candidates CONCURRENTLY: they're independent, so firing
+    // them in parallel keeps the slow path at ~1× latency instead of (N-1)×.
+    // Each failure is swallowed and dropped — candidate #0 (the original) is
+    // always present, so we can never end up worse than where we started.
+    const extraCandidates = await Promise.all(
+      Array.from({ length: this.bestOfN - 1 }, async (_unused, i) => {
+        try {
+          const resp = await provider.complete({
+            ...baseRequest,
+            tools: undefined, // final synthesis — no further tool use
+            temperature: 0.7,
+          });
+          const text = this.stripDoneMarker(this.extractTextContent(resp.content));
+          return text.trim() ? text : null;
+        } catch (e) {
+          this.logger.warn({ error: (e as Error).message, attempt: i + 1 }, 'Best-of-N candidate generation failed');
+          return null;
         }
-        return block;
-      });
+      })
+    );
 
-      return { ...msg, content: prunedContent as ContentBlock[] };
-    });
+    const candidates: string[] = [originalText, ...extraCandidates.filter((t): t is string => !!t)];
+
+    if (candidates.length === 1) return originalText;
+
+    const selection = selectBest(
+      candidates.map((text) => ({ text })),
+      (c) => scoreResponseHeuristic(c.text, userMessage)
+    );
+    this.logger.info(
+      {
+        candidates: candidates.length,
+        bestIndex: selection.bestIndex,
+        scores: selection.scores.map((s) => Number(s.score.toFixed(2))),
+      },
+      'Best-of-N selection complete'
+    );
+    return selection.best.text;
   }
 
   /**

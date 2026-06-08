@@ -9,6 +9,9 @@ import { createLogger } from './utils/logger.js';
 import { SkillPackageManager, SkillInstaller } from './skills/clawhub.js';
 import { SkillLoader } from './skills/loader.js';
 import { migrateJsonlToSqlite, verifyMigration, rollbackMigration } from './memory/migrate.js';
+import * as nodePath from 'path';
+import { ScallopDatabase } from './memory/db.js';
+import { explainProactiveDecisions, type ProactiveDecision } from './proactive/decision-log.js';
 
 const VERSION = '0.1.0';
 
@@ -690,6 +693,33 @@ migrateCommand
       console.log('✓ Rollback complete');
     } catch (error) {
       console.error('Rollback error:', (error as Error).message);
+      process.exit(1);
+    }
+  });
+
+// why-no-proact - diagnose why proactive messages are / aren't firing
+program
+  .command('why-no-proact')
+  .description('Explain why proactive messages have (or have not) been firing recently')
+  .option('-n, --limit <count>', 'Number of recent decisions to inspect', '30')
+  .action((options: { limit: string }) => {
+    try {
+      const config = loadConfig();
+      const configured = config.memory.dbPath;
+      const dbPath = nodePath.isAbsolute(configured)
+        ? configured
+        : nodePath.join(config.agent.workspace, configured);
+
+      const db = new ScallopDatabase(dbPath);
+      try {
+        const limit = Math.max(1, parseInt(options.limit, 10) || 30);
+        const decisions = db.getRecentProactiveDecisions(limit) as ProactiveDecision[];
+        console.log(explainProactiveDecisions(decisions));
+      } finally {
+        db.close();
+      }
+    } catch (error) {
+      console.error('Failed to read proactive decisions:', (error as Error).message);
       process.exit(1);
     }
   });

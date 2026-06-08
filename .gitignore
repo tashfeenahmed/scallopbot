@@ -63,6 +63,7 @@ test-vision*.ts
 
 # PDFs
 pdf/
+*.pdf
 
 # Evals
 evals/
@@ -72,3 +73,9 @@ web/node_modules/
 
 # Website
 website/
+
+# Pi deployment data (secrets, memories, env files)
+pi-data/
+
+# Local Claude Code config (machine-specific settings + locks)
+.claude/
