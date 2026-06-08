@@ -45,6 +45,9 @@ export class SessionSummarizer {
   private logger: Logger;
   private embedder?: EmbeddingProvider;
   private minMessages: number;
+  /** Per-session failure counter so a chronically broken session doesn't retry every gardener tick. */
+  private failures: Map<string, number> = new Map();
+  private static readonly MAX_FAILURES = 3;
 
   constructor(options: SessionSummarizerOptions) {
     this.provider = options.provider;
@@ -62,6 +65,15 @@ export class SessionSummarizer {
     sessionId: string,
     userId: string = 'default'
   ): Promise<boolean> {
+    // Skip sessions that have failed too many times. Without this, the gardener's
+    // `NOT EXISTS session_summaries` query re-selects the same broken session
+    // every tick, thrashing the LLM forever.
+    const priorFailures = this.failures.get(sessionId) ?? 0;
+    if (priorFailures >= SessionSummarizer.MAX_FAILURES) {
+      this.logger.debug({ sessionId, failures: priorFailures }, 'Skipping chronically failing session summary');
+      return false;
+    }
+
     // Check if summary already exists
     const existing = db.getSessionSummary(sessionId);
     if (existing) {
@@ -109,9 +121,15 @@ export class SessionSummarizer {
         { sessionId, topics: result.topics, messageCount: messages.length },
         'Session summary generated'
       );
+      this.failures.delete(sessionId);
       return true;
     } catch (err) {
-      this.logger.warn({ error: (err as Error).message, sessionId }, 'Session summarization failed');
+      const attempt = priorFailures + 1;
+      this.failures.set(sessionId, attempt);
+      this.logger.warn(
+        { error: (err as Error).message, sessionId, attempt, willRetry: attempt < SessionSummarizer.MAX_FAILURES },
+        'Session summarization failed'
+      );
       return false;
     }
   }
@@ -167,7 +185,9 @@ export class SessionSummarizer {
     const response = await this.provider.complete({
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.1,
-      maxTokens: 300,
+      // Bumped from 300 so thinking models (qwen3.6) have budget for reasoning_content
+      // plus the actual 2-3 sentence JSON summary.
+      maxTokens: 600,
     });
 
     const responseText = Array.isArray(response.content)

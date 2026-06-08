@@ -72,7 +72,7 @@ function parseArgs(): TelegramSendArgs {
     outputResult({
       success: false,
       output: '',
-      error: 'Missing required parameter: chat_id',
+      error: 'Missing required parameter: chat_id. Usage: {"chat_id": "<telegram-user-id-from-current-session>", "message": "text to send"}. Pass the same chat_id you received this turn from.',
       exitCode: 1,
     });
   }
@@ -82,7 +82,7 @@ function parseArgs(): TelegramSendArgs {
     outputResult({
       success: false,
       output: '',
-      error: 'Missing required parameter: message',
+      error: 'Missing required parameter: message (must be a non-empty string). Usage: {"chat_id": "<id>", "message": "the text content you want delivered to the user"}. Note: this skill SENDS to Telegram — to reply in the current turn, just emit your text in the assistant response, no skill needed.',
       exitCode: 1,
     });
   }

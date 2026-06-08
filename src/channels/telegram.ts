@@ -17,6 +17,14 @@ const MAX_MESSAGE_LENGTH = 4096;
 const TYPING_INTERVAL = 5000; // 5 seconds
 const MAX_QUEUE_SIZE = 10;
 
+// Escalating context-pressure warnings, keyed by the turn's total input tokens.
+// Ordered highest-first so we always fire the most severe tier that applies.
+const CONTEXT_WARN_TIERS: { threshold: number; message: string }[] = [
+  { threshold: 185_000, message: '🚨 Context near limit (${k}k tokens). Send /new now — next turn may fail.' },
+  { threshold: 170_000, message: '⚠️ Context is very long (${k}k tokens). Recommend /new soon.' },
+  { threshold: 150_000, message: '⚠️ Context is getting long (${k}k tokens). Consider /new when done.' },
+];
+
 interface QueuedMessage {
   type: 'text' | 'voice' | 'document' | 'photo';
   execute: () => Promise<void>;
@@ -116,6 +124,7 @@ export class TelegramChannel {
   private activeProcessing: Set<string> = new Set(); // Track users with in-flight agent calls
   private userQueues: Map<string, QueuedMessage[]> = new Map(); // Per-user message queue
   private verboseUsers: Set<string> = new Set(); // Track users who want debug output
+  private contextWarnedTier: Map<string, number> = new Map(); // sessionId -> highest tier threshold already warned
   private voiceManager: VoiceManager | null = null;
   private voiceAvailable = false;
   private enableVoiceReply: boolean;
@@ -689,6 +698,22 @@ export class TelegramChannel {
     this.logger.info({ userId, model: selectedName }, 'User switched model');
   }
 
+  private async maybeWarnContext(sessionId: string, ctx: Context, inputTokens: number): Promise<void> {
+    const lastWarned = this.contextWarnedTier.get(sessionId) ?? 0;
+    for (const { threshold, message } of CONTEXT_WARN_TIERS) {
+      if (inputTokens >= threshold && threshold > lastWarned) {
+        this.contextWarnedTier.set(sessionId, threshold);
+        const k = Math.round(inputTokens / 1000);
+        try {
+          await ctx.reply(message.replace('${k}', k.toString()));
+        } catch (error) {
+          this.logger.warn({ error: (error as Error).message }, 'Failed to send context warning');
+        }
+        return;
+      }
+    }
+  }
+
   /**
    * Resolve the user's model preference to a provider (or undefined for auto/router)
    */
@@ -915,6 +940,8 @@ export class TelegramChannel {
         }
       }
 
+      await this.maybeWarnContext(sessionId, ctx, result.tokenUsage.peakInputTokens ?? result.tokenUsage.inputTokens);
+
       // Voice replies are now contextual - the agent can use the voice_reply tool
       // when it determines a voice response is appropriate, rather than automatically
       // replying with voice just because the user sent a voice message.
@@ -1017,6 +1044,8 @@ export class TelegramChannel {
           await ctx.reply(chunk.replace(/<[^>]*>/g, ''));
         }
       }
+
+      await this.maybeWarnContext(sessionId, ctx, result.tokenUsage.peakInputTokens ?? result.tokenUsage.inputTokens);
 
       this.logger.info({ userId, fileName: document.file_name }, 'Processed document message');
     } catch (error) {
@@ -1213,6 +1242,8 @@ export class TelegramChannel {
         }
       }
 
+      await this.maybeWarnContext(sessionId, ctx, result.tokenUsage.peakInputTokens ?? result.tokenUsage.inputTokens);
+
       this.logger.info({ userId, photoCount }, 'Processed photo message with vision');
     } catch (error) {
       clearInterval(typingInterval);
@@ -1345,6 +1376,8 @@ export class TelegramChannel {
           await ctx.reply(chunk.replace(/<[^>]*>/g, ''));
         }
       }
+
+      await this.maybeWarnContext(sessionId, ctx, result.tokenUsage.peakInputTokens ?? result.tokenUsage.inputTokens);
 
       // Check for pending voice attachments from voice_reply tool
       await this.sendPendingVoiceAttachments(ctx, sessionId);

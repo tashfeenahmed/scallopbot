@@ -110,6 +110,13 @@ export interface TokenUsage {
   reasoningTokens?: number;
   /** Input tokens served from prompt cache (subset of inputTokens) */
   cachedInputTokens?: number;
+  /**
+   * Largest single-iteration prompt size in a multi-iteration turn.
+   * `inputTokens` is the sum across iterations (for billing); `peakInputTokens`
+   * is the actual peak context pressure and is what should drive
+   * context-window warnings.
+   */
+  peakInputTokens?: number;
 }
 
 // Completion response

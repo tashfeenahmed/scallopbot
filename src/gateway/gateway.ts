@@ -98,8 +98,18 @@ export class Gateway {
     this.providerRegistry = new ProviderRegistry();
     this.initializeProviders();
 
-    // Initialize router with providers
-    this.router = new Router({});
+    // Initialize router with providers. PROVIDER_ORDER env (via config.routing.providerOrder)
+    // drives both the default chain and tier-level ordering so local/pinned providers can
+    // be preferred over cloud ones. Cascade fallback still applies when the first choice fails.
+    const routerOrder = this.config.routing.providerOrder;
+    this.router = new Router({
+      providerOrder: routerOrder,
+      tierMapping: {
+        fast: routerOrder,
+        standard: routerOrder,
+        capable: routerOrder,
+      },
+    });
     this.registerProvidersWithRouter();
 
     // Use OllamaEmbedder for semantic search if Ollama is configured
@@ -191,21 +201,22 @@ export class Gateway {
     this.logger.debug('Board service initialized');
 
     // Initialize LLM-based fact extractor.
-    // Prefer providers in PROVIDER_ORDER (respects the user's chosen default)
-    // so the extractor uses the same provider as the main chat. Falls back to
-    // any non-Ollama provider (Ollama is embed-only). Ollama is excluded
-    // because it may not have a chat-capable model loaded.
+    // Background tasks (fact extraction + session summarization) should NOT use
+    // the same upstream as the main chat — otherwise a single-slot local LLM
+    // (e.g. Dell qwen3.6) gets hammered by foreground turn + async extractor
+    // concurrently, causing 429 "overloaded" and timeouts. Pick the SECOND
+    // non-ollama provider in PROVIDER_ORDER as a dedicated background upstream;
+    // fall back to the first one if only a single provider is available.
     const availableProviders = this.providerRegistry.getAvailableProviders();
     const providerOrder = this.config.routing.providerOrder;
-    let factExtractionProvider: LLMProvider | undefined;
+    const candidates: LLMProvider[] = [];
     for (const name of providerOrder) {
       const p = this.providerRegistry.getProvider(name);
-      if (p && p.name !== 'ollama' && p.isAvailable()) {
-        factExtractionProvider = p;
-        break;
-      }
+      if (p && p.name !== 'ollama' && p.isAvailable()) candidates.push(p);
     }
-    factExtractionProvider = factExtractionProvider
+    let factExtractionProvider: LLMProvider | undefined =
+      candidates[1] // prefer second (non-foreground) provider
+      || candidates[0]
       || availableProviders.find(p => p.name !== 'ollama')
       || this.providerRegistry.getDefaultProvider();
 

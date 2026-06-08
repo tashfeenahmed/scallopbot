@@ -1,7 +1,7 @@
 /** Shared constants across all LLM providers */
 
 /** Maximum number of retry attempts for transient errors */
-export const DEFAULT_MAX_RETRIES = 3;
+export const DEFAULT_MAX_RETRIES = 6;
 
 /** HTTP status codes that trigger automatic retry with backoff */
 export const RETRY_STATUS_CODES = [429, 500, 503];

@@ -171,6 +171,19 @@ async function searchMemories(
 ): Promise<{ memory: ScallopMemoryEntry; score: number }[]> {
   if (memories.length === 0) return [];
 
+  // When the LLM omits a query (the parser defaults it to '*') or asks for
+  // "everything", skip relevance scoring — there's no meaningful term to score
+  // against, and BM25 of '*' returns 0 for every doc, so the result list comes
+  // back empty even though we have plenty of memories. Return top-N by
+  // prominence instead so "what do you know about me" actually works.
+  const trimmed = query.trim();
+  if (trimmed === '' || trimmed === '*' || /^(all|everything|anything)$/i.test(trimmed)) {
+    return [...memories]
+      .sort((a, b) => (b.prominence ?? 0) - (a.prominence ?? 0))
+      .slice(0, limit)
+      .map((memory) => ({ memory, score: memory.prominence ?? 0 }));
+  }
+
   const contentTexts = memories.map((m) => m.content);
   const avgDocLength =
     contentTexts.reduce((sum, c) => sum + c.split(/\s+/).length, 0) / contentTexts.length;

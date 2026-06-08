@@ -329,37 +329,84 @@ function parseRecurringString(input: string): RecurringSchedule | null {
   return null;
 }
 
-function parseTriggerTime(input: string): { triggerAt: number; description: string } | null {
-  const lower = input.toLowerCase().trim();
+/** Resolve a wall-clock {hour,minute} in user TZ to a UTC Date, dayShift days from today. */
+function targetFromUserTime(time: { hour: number; minute: number }, dayShift: number, advanceIfPast: boolean): Date {
+  const userNow = getUserNowParts();
+  const baseUtc = Date.UTC(userNow.year, userNow.month, userNow.day + dayShift);
+  const base = new Date(baseUtc);
+  let target = tzToUtc(base.getUTCFullYear(), base.getUTCMonth(), base.getUTCDate(), time.hour, time.minute);
+  if (advanceIfPast && target <= userNow.now) {
+    const next = new Date(baseUtc + 24 * 60 * 60 * 1000);
+    target = tzToUtc(next.getUTCFullYear(), next.getUTCMonth(), next.getUTCDate(), time.hour, time.minute);
+  }
+  return target;
+}
 
-  // "at 10am", "at 3:30pm"
+/** Default times for relative-day-period phrases ("tonight" → 9pm). All in user TZ. */
+const PERIOD_TIMES: Record<string, { hour: number; minute: number }> = {
+  morning: { hour: 9, minute: 0 },
+  noon: { hour: 12, minute: 0 },
+  afternoon: { hour: 15, minute: 0 },
+  evening: { hour: 19, minute: 0 },
+  night: { hour: 22, minute: 0 },
+  tonight: { hour: 21, minute: 0 },
+  midnight: { hour: 0, minute: 0 },
+};
+
+function parseTriggerTime(input: string): { triggerAt: number; description: string } | null {
+  // Strip a "today" prefix so "today 8pm" / "today at 8pm" fall through to the bare-time branch.
+  const lower = input.toLowerCase().trim().replace(/^today\s+/, '');
+
+  // ISO 8601 timestamp (with or without timezone). Anchor on the leading digits so
+  // we don't accidentally match plain "8" as ISO. Accepts e.g. 2026-04-25T22:00:00Z,
+  // 2026-04-25 22:00, 2026-04-25T22:00.
+  const isoMatch = lower.match(/^\d{4}-\d{2}-\d{2}[t\s]\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:z|[+-]\d{2}:?\d{2})?$/i);
+  if (isoMatch) {
+    const t = new Date(input.trim());
+    if (!isNaN(t.getTime())) {
+      return { triggerAt: t.getTime(), description: formatDateTime(t) };
+    }
+  }
+
+  // Named time-of-day phrases: "tonight", "this evening", "this morning",
+  // "tomorrow morning", "tomorrow night", etc.
+  const periodMatch = lower.match(/^(?:(this|tomorrow)\s+)?(morning|noon|afternoon|evening|night|midnight|tonight)$/);
+  if (periodMatch) {
+    const dayWord = periodMatch[1];
+    const period = periodMatch[2];
+    const time = PERIOD_TIMES[period];
+    if (time) {
+      // "tonight" implicitly means today; "tomorrow night" means +1 day.
+      const dayShift = dayWord === 'tomorrow' ? 1 : 0;
+      // If "this <period>" or bare "tonight" and the implied time has already passed,
+      // do NOT auto-advance — assume the user means today still (e.g. running late).
+      // Only "morning" advances when past, since "this morning" tomorrow makes no sense.
+      const advance = dayShift === 0 && period === 'morning';
+      const target = targetFromUserTime(time, dayShift, advance);
+      return { triggerAt: target.getTime(), description: formatDateTime(target) };
+    }
+  }
+
+  // "at 10am", "at 3:30pm", bare "8pm"
   const atTimeMatch = lower.match(/^(?:at\s+)?(\d{1,2}(?::\d{2})?\s*(?:am|pm)?|\d{1,2}:\d{2})$/);
   if (atTimeMatch) {
     const time = parseTime(atTimeMatch[1]);
     if (time) {
-      const userNow = getUserNowParts();
-      let target = tzToUtc(userNow.year, userNow.month, userNow.day, time.hour, time.minute);
-      if (target <= userNow.now) {
-        const d = new Date(userNow.year, userNow.month, userNow.day + 1);
-        target = tzToUtc(d.getFullYear(), d.getMonth(), d.getDate(), time.hour, time.minute);
-      }
+      const target = targetFromUserTime(time, 0, true);
       return { triggerAt: target.getTime(), description: formatDateTime(target) };
     }
   }
 
-  // "tomorrow at 10am", "tomorrow 9am"
+  // "tomorrow at 10am", "tomorrow 9am", or suffix "10am tomorrow"
   const tomorrowMatch = lower.match(/^tomorrow\s+(?:at\s+)?(\d{1,2}(?::\d{2})?\s*(?:am|pm)?|\d{1,2}:\d{2})$/);
-  if (tomorrowMatch) {
-    const time = parseTime(tomorrowMatch[1]);
-    if (time) {
-      const userNow = getUserNowParts();
-      const d = new Date(userNow.year, userNow.month, userNow.day + 1);
-      const target = tzToUtc(d.getFullYear(), d.getMonth(), d.getDate(), time.hour, time.minute);
-      return { triggerAt: target.getTime(), description: formatDateTime(target) };
-    }
+  const tomorrowSuffixMatch = lower.match(/^(\d{1,2}(?::\d{2})?\s*(?:am|pm)?|\d{1,2}:\d{2})\s+tomorrow$/);
+  const tomorrowTime = tomorrowMatch ? parseTime(tomorrowMatch[1]) : (tomorrowSuffixMatch ? parseTime(tomorrowSuffixMatch[1]) : null);
+  if (tomorrowTime) {
+    const target = targetFromUserTime(tomorrowTime, 1, false);
+    return { triggerAt: target.getTime(), description: formatDateTime(target) };
   }
 
-  // "in X minutes/hours"
+  // "in X minutes/hours/days"
   const inMatch = lower.match(/^in\s+(\d+)\s*(min(?:ute)?s?|hours?|hrs?|days?)$/);
   if (inMatch) {
     const value = parseInt(inMatch[1], 10);
@@ -524,7 +571,12 @@ function addItem(args: BoardArgs): SkillResult {
       const parsed = parseTriggerTime(args.trigger_time);
       if (!parsed) {
         db.close();
-        return { success: false, output: '', error: `Could not parse time: "${args.trigger_time}". Try: "in 30 min", "at 10am", "tomorrow 9am", or for recurring use the recurring object (e.g. {"type":"daily","hour":8,"minute":0}).`, exitCode: 1 };
+        return {
+          success: false,
+          output: '',
+          error: `Could not parse time: "${args.trigger_time}". Accepted formats: "8pm" / "at 10am" / "3:30pm" / "today 8pm" / "tonight" / "this evening" / "tomorrow 9am" / "10am tomorrow" / "in 30 min" / "in 2 hours" / "in 3 days" / ISO "2026-04-25T22:00". For recurring use the recurring object instead, e.g. {"type":"daily","hour":8,"minute":0}.`,
+          exitCode: 1,
+        };
       }
       triggerAt = parsed.triggerAt;
       scheduleDesc = parsed.description;

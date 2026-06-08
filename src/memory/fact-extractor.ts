@@ -331,9 +331,12 @@ export class LLMFactExtractor {
       }
       prompt += `User message:\n${message}\n\nExtract facts and triggers (JSON only):`;
 
-      // Call LLM to extract facts and triggers
+      // Call LLM to extract facts and triggers. Cap max_tokens so thinking-heavy
+      // models (qwen3.6) don't burn the entire budget on reasoning_content and
+      // return empty JSON. 1500 is plenty for even a long facts+triggers payload.
       const response = await this.provider.complete({
         messages: [{ role: 'user', content: prompt }],
+        maxTokens: 1500,
       });
 
       // Parse response - handle ContentBlock[] response
@@ -733,7 +736,10 @@ export class LLMFactExtractor {
       this.extractionCount++;
       if (this.extractionCount >= LLMFactExtractor.CONSOLIDATION_INTERVAL) {
         this.extractionCount = 0;
-        // Wrap with a 30s timeout to prevent zombie processes if LLM hangs
+        // Wrap with a 90s timeout to prevent zombie processes if LLM hangs.
+        // Bumped from 30s because background fact-extractor now routes through the
+        // 2nd provider (OpenRouter qwen3.6-plus) which can take 30-60s when thinking
+        // tokens are heavy. 30s was tripping on legitimate slow responses.
         const consolidationPromise = this.consolidateMemory(
           storedMemories.map(m => m.id),
           userId,
@@ -742,7 +748,7 @@ export class LLMFactExtractor {
           Array.from(allCandidateMemoryIds),
         );
         const timeoutPromise = new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error('Consolidation timed out after 30s')), 30_000)
+          setTimeout(() => reject(new Error('Consolidation timed out after 90s')), 90_000)
         );
         Promise.race([consolidationPromise, timeoutPromise]).catch(err => {
           this.logger.warn({ error: (err as Error).message }, 'Background consolidation failed');
