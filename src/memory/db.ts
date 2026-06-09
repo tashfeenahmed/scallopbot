@@ -742,6 +742,68 @@ export class ScallopDatabase {
       );
       CREATE INDEX IF NOT EXISTS idx_proactive_decisions_at
         ON proactive_decisions(at DESC);
+
+      -- Self-evolution engine — Layer 1 corpus of improvement signals captured
+      -- at the end of agent turns (reusable tasks, skill failures, low-quality
+      -- answers). The nightly optimizer harvests these to propose mutations.
+      CREATE TABLE IF NOT EXISTS evolution_signals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT NOT NULL,
+        at INTEGER NOT NULL,
+        type TEXT NOT NULL,
+        target_skill TEXT,
+        critic_score REAL,
+        tool_call_count INTEGER,
+        session_id TEXT,
+        detail TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_evolution_signals_at
+        ON evolution_signals(at DESC);
+
+      -- Self-evolution observability log: every harvest/reflect/verify/promote/
+      -- rollback decision, powering the why-evolution diagnostic.
+      CREATE TABLE IF NOT EXISTS evolution_decisions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        at INTEGER NOT NULL,
+        stage TEXT NOT NULL,
+        outcome TEXT NOT NULL,
+        reason TEXT,
+        target TEXT,
+        detail TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_evolution_decisions_at
+        ON evolution_decisions(at DESC);
+
+      -- Promoted-mutation ledger: snapshots the prior version of a target before a
+      -- mutation goes live, so a regressing change can be auto-rolled-back. status:
+      -- active | rolled_back. snapshot is the prior SKILL.md/scripts (JSON) or null
+      -- if the target did not exist before (then rollback = delete).
+      CREATE TABLE IF NOT EXISTS evolution_versions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        target TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        at INTEGER NOT NULL,
+        baseline_fitness REAL,
+        snapshot TEXT,
+        status TEXT NOT NULL DEFAULT 'active',
+        detail TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_evolution_versions_target
+        ON evolution_versions(target, at DESC);
+
+      -- Machine-authored prompt fragments (e.g. 'learned_guidance') appended to the
+      -- system prompt when active. The optimizer's patch_prompt path writes here;
+      -- the agent reads active rows each turn. One active row per fragment_id.
+      CREATE TABLE IF NOT EXISTS prompt_overrides (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        fragment_id TEXT NOT NULL,
+        content TEXT NOT NULL,
+        active INTEGER NOT NULL DEFAULT 1,
+        version INTEGER NOT NULL DEFAULT 1,
+        at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_prompt_overrides_fragment
+        ON prompt_overrides(fragment_id, active);
     `);
 
     // Migration: Add source column to existing databases
@@ -2701,6 +2763,220 @@ export class ScallopDatabase {
   pruneProactiveDecisions(cutoffMs: number): number {
     const result = this.db.prepare('DELETE FROM proactive_decisions WHERE at < ?').run(cutoffMs);
     return result.changes;
+  }
+
+  // ============ Self-Evolution Engine ============
+
+  /** Append a captured improvement signal (Layer 1). Best-effort. */
+  recordEvolutionSignal(signal: {
+    userId: string;
+    at: number;
+    type: string;
+    targetSkill?: string | null;
+    criticScore?: number | null;
+    toolCallCount?: number | null;
+    sessionId?: string | null;
+    detail?: Record<string, unknown> | null;
+  }): void {
+    try {
+      this.db.prepare(`
+        INSERT INTO evolution_signals
+          (user_id, at, type, target_skill, critic_score, tool_call_count, session_id, detail)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        signal.userId,
+        signal.at,
+        signal.type,
+        signal.targetSkill ?? null,
+        signal.criticScore ?? null,
+        signal.toolCallCount ?? null,
+        signal.sessionId ?? null,
+        signal.detail ? JSON.stringify(signal.detail) : null,
+      );
+    } catch {
+      // Observability/corpus capture is best-effort; swallow.
+    }
+  }
+
+  /** Most recent evolution signals (newest first). */
+  getRecentEvolutionSignals(limit: number = 100): Array<{
+    id: number;
+    userId: string;
+    at: number;
+    type: string;
+    targetSkill: string | null;
+    criticScore: number | null;
+    toolCallCount: number | null;
+    sessionId: string | null;
+    detail: Record<string, unknown> | null;
+  }> {
+    const rows = this.db.prepare(`
+      SELECT id, user_id, at, type, target_skill, critic_score, tool_call_count, session_id, detail
+      FROM evolution_signals
+      ORDER BY at DESC
+      LIMIT ?
+    `).all(limit) as Array<{
+      id: number; user_id: string; at: number; type: string; target_skill: string | null;
+      critic_score: number | null; tool_call_count: number | null; session_id: string | null; detail: string | null;
+    }>;
+    return rows.map(r => ({
+      id: r.id,
+      userId: r.user_id,
+      at: r.at,
+      type: r.type,
+      targetSkill: r.target_skill,
+      criticScore: r.critic_score,
+      toolCallCount: r.tool_call_count,
+      sessionId: r.session_id,
+      detail: r.detail ? parseDetailJSON(r.detail) : null,
+    }));
+  }
+
+  /** Prune evolution_signals older than `cutoffMs`. */
+  pruneEvolutionSignals(cutoffMs: number): number {
+    const result = this.db.prepare('DELETE FROM evolution_signals WHERE at < ?').run(cutoffMs);
+    return result.changes;
+  }
+
+  /** Append an evolution decision record (observability). Best-effort. */
+  recordEvolutionDecision(decision: {
+    at: number;
+    stage: string;
+    outcome: string;
+    reason?: string | null;
+    target?: string | null;
+    detail?: Record<string, unknown> | null;
+  }): void {
+    try {
+      this.db.prepare(`
+        INSERT INTO evolution_decisions (at, stage, outcome, reason, target, detail)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `).run(
+        decision.at,
+        decision.stage,
+        decision.outcome,
+        decision.reason ?? null,
+        decision.target ?? null,
+        decision.detail ? JSON.stringify(decision.detail) : null,
+      );
+    } catch {
+      // Observability is best-effort; swallow.
+    }
+  }
+
+  /** Most recent evolution decisions (newest first), for the diagnostic. */
+  getRecentEvolutionDecisions(limit: number = 30): Array<{
+    id: number;
+    at: number;
+    stage: string;
+    outcome: string;
+    reason: string | null;
+    target: string | null;
+    detail: Record<string, unknown> | null;
+  }> {
+    const rows = this.db.prepare(`
+      SELECT id, at, stage, outcome, reason, target, detail
+      FROM evolution_decisions
+      ORDER BY at DESC
+      LIMIT ?
+    `).all(limit) as Array<{
+      id: number; at: number; stage: string; outcome: string; reason: string | null; target: string | null; detail: string | null;
+    }>;
+    return rows.map(r => ({
+      id: r.id,
+      at: r.at,
+      stage: r.stage,
+      outcome: r.outcome,
+      reason: r.reason,
+      target: r.target,
+      detail: r.detail ? parseDetailJSON(r.detail) : null,
+    }));
+  }
+
+  /** Record a promoted mutation + its rollback snapshot. Returns the new row id. */
+  recordEvolutionVersion(version: {
+    target: string;
+    kind: string;
+    at: number;
+    baselineFitness?: number | null;
+    snapshot?: string | null;
+    detail?: Record<string, unknown> | null;
+  }): number {
+    const result = this.db.prepare(`
+      INSERT INTO evolution_versions (target, kind, at, baseline_fitness, snapshot, status, detail)
+      VALUES (?, ?, ?, ?, ?, 'active', ?)
+    `).run(
+      version.target,
+      version.kind,
+      version.at,
+      version.baselineFitness ?? null,
+      version.snapshot ?? null,
+      version.detail ? JSON.stringify(version.detail) : null,
+    );
+    return Number(result.lastInsertRowid);
+  }
+
+  /** The currently-active promoted version for a target, if any. */
+  getActiveEvolutionVersion(target: string): {
+    id: number; target: string; kind: string; at: number; baselineFitness: number | null; snapshot: string | null;
+  } | null {
+    const row = this.db.prepare(`
+      SELECT id, target, kind, at, baseline_fitness, snapshot
+      FROM evolution_versions
+      WHERE target = ? AND status = 'active'
+      ORDER BY at DESC LIMIT 1
+    `).get(target) as { id: number; target: string; kind: string; at: number; baseline_fitness: number | null; snapshot: string | null } | undefined;
+    if (!row) return null;
+    return { id: row.id, target: row.target, kind: row.kind, at: row.at, baselineFitness: row.baseline_fitness, snapshot: row.snapshot };
+  }
+
+  /** All active promoted versions (for the rollback watchdog). */
+  getActiveEvolutionVersions(): Array<{ id: number; target: string; kind: string; at: number; baselineFitness: number | null }> {
+    const rows = this.db.prepare(`
+      SELECT id, target, kind, at, baseline_fitness
+      FROM evolution_versions WHERE status = 'active' ORDER BY at DESC
+    `).all() as Array<{ id: number; target: string; kind: string; at: number; baseline_fitness: number | null }>;
+    return rows.map(r => ({ id: r.id, target: r.target, kind: r.kind, at: r.at, baselineFitness: r.baseline_fitness }));
+  }
+
+  /** Mark a version row as rolled back. */
+  markEvolutionVersionRolledBack(id: number): void {
+    this.db.prepare(`UPDATE evolution_versions SET status = 'rolled_back' WHERE id = ?`).run(id);
+  }
+
+  /** All currently-active prompt fragments (appended to the system prompt). */
+  getActivePromptOverrides(): Array<{ fragmentId: string; content: string; version: number }> {
+    const rows = this.db.prepare(`
+      SELECT fragment_id, content, version FROM prompt_overrides WHERE active = 1 ORDER BY fragment_id
+    `).all() as Array<{ fragment_id: string; content: string; version: number }>;
+    return rows.map(r => ({ fragmentId: r.fragment_id, content: r.content, version: r.version }));
+  }
+
+  /** The active content for one fragment, or null. */
+  getActivePromptOverride(fragmentId: string): { content: string; version: number } | null {
+    const row = this.db.prepare(`
+      SELECT content, version FROM prompt_overrides WHERE fragment_id = ? AND active = 1 ORDER BY version DESC LIMIT 1
+    `).get(fragmentId) as { content: string; version: number } | undefined;
+    return row ? { content: row.content, version: row.version } : null;
+  }
+
+  /** Activate a new version of a fragment, deactivating any prior active one. Returns the new version. */
+  upsertPromptOverride(fragmentId: string, content: string, at: number): number {
+    const prior = this.db.prepare(`SELECT MAX(version) as v FROM prompt_overrides WHERE fragment_id = ?`).get(fragmentId) as { v: number | null };
+    const nextVersion = (prior.v ?? 0) + 1;
+    this.db.prepare(`UPDATE prompt_overrides SET active = 0 WHERE fragment_id = ?`).run(fragmentId);
+    this.db.prepare(`
+      INSERT INTO prompt_overrides (fragment_id, content, active, version, at) VALUES (?, ?, 1, ?, ?)
+    `).run(fragmentId, content, nextVersion, at);
+    return nextVersion;
+  }
+
+  /** Deactivate the active version of a fragment, optionally re-activating a prior content. */
+  rollbackPromptOverride(fragmentId: string, restoreContent: string | null, at: number): void {
+    this.db.prepare(`UPDATE prompt_overrides SET active = 0 WHERE fragment_id = ?`).run(fragmentId);
+    if (restoreContent !== null) {
+      this.upsertPromptOverride(fragmentId, restoreContent, at);
+    }
   }
 
   /**

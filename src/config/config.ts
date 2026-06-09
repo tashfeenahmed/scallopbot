@@ -1,5 +1,7 @@
 import { z } from 'zod';
 import dotenv from 'dotenv';
+import { parseModelRef, DEFAULT_MODELS, type ModelRef, type ModelsConfig } from './model-routing.js';
+import { DEFAULT_EVOLUTION_CONFIG } from '../evolution/config.js';
 
 // Load environment variables from .env file
 dotenv.config();
@@ -8,6 +10,22 @@ dotenv.config();
 const DEFAULT_HOST = '127.0.0.1';
 const DEFAULT_OLLAMA_BASE_URL = 'http://localhost:11434';
 const DEFAULT_API_PORT = 3000;
+
+/** Parse an integer env var, falling back to a default when unset/invalid. */
+function envInt(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined) return fallback;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+/** Parse a float env var, falling back to a default when unset/invalid. */
+function envFloat(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined) return fallback;
+  const n = parseFloat(raw);
+  return Number.isFinite(n) ? n : fallback;
+}
 
 // Provider configuration schemas
 const anthropicProviderSchema = z.object({
@@ -174,9 +192,91 @@ const subagentSchema = z.object({
   allowMemoryWrites: z.boolean().default(false),
 });
 
+// Per-purpose model routing schema (single place each LLM job picks its model).
+// See src/config/model-routing.ts for the resolver. Defaults preserve the prior
+// inline behavior exactly; each is overridable via MODEL_<PURPOSE> env vars.
+const modelRefSchema = z.union([
+  z.object({ use: z.enum(['main', 'background']) }),
+  z.object({ tier: z.enum(['fast', 'standard', 'capable']) }),
+  z.object({ provider: z.string().min(1), model: z.string().optional() }),
+]);
+
+// Operational tuning knobs — the central, env-overridable surface for the
+// constants an operator actually adjusts. Deep algorithm internals (decay rates,
+// emotion-lexicon weights, compaction char thresholds) intentionally stay in
+// their module homes. Defaults equal the prior hardcoded values exactly.
+const TUNING_DEFAULTS = {
+  gardener: {
+    lightIntervalMs: 60_000,
+    deepIntervalMs: 72 * 60 * 1000,
+    sleepIntervalMs: 20 * 60 * 60 * 1000,
+    quietHoursStart: 2,
+    quietHoursEnd: 5,
+  },
+  critic: { bestOfN: 1, bestOfNThreshold: 0.85 },
+  skills: { timeoutMs: 120_000, maxOutputBytes: 1024 * 1024 },
+};
+
+const tuningSchema = z.object({
+  gardener: z
+    .object({
+      /** Light-tick (decay) cadence. */
+      lightIntervalMs: z.number().int().positive().default(TUNING_DEFAULTS.gardener.lightIntervalMs),
+      /** Deep-tick (summaries, behavioral inference, proactive) cadence. */
+      deepIntervalMs: z.number().int().positive().default(TUNING_DEFAULTS.gardener.deepIntervalMs),
+      /** Sleep-tick (dream/reflection) cadence. */
+      sleepIntervalMs: z.number().int().positive().default(TUNING_DEFAULTS.gardener.sleepIntervalMs),
+      /** Quiet-hours window for the sleep tick (local hour, 0-23). */
+      quietHoursStart: z.number().int().min(0).max(23).default(TUNING_DEFAULTS.gardener.quietHoursStart),
+      quietHoursEnd: z.number().int().min(0).max(23).default(TUNING_DEFAULTS.gardener.quietHoursEnd),
+    })
+    .default(TUNING_DEFAULTS.gardener),
+  critic: z
+    .object({
+      /** Best-of-N candidate count for the main loop (1 = disabled). */
+      bestOfN: z.number().int().positive().default(TUNING_DEFAULTS.critic.bestOfN),
+      /** Quality bar below which best-of-N resampling kicks in. */
+      bestOfNThreshold: z.number().min(0).max(1).default(TUNING_DEFAULTS.critic.bestOfNThreshold),
+    })
+    .default(TUNING_DEFAULTS.critic),
+  skills: z
+    .object({
+      /** Default skill-script execution timeout. */
+      timeoutMs: z.number().int().positive().default(TUNING_DEFAULTS.skills.timeoutMs),
+      /** Max captured stdout/stderr per skill run. */
+      maxOutputBytes: z.number().int().positive().default(TUNING_DEFAULTS.skills.maxOutputBytes),
+    })
+    .default(TUNING_DEFAULTS.skills),
+});
+
+// Self-evolution engine config. The model it runs on lives in models.evolution;
+// these are the feature toggle + capture/optimizer thresholds.
+const evolutionSchema = z.object({
+  enabled: z.boolean().default(DEFAULT_EVOLUTION_CONFIG.enabled),
+  minToolCalls: z.number().int().positive().default(DEFAULT_EVOLUTION_CONFIG.minToolCalls),
+  reusableScoreBar: z.number().min(0).max(1).default(DEFAULT_EVOLUTION_CONFIG.reusableScoreBar),
+  lowQualityThreshold: z.number().min(0).max(1).default(DEFAULT_EVOLUTION_CONFIG.lowQualityThreshold),
+  maxProposals: z.number().int().positive().default(DEFAULT_EVOLUTION_CONFIG.maxProposals),
+  fitnessEpsilon: z.number().min(0).max(1).default(DEFAULT_EVOLUTION_CONFIG.fitnessEpsilon),
+  rollbackWindow: z.number().int().positive().default(DEFAULT_EVOLUTION_CONFIG.rollbackWindow),
+  useLlmJudge: z.boolean().default(DEFAULT_EVOLUTION_CONFIG.useLlmJudge),
+});
+
+const modelsSchema = z.object({
+  reranker: modelRefSchema.default(DEFAULT_MODELS.reranker),
+  factExtraction: modelRefSchema.default(DEFAULT_MODELS.factExtraction),
+  cognition: modelRefSchema.default(DEFAULT_MODELS.cognition),
+  critic: modelRefSchema.default(DEFAULT_MODELS.critic),
+  evolution: modelRefSchema.default(DEFAULT_MODELS.evolution),
+  eval: modelRefSchema.default(DEFAULT_MODELS.eval),
+});
+
 // Main configuration schema
 export const configSchema = z.object({
   providers: providersSchema,
+  models: modelsSchema.default(DEFAULT_MODELS),
+  tuning: tuningSchema.default(TUNING_DEFAULTS),
+  evolution: evolutionSchema.default(DEFAULT_EVOLUTION_CONFIG),
   channels: channelsSchema,
   agent: agentSchema,
   logging: loggingSchema.default({ level: 'info' }),
@@ -202,6 +302,7 @@ export const configSchema = z.object({
 // Type inference from schema
 export type Config = z.infer<typeof configSchema>;
 export type ProviderConfig = z.infer<typeof providersSchema>;
+export type { ModelsConfig, ModelRef } from './model-routing.js';
 export type ChannelConfig = z.infer<typeof channelsSchema>;
 export type AgentConfig = z.infer<typeof agentSchema>;
 export type LoggingConfig = z.infer<typeof loggingSchema>;
@@ -213,6 +314,8 @@ export type GatewayConfig = z.infer<typeof gatewaySchema>;
 export type TailscaleConfig = z.infer<typeof tailscaleSchema>;
 export type SubagentConfig = z.infer<typeof subagentSchema>;
 export type ToolPolicyConfig = z.infer<typeof toolPolicySchema>;
+export type TuningConfig = z.infer<typeof tuningSchema>;
+export type EvolutionConfigSchema = z.infer<typeof evolutionSchema>;
 
 /**
  * Load configuration from environment variables
@@ -233,7 +336,49 @@ export function loadConfig(): Config {
     : 100;
   const logLevel = process.env.LOG_LEVEL || 'info';
 
+  // Per-purpose model overrides: only include keys with a MODEL_<PURPOSE> env set;
+  // zod fills the rest from MODELS_DEFAULTS so behavior is unchanged by default.
+  const modelsRaw: Partial<Record<keyof ModelsConfig, ModelRef>> = {};
+  const addModelOverride = (key: keyof ModelsConfig, envVar: string): void => {
+    const ref = parseModelRef(process.env[envVar]);
+    if (ref) modelsRaw[key] = ref;
+  };
+  addModelOverride('reranker', 'MODEL_RERANKER');
+  addModelOverride('factExtraction', 'MODEL_FACT_EXTRACTION');
+  addModelOverride('cognition', 'MODEL_COGNITION');
+  addModelOverride('critic', 'MODEL_CRITIC');
+  addModelOverride('evolution', 'MODEL_EVOLUTION');
+  addModelOverride('eval', 'MODEL_EVAL');
+
   const rawConfig = {
+    models: modelsRaw,
+    tuning: {
+      gardener: {
+        lightIntervalMs: envInt('GARDENER_LIGHT_INTERVAL_MS', 60_000),
+        deepIntervalMs: envInt('GARDENER_DEEP_INTERVAL_MS', 72 * 60 * 1000),
+        sleepIntervalMs: envInt('GARDENER_SLEEP_INTERVAL_MS', 20 * 60 * 60 * 1000),
+        quietHoursStart: envInt('GARDENER_QUIET_HOURS_START', 2),
+        quietHoursEnd: envInt('GARDENER_QUIET_HOURS_END', 5),
+      },
+      critic: {
+        bestOfN: envInt('BEST_OF_N', 1),
+        bestOfNThreshold: envFloat('BEST_OF_N_THRESHOLD', 0.85),
+      },
+      skills: {
+        timeoutMs: envInt('SKILL_TIMEOUT_MS', 120_000),
+        maxOutputBytes: envInt('SKILL_MAX_OUTPUT_BYTES', 1024 * 1024),
+      },
+    },
+    evolution: {
+      enabled: process.env.EVOLUTION_ENABLED !== 'false',
+      minToolCalls: envInt('EVOLUTION_MIN_TOOL_CALLS', DEFAULT_EVOLUTION_CONFIG.minToolCalls),
+      reusableScoreBar: envFloat('EVOLUTION_REUSABLE_SCORE_BAR', DEFAULT_EVOLUTION_CONFIG.reusableScoreBar),
+      lowQualityThreshold: envFloat('EVOLUTION_LOW_QUALITY_THRESHOLD', DEFAULT_EVOLUTION_CONFIG.lowQualityThreshold),
+      maxProposals: envInt('EVOLUTION_MAX_PROPOSALS', DEFAULT_EVOLUTION_CONFIG.maxProposals),
+      fitnessEpsilon: envFloat('EVOLUTION_FITNESS_EPSILON', DEFAULT_EVOLUTION_CONFIG.fitnessEpsilon),
+      rollbackWindow: envInt('EVOLUTION_ROLLBACK_WINDOW', DEFAULT_EVOLUTION_CONFIG.rollbackWindow),
+      useLlmJudge: process.env.EVOLUTION_USE_LLM_JUDGE === 'true',
+    },
     providers: {
       anthropic: {
         apiKey: anthropicApiKey,

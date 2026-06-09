@@ -27,6 +27,7 @@ import { getQueriesForDay, type SimulatedDay } from './scenarios.js';
 import { type EvalModeConfig, createModeSearch } from './modes.js';
 import { cosineSimilarity, OllamaEmbedder, type EmbeddingProvider } from '../memory/embeddings.js';
 import { MoonshotProvider } from '../providers/moonshot.js';
+import { parseModelRef } from '../config/model-routing.js';
 import type { LLMProvider, CompletionRequest, CompletionResponse, ContentBlock } from '../providers/types.js';
 import { flattenSystem } from '../providers/types.js';
 
@@ -93,9 +94,15 @@ export function createEvalProviders(): EvalProviders {
     model: 'nomic-embed-text',
   });
 
+  // Eval model id is centralized via config.models.eval (MODEL_EVAL=moonshot:<model>).
+  // The harness pins Moonshot as the provider for reproducibility; only the model
+  // id is configurable here.
+  const evalRef = parseModelRef(process.env.MODEL_EVAL);
+  const evalModel = evalRef && 'provider' in evalRef && evalRef.model ? evalRef.model : 'kimi-k2.5';
+
   const moonshot = new MoonshotProvider({
     apiKey: moonshotKey,
-    model: 'kimi-k2.5',
+    model: evalModel,
     timeout: 30_000,
   });
 

@@ -239,5 +239,77 @@ describe('Config Schema', () => {
 
       expect(config.channels.telegram.enabled).toBe(false);
     });
+
+    it('should default per-purpose models to behavior-preserving values', async () => {
+      process.env.ANTHROPIC_API_KEY = 'sk-ant-env-key';
+      process.env.AGENT_WORKSPACE = '/env/workspace';
+      for (const v of ['MODEL_RERANKER', 'MODEL_FACT_EXTRACTION', 'MODEL_COGNITION', 'MODEL_CRITIC', 'MODEL_EVOLUTION', 'MODEL_EVAL']) {
+        delete process.env[v];
+      }
+
+      const { loadConfig } = await import('./config.js');
+      const config = loadConfig();
+
+      expect(config.models.reranker).toEqual({ tier: 'fast' });
+      expect(config.models.factExtraction).toEqual({ use: 'background' });
+      expect(config.models.cognition).toEqual({ tier: 'fast' });
+      expect(config.models.critic).toEqual({ use: 'main' });
+      expect(config.models.evolution).toEqual({ use: 'main' });
+      expect(config.models.eval).toEqual({ provider: 'moonshot', model: 'kimi-k2.5' });
+    });
+
+    it('should apply MODEL_<PURPOSE> env overrides', async () => {
+      process.env.ANTHROPIC_API_KEY = 'sk-ant-env-key';
+      process.env.AGENT_WORKSPACE = '/env/workspace';
+      process.env.MODEL_EVOLUTION = 'groq';
+      process.env.MODEL_RERANKER = 'tier:capable';
+      process.env.MODEL_EVAL = 'moonshot:kimi-k2.6';
+
+      const { loadConfig } = await import('./config.js');
+      const config = loadConfig();
+
+      expect(config.models.evolution).toEqual({ provider: 'groq' });
+      expect(config.models.reranker).toEqual({ tier: 'capable' });
+      expect(config.models.eval).toEqual({ provider: 'moonshot', model: 'kimi-k2.6' });
+      // untouched purposes keep their defaults
+      expect(config.models.cognition).toEqual({ tier: 'fast' });
+    });
+
+    it('should default tuning knobs to prior hardcoded values', async () => {
+      process.env.ANTHROPIC_API_KEY = 'sk-ant-env-key';
+      process.env.AGENT_WORKSPACE = '/env/workspace';
+      for (const v of ['GARDENER_DEEP_INTERVAL_MS', 'BEST_OF_N', 'BEST_OF_N_THRESHOLD', 'SKILL_TIMEOUT_MS']) {
+        delete process.env[v];
+      }
+
+      const { loadConfig } = await import('./config.js');
+      const config = loadConfig();
+
+      expect(config.tuning.gardener.deepIntervalMs).toBe(72 * 60 * 1000);
+      expect(config.tuning.gardener.sleepIntervalMs).toBe(20 * 60 * 60 * 1000);
+      expect(config.tuning.gardener.quietHoursStart).toBe(2);
+      expect(config.tuning.gardener.quietHoursEnd).toBe(5);
+      expect(config.tuning.critic.bestOfN).toBe(1);
+      expect(config.tuning.critic.bestOfNThreshold).toBe(0.85);
+      expect(config.tuning.skills.timeoutMs).toBe(120_000);
+      expect(config.tuning.skills.maxOutputBytes).toBe(1024 * 1024);
+    });
+
+    it('should apply tuning env overrides', async () => {
+      process.env.ANTHROPIC_API_KEY = 'sk-ant-env-key';
+      process.env.AGENT_WORKSPACE = '/env/workspace';
+      process.env.GARDENER_DEEP_INTERVAL_MS = '600000';
+      process.env.BEST_OF_N = '3';
+      process.env.BEST_OF_N_THRESHOLD = '0.7';
+      process.env.SKILL_TIMEOUT_MS = '30000';
+
+      const { loadConfig } = await import('./config.js');
+      const config = loadConfig();
+
+      expect(config.tuning.gardener.deepIntervalMs).toBe(600000);
+      expect(config.tuning.critic.bestOfN).toBe(3);
+      expect(config.tuning.critic.bestOfNThreshold).toBe(0.7);
+      expect(config.tuning.skills.timeoutMs).toBe(30000);
+    });
   });
 });

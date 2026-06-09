@@ -18,15 +18,25 @@ const DEFAULT_TIMEOUT_MS = 120000;
 /** Maximum output size in bytes (1MB) to prevent OOM from runaway scripts */
 const MAX_OUTPUT_BYTES = 1024 * 1024;
 
+/** Operational knobs for skill execution (sourced from config.tuning.skills). */
+export interface SkillExecutorOptions {
+  timeoutMs?: number;
+  maxOutputBytes?: number;
+}
+
 /**
  * Skill Executor class for running scripts from skill folders
  */
 export class SkillExecutor {
   private getTimezone?: (userId: string) => string;
   private scriptPathCache = new Map<string, string | null>();
+  private timeoutMs: number;
+  private maxOutputBytes: number;
 
-  constructor(private logger?: Logger, getTimezone?: (userId: string) => string) {
+  constructor(private logger?: Logger, getTimezone?: (userId: string) => string, options?: SkillExecutorOptions) {
     this.getTimezone = getTimezone;
+    this.timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.maxOutputBytes = options?.maxOutputBytes ?? MAX_OUTPUT_BYTES;
   }
 
   /**
@@ -243,17 +253,17 @@ export class SkillExecutor {
         done({
           success: false,
           output: stdout.join(''),
-          error: `Script timed out after ${DEFAULT_TIMEOUT_MS}ms`,
+          error: `Script timed out after ${this.timeoutMs}ms`,
           exitCode: 124, // Standard timeout exit code
         });
-      }, DEFAULT_TIMEOUT_MS);
+      }, this.timeoutMs);
 
       child.stdout?.on('data', (data: Buffer) => {
         if (outputTruncated) return;
         outputBytes += data.length;
-        if (outputBytes > MAX_OUTPUT_BYTES) {
+        if (outputBytes > this.maxOutputBytes) {
           outputTruncated = true;
-          stdout.push('\n[OUTPUT TRUNCATED - exceeded 1MB limit]');
+          stdout.push(`\n[OUTPUT TRUNCATED - exceeded ${this.maxOutputBytes} byte limit]`);
           child.kill('SIGTERM');
           return;
         }
@@ -323,6 +333,10 @@ export class SkillExecutor {
 /**
  * Create a skill executor instance
  */
-export function createSkillExecutor(logger?: Logger, getTimezone?: (userId: string) => string): SkillExecutor {
-  return new SkillExecutor(logger, getTimezone);
+export function createSkillExecutor(
+  logger?: Logger,
+  getTimezone?: (userId: string) => string,
+  options?: SkillExecutorOptions,
+): SkillExecutor {
+  return new SkillExecutor(logger, getTimezone, options);
 }

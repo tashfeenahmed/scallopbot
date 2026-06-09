@@ -3,7 +3,19 @@
  *
  * All timing constants, budget caps, and thresholds in one place.
  * Import from here instead of scattering magic numbers across files.
+ *
+ * The operational knobs (cooldown, min-gap, per-dial budgets, items-per-eval) are
+ * env-overridable so they can be tuned without code changes:
+ *   PROACTIVE_COOLDOWN_MS, PROACTIVE_MIN_GAP_MS, PROACTIVE_MAX_ITEMS_PER_EVAL,
+ *   PROACTIVE_BUDGET_CONSERVATIVE, PROACTIVE_BUDGET_MODERATE, PROACTIVE_BUDGET_EAGER.
  */
+
+function envInt(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined) return fallback;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) ? n : fallback;
+}
 
 // ============ Timing ============
 
@@ -25,7 +37,7 @@ export const DEFAULT_GARDENER_QUIET_HOURS = { start: 2, end: 5 } as const;
 // ============ Delivery ============
 
 /** Minimum gap between proactive messages: 2 hours */
-export const MIN_GAP_MS = 2 * 60 * 60 * 1000;
+export const MIN_GAP_MS = envInt('PROACTIVE_MIN_GAP_MS', 2 * 60 * 60 * 1000);
 
 /** Maximum deferral: never defer more than 24 hours */
 export const MAX_DEFERRAL_MS = 24 * 60 * 60 * 1000;
@@ -46,16 +58,16 @@ export const ENGAGEMENT_WINDOW_MS = 15 * 60 * 1000;
 
 /** Per-dial daily notification budget caps */
 export const DIAL_BUDGETS = {
-  conservative: 1,
-  moderate: 3,
-  eager: 5,
+  conservative: envInt('PROACTIVE_BUDGET_CONSERVATIVE', 1),
+  moderate: envInt('PROACTIVE_BUDGET_MODERATE', 3),
+  eager: envInt('PROACTIVE_BUDGET_EAGER', 5),
 } as const;
 
 /** Hard cap: max items per evaluator run */
-export const MAX_ITEMS_PER_EVAL = 3;
+export const MAX_ITEMS_PER_EVAL = envInt('PROACTIVE_MAX_ITEMS_PER_EVAL', 3);
 
 /** Cooldown between proactive evaluations: 6 hours */
-export const PROACTIVE_COOLDOWN_MS = 6 * 60 * 60 * 1000;
+export const PROACTIVE_COOLDOWN_MS = envInt('PROACTIVE_COOLDOWN_MS', 6 * 60 * 60 * 1000);
 
 /** Minimum session messages to warrant inner thoughts evaluation */
 export const MIN_SESSION_MESSAGES = 3;

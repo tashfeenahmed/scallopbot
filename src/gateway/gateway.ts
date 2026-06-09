@@ -1,6 +1,7 @@
 import * as path from 'path';
 import type { Logger } from 'pino';
 import type { Config } from '../config/config.js';
+import { PurposeRouter, DEFAULT_MODELS } from '../config/model-routing.js';
 import {
   AnthropicProvider,
   OpenAIProvider,
@@ -15,6 +16,8 @@ import {
 import { defineSkill } from '../skills/sdk.js';
 import { SessionManager } from '../agent/session.js';
 import { Agent } from '../agent/agent.js';
+import { EvolutionRecorder } from '../evolution/signals.js';
+import { EvolutionEngine } from '../evolution/engine.js';
 import { TelegramChannel } from '../channels/telegram.js';
 import { TelegramGateway } from '../channels/telegram-gateway.js';
 import { ApiChannel } from '../channels/api.js';
@@ -56,6 +59,8 @@ export class Gateway {
   private skillRegistry: SkillRegistry | null = null;
   private skillExecutor: SkillExecutor | null = null;
   private router: Router | null = null;
+  private purposeRouter: PurposeRouter | null = null;
+  private evolutionEngine: EvolutionEngine | null = null;
   private costTracker: CostTracker | null = null;
   private scallopMemoryStore: ScallopMemoryStore | null = null;
   private backgroundGardener: BackgroundGardener | null = null;
@@ -112,6 +117,10 @@ export class Gateway {
     });
     this.registerProvidersWithRouter();
 
+    // Single place that resolves which model each background job runs on.
+    // Defaults preserve prior inline behavior; override via MODEL_<PURPOSE> env.
+    this.purposeRouter = new PurposeRouter(this.config.models ?? DEFAULT_MODELS, this.providerRegistry, this.router);
+
     // Use OllamaEmbedder for semantic search if Ollama is configured
     let embedder: EmbeddingProvider | undefined;
     const ollamaConfig = this.config.providers.ollama;
@@ -132,15 +141,16 @@ export class Gateway {
       ? configuredDbPath
       : path.join(this.config.agent.workspace, configuredDbPath);
 
-    // Get a fast-tier provider for LLM re-ranking of search results (opt-in, graceful degradation)
+    // Provider for LLM re-ranking of search results (opt-in, graceful degradation).
+    // Model choice lives in config.models.reranker (default: fast tier).
     let rerankProvider: LLMProvider | undefined;
     try {
-      rerankProvider = await this.router.selectProvider('fast') ?? undefined;
+      rerankProvider = await this.purposeRouter.providerFor('reranker');
       if (rerankProvider) {
-        this.logger.debug({ provider: rerankProvider.name }, 'Using fast-tier provider for search re-ranking');
+        this.logger.debug({ provider: rerankProvider.name }, 'Using configured provider for search re-ranking');
       }
     } catch {
-      // No fast provider available — re-ranking will be skipped
+      // No provider available — re-ranking will be skipped
     }
 
     this.scallopMemoryStore = new ScallopMemoryStore({
@@ -204,21 +214,11 @@ export class Gateway {
     // Background tasks (fact extraction + session summarization) should NOT use
     // the same upstream as the main chat — otherwise a single-slot local LLM
     // (e.g. Dell qwen3.6) gets hammered by foreground turn + async extractor
-    // concurrently, causing 429 "overloaded" and timeouts. Pick the SECOND
-    // non-ollama provider in PROVIDER_ORDER as a dedicated background upstream;
-    // fall back to the first one if only a single provider is available.
-    const availableProviders = this.providerRegistry.getAvailableProviders();
-    const providerOrder = this.config.routing.providerOrder;
-    const candidates: LLMProvider[] = [];
-    for (const name of providerOrder) {
-      const p = this.providerRegistry.getProvider(name);
-      if (p && p.name !== 'ollama' && p.isAvailable()) candidates.push(p);
-    }
-    let factExtractionProvider: LLMProvider | undefined =
-      candidates[1] // prefer second (non-foreground) provider
-      || candidates[0]
-      || availableProviders.find(p => p.name !== 'ollama')
-      || this.providerRegistry.getDefaultProvider();
+    // concurrently, causing 429 "overloaded" and timeouts. The "background"
+    // model purpose encodes that heuristic (2nd non-local in PROVIDER_ORDER);
+    // model choice lives in config.models.factExtraction.
+    const factExtractionProvider: LLMProvider | undefined =
+      await this.purposeRouter.providerFor('factExtraction');
 
     if (factExtractionProvider && this.scallopMemoryStore) {
       this.factExtractor = new LLMFactExtractor({
@@ -238,16 +238,33 @@ export class Gateway {
     const sessionSummarizer = factExtractionProvider
       ? new SessionSummarizer({ provider: factExtractionProvider, logger: this.logger, embedder })
       : undefined;
+    // Nightly cognition (dream/reflection/proactive) runs on config.models.cognition
+    // (default: fast tier — same as before, when this reused the rerank provider).
+    const cognitionProvider = await this.purposeRouter.providerFor('cognition');
+    const gardenerTuning = this.config.tuning?.gardener;
     this.backgroundGardener = new BackgroundGardener({
       scallopStore: this.scallopMemoryStore,
       logger: this.logger,
-      interval: 60000, // 1 minute
-      fusionProvider: rerankProvider,
+      interval: gardenerTuning?.lightIntervalMs ?? 60000, // 1 minute
+      deepIntervalMs: gardenerTuning?.deepIntervalMs,
+      sleepIntervalMs: gardenerTuning?.sleepIntervalMs,
+      quietHours: gardenerTuning
+        ? { start: gardenerTuning.quietHoursStart, end: gardenerTuning.quietHoursEnd }
+        : undefined,
+      fusionProvider: cognitionProvider,
       sessionSummarizer,
       workspace: this.config.agent.workspace,
       getTimezone: (userId: string) => this.configManager!.getUserTimezone(userId),
       onMorningDigest: async (userId: string) => {
         await (this.unifiedScheduler?.sendMorningDigest(userId) ?? Promise.resolve(0));
+      },
+      // Late-bound: the evolution engine is constructed after the skill registry
+      // exists; the gardener only ticks once started, by which point it is set.
+      onDeepTick: async () => {
+        await this.evolutionEngine?.runWatchdog();
+      },
+      onSleepTick: async () => {
+        await this.evolutionEngine?.runOptimizer();
       },
     });
 
@@ -281,9 +298,32 @@ export class Gateway {
     // Create skill executor for skill-based execution
     this.skillExecutor = createSkillExecutor(
       this.logger,
-      (userId: string) => this.configManager!.getUserTimezone(userId)
+      (userId: string) => this.configManager!.getUserTimezone(userId),
+      {
+        timeoutMs: this.config.tuning?.skills?.timeoutMs,
+        maxOutputBytes: this.config.tuning?.skills?.maxOutputBytes,
+      }
     );
     this.logger.debug('Skill executor created');
+
+    // Self-evolution engine (Layer 2). Constructed now that the skill registry +
+    // executor exist; the gardener's deep/sleep ticks drive it (late-bound above).
+    if (this.config.evolution?.enabled) {
+      const evoDb = this.scallopMemoryStore.getDatabase();
+      const registry = this.skillRegistry;
+      const executor = this.skillExecutor;
+      const purposeRouter = this.purposeRouter;
+      this.evolutionEngine = new EvolutionEngine({
+        db: evoDb,
+        resolveProvider: () => purposeRouter.providerFor('evolution'),
+        executor,
+        reloadFromDisk: () => registry.reloadFromDisk(),
+        getLiveSkillPath: (name: string) => registry.getSkill(name)?.path,
+        config: this.config.evolution,
+        logger: this.logger,
+      });
+      this.logger.debug('Self-evolution engine initialized');
+    }
 
     // Initialize voice manager (for voice reply tool)
     this.voiceManager = VoiceManager.fromEnv(this.logger);
@@ -370,6 +410,15 @@ export class Gateway {
     await this.registerSkillManagementSkill();
     this.logger.debug('Skill management skill registered');
 
+    // Self-evolution Layer 1 recorder — captures improvement signals at turn end.
+    const evolutionRecorder = this.config.evolution?.enabled
+      ? new EvolutionRecorder(
+          this.scallopMemoryStore.getDatabase(),
+          this.config.evolution,
+          this.logger,
+        )
+      : undefined;
+
     this.agent = new Agent({
       provider,
       sessionManager: this.sessionManager,
@@ -388,6 +437,9 @@ export class Gateway {
       logger: this.logger,
       maxIterations: this.config.agent.maxIterations,
       enableThinking: this.config.providers.moonshot.enableThinking,
+      bestOfN: this.config.tuning?.critic?.bestOfN,
+      bestOfNThreshold: this.config.tuning?.critic?.bestOfNThreshold,
+      evolutionRecorder,
       announceQueue: this.announceQueue,
       subAgentExecutor: this.subAgentExecutor,
       interruptQueue: this.interruptQueue,
@@ -685,6 +737,14 @@ export class Gateway {
 
   getProvider(): LLMProvider | undefined {
     return this.providerRegistry?.getDefaultProvider();
+  }
+
+  /** Per-purpose model resolver (reranker, factExtraction, cognition, critic, evolution, eval). */
+  getPurposeRouter(): PurposeRouter {
+    if (!this.purposeRouter) {
+      throw new Error('Gateway not initialized');
+    }
+    return this.purposeRouter;
   }
 
   getSessionManager(): SessionManager {

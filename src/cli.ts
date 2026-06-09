@@ -12,6 +12,8 @@ import { migrateJsonlToSqlite, verifyMigration, rollbackMigration } from './memo
 import * as nodePath from 'path';
 import { ScallopDatabase } from './memory/db.js';
 import { explainProactiveDecisions, type ProactiveDecision } from './proactive/decision-log.js';
+import { explainEvolution } from './evolution/decision-log.js';
+import type { EvolutionSignal, EvolutionDecision } from './evolution/types.js';
 
 const VERSION = '0.1.0';
 
@@ -720,6 +722,68 @@ program
       }
     } catch (error) {
       console.error('Failed to read proactive decisions:', (error as Error).message);
+      process.exit(1);
+    }
+  });
+
+// why-evolution - diagnose what the self-evolution engine has captured / learned
+program
+  .command('why-evolution')
+  .description('Show the self-evolution signal corpus and recent optimizer decisions')
+  .option('-n, --limit <count>', 'Number of recent decisions to inspect', '30')
+  .action((options: { limit: string }) => {
+    try {
+      const config = loadConfig();
+      const configured = config.memory.dbPath;
+      const dbPath = nodePath.isAbsolute(configured)
+        ? configured
+        : nodePath.join(config.agent.workspace, configured);
+
+      const db = new ScallopDatabase(dbPath);
+      try {
+        const limit = Math.max(1, parseInt(options.limit, 10) || 30);
+        const signals = db.getRecentEvolutionSignals(1000) as unknown as EvolutionSignal[];
+        const decisions = db.getRecentEvolutionDecisions(limit) as unknown as EvolutionDecision[];
+        console.log(explainEvolution(signals, decisions));
+      } finally {
+        db.close();
+      }
+    } catch (error) {
+      console.error('Failed to read evolution state:', (error as Error).message);
+      process.exit(1);
+    }
+  });
+
+// evolution-status - list active self-authored skills + prompt fragments + rollbacks
+program
+  .command('evolution-status')
+  .description('List active self-evolution mutations (promoted skills, prompt fragments, rollbacks)')
+  .action(() => {
+    try {
+      const config = loadConfig();
+      const configured = config.memory.dbPath;
+      const dbPath = nodePath.isAbsolute(configured)
+        ? configured
+        : nodePath.join(config.agent.workspace, configured);
+      const db = new ScallopDatabase(dbPath);
+      try {
+        const versions = db.getActiveEvolutionVersions();
+        const prompts = db.getActivePromptOverrides();
+        console.log('Active self-evolution mutations');
+        console.log('==============================');
+        const skills = versions.filter(v => !v.target.startsWith('prompt:'));
+        console.log(`\nPromoted skills (${skills.length}):`);
+        for (const v of skills) console.log(`  - ${v.target} (${v.kind})`);
+        console.log(`\nActive prompt fragments (${prompts.length}):`);
+        for (const p of prompts) console.log(`  - ${p.fragmentId} v${p.version}: ${p.content.slice(0, 80)}...`);
+        const rolledBack = db.getRecentEvolutionDecisions(50).filter(d => d.stage === 'rollback' && d.outcome === 'rolled_back');
+        console.log(`\nRecent rollbacks (${rolledBack.length}):`);
+        for (const r of rolledBack.slice(0, 10)) console.log(`  - ${r.target}`);
+      } finally {
+        db.close();
+      }
+    } catch (error) {
+      console.error('Failed to read evolution status:', (error as Error).message);
       process.exit(1);
     }
   });

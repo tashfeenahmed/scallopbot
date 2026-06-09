@@ -33,6 +33,7 @@ import { applyToolPolicyPipeline, type ToolPolicy } from '../skills/tool-policy.
 import { enqueueInLane } from './command-queue.js';
 import { compact, compactSync, estimateMessagesTokens } from '../routing/compaction-pipeline.js';
 import { selectBest, scoreResponseHeuristic } from './critic.js';
+import type { EvolutionRecorder } from '../evolution/signals.js';
 
 export interface AgentOptions {
   provider: LLMProvider;
@@ -81,6 +82,8 @@ export interface AgentOptions {
    * higher = resample more eagerly.
    */
   bestOfNThreshold?: number;
+  /** Optional self-evolution recorder: captures improvement signals at turn end (best-effort). */
+  evolutionRecorder?: EvolutionRecorder;
 }
 
 export interface AgentResult {
@@ -197,6 +200,8 @@ export class Agent {
   private bestOfN: number;
   /** Quality bar below which best-of-N resampling kicks in */
   private bestOfNThreshold: number;
+  /** Optional self-evolution signal recorder (best-effort, turn-end). */
+  private evolutionRecorder: EvolutionRecorder | null;
 
   /** Enhanced tool loop detector */
   private toolLoopDetector = new ToolLoopDetector();
@@ -227,6 +232,7 @@ export class Agent {
     this.interruptQueue = options.interruptQueue || null;
     this.bestOfN = Math.max(1, options.bestOfN ?? 1);
     this.bestOfNThreshold = options.bestOfNThreshold ?? 0.85;
+    this.evolutionRecorder = options.evolutionRecorder ?? null;
 
     this.logger.info({ enableThinking: this.enableThinking, bestOfN: this.bestOfN, bestOfNThreshold: this.bestOfNThreshold }, 'Agent thinking mode configured');
   }
@@ -437,6 +443,9 @@ export class Agent {
     let maxTokensContinuations = 0;
     let emptyEndTurnRetries = 0;
     let finalResponse = '';
+    // Self-evolution signal accounting (best-effort, captured at turn end).
+    let totalToolCalls = 0;
+    const failedSkills: string[] = [];
 
     // Agent loop
     while (iterations < this.maxIterations) {
@@ -803,6 +812,19 @@ export class Agent {
         }
       }
 
+      // Self-evolution signal accounting: count calls and map errored results back
+      // to their skill name (for skill_failure capture at turn end).
+      totalToolCalls += toolUses.length;
+      if (this.evolutionRecorder) {
+        const idToName = new Map(toolUses.map(t => [t.id, t.name]));
+        for (const result of toolResults) {
+          if (result.type === 'tool_result' && 'is_error' in result && result.is_error) {
+            const name = idToName.get((result as { tool_use_id: string }).tool_use_id);
+            if (name) failedSkills.push(name);
+          }
+        }
+      }
+
       const loopDetection = this.toolLoopDetector.detect(sessionId);
       if (loopDetection) {
         this.logger.warn(
@@ -915,6 +937,19 @@ export class Agent {
       timestamp: new Date(),
     }).catch(() => {});
 
+    // Self-evolution: capture improvement signals for this turn (best-effort, no LLM).
+    if (this.evolutionRecorder && finalResponse.trim()) {
+      this.evolutionRecorder.recordTurn({
+        userId: resolvedUserId,
+        sessionId,
+        userMessage,
+        finalResponse,
+        toolCallCount: totalToolCalls,
+        failedSkills,
+        complexityTier: complexity.suggestedModelTier,
+      });
+    }
+
     return {
       response: finalResponse,
       tokenUsage,
@@ -959,6 +994,21 @@ Only use write_file + send_file for **binary/generated files** (PDFs, images, ar
       const skillPrompt = this.skillRegistry.generateSkillPrompt();
       if (skillPrompt) {
         stable += `\n\n${skillPrompt}`;
+      }
+    }
+
+    // Machine-authored learned guidance from the self-evolution engine
+    // (patch_prompt mutations). Stable across turns until the next promotion,
+    // so it stays in the cacheable prefix. Best-effort.
+    if (this.scallopStore) {
+      try {
+        const overrides = this.scallopStore.getDatabase().getActivePromptOverrides();
+        if (overrides.length > 0) {
+          const guidance = overrides.map(o => o.content.trim()).filter(Boolean).join('\n\n');
+          if (guidance) stable += `\n\n## LEARNED GUIDANCE\n${guidance}`;
+        }
+      } catch {
+        // Prompt overrides are best-effort; never block a turn on them.
       }
     }
 

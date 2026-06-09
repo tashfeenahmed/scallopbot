@@ -44,6 +44,10 @@ export interface BackgroundGardenerOptions {
   logger: Logger;
   /** Light tick interval in ms (default: 5 minutes) */
   interval?: number;
+  /** Deep tick interval in ms (default: ~72 minutes) */
+  deepIntervalMs?: number;
+  /** Sleep tick interval in ms (default: ~20 hours) */
+  sleepIntervalMs?: number;
   /** Session summarizer for generating summaries before pruning */
   sessionSummarizer?: SessionSummarizer;
   /** Optional LLM provider for memory fusion (merging dormant clusters) */
@@ -58,6 +62,10 @@ export interface BackgroundGardenerOptions {
   getTimezone?: (userId: string) => string;
   /** Callback fired once when transitioning out of quiet hours (morning digest) */
   onMorningDigest?: (userId: string) => Promise<void>;
+  /** Optional hook fired at the end of each deep tick (e.g. evolution rollback watchdog). */
+  onDeepTick?: () => Promise<void>;
+  /** Optional hook fired at the end of each sleep tick (e.g. evolution optimizer). */
+  onSleepTick?: () => Promise<void>;
 }
 
 /**
@@ -80,6 +88,8 @@ export class BackgroundGardener {
   private scallopStore: ScallopMemoryStore;
   private logger: Logger;
   private interval: number;
+  private deepIntervalMs: number;
+  private sleepIntervalMs: number;
   private sessionSummarizer?: SessionSummarizer;
   private fusionProvider?: LLMProvider;
   private timer: NodeJS.Timeout | null = null;
@@ -89,13 +99,15 @@ export class BackgroundGardener {
   private disableArchival: boolean;
   private getTimezone: (userId: string) => string;
   private onMorningDigest?: (userId: string) => Promise<void>;
+  private onDeepTick?: () => Promise<void>;
+  private onSleepTick?: () => Promise<void>;
   private wasInQuietHours = false;
 
-  /** Deep tick interval in ms (default: ~72 minutes) */
-  private static readonly DEEP_INTERVAL_MS = 72 * 60 * 1000;
+  /** Default deep tick interval in ms (~72 minutes) — overridable via config.tuning.gardener. */
+  private static readonly DEFAULT_DEEP_INTERVAL_MS = 72 * 60 * 1000;
 
-  /** Sleep tick interval in ms (default: ~20 hours — gives margin to hit quiet hours daily) */
-  private static readonly SLEEP_INTERVAL_MS = 20 * 60 * 60 * 1000;
+  /** Default sleep tick interval in ms (~20 hours — margin to hit quiet hours daily). */
+  private static readonly DEFAULT_SLEEP_INTERVAL_MS = 20 * 60 * 60 * 1000;
 
   /** DB keys for persisting tick timestamps across restarts */
   private static readonly DEEP_TICK_KEY = 'gardener:lastDeepTickAt';
@@ -105,6 +117,8 @@ export class BackgroundGardener {
     this.scallopStore = options.scallopStore;
     this.logger = options.logger.child({ component: 'gardener' });
     this.interval = options.interval ?? 5 * 60 * 1000; // 5 minutes default
+    this.deepIntervalMs = options.deepIntervalMs ?? BackgroundGardener.DEFAULT_DEEP_INTERVAL_MS;
+    this.sleepIntervalMs = options.sleepIntervalMs ?? BackgroundGardener.DEFAULT_SLEEP_INTERVAL_MS;
     this.sessionSummarizer = options.sessionSummarizer;
     this.fusionProvider = options.fusionProvider;
     this.quietHours = options.quietHours ?? { start: 2, end: 5 };
@@ -112,6 +126,8 @@ export class BackgroundGardener {
     this.disableArchival = options.disableArchival ?? false;
     this.getTimezone = options.getTimezone ?? (() => Intl.DateTimeFormat().resolvedOptions().timeZone);
     this.onMorningDigest = options.onMorningDigest;
+    this.onDeepTick = options.onDeepTick;
+    this.onSleepTick = options.onSleepTick;
   }
 
   start(): void {
@@ -206,7 +222,7 @@ export class BackgroundGardener {
 
     // Check if it's time for a deep tick (time-based, persisted across restarts)
     const lastDeepAt = this.getPersistedTimestamp(BackgroundGardener.DEEP_TICK_KEY);
-    if (now - lastDeepAt >= BackgroundGardener.DEEP_INTERVAL_MS) {
+    if (now - lastDeepAt >= this.deepIntervalMs) {
       this.setPersistedTimestamp(BackgroundGardener.DEEP_TICK_KEY, now);
       this.deepTick().catch(err => {
         this.logger.warn({ error: (err as Error).message }, 'Deep tick failed');
@@ -215,7 +231,7 @@ export class BackgroundGardener {
 
     // Check if it's time for a sleep tick (time-based + quiet hours gated)
     const lastSleepAt = this.getPersistedTimestamp(BackgroundGardener.SLEEP_TICK_KEY);
-    if (now - lastSleepAt >= BackgroundGardener.SLEEP_INTERVAL_MS && this.isQuietHours()) {
+    if (now - lastSleepAt >= this.sleepIntervalMs && this.isQuietHours()) {
       this.setPersistedTimestamp(BackgroundGardener.SLEEP_TICK_KEY, now);
       this.sleepTick().catch(err => {
         this.logger.warn({ error: (err as Error).message }, 'Sleep tick failed');
@@ -284,6 +300,15 @@ export class BackgroundGardener {
       context: { phase: 'deep_tick_complete' },
       timestamp: new Date(),
     }).catch(() => {});
+
+    // Optional end-of-deep-tick hook (e.g. evolution auto-rollback watchdog).
+    if (this.onDeepTick) {
+      try {
+        await this.onDeepTick();
+      } catch (err) {
+        this.logger.warn({ error: (err as Error).message }, 'onDeepTick hook failed');
+      }
+    }
 
     this.logger.info('Deep tick complete');
   }
@@ -354,6 +379,15 @@ export class BackgroundGardener {
     await runSelfReflection(ctx);
     await runGapScanner(ctx);
     await runBoardReview(ctx);
+
+    // Optional end-of-sleep-tick hook (e.g. nightly evolution optimizer).
+    if (this.onSleepTick) {
+      try {
+        await this.onSleepTick();
+      } catch (err) {
+        this.logger.warn({ error: (err as Error).message }, 'onSleepTick hook failed');
+      }
+    }
 
     this.logger.info('Sleep tick complete');
   }
