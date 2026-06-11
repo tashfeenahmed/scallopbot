@@ -35,9 +35,11 @@ interface SkillInput {
 function findDatabasePath(): string {
   // Check common locations
   const possiblePaths = [
+    // MEMORY_DB_PATH decouples the DB from the workspace — honor it first.
+    process.env.MEMORY_DB_PATH || '',
     path.join(process.cwd(), 'memories.db'),
     path.join(process.env.HOME || '', '.scallopbot', 'memories.db'),
-  ];
+  ].filter(Boolean);
 
   for (const p of possiblePaths) {
     if (fs.existsSync(p)) {

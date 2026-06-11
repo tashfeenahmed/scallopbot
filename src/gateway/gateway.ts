@@ -988,11 +988,13 @@ export class Gateway {
           } else if (sessionId) {
             entries = scallopStore.getByUser(sessionId, { category: mapCategory(type), limit: 100 });
           } else if (recent) {
-            entries = scallopStore.getByUser('', { category: mapCategory(type), limit: Math.min(recent, 100) });
+            // 'default' is the canonical store user (agent.ts resolvedUserId) —
+            // '' matched nothing, so recent/type lookups always came back empty.
+            entries = scallopStore.getByUser('default', { category: mapCategory(type), limit: Math.min(recent, 100) });
           } else if (type) {
-            entries = scallopStore.getByUser('', { category: mapCategory(type), limit: 50 });
+            entries = scallopStore.getByUser('default', { category: mapCategory(type), limit: 50 });
           } else {
-            entries = scallopStore.getByUser('', { limit: 10 });
+            entries = scallopStore.getByUser('default', { limit: 10 });
           }
 
           logger.debug({ id, sessionId, type, recent, count: entries.length }, 'Memory get completed');

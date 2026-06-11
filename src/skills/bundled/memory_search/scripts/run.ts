@@ -314,8 +314,10 @@ function formatResults(results: { memory: ScallopMemoryEntry; score: number }[])
  * Execute memory search against SQLite database
  */
 async function executeSearch(args: MemorySearchArgs): Promise<void> {
+  // MEMORY_DB_PATH decouples the DB from the workspace (gateway honors it since
+  // 5744abf; skills must too or they silently read a parallel empty store).
   const workspace = process.env.SKILL_WORKSPACE || process.env.AGENT_WORKSPACE || process.cwd();
-  const dbPath = path.join(workspace, 'memories.db');
+  const dbPath = process.env.MEMORY_DB_PATH || path.join(workspace, 'memories.db');
 
   let db: ScallopDatabase | null = null;
   try {

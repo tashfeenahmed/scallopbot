@@ -144,6 +144,7 @@ export class CostTracker {
   private monthlyBudget?: number;
   private warningThreshold: number;
   private customPricing: Map<string, ModelPricing> = new Map();
+  private warnedUnknownModels: Set<string> = new Set();
   private usageHistory: UsageRecord[] = [];
   private db?: ScallopDatabase;
 
@@ -190,8 +191,11 @@ export class CostTracker {
       return DEFAULT_PRICING[model];
     }
 
-    // Unknown model - log warning and return zero pricing
-    console.warn(`[CostTracker] Unknown model "${model}" - cost will be $0`);
+    // Unknown model - log warning (once per model) and return zero pricing
+    if (!this.warnedUnknownModels.has(model)) {
+      this.warnedUnknownModels.add(model);
+      console.warn(`[CostTracker] Unknown model "${model}" - cost will be $0`);
+    }
     return { inputPerMillion: 0, outputPerMillion: 0 };
   }
 

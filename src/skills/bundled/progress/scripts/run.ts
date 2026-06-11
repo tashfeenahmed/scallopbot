@@ -43,6 +43,8 @@ interface SkillResult {
 
 // Database path
 function getDbPath(): string {
+  // MEMORY_DB_PATH decouples the DB from the workspace — honor it first.
+  if (process.env.MEMORY_DB_PATH) return process.env.MEMORY_DB_PATH;
   const workspace = process.env.SKILL_WORKSPACE || process.cwd();
   return path.join(workspace, 'memories.db');
 }

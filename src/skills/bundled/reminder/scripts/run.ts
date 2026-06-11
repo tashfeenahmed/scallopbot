@@ -57,6 +57,8 @@ interface SkillResult {
 // then fall back to data dir
 function getDbPath(): string {
   const possiblePaths = [
+    // MEMORY_DB_PATH decouples the DB from the workspace — honor it first.
+    process.env.MEMORY_DB_PATH || null,
     process.env.SKILL_WORKSPACE ? path.join(process.env.SKILL_WORKSPACE, 'memories.db') : null,
     path.join(process.cwd(), 'memories.db'),
     path.join(process.env.SCALLOPBOT_DATA_DIR || path.join(os.homedir(), '.scallopbot'), 'memories.db'),
