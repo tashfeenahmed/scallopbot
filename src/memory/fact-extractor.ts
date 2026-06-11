@@ -101,7 +101,9 @@ export interface LLMFactExtractorOptions {
 /**
  * The prompt used to extract facts from messages
  */
-const FACT_AND_TRIGGER_EXTRACTION_PROMPT = `You are a fact extraction system. Extract factual information, detect memory actions, AND identify proactive triggers from the user's message.
+// Exported for fine-tune dataset construction (scripts/ft/) — the builder
+// re-renders historical prompts with the exact production template.
+export const FACT_AND_TRIGGER_EXTRACTION_PROMPT = `You are a fact extraction system. Extract factual information, detect memory actions, AND identify proactive triggers from the user's message.
 
 CURRENT DATE: {{CURRENT_DATE}}
 CURRENT TIME: {{CURRENT_TIME}}

@@ -24,7 +24,8 @@ export interface SessionSummaryResult {
   topics: string[];
 }
 
-const SESSION_SUMMARY_PROMPT = `Summarize this conversation in 2-3 concise sentences. Focus on:
+// Exported for fine-tune dataset construction (scripts/ft/).
+export const SESSION_SUMMARY_PROMPT = `Summarize this conversation in 2-3 concise sentences. Focus on:
 - What the user asked for / what was discussed
 - Key outcomes or decisions made
 - Any commitments or follow-ups mentioned
