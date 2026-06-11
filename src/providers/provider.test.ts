@@ -209,7 +209,12 @@ describe('ProviderRegistry', () => {
 
       registry.registerProvider(provider);
 
-      expect(registry.getProvider('anthropic')).toBe(provider);
+      // Registry wraps providers with the trace-tap Proxy, so assert
+      // behavioral identity rather than object identity.
+      const registered = registry.getProvider('anthropic');
+      expect(registered).toBeDefined();
+      expect(registered!.name).toBe(provider.name);
+      expect(registered!.isAvailable()).toBe(provider.isAvailable());
     });
   });
 
@@ -221,7 +226,9 @@ describe('ProviderRegistry', () => {
 
       registry.registerProvider(provider);
 
-      expect(registry.getProvider('anthropic')).toBe(provider);
+      const registered = registry.getProvider('anthropic');
+      expect(registered).toBeDefined();
+      expect(registered!.name).toBe('anthropic');
     });
 
     it('should return undefined for unregistered provider', async () => {
@@ -240,7 +247,9 @@ describe('ProviderRegistry', () => {
 
       registry.registerProvider(provider);
 
-      expect(registry.getDefaultProvider()).toBe(provider);
+      const def = registry.getDefaultProvider();
+      expect(def).toBeDefined();
+      expect(def!.name).toBe(provider.name);
     });
 
     it('should return undefined when no providers available', async () => {

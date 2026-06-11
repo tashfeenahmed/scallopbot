@@ -44,6 +44,7 @@ import { GoalService } from '../goals/index.js';
 import { BoardService } from '../board/board-service.js';
 import { SubAgentRegistry, SubAgentExecutor, AnnounceQueue } from '../subagent/index.js';
 import { InterruptQueue } from '../agent/interrupt-queue.js';
+import { setTraceSink } from '../routing/trace-tap.js';
 
 export interface GatewayOptions {
   config: Config;
@@ -161,6 +162,21 @@ export class Gateway {
       relationsProvider: rerankProvider,
     });
     this.logger.info({ dbPath, count: this.scallopMemoryStore.getCount() }, 'ScallopMemory initialized');
+
+    // Activate the LLM trace tap now that the DB exists: tagged completions
+    // (fact extraction, reranking, tool calls, …) are recorded to llm_traces
+    // as fine-tune training data. Best-effort by design.
+    {
+      const traceDb = this.scallopMemoryStore.getDatabase();
+      const traceLogger = this.logger;
+      setTraceSink((row) => {
+        try {
+          traceDb.insertLlmTrace(row);
+        } catch (err) {
+          traceLogger.debug({ error: (err as Error).message }, 'LLM trace insert failed (non-fatal)');
+        }
+      });
+    }
 
     // Load runtime vault keys into process.env (before skill loading so gates pass)
     const runtimeKeys = this.scallopMemoryStore.getDatabase().getAllRuntimeKeys();

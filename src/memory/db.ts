@@ -743,6 +743,27 @@ export class ScallopDatabase {
       CREATE INDEX IF NOT EXISTS idx_proactive_decisions_at
         ON proactive_decisions(at DESC);
 
+      -- LLM call traces for fine-tune dataset building (see trace-tap.ts).
+      -- Full rendered prompt + raw response per tagged structured call
+      -- (fact_extract, memory_manage, relation_classify, rerank,
+      -- session_summary, tool_call). parsed_ok=0 rows are the failures the
+      -- fine-tune should eliminate; parsed_ok=1 rows from strong models are
+      -- training targets. Pruned by retention (pruneLlmTraces) after pull.
+      CREATE TABLE IF NOT EXISTS llm_traces (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts INTEGER NOT NULL,
+        purpose TEXT NOT NULL,
+        model TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        prompt TEXT NOT NULL,
+        response TEXT NOT NULL,
+        parsed_ok INTEGER NOT NULL,
+        session_id TEXT,
+        latency_ms INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS idx_llm_traces_ts ON llm_traces(ts DESC);
+      CREATE INDEX IF NOT EXISTS idx_llm_traces_purpose ON llm_traces(purpose, ts DESC);
+
       -- Self-evolution engine — Layer 1 corpus of improvement signals captured
       -- at the end of agent turns (reusable tasks, skill failures, low-quality
       -- answers). The nightly optimizer harvests these to propose mutations.
@@ -2669,6 +2690,48 @@ export class ScallopDatabase {
    * Record a proactive message that was sent to a user. Persists to SQLite so
    * the in-memory dedup history survives process restarts.
    */
+  /**
+   * Record an LLM call trace for fine-tune dataset building.
+   * Self-pruning: roughly every 200 inserts, drops rows older than 45 days
+   * so the table can't grow unbounded on the Pi if nightly pulls lapse.
+   */
+  insertLlmTrace(row: {
+    ts: number;
+    purpose: string;
+    model: string;
+    provider: string;
+    prompt: string;
+    response: string;
+    parsedOk: number;
+    sessionId: string | null;
+    latencyMs: number;
+  }): void {
+    this.db.prepare(`
+      INSERT INTO llm_traces (ts, purpose, model, provider, prompt, response, parsed_ok, session_id, latency_ms)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(row.ts, row.purpose, row.model, row.provider, row.prompt, row.response, row.parsedOk, row.sessionId, row.latencyMs);
+
+    if (++this.llmTraceInsertCount % 200 === 0) {
+      this.pruneLlmTraces(Date.now() - 45 * 24 * 60 * 60 * 1000);
+    }
+  }
+
+  private llmTraceInsertCount = 0;
+
+  /** Delete traces older than `cutoffMs`. Returns rows removed. */
+  pruneLlmTraces(cutoffMs: number): number {
+    return this.db.prepare('DELETE FROM llm_traces WHERE ts < ?').run(cutoffMs).changes as number;
+  }
+
+  /** Trace counts by purpose/parse outcome since `sinceMs` (observability). */
+  getLlmTraceStats(sinceMs: number): Array<{ purpose: string; parsedOk: number; count: number }> {
+    const rows = this.db.prepare(`
+      SELECT purpose, parsed_ok, COUNT(*) AS count FROM llm_traces
+      WHERE ts >= ? GROUP BY purpose, parsed_ok ORDER BY purpose
+    `).all(sinceMs) as Array<{ purpose: string; parsed_ok: number; count: number }>;
+    return rows.map(r => ({ purpose: r.purpose, parsedOk: r.parsed_ok, count: r.count }));
+  }
+
   recordProactiveSend(userId: string, message: string, source: string, sentAt: number = Date.now()): void {
     this.db.prepare(`
       INSERT INTO proactive_send_log (user_id, message, source, sent_at)

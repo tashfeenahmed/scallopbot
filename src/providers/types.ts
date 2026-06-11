@@ -100,6 +100,16 @@ export interface CompletionRequest {
    * ignore the signal silently.
    */
   signal?: AbortSignal;
+  /**
+   * Fine-tune trace tag (see src/routing/trace-tap.ts). Set at the call site
+   * to record this completion in llm_traces: 'fact_extract' | 'memory_manage'
+   * | 'relation_classify' | 'rerank' | 'session_summary' | 'tool_call'.
+   * Requests with tools are implicitly tagged 'tool_call'. Metadata only —
+   * never sent upstream.
+   */
+  purpose?: string;
+  /** Session/run id attached to the trace row (metadata only). */
+  traceSessionId?: string;
 }
 
 // Token usage tracking

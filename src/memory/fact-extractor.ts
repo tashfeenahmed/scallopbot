@@ -337,6 +337,7 @@ export class LLMFactExtractor {
       const response = await this.provider.complete({
         messages: [{ role: 'user', content: prompt }],
         maxTokens: 1500,
+        purpose: 'fact_extract',
       });
 
       // Parse response - handle ContentBlock[] response
@@ -1118,6 +1119,7 @@ Respond with JSON only:
         messages: [{ role: 'user', content: prompt }],
         temperature: 0.1,
         maxTokens: 400,
+        purpose: 'memory_manage',
       });
 
       const responseText = Array.isArray(response.content)
@@ -1698,6 +1700,7 @@ export async function extractFactsWithLLM(
 
   const response = await provider.complete({
     messages: [{ role: 'user', content: prompt }],
+    purpose: 'fact_extract',
   });
 
   // Handle ContentBlock[] response

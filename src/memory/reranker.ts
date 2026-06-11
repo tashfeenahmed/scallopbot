@@ -80,6 +80,7 @@ export async function rerankResults(
   let llmScores: Map<number, number> | null = null;
   try {
     const request = buildRerankPrompt(query, truncated);
+    request.purpose = 'rerank';
     const response = await provider.complete(request);
 
     // Extract text from ContentBlock[] response (same pattern as fact-extractor.ts)

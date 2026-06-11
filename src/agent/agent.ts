@@ -587,6 +587,9 @@ export class Agent {
         enableThinking: thinkParams.enableThinking,
         thinkingBudgetTokens: thinkParams.thinkingBudgetTokens,
         ...(abortSignal && { signal: abortSignal }),
+        // Fine-tune trace tagging: agent turns with tools are the tool-calling
+        // training track (includes "answered without a tool" examples).
+        ...(tools.length > 0 && { purpose: 'tool_call', traceSessionId: sessionId }),
       };
 
       this.logger.info({ iteration: iterations, messageCount: messages.length, provider: activeProvider.name }, 'Agent iteration starting');

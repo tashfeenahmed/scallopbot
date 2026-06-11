@@ -188,6 +188,7 @@ export class SessionSummarizer {
       // Bumped from 300 so thinking models (qwen3.6) have budget for reasoning_content
       // plus the actual 2-3 sentence JSON summary.
       maxTokens: 600,
+      purpose: 'session_summary',
     });
 
     const responseText = Array.isArray(response.content)

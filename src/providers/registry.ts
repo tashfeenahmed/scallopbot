@@ -1,4 +1,5 @@
 import type { LLMProvider } from './types.js';
+import { wrapProviderWithTraceTap } from '../routing/trace-tap.js';
 
 /**
  * Registry for managing LLM providers
@@ -8,10 +9,12 @@ export class ProviderRegistry {
   private providers: Map<string, LLMProvider> = new Map();
 
   /**
-   * Register a provider
+   * Register a provider. Wrapped with the LLM trace tap so tagged calls
+   * (purpose set, or tools present) are recorded for fine-tune datasets.
+   * The wrap is a transparent Proxy — a no-op until a trace sink is set.
    */
   registerProvider(provider: LLMProvider): void {
-    this.providers.set(provider.name, provider);
+    this.providers.set(provider.name, wrapProviderWithTraceTap(provider));
   }
 
   /**

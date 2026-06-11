@@ -118,6 +118,7 @@ export class RelationshipClassifier {
         messages: [{ role: 'user', content: prompt }],
         temperature: 0.1, // Low temperature for consistent classification
         maxTokens: 200,
+        purpose: 'relation_classify',
       };
 
       const response = await this.provider.complete(request);
@@ -173,6 +174,7 @@ export class RelationshipClassifier {
         messages: [{ role: 'user', content: prompt }],
         temperature: 0.1,
         maxTokens: 100 + newFacts.length * 100, // Scale tokens with batch size
+        purpose: 'relation_classify',
       };
 
       const response = await this.provider.complete(request);
