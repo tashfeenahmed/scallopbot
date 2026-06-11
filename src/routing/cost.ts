@@ -130,6 +130,13 @@ const DEFAULT_PRICING: Record<string, ModelPricing> = {
   // Free/Local
   'llama3.2': { inputPerMillion: 0, outputPerMillion: 0 },
   'mistral': { inputPerMillion: 0, outputPerMillion: 0 },
+  // Dell local LLM (LAN-only, no cost)
+  'qwen3.6': { inputPerMillion: 0, outputPerMillion: 0 },
+  'qwen3.6-27b': { inputPerMillion: 0, outputPerMillion: 0 },
+  'qwen3.6-uncen': { inputPerMillion: 0, outputPerMillion: 0 },
+  'qwen3.6-plus': { inputPerMillion: 0, outputPerMillion: 0 },
+  'qwen3-coder': { inputPerMillion: 0, outputPerMillion: 0 },
+  'glm4.7-flash': { inputPerMillion: 0, outputPerMillion: 0 },
 };
 
 export class CostTracker {

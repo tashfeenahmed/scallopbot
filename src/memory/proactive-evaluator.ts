@@ -74,6 +74,10 @@ export interface ProactiveEvalResult {
   llmCalled: boolean;
   /** Skip reason if pre-filter rejected */
   skipReason?: string;
+  /** Error message when skipReason === 'llm_error' (for observability) */
+  errorMessage?: string;
+  /** Raw response length when the LLM replied but parsing yielded zero items */
+  unparsedResponseLength?: number;
 }
 
 // ============ Pre-filter ============
@@ -195,7 +199,10 @@ Summary: ${s.summary}`);
     messages: [{ role: 'user', content: userMessage }],
     system,
     temperature: 0.2,
-    maxTokens: 500,
+    // 1500, not 500: thinking-heavy models (qwen3.6, kimi-thinking) burn budget
+    // on reasoning before emitting the JSON. At 500 the visible output came back
+    // empty/truncated, every parse failed, and proactivity silently died.
+    maxTokens: 1500,
   };
 }
 
@@ -336,8 +343,19 @@ export async function evaluateProactive(
       items: filtered,
       signalsFound: allSignals.length,
       llmCalled: true,
+      // Distinguish "LLM said skip" from "we couldn't parse the reply" — the
+      // latter looked identical in logs for weeks while proactivity was dead.
+      ...(rawItems.length === 0 && extractJSON(text) === null
+        ? { skipReason: 'parse_failed', unparsedResponseLength: text.length }
+        : {}),
     };
-  } catch {
-    return { items: [], signalsFound: allSignals.length, llmCalled: true, skipReason: 'llm_error' };
+  } catch (err) {
+    return {
+      items: [],
+      signalsFound: allSignals.length,
+      llmCalled: true,
+      skipReason: 'llm_error',
+      errorMessage: (err as Error).message,
+    };
   }
 }

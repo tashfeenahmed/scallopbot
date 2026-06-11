@@ -600,6 +600,7 @@ export class TelegramChannel {
   private static PROVIDER_LABELS: Record<string, string> = {
     anthropic: 'Anthropic (Claude)',
     openai: 'OpenAI (GPT)',
+    local: 'Local Model',
     groq: 'Groq',
     moonshot: 'Moonshot (Kimi)',
     xai: 'xAI (Grok)',
@@ -610,6 +611,9 @@ export class TelegramChannel {
   private getProviderLabel(provider: { name: string; model?: string }): string {
     if (provider.name === 'openrouter' && provider.model) {
       return `OpenRouter (${provider.model})`;
+    }
+    if (provider.name === 'local' && provider.model) {
+      return `Local Model (${provider.model})`;
     }
     return TelegramChannel.PROVIDER_LABELS[provider.name] || provider.name;
   }
@@ -675,6 +679,9 @@ export class TelegramChannel {
     } else {
       // Name selection
       selectedName = args.toLowerCase();
+      // Friendly aliases for the local Dell model
+      const LOCAL_ALIASES: Record<string, string> = { qwen: 'local', quan: 'local' };
+      if (LOCAL_ALIASES[selectedName]) selectedName = LOCAL_ALIASES[selectedName];
     }
 
     // Validate

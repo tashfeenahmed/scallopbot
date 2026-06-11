@@ -34,8 +34,14 @@ const SEND_DEDUP_WINDOW_MS = 2 * 60 * 60 * 1000;
  *  "how are you feeling after the leg workout"). */
 const SEND_DEDUP_THRESHOLD = 0.3;
 /** Hard floor on time between any two agent-sourced proactive sends to the
- *  same user. Bypassed for user-set reminders (they have explicit times). */
-const MIN_AGENT_PROACTIVE_GAP_MS = 60 * 60 * 1000;
+ *  same user. Bypassed for user-set reminders (they have explicit times).
+ *  Honors PROACTIVE_MIN_GAP_MS (previously the env var was read by
+ *  proactive-config but silently ignored here — a hard-coded 1h won). */
+const MIN_AGENT_PROACTIVE_GAP_MS = (() => {
+  const raw = process.env.PROACTIVE_MIN_GAP_MS;
+  const parsed = raw ? parseInt(raw, 10) : NaN;
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 60 * 60 * 1000;
+})();
 
 /**
  * Strip internal markup, XML function calls, error prefixes, and thinking blocks
@@ -403,14 +409,26 @@ export class UnifiedScheduler {
       // Fetch recent chat context so the sub-agent is aware of ongoing conversations
       const chatContext = getRecentChatContext(this.db);
 
+      // Grounding directive: scheduled tasks run unattended, so a sub-agent that
+      // skips its data tools and improvises output goes unnoticed (e.g. the daily
+      // YouTube report that fabricated subscriber counts for weeks). Spell out
+      // that the listed tools are the source of truth.
+      const toolList = (config.tools ?? []).join(', ');
+      const groundedTask = toolList
+        ? `${config.goal}\n\nIMPORTANT: Use your tools (${toolList}) to gather the REAL data this task needs. Do not estimate, extrapolate, or invent any numbers. If the data cannot be retrieved, deliver a short honest report saying what failed instead.`
+        : config.goal;
+
       const result = await this.subAgentExecutor!.spawnAndWait(
         this.schedulerSessionId!,
         {
-          task: config.goal,
+          task: groundedTask,
           label: `scheduled:${item.type}`,
           skills: config.tools,
           modelTier: config.modelTier ?? 'fast',
-          timeoutSeconds: 180,
+          // 420s, not 180s: thinking-heavy models (kimi, local qwen) regularly
+          // need >3min for multi-tool tasks — at 180s the report runs were
+          // timing out and producing nothing at all.
+          timeoutSeconds: 420,
           waitForResult: true,
           recentChatContext: chatContext?.formattedContext,
         },

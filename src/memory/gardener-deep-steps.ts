@@ -488,6 +488,10 @@ export async function runInnerThoughts(ctx: GardenerContext): Promise<void> {
         itemsCreated: result.items.length,
         llmCalled: result.llmCalled,
         skipReason: result.skipReason,
+        ...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
+        ...(result.unparsedResponseLength !== undefined
+          ? { unparsedResponseLength: result.unparsedResponseLength }
+          : {}),
       }, 'Proactive evaluation complete');
     }
 

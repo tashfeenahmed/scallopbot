@@ -157,6 +157,8 @@ export interface LLMProvider {
 
 // Provider configuration
 export interface ProviderOptions {
+  /** Provider instance name override (e.g. "local" for a LAN OpenAI-compatible server) */
+  name?: string;
   apiKey: string;
   /** Multiple API keys for rotation on auth errors */
   apiKeys?: string[];

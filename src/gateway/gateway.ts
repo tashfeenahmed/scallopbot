@@ -499,6 +499,22 @@ export class Gateway {
       this.logger.debug({ provider: 'openai', model: openaiConfig.model }, 'Provider registered');
     }
 
+    // Initialize Local provider (OpenAI-compatible, e.g. llama-swap on the Dell P40).
+    // Registered under the name "local" so it can appear in PROVIDER_ORDER and /model
+    // independently of the cloud "openai" provider.
+    const localBaseUrl = process.env.LOCAL_BASE_URL;
+    if (localBaseUrl) {
+      const local = new OpenAIProvider({
+        name: 'local',
+        baseUrl: localBaseUrl,
+        apiKey: process.env.LOCAL_API_KEY || 'sk-local',
+        model: process.env.LOCAL_MODEL || 'qwen3.6',
+        timeout: 600000,
+      });
+      this.providerRegistry.registerProvider(local);
+      this.logger.debug({ provider: 'local', model: process.env.LOCAL_MODEL || 'qwen3.6' }, 'Provider registered');
+    }
+
     // Initialize Groq provider
     const groqConfig = this.config.providers.groq;
     if (groqConfig.apiKey) {

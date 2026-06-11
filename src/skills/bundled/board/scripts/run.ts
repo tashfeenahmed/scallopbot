@@ -597,6 +597,17 @@ function addItem(args: BoardArgs): SkillResult {
   const priority = args.priority || 'medium';
   const type = kind === 'task' ? 'event_prep' : 'reminder';
 
+  // Recurring items live forever, so a concrete date baked into the title goes
+  // stale immediately ("Daily Report - March 8, 2026" still firing in June).
+  // Strip trailing date suffixes from recurring titles.
+  let title = args.title;
+  if (recurring) {
+    title = title
+      .replace(/\s*[-–—:,]?\s*\(?\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4}\)?\s*$/i, '')
+      .replace(/\s*[-–—:,]?\s*\(?\d{4}-\d{2}-\d{2}\)?\s*$/, '')
+      .trim() || args.title;
+  }
+
   db.prepare(`
     INSERT INTO scheduled_items (
       id, user_id, session_id, source, kind, type, message, context,
@@ -605,7 +616,7 @@ function addItem(args: BoardArgs): SkillResult {
       created_at, updated_at
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
-    id, USER_ID, null, 'user', kind, type, args.title, null,
+    id, USER_ID, null, 'user', kind, type, title, null,
     triggerAt,
     recurring ? JSON.stringify(recurring) : null,
     'pending', null, null,

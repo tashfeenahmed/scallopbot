@@ -418,6 +418,7 @@ export class SubAgentExecutor {
     lines.push(`3. You have a LIMITED iteration budget (${this.config.maxIterations} iterations). Be efficient.`);
     lines.push(`4. Do NOT send messages to the user, manage goals, set reminders, or spawn agents.`);
     lines.push(`5. Focus ONLY on the assigned task.`);
+    lines.push(`6. NEVER fabricate data. If the task involves metrics, stats, account data, or any factual lookup, you MUST obtain the real values through your tools. If a tool fails or the data is unavailable, say exactly that ("I couldn't retrieve X because Y") — an honest failure report is valuable; invented numbers are harmful and destroy trust.`);
     lines.push('');
     lines.push(`Current date: ${new Date().toISOString().split('T')[0]}`);
     lines.push(`Workspace: ${this.workspace}`);

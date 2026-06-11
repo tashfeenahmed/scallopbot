@@ -48,7 +48,7 @@ export interface ProviderCharacteristics {
 }
 
 export class OpenAIProvider implements LLMProvider {
-  public readonly name = 'openai';
+  public readonly name: string;
   public readonly model: string;
   public readonly characteristics: ProviderCharacteristics = {
     speed: 'standard',
@@ -65,6 +65,7 @@ export class OpenAIProvider implements LLMProvider {
   private credentialPool: CredentialPool | null;
 
   constructor(options: ProviderOptions) {
+    this.name = options.name || 'openai';
     this.model = options.model || DEFAULT_MODEL;
     this.maxRetries = options.maxRetries || DEFAULT_MAX_RETRIES;
     this.baseUrl = options.baseUrl;
