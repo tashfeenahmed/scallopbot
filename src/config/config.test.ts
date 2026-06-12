@@ -211,6 +211,69 @@ describe('Config Schema', () => {
       expect(config.agent.workspace).toBe(process.cwd());
     });
 
+    describe('multi-model mode (CUSTOM_PROVIDER_*)', () => {
+      beforeEach(() => {
+        process.env.ANTHROPIC_API_KEY = 'sk-ant-env-key';
+        process.env.TELEGRAM_BOT_TOKEN = 'env-bot-token';
+        // Isolate from any ambient custom-provider vars
+        for (const k of Object.keys(process.env)) {
+          if (k.startsWith('CUSTOM_PROVIDER_') || k === 'MULTI_MODEL_ENABLED') delete process.env[k];
+        }
+      });
+
+      it('defaults to disabled with no custom providers', async () => {
+        const { loadConfig } = await import('./config.js');
+        const config = loadConfig();
+        expect(config.multiModel.enabled).toBe(false);
+        expect(config.multiModel.providers).toEqual([]);
+      });
+
+      it('parses CUSTOM_PROVIDER_<NAME> as baseUrl|model|apiKey with lowercased name', async () => {
+        process.env.MULTI_MODEL_ENABLED = 'true';
+        process.env.CUSTOM_PROVIDER_MY_MEMORY = 'http://localhost:11434/v1|my-memory-q5|sk-whatever';
+        process.env.CUSTOM_PROVIDER_TOOLS = 'http://localhost:11434/v1|my-tools-q5';
+
+        const { loadConfig } = await import('./config.js');
+        const config = loadConfig();
+
+        expect(config.multiModel.enabled).toBe(true);
+        const byName = Object.fromEntries(config.multiModel.providers.map((p) => [p.name, p]));
+        expect(byName.my_memory).toMatchObject({ baseUrl: 'http://localhost:11434/v1', model: 'my-memory-q5', apiKey: 'sk-whatever' });
+        expect(byName.tools).toMatchObject({ model: 'my-tools-q5', apiKey: 'sk-local' }); // apiKey defaulted
+      });
+
+      it('still parses providers when the toggle is off (gateway ignores them)', async () => {
+        process.env.CUSTOM_PROVIDER_TOOLS = 'http://localhost:11434/v1|my-tools-q5';
+
+        const { loadConfig } = await import('./config.js');
+        const config = loadConfig();
+
+        expect(config.multiModel.enabled).toBe(false);
+        expect(config.multiModel.providers).toHaveLength(1);
+      });
+
+      it('throws on malformed values (fail fast at startup)', async () => {
+        process.env.CUSTOM_PROVIDER_TOOLS = 'http://localhost:11434/v1'; // missing |model
+
+        const { loadConfig } = await import('./config.js');
+        expect(() => loadConfig()).toThrow(/expected "<baseUrl>\|<model>/);
+      });
+
+      it('throws when shadowing a built-in provider name', async () => {
+        process.env.CUSTOM_PROVIDER_OPENAI = 'http://localhost:11434/v1|sneaky';
+
+        const { loadConfig } = await import('./config.js');
+        expect(() => loadConfig()).toThrow(/shadows a built-in provider/);
+      });
+
+      it('rejects invalid baseUrl via schema validation', async () => {
+        process.env.CUSTOM_PROVIDER_TOOLS = 'not-a-url|my-model';
+
+        const { loadConfig } = await import('./config.js');
+        expect(() => loadConfig()).toThrow();
+      });
+    });
+
     it('should throw error if no LLM provider API key is set', async () => {
       // Import first (which triggers dotenv)
       const { loadConfig } = await import('./config.js');

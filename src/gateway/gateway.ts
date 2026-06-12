@@ -589,6 +589,32 @@ export class Gateway {
       this.providerRegistry.registerProvider(xai);
       this.logger.debug({ provider: 'xai', model: xaiConfig.model }, 'Provider registered');
     }
+
+    // Multi-model mode: user-defined OpenAI-compatible endpoints from
+    // CUSTOM_PROVIDER_* env vars. Each registers under its own name, so it can
+    // be pinned per purpose (MODEL_RERANKER=my-memory) or placed in the chat
+    // fallback chain (PROVIDER_ORDER=my-tools,openrouter).
+    // Optional-chained: hand-rolled configs (tests, embedders) may omit the
+    // section; zod-loaded configs always have it.
+    const multiModel = this.config.multiModel ?? { enabled: false, providers: [] };
+    if (multiModel.enabled) {
+      for (const cp of multiModel.providers) {
+        const custom = new OpenAIProvider({
+          name: cp.name,
+          baseUrl: cp.baseUrl,
+          apiKey: cp.apiKey,
+          model: cp.model,
+          timeout: 600000, // local fine-tunes on modest GPUs can be slow; match 'local'
+        });
+        this.providerRegistry.registerProvider(custom);
+        this.logger.info({ provider: cp.name, model: cp.model, baseUrl: cp.baseUrl }, 'Custom provider registered (multi-model mode)');
+      }
+    } else if (multiModel.providers.length > 0) {
+      this.logger.warn(
+        { defined: multiModel.providers.map((p) => p.name) },
+        'CUSTOM_PROVIDER_* set but MULTI_MODEL_ENABLED is not "true" — custom providers ignored'
+      );
+    }
   }
 
   private registerProvidersWithRouter(): void {

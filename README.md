@@ -149,6 +149,31 @@ Requires Node.js 22+.
 
 Configure one or more in `.env`. The router handles selection and failover automatically.
 
+### Multi-Model Mode (optional)
+
+One model serves every purpose by default. If you want specialized models — say, a
+fine-tuned 4B for memory operations and a different model for the main agent loop —
+toggle multi-model mode on and register any OpenAI-compatible endpoint under your
+own name:
+
+```bash
+MULTI_MODEL_ENABLED=true
+CUSTOM_PROVIDER_MY_TOOLS=http://localhost:11434/v1|my-tools-model
+CUSTOM_PROVIDER_MY_MEMORY=http://localhost:11434/v1|my-memory-model
+
+# Pin background purposes to the memory model...
+MODEL_FACT_EXTRACTION=my_memory
+MODEL_RERANKER=my_memory
+# ...and put the tools model first in the chat fallback chain
+PROVIDER_ORDER=my_tools,openrouter
+```
+
+Custom providers behave like built-ins everywhere: they can be pinned per purpose
+(`MODEL_RERANKER`, `MODEL_FACT_EXTRACTION`, `MODEL_COGNITION`, `MODEL_CRITIC`,
+`MODEL_EVOLUTION`, `MODEL_EVAL`), placed in `PROVIDER_ORDER`, and selected with the
+`/model` command. With the toggle off, `CUSTOM_PROVIDER_*` entries are ignored (a
+warning is logged), so the default single-model setup stays untouched.
+
 ## Bundled Skills
 
 16 skills ship out of the box:

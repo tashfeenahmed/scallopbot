@@ -271,10 +271,37 @@ const modelsSchema = z.object({
   eval: modelRefSchema.default(DEFAULT_MODELS.eval),
 });
 
+// Multi-model mode: user-defined OpenAI-compatible endpoints, each registered as
+// a provider under its own name. Lets one ScallopBot route different purposes to
+// different models (e.g. a fine-tuned memory model + a fine-tuned tools model on
+// a local llama-server) instead of one model for everything. Off by default —
+// a single-model setup needs none of this.
+const customProviderSchema = z.object({
+  /** Registry name; usable in PROVIDER_ORDER and MODEL_<PURPOSE> refs. */
+  name: z.string().regex(/^[a-z][a-z0-9_-]*$/, 'lowercase letters, digits, _ and - only; must start with a letter'),
+  /** OpenAI-compatible /v1 endpoint, e.g. http://localhost:11434/v1 */
+  baseUrl: z.string().url(),
+  /** Model id to request from the endpoint. */
+  model: z.string().min(1),
+  /** Bearer key. Local llama-server-style endpoints accept any non-empty value. */
+  apiKey: z.string().min(1).default('sk-local'),
+});
+
+const multiModelSchema = z.object({
+  enabled: z.boolean().default(false),
+  providers: z.array(customProviderSchema).default([]),
+});
+
+/** Built-in provider names that CUSTOM_PROVIDER_* entries may not shadow. */
+export const RESERVED_PROVIDER_NAMES = new Set([
+  'anthropic', 'openai', 'local', 'groq', 'ollama', 'openrouter', 'moonshot', 'xai',
+]);
+
 // Main configuration schema
 export const configSchema = z.object({
   providers: providersSchema,
   models: modelsSchema.default(DEFAULT_MODELS),
+  multiModel: multiModelSchema.default({ enabled: false, providers: [] }),
   tuning: tuningSchema.default(TUNING_DEFAULTS),
   evolution: evolutionSchema.default(DEFAULT_EVOLUTION_CONFIG),
   channels: channelsSchema,
@@ -302,6 +329,8 @@ export const configSchema = z.object({
 // Type inference from schema
 export type Config = z.infer<typeof configSchema>;
 export type ProviderConfig = z.infer<typeof providersSchema>;
+export type MultiModelConfig = z.infer<typeof multiModelSchema>;
+export type CustomProviderConfig = z.infer<typeof customProviderSchema>;
 export type { ModelsConfig, ModelRef } from './model-routing.js';
 export type ChannelConfig = z.infer<typeof channelsSchema>;
 export type AgentConfig = z.infer<typeof agentSchema>;
@@ -350,8 +379,29 @@ export function loadConfig(): Config {
   addModelOverride('evolution', 'MODEL_EVOLUTION');
   addModelOverride('eval', 'MODEL_EVAL');
 
+  // Multi-model mode: CUSTOM_PROVIDER_<NAME>="<baseUrl>|<model>[|<apiKey>]".
+  // Always parsed (so a typo fails fast at startup), only registered by the
+  // gateway when MULTI_MODEL_ENABLED=true.
+  const customProviders: Array<{ name: string; baseUrl: string; model: string; apiKey?: string }> = [];
+  for (const [key, raw] of Object.entries(process.env)) {
+    if (!key.startsWith('CUSTOM_PROVIDER_') || !raw) continue;
+    const name = key.slice('CUSTOM_PROVIDER_'.length).toLowerCase();
+    if (RESERVED_PROVIDER_NAMES.has(name)) {
+      throw new Error(`${key}: "${name}" shadows a built-in provider — pick another name`);
+    }
+    const [baseUrl, model, apiKey] = raw.split('|').map((s) => s.trim());
+    if (!baseUrl || !model) {
+      throw new Error(`${key}: expected "<baseUrl>|<model>[|<apiKey>]", got "${raw}"`);
+    }
+    customProviders.push({ name, baseUrl, model, ...(apiKey && { apiKey }) });
+  }
+
   const rawConfig = {
     models: modelsRaw,
+    multiModel: {
+      enabled: process.env.MULTI_MODEL_ENABLED === 'true',
+      providers: customProviders,
+    },
     tuning: {
       gardener: {
         lightIntervalMs: envInt('GARDENER_LIGHT_INTERVAL_MS', 60_000),
