@@ -338,6 +338,87 @@ describe('Config Schema', () => {
       expect(config.models.cognition).toEqual({ tier: 'fast' });
     });
 
+    describe('single switch (MODEL)', () => {
+      beforeEach(() => {
+        process.env.ANTHROPIC_API_KEY = 'sk-ant-env-key';
+        process.env.AGENT_WORKSPACE = '/env/workspace';
+        // Isolate from ambient routing vars
+        for (const k of Object.keys(process.env)) {
+          if (
+            k === 'MODEL' ||
+            k === 'PROVIDER_ORDER' ||
+            k === 'MULTI_MODEL_ENABLED' ||
+            k.startsWith('MODEL_') ||
+            k.startsWith('CUSTOM_PROVIDER_')
+          ) {
+            delete process.env[k];
+          }
+        }
+      });
+
+      it('points every purpose AND the chat order at one provider', async () => {
+        process.env.MODEL = 'openrouter';
+
+        const { loadConfig } = await import('./config.js');
+        const config = loadConfig();
+
+        for (const purpose of ['reranker', 'factExtraction', 'cognition', 'critic', 'evolution', 'eval'] as const) {
+          expect(config.models[purpose]).toEqual({ provider: 'openrouter' });
+        }
+        expect(config.routing.providerOrder).toEqual(['openrouter']);
+      });
+
+      it('lets MODEL_<PURPOSE> override the MODEL switch per purpose', async () => {
+        process.env.MODEL = 'openrouter';
+        process.env.MODEL_COGNITION = 'tier:fast';
+
+        const { loadConfig } = await import('./config.js');
+        const config = loadConfig();
+
+        expect(config.models.cognition).toEqual({ tier: 'fast' });          // specific wins
+        expect(config.models.reranker).toEqual({ provider: 'openrouter' });  // others follow MODEL
+      });
+
+      it('lets PROVIDER_ORDER override the MODEL switch for chat only', async () => {
+        process.env.MODEL = 'openrouter';
+        process.env.PROVIDER_ORDER = 'moonshot,openrouter';
+
+        const { loadConfig } = await import('./config.js');
+        const config = loadConfig();
+
+        expect(config.routing.providerOrder).toEqual(['moonshot', 'openrouter']); // chat: explicit wins
+        expect(config.models.cognition).toEqual({ provider: 'openrouter' });       // purposes still follow MODEL
+      });
+
+      it('accepts a CUSTOM_PROVIDER_* name as the switch target', async () => {
+        process.env.MULTI_MODEL_ENABLED = 'true';
+        process.env.CUSTOM_PROVIDER_ORNITH = 'http://localhost:11434/v1|ornith';
+        process.env.MODEL = 'ornith';
+
+        const { loadConfig } = await import('./config.js');
+        const config = loadConfig();
+
+        expect(config.routing.providerOrder).toEqual(['ornith']);
+        expect(config.models.cognition).toEqual({ provider: 'ornith' });
+      });
+
+      it('throws on an unknown provider name (typo)', async () => {
+        process.env.MODEL = 'openroutr';
+
+        const { loadConfig } = await import('./config.js');
+        expect(() => loadConfig()).toThrow(/unknown provider "openroutr"/);
+      });
+
+      it('leaves defaults unchanged when MODEL is unset', async () => {
+        const { loadConfig } = await import('./config.js');
+        const config = loadConfig();
+
+        expect(config.models.reranker).toEqual({ tier: 'fast' });
+        expect(config.models.eval).toEqual({ provider: 'moonshot', model: 'kimi-k2.5' });
+        expect(config.routing.providerOrder).toEqual(['moonshot', 'anthropic', 'openai', 'groq', 'xai', 'ollama']);
+      });
+    });
+
     it('should default tuning knobs to prior hardcoded values', async () => {
       process.env.ANTHROPIC_API_KEY = 'sk-ant-env-key';
       process.env.AGENT_WORKSPACE = '/env/workspace';

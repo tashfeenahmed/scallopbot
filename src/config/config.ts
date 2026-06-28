@@ -365,23 +365,10 @@ export function loadConfig(): Config {
     : 100;
   const logLevel = process.env.LOG_LEVEL || 'info';
 
-  // Per-purpose model overrides: only include keys with a MODEL_<PURPOSE> env set;
-  // zod fills the rest from MODELS_DEFAULTS so behavior is unchanged by default.
-  const modelsRaw: Partial<Record<keyof ModelsConfig, ModelRef>> = {};
-  const addModelOverride = (key: keyof ModelsConfig, envVar: string): void => {
-    const ref = parseModelRef(process.env[envVar]);
-    if (ref) modelsRaw[key] = ref;
-  };
-  addModelOverride('reranker', 'MODEL_RERANKER');
-  addModelOverride('factExtraction', 'MODEL_FACT_EXTRACTION');
-  addModelOverride('cognition', 'MODEL_COGNITION');
-  addModelOverride('critic', 'MODEL_CRITIC');
-  addModelOverride('evolution', 'MODEL_EVOLUTION');
-  addModelOverride('eval', 'MODEL_EVAL');
-
   // Multi-model mode: CUSTOM_PROVIDER_<NAME>="<baseUrl>|<model>[|<apiKey>]".
   // Always parsed (so a typo fails fast at startup), only registered by the
-  // gateway when MULTI_MODEL_ENABLED=true.
+  // gateway when MULTI_MODEL_ENABLED=true. Parsed before the MODEL switch below
+  // so that switch can validate against custom provider names too.
   const customProviders: Array<{ name: string; baseUrl: string; model: string; apiKey?: string }> = [];
   for (const [key, raw] of Object.entries(process.env)) {
     if (!key.startsWith('CUSTOM_PROVIDER_') || !raw) continue;
@@ -395,6 +382,49 @@ export function loadConfig(): Config {
     }
     customProviders.push({ name, baseUrl, model, ...(apiKey && { apiKey }) });
   }
+
+  // ── Single switch: MODEL ──────────────────────────────────────────────────
+  // One var points the WHOLE bot at a model/provider: the chat provider chain
+  // AND every background purpose (reranker, fact-extraction, cognition, critic,
+  // evolution, eval). It's a global default — more specific settings still win:
+  //   chat:    PROVIDER_ORDER   > MODEL > built-in chain
+  //   purpose: MODEL_<PURPOSE>  > MODEL > built-in per-purpose default
+  // Value is a provider name (built-in or a CUSTOM_PROVIDER_* name), optionally
+  // "provider:model". Typos fail fast.
+  const globalModelRef = parseModelRef(process.env.MODEL);
+  if (globalModelRef && 'provider' in globalModelRef) {
+    const knownProviders = new Set<string>([
+      ...RESERVED_PROVIDER_NAMES,
+      ...customProviders.map((p) => p.name),
+    ]);
+    if (!knownProviders.has(globalModelRef.provider)) {
+      throw new Error(
+        `MODEL="${process.env.MODEL}": unknown provider "${globalModelRef.provider}". ` +
+        `Use a built-in (${[...RESERVED_PROVIDER_NAMES].sort().join(', ')}) or a CUSTOM_PROVIDER_* name.`,
+      );
+    }
+  }
+
+  // Per-purpose model config. Precedence: MODEL_<PURPOSE> env > MODEL global
+  // switch > built-in default (zod fills unset keys from DEFAULT_MODELS, so
+  // default behavior is unchanged when neither MODEL nor MODEL_<PURPOSE> is set).
+  const modelsRaw: Partial<Record<keyof ModelsConfig, ModelRef>> = {};
+  const ALL_PURPOSES: (keyof ModelsConfig)[] = [
+    'reranker', 'factExtraction', 'cognition', 'critic', 'evolution', 'eval',
+  ];
+  if (globalModelRef) {
+    for (const key of ALL_PURPOSES) modelsRaw[key] = globalModelRef;
+  }
+  const addModelOverride = (key: keyof ModelsConfig, envVar: string): void => {
+    const ref = parseModelRef(process.env[envVar]);
+    if (ref) modelsRaw[key] = ref;
+  };
+  addModelOverride('reranker', 'MODEL_RERANKER');
+  addModelOverride('factExtraction', 'MODEL_FACT_EXTRACTION');
+  addModelOverride('cognition', 'MODEL_COGNITION');
+  addModelOverride('critic', 'MODEL_CRITIC');
+  addModelOverride('evolution', 'MODEL_EVOLUTION');
+  addModelOverride('eval', 'MODEL_EVAL');
 
   const rawConfig = {
     models: modelsRaw,
@@ -490,9 +520,13 @@ export function loadConfig(): Config {
       level: logLevel,
     },
     routing: {
+      // Chat provider chain. Precedence: explicit PROVIDER_ORDER > MODEL single
+      // switch (as a one-provider chain) > built-in default chain.
       providerOrder: process.env.PROVIDER_ORDER
         ? process.env.PROVIDER_ORDER.split(',').map((p) => p.trim())
-        : ['moonshot', 'anthropic', 'openai', 'groq', 'xai', 'ollama'],
+        : globalModelRef && 'provider' in globalModelRef
+          ? [globalModelRef.provider]
+          : ['moonshot', 'anthropic', 'openai', 'groq', 'xai', 'ollama'],
       enableComplexityAnalysis: process.env.ENABLE_COMPLEXITY_ANALYSIS !== 'false',
     },
     cost: {
