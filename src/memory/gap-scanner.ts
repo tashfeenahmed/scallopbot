@@ -158,7 +158,10 @@ export function scanBehavioralAnomalies(
   if (mf.trend === 'decreasing' && mf.dailyRate < mf.weeklyAvg * 0.5) {
     results.push({
       type: 'behavioral_anomaly',
-      severity: 'low',
+      // 'medium' (was 'low'): the guard already requires a *significant* drop
+      // (decreasing trend AND dailyRate below half the weekly average), which is
+      // a strong check-in cue. At 'low' the moderate dial skipped it wholesale.
+      severity: 'medium',
       description: `Message frequency has dropped significantly (${mf.dailyRate.toFixed(1)}/day vs ${mf.weeklyAvg.toFixed(1)}/week avg)`,
       context: {
         dailyRate: mf.dailyRate,
@@ -174,7 +177,9 @@ export function scanBehavioralAnomalies(
   if (se && se.trend === 'decreasing' && se.avgMessagesPerSession < 3) {
     results.push({
       type: 'behavioral_anomaly',
-      severity: 'low',
+      // 'medium' (was 'low'): a declining trend AND fewer than 3 messages per
+      // session is a meaningful disengagement cue worth a check-in, not noise.
+      severity: 'medium',
       description: `Session engagement is declining (avg ${se.avgMessagesPerSession.toFixed(1)} messages per session)`,
       context: {
         avgMessagesPerSession: se.avgMessagesPerSession,
@@ -247,10 +252,12 @@ export function scanUnresolvedThreads(
     );
     if (hasFollowUp) continue;
 
-    // Unresolved thread candidate. Elevate severity when the session had an
-    // explicit question in its topics; otherwise 'low' — evaluator decides.
+    // Unresolved thread candidate. A thread with no follow-up within the window
+    // is "meaningfully unresolved" — exactly the moderate dial's bar — so floor
+    // it at 'medium' (was 'low' for non-question threads, which the dial skipped
+    // wholesale). Question topics still surface in the blurb below.
     const questionTopics = summary.topics.filter((t) => t.includes('?'));
-    const severity: 'low' | 'medium' = questionTopics.length > 0 ? 'medium' : 'low';
+    const severity: 'medium' = 'medium';
     const topicBlurb = questionTopics.length > 0
       ? questionTopics.join(', ')
       : summary.topics.slice(0, 3).join(', ') || summary.summary.slice(0, 80);

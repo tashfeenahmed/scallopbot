@@ -145,7 +145,7 @@ export function buildEvaluatorPrompt(
       }
     : {
         conservative: 'Only act on clearly stale, overdue, or critical items. Skip anything uncertain.',
-        moderate: 'Act on items that are meaningfully stale or unresolved. Skip low-severity or uncertain signals.',
+        moderate: 'Act on items that are meaningfully stale or unresolved. For low-severity or uncertain signals, use judgment: act when there is a clear, specific way a brief nudge would genuinely help; otherwise skip. Do not blanket-skip every low-severity signal.',
         eager: 'Act on most signals unless they are clearly noise. Be proactive.',
       };
 
@@ -259,6 +259,37 @@ export function parseEvaluatorResponse(
   return results;
 }
 
+// ============ LLM call with retry ============
+
+/**
+ * Call the provider with one retry on a transient failure.
+ *
+ * The evaluator runs unattended (~every 72 min). A single network/timeout
+ * blip used to mark the whole tick 'llm_error' and skip silently until the
+ * next cycle. One retry with a short backoff absorbs transient provider
+ * errors so a momentary blip doesn't cost a full proactive cycle. A genuine
+ * outage still surfaces as 'llm_error' after the retries are exhausted.
+ */
+async function completeWithRetry(
+  provider: LLMProvider,
+  prompt: CompletionRequest,
+  retries = 1,
+  backoffMs = 1000,
+): Promise<Awaited<ReturnType<LLMProvider['complete']>>> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await provider.complete(prompt);
+    } catch (err) {
+      lastErr = err;
+      if (attempt < retries) {
+        await new Promise((resolve) => setTimeout(resolve, backoffMs * (attempt + 1)));
+      }
+    }
+  }
+  throw lastErr;
+}
+
 // ============ Orchestrator ============
 
 /**
@@ -322,7 +353,7 @@ export async function evaluateProactive(
   // Single LLM call
   try {
     const prompt = buildEvaluatorPrompt(input, allSignals);
-    const response = await provider.complete(prompt);
+    const response = await completeWithRetry(provider, prompt);
     const text = extractResponseText(response.content);
     const rawItems = parseEvaluatorResponse(text, allSignals);
 

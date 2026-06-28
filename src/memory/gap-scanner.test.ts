@@ -328,7 +328,7 @@ describe('scanBehavioralAnomalies', () => {
     const result = scanBehavioralAnomalies(signals, NOW);
     expect(result).toHaveLength(1);
     expect(result[0].type).toBe('behavioral_anomaly');
-    expect(result[0].severity).toBe('low');
+    expect(result[0].severity).toBe('medium');
     expect(result[0].description.toLowerCase()).toContain('frequency');
   });
 
@@ -387,7 +387,7 @@ describe('scanBehavioralAnomalies', () => {
     );
     expect(engageSignal).toBeDefined();
     expect(engageSignal!.type).toBe('behavioral_anomaly');
-    expect(engageSignal!.severity).toBe('low');
+    expect(engageSignal!.severity).toBe('medium');
   });
 
   it('does not flag engagement when avgMessagesPerSession >= 3', () => {
@@ -485,9 +485,10 @@ describe('scanBehavioralAnomalies', () => {
     const result = scanBehavioralAnomalies(signals, NOW);
     expect(result.length).toBe(3);
     expect(result.every((s) => s.type === 'behavioral_anomaly')).toBe(true);
-    // Two frequency/engagement anomalies remain 'low'; response_length is now 'medium'
-    expect(result.filter((s) => s.severity === 'low').length).toBe(2);
-    expect(result.filter((s) => s.severity === 'medium').length).toBe(1);
+    // All three anomalies (frequency drop, engagement drop, response_length) are
+    // now 'medium' so the moderate dial no longer skips them wholesale.
+    expect(result.filter((s) => s.severity === 'low').length).toBe(0);
+    expect(result.filter((s) => s.severity === 'medium').length).toBe(3);
   });
 
   it('returns empty when no anomaly conditions met', () => {
@@ -596,10 +597,11 @@ describe('scanUnresolvedThreads', () => {
     expect(result[0].sourceId).toBe('s5');
   });
 
-  it('flags topics without question marks as low-severity unresolved threads', () => {
+  it('flags topics without question marks as medium-severity unresolved threads', () => {
     // Previously required a "?" in topics, which meant normal conversations
     // never became signals. New behavior: any session with no follow-up
-    // within 48h is a candidate, with severity 'low' when no question mark.
+    // within 48h is a candidate, floored at 'medium' (a thread with no
+    // follow-up is meaningfully unresolved) so the moderate dial considers it.
     const summary = makeSummary({
       id: 's6',
       topics: ['deployment', 'infrastructure'],
@@ -608,7 +610,7 @@ describe('scanUnresolvedThreads', () => {
     });
     const result = scanUnresolvedThreads([summary], NOW);
     expect(result).toHaveLength(1);
-    expect(result[0].severity).toBe('low');
+    expect(result[0].severity).toBe('medium');
     expect(result[0].sourceId).toBe('s6');
   });
 
@@ -645,7 +647,7 @@ describe('scanUnresolvedThreads', () => {
         createdAt: NOW - 5 * DAY_MS + 12 * 60 * 60 * 1000, // 12h later
         messageCount: 8,
       }),
-      // No question: still flagged (as 'low') because there's no follow-up.
+      // No question: still flagged (now 'medium') because there's no follow-up.
       makeSummary({
         id: 'no-question',
         topics: ['general chat'],
@@ -660,7 +662,7 @@ describe('scanUnresolvedThreads', () => {
     const unresolved = result.find(r => r.sourceId === 'unresolved');
     expect(unresolved?.severity).toBe('medium');
     const noQuestion = result.find(r => r.sourceId === 'no-question');
-    expect(noQuestion?.severity).toBe('low');
+    expect(noQuestion?.severity).toBe('medium');
   });
 
   it('detects question mark anywhere in topics array', () => {
