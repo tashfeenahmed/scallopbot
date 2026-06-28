@@ -693,15 +693,20 @@ export class TelegramChannel {
       return;
     }
 
-    // Save preference
+    // Save preference (chat) AND flip the global runtime switch so every
+    // non-pinned background job (memory, cognition/proactivity, etc.) follows.
     await this.configManager.updateUserConfig(userId, { modelId: selectedName });
+    this.configManager.setGlobalModel(selectedName);
 
     const selectedProvider = available.find(p => p.name === selectedName);
     const label = selectedName === 'auto'
       ? 'auto (smart routing)'
       : selectedProvider ? this.getProviderLabel(selectedProvider as { name: string; model?: string }) : selectedName;
 
-    await ctx.reply(`Switched to <b>${label}</b>`, { parse_mode: 'HTML' });
+    const scope = selectedName === 'auto'
+      ? 'chat + background reset to defaults'
+      : 'chat + all background jobs (pinned purposes excepted)';
+    await ctx.reply(`Switched to <b>${label}</b> — ${scope}.`, { parse_mode: 'HTML' });
     this.logger.info({ userId, model: selectedName }, 'User switched model');
   }
 

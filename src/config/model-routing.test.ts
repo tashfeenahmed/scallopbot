@@ -144,3 +144,58 @@ describe('PurposeRouter — overrides', () => {
     expect(pr.modelFor('reranker')).toBeUndefined();
   });
 });
+
+describe('PurposeRouter — runtime /model switch', () => {
+  const order = ['moonshot', 'anthropic', 'groq'];
+
+  it('moves every non-pinned purpose to the runtime model', async () => {
+    const { registry, router } = harness(order);
+    const pr = new PurposeRouter(DEFAULT_MODELS, registry, router, new Set(), () => 'groq');
+    // cognition defaults to fast tier, factExtraction to background — both follow the switch
+    expect((await pr.providerFor('cognition'))?.name).toBe('groq');
+    expect((await pr.providerFor('factExtraction'))?.name).toBe('groq');
+    expect(pr.refFor('cognition')).toEqual({ provider: 'groq' });
+  });
+
+  it('does NOT move a pinned purpose (memory/tools carve-out)', async () => {
+    const { registry, router } = harness(order);
+    const pr = new PurposeRouter(
+      { ...DEFAULT_MODELS, factExtraction: { provider: 'anthropic' } },
+      registry,
+      router,
+      new Set(['factExtraction']),
+      () => 'groq',
+    );
+    expect((await pr.providerFor('factExtraction'))?.name).toBe('anthropic'); // pinned: ignores switch
+    expect((await pr.providerFor('cognition'))?.name).toBe('groq'); // non-pinned: follows switch
+  });
+
+  it('falls back to configured defaults when the switch is unset', async () => {
+    const { registry, router } = harness(order);
+    const pr = new PurposeRouter(DEFAULT_MODELS, registry, router, new Set(), () => undefined);
+    const fast = await router.selectProvider('fast');
+    expect((await pr.providerFor('cognition'))?.name).toBe(fast?.name);
+  });
+});
+
+describe('PurposeRouter — dynamicProviderFor (live switch, no restart)', () => {
+  const order = ['moonshot', 'anthropic', 'groq'];
+
+  it('re-resolves the target on every call', async () => {
+    let runtime: string | undefined = undefined;
+    const { registry, router } = harness(order);
+    const pr = new PurposeRouter(DEFAULT_MODELS, registry, router, new Set(), () => runtime);
+    const dyn = pr.dynamicProviderFor('cognition');
+
+    // No override → fast tier (first available = moonshot)
+    const first = await dyn.complete({ messages: [{ role: 'user', content: 'hi' }] });
+    expect((first.content[0] as { text: string }).text).toBe('moonshot');
+
+    // Flip the switch at runtime → the SAME wrapper now routes to groq
+    runtime = 'groq';
+    const second = await dyn.complete({ messages: [{ role: 'user', content: 'hi' }] });
+    expect((second.content[0] as { text: string }).text).toBe('groq');
+
+    expect(dyn.isAvailable()).toBe(true);
+  });
+});

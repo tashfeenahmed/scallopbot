@@ -18,6 +18,7 @@ import type { LLMProvider } from '../providers/types.js';
 import type { ProviderRegistry } from '../providers/registry.js';
 import type { Router } from '../routing/router.js';
 import type { ModelTier } from '../routing/complexity.js';
+import { DynamicProvider } from '../providers/dynamic-provider.js';
 
 /** A resolvable model target for a single purpose. */
 export type ModelRef =
@@ -111,10 +112,29 @@ export class PurposeRouter {
     private readonly models: ModelsConfig,
     private readonly registry: ProviderRegistry,
     private readonly router: Router,
+    /**
+     * Purposes pinned via a MODEL_<PURPOSE> env var. These keep their configured
+     * model and are NOT moved by the global runtime switch — the carve-out for
+     * "keep memory/tools separate".
+     */
+    private readonly pinnedPurposes: ReadonlySet<ModelPurpose> = new Set(),
+    /**
+     * The global runtime model override (set by the `/model` command). When it
+     * returns a provider name, every non-pinned purpose resolves to it; returns
+     * undefined when unset so configured defaults apply. Read on every call, so
+     * a live switch needs no restart.
+     */
+    private readonly getRuntimeModel: () => string | undefined = () => undefined,
   ) {}
 
-  /** The configured ModelRef for a purpose (for logging / CLI introspection). */
+  /**
+   * The ModelRef a purpose resolves to right now. Precedence:
+   *   explicit MODEL_<PURPOSE> pin  >  runtime /model override  >  configured default
+   */
   refFor(purpose: ModelPurpose): ModelRef {
+    if (this.pinnedPurposes.has(purpose)) return this.models[purpose];
+    const runtime = this.getRuntimeModel();
+    if (runtime) return { provider: runtime };
     return this.models[purpose];
   }
 
@@ -123,13 +143,22 @@ export class PurposeRouter {
    * construct their own provider instance (e.g. the eval harness).
    */
   modelFor(purpose: ModelPurpose): string | undefined {
-    const ref = this.models[purpose];
+    const ref = this.refFor(purpose);
     return 'provider' in ref ? ref.model : undefined;
   }
 
   /** Resolve the provider a purpose should run on. May be undefined if nothing is available. */
   async providerFor(purpose: ModelPurpose): Promise<LLMProvider | undefined> {
-    return this.resolve(this.models[purpose]);
+    return this.resolve(this.refFor(purpose));
+  }
+
+  /**
+   * A provider that re-resolves this purpose on every call, so a runtime model
+   * switch (`/model`) takes effect without a restart. Use for long-lived
+   * background consumers that would otherwise capture a provider at startup.
+   */
+  dynamicProviderFor(purpose: ModelPurpose): LLMProvider {
+    return new DynamicProvider(() => this.providerFor(purpose), purpose);
   }
 
   private async resolve(ref: ModelRef): Promise<LLMProvider | undefined> {

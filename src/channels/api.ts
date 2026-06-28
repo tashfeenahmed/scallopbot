@@ -1291,12 +1291,18 @@ export class ApiChannel implements Channel, TriggerSource {
           return true;
         }
 
+        // Chat preference AND the global runtime switch (drives all non-pinned
+        // background jobs: memory, cognition/proactivity, reranker, etc.).
         await this.configManager.updateUserConfig('default', { modelId: selectedName });
+        this.configManager.setGlobalModel(selectedName);
         const selectedProvider = available.find(p => p.name === selectedName);
         const label = selectedName === 'auto'
           ? 'auto (smart routing)'
           : selectedProvider ? this.getProviderLabel(selectedProvider as { name: string; model?: string }) : selectedName;
-        this.sendWsMessage(ws, { type: 'response', content: `Switched to **${label}**` });
+        const scope = selectedName === 'auto'
+          ? 'chat + background reset to defaults'
+          : 'chat + all background jobs (pinned purposes excepted)';
+        this.sendWsMessage(ws, { type: 'response', content: `Switched to **${label}** — ${scope}.` });
         this.logger.info({ clientId, model: selectedName }, 'WebSocket user switched model');
         return true;
       }

@@ -1,7 +1,7 @@
 import * as path from 'path';
 import type { Logger } from 'pino';
 import type { Config } from '../config/config.js';
-import { PurposeRouter, DEFAULT_MODELS } from '../config/model-routing.js';
+import { PurposeRouter, DEFAULT_MODELS, type ModelPurpose } from '../config/model-routing.js';
 import {
   AnthropicProvider,
   OpenAIProvider,
@@ -120,7 +120,16 @@ export class Gateway {
 
     // Single place that resolves which model each background job runs on.
     // Defaults preserve prior inline behavior; override via MODEL_<PURPOSE> env.
-    this.purposeRouter = new PurposeRouter(this.config.models ?? DEFAULT_MODELS, this.providerRegistry, this.router);
+    // The pin set (MODEL_<PURPOSE> purposes) is excluded from the runtime /model
+    // switch; getRuntimeModel reads the live global switch (configManager is
+    // created later, so this is read lazily, only at resolve time).
+    this.purposeRouter = new PurposeRouter(
+      this.config.models ?? DEFAULT_MODELS,
+      this.providerRegistry,
+      this.router,
+      new Set((this.config.modelPins ?? []) as ModelPurpose[]),
+      () => this.configManager?.getGlobalModel(),
+    );
 
     // Use OllamaEmbedder for semantic search if Ollama is configured
     let embedder: EmbeddingProvider | undefined;
@@ -144,15 +153,10 @@ export class Gateway {
 
     // Provider for LLM re-ranking of search results (opt-in, graceful degradation).
     // Model choice lives in config.models.reranker (default: fast tier).
-    let rerankProvider: LLMProvider | undefined;
-    try {
-      rerankProvider = await this.purposeRouter.providerFor('reranker');
-      if (rerankProvider) {
-        this.logger.debug({ provider: rerankProvider.name }, 'Using configured provider for search re-ranking');
-      }
-    } catch {
-      // No provider available — re-ranking will be skipped
-    }
+    // Resolves lazily per call (DynamicProvider) so the runtime /model switch
+    // reaches re-ranking without a restart; degrades gracefully if no provider
+    // is available when actually invoked.
+    const rerankProvider: LLMProvider = this.purposeRouter.dynamicProviderFor('reranker');
 
     this.scallopMemoryStore = new ScallopMemoryStore({
       dbPath,
@@ -233,8 +237,9 @@ export class Gateway {
     // concurrently, causing 429 "overloaded" and timeouts. The "background"
     // model purpose encodes that heuristic (2nd non-local in PROVIDER_ORDER);
     // model choice lives in config.models.factExtraction.
-    const factExtractionProvider: LLMProvider | undefined =
-      await this.purposeRouter.providerFor('factExtraction');
+    // Lazy per-call resolution so the runtime /model switch applies live.
+    const factExtractionProvider: LLMProvider =
+      this.purposeRouter.dynamicProviderFor('factExtraction');
 
     if (factExtractionProvider && this.scallopMemoryStore) {
       this.factExtractor = new LLMFactExtractor({
@@ -256,7 +261,7 @@ export class Gateway {
       : undefined;
     // Nightly cognition (dream/reflection/proactive) runs on config.models.cognition
     // (default: fast tier — same as before, when this reused the rerank provider).
-    const cognitionProvider = await this.purposeRouter.providerFor('cognition');
+    const cognitionProvider = this.purposeRouter.dynamicProviderFor('cognition');
     const gardenerTuning = this.config.tuning?.gardener;
     this.backgroundGardener = new BackgroundGardener({
       scallopStore: this.scallopMemoryStore,

@@ -409,6 +409,21 @@ describe('Config Schema', () => {
         expect(() => loadConfig()).toThrow(/unknown provider "openroutr"/);
       });
 
+      it('records explicit MODEL_<PURPOSE> pins (carve-outs) in modelPins', async () => {
+        process.env.MODEL = 'openrouter';
+        process.env.MODEL_FACT_EXTRACTION = 'moonshot';
+
+        const { loadConfig } = await import('./config.js');
+        const config = loadConfig();
+
+        // Pinned purpose is recorded and keeps its own model
+        expect(config.modelPins).toContain('factExtraction');
+        expect(config.models.factExtraction).toEqual({ provider: 'moonshot' });
+        // A purpose that only follows the MODEL switch is NOT pinned
+        expect(config.modelPins).not.toContain('cognition');
+        expect(config.models.cognition).toEqual({ provider: 'openrouter' });
+      });
+
       it('leaves defaults unchanged when MODEL is unset', async () => {
         const { loadConfig } = await import('./config.js');
         const config = loadConfig();

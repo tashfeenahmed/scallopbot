@@ -58,6 +58,9 @@ const DEFAULT_PERSONALITY_PROMPT =
   'You are a friendly and helpful assistant. Be warm, conversational, and approachable. Use a casual tone while remaining helpful and accurate.';
 
 export class BotConfigManager {
+  /** runtime_keys key for the global model switch (set by `/model`). */
+  private static readonly GLOBAL_MODEL_KEY = 'runtime:model';
+
   private db: ScallopDatabase;
   private logger?: Logger;
 
@@ -136,6 +139,28 @@ export class BotConfigManager {
     });
 
     return this.getUserConfig(userId);
+  }
+
+  /**
+   * Set the global runtime model switch (used by the `/model` command). This is
+   * the single live knob: it drives every NON-pinned background purpose
+   * (memory, cognition/proactivity, reranker, critic, evolution, eval) for the
+   * whole bot. Pass 'auto' (or empty) to clear it and fall back to the MODEL env
+   * / built-in defaults. (Per-user chat selection is stored separately on the
+   * user's config; on a single-user bot the two move together.)
+   */
+  setGlobalModel(modelId: string): void {
+    if (!modelId || modelId === 'auto') {
+      this.db.deleteRuntimeKey(BotConfigManager.GLOBAL_MODEL_KEY);
+    } else {
+      this.db.setRuntimeKey(BotConfigManager.GLOBAL_MODEL_KEY, modelId);
+    }
+  }
+
+  /** The active global runtime model, or undefined when unset / 'auto'. */
+  getGlobalModel(): string | undefined {
+    const value = this.db.getRuntimeKey(BotConfigManager.GLOBAL_MODEL_KEY);
+    return value && value !== 'auto' ? value : undefined;
   }
 
   /**

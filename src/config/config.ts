@@ -301,6 +301,9 @@ export const RESERVED_PROVIDER_NAMES = new Set([
 export const configSchema = z.object({
   providers: providersSchema,
   models: modelsSchema.default(DEFAULT_MODELS),
+  // Purposes explicitly pinned via MODEL_<PURPOSE> — excluded from the runtime
+  // /model switch so memory/tools can stay on a separate model.
+  modelPins: z.array(z.string()).default([]),
   multiModel: multiModelSchema.default({ enabled: false, providers: [] }),
   tuning: tuningSchema.default(TUNING_DEFAULTS),
   evolution: evolutionSchema.default(DEFAULT_EVOLUTION_CONFIG),
@@ -415,9 +418,15 @@ export function loadConfig(): Config {
   if (globalModelRef) {
     for (const key of ALL_PURPOSES) modelsRaw[key] = globalModelRef;
   }
+  // Purposes explicitly pinned via MODEL_<PURPOSE>. These are excluded from the
+  // runtime /model switch so memory/tools can be kept on a separate model.
+  const modelPins: (keyof ModelsConfig)[] = [];
   const addModelOverride = (key: keyof ModelsConfig, envVar: string): void => {
     const ref = parseModelRef(process.env[envVar]);
-    if (ref) modelsRaw[key] = ref;
+    if (ref) {
+      modelsRaw[key] = ref;
+      modelPins.push(key);
+    }
   };
   addModelOverride('reranker', 'MODEL_RERANKER');
   addModelOverride('factExtraction', 'MODEL_FACT_EXTRACTION');
@@ -428,6 +437,7 @@ export function loadConfig(): Config {
 
   const rawConfig = {
     models: modelsRaw,
+    modelPins,
     multiModel: {
       enabled: process.env.MULTI_MODEL_ENABLED === 'true',
       providers: customProviders,
