@@ -129,6 +129,7 @@ export class Gateway {
       this.router,
       new Set((this.config.modelPins ?? []) as ModelPurpose[]),
       () => this.configManager?.getGlobalModel(),
+      this.logger,
     );
 
     // Use OllamaEmbedder for semantic search if Ollama is configured

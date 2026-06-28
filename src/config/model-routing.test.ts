@@ -22,6 +22,32 @@ function mockProvider(name: string, available = true): LLMProvider {
   };
 }
 
+/** Like mockProvider but its complete() always rejects — simulates an outage
+ *  (e.g. the local P40 box being down) while still reporting isAvailable. */
+function failingProvider(name: string, error = 'ECONNREFUSED'): LLMProvider {
+  return {
+    name,
+    isAvailable: () => true,
+    complete: vi.fn().mockRejectedValue(new Error(error)),
+  };
+}
+
+/** Build a registry + router from explicit provider instances (lets a test mix
+ *  succeeding and failing providers while preserving PROVIDER_ORDER). */
+function harnessFrom(providers: LLMProvider[]) {
+  const order = providers.map((p) => p.name);
+  const registry = new ProviderRegistry();
+  const router = new Router({
+    providerOrder: order,
+    tierMapping: { fast: order, standard: order, capable: order },
+  });
+  for (const p of providers) {
+    registry.registerProvider(p);
+    router.registerProvider(p);
+  }
+  return { registry, router };
+}
+
 /** Build a registry + router wired identically to the gateway. */
 function harness(order: string[], available: Record<string, boolean> = {}) {
   const registry = new ProviderRegistry();
@@ -197,5 +223,74 @@ describe('PurposeRouter — dynamicProviderFor (live switch, no restart)', () =>
     expect((second.content[0] as { text: string }).text).toBe('groq');
 
     expect(dyn.isAvailable()).toBe(true);
+  });
+});
+
+describe('PurposeRouter — background cascade fallback (local → cloud)', () => {
+  it('providersFor returns the resolved primary then the rest of PROVIDER_ORDER', async () => {
+    const { registry, router } = harnessFrom([mockProvider('localp40'), mockProvider('cloud'), mockProvider('lastresort')]);
+    const pr = new PurposeRouter(DEFAULT_MODELS, registry, router);
+    // cognition → fast tier → first available (localp40), then the remaining order
+    const chain = await pr.providersFor('cognition');
+    expect(chain.map((p) => p.name)).toEqual(['localp40', 'cloud', 'lastresort']);
+  });
+
+  it('a non-pinned purpose fails over to the next provider when the primary throws', async () => {
+    const cloud = mockProvider('cloud');
+    const { registry, router } = harnessFrom([failingProvider('localp40'), cloud]);
+    const pr = new PurposeRouter(DEFAULT_MODELS, registry, router);
+    const dyn = pr.dynamicProviderFor('cognition'); // non-pinned (proactivity)
+    const res = await dyn.complete({ messages: [{ role: 'user', content: 'hi' }] });
+    expect((res.content[0] as { text: string }).text).toBe('cloud');
+  });
+
+  it('uses the primary and never touches the fallback when the primary succeeds', async () => {
+    const cloud = mockProvider('cloud');
+    const { registry, router } = harnessFrom([mockProvider('localp40'), cloud]);
+    const pr = new PurposeRouter(DEFAULT_MODELS, registry, router);
+    const dyn = pr.dynamicProviderFor('cognition'); // non-pinned (proactivity)
+    const res = await dyn.complete({ messages: [{ role: 'user', content: 'hi' }] });
+    expect((res.content[0] as { text: string }).text).toBe('localp40');
+    expect(cloud.complete).not.toHaveBeenCalled();
+  });
+
+  it('memory (factExtraction) on the local switch fails over to cloud when the P40 is down', async () => {
+    const cloud = mockProvider('cloud');
+    const { registry, router } = harnessFrom([failingProvider('localp40'), cloud]);
+    // Mirror production: MODEL=ornith pins every purpose at the local provider,
+    // so factExtraction's primary is the P40, not the background heuristic.
+    const pr = new PurposeRouter(DEFAULT_MODELS, registry, router, new Set(), () => 'localp40');
+    const dyn = pr.dynamicProviderFor('factExtraction');
+    const res = await dyn.complete({ messages: [{ role: 'user', content: 'hi' }] });
+    expect((res.content[0] as { text: string }).text).toBe('cloud');
+  });
+
+  it('throws the last error when every provider in the chain fails', async () => {
+    const { registry, router } = harnessFrom([failingProvider('localp40', 'p40-down'), failingProvider('cloud', 'cloud-down')]);
+    const pr = new PurposeRouter(DEFAULT_MODELS, registry, router);
+    const dyn = pr.dynamicProviderFor('cognition');
+    await expect(dyn.complete({ messages: [{ role: 'user', content: 'hi' }] })).rejects.toThrow('cloud-down');
+  });
+
+  it('does NOT cascade a pinned purpose — eval stays on its model and fails hard', async () => {
+    const cloud = mockProvider('cloud');
+    const { registry, router } = harnessFrom([failingProvider('moonshot'), cloud]);
+    // eval is pinned (model-routing carve-out): no fallback chain
+    const pr = new PurposeRouter(DEFAULT_MODELS, registry, router, new Set(['eval']));
+    const dyn = pr.dynamicProviderFor('eval');
+    await expect(dyn.complete({ messages: [{ role: 'user', content: 'hi' }] })).rejects.toThrow();
+    expect(cloud.complete).not.toHaveBeenCalled();
+  });
+
+  it('logs each fallback hop when a logger is supplied', async () => {
+    const warn = vi.fn();
+    const { registry, router } = harnessFrom([failingProvider('localp40'), mockProvider('cloud')]);
+    const pr = new PurposeRouter(DEFAULT_MODELS, registry, router, new Set(), () => undefined, { warn });
+    const dyn = pr.dynamicProviderFor('cognition');
+    await dyn.complete({ messages: [{ role: 'user', content: 'hi' }] });
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ failed: 'localp40', fallback: 'cloud' }),
+      expect.stringContaining('falling back'),
+    );
   });
 });

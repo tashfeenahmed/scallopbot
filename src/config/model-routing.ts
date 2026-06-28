@@ -18,7 +18,7 @@ import type { LLMProvider } from '../providers/types.js';
 import type { ProviderRegistry } from '../providers/registry.js';
 import type { Router } from '../routing/router.js';
 import type { ModelTier } from '../routing/complexity.js';
-import { DynamicProvider } from '../providers/dynamic-provider.js';
+import { DynamicProvider, type FallbackLogger } from '../providers/dynamic-provider.js';
 
 /** A resolvable model target for a single purpose. */
 export type ModelRef =
@@ -125,6 +125,11 @@ export class PurposeRouter {
      * a live switch needs no restart.
      */
     private readonly getRuntimeModel: () => string | undefined = () => undefined,
+    /**
+     * Optional structured logger; used only to record background-purpose
+     * provider fallbacks (local → cloud cascade) for observability.
+     */
+    private readonly logger?: FallbackLogger,
   ) {}
 
   /**
@@ -153,12 +158,41 @@ export class PurposeRouter {
   }
 
   /**
+   * The ordered cascade a non-pinned purpose should attempt: its resolved
+   * primary first, then the remaining PROVIDER_ORDER providers as fallbacks
+   * (deduped, available only). Lets a background job pinned at a local model
+   * (e.g. the Dell P40) fail over to the cloud chain when the box is down,
+   * mirroring the foreground chat cascade. Re-resolved per call so a runtime
+   * `/model` switch is honored live.
+   */
+  async providersFor(purpose: ModelPurpose): Promise<LLMProvider[]> {
+    const chain: LLMProvider[] = [];
+    const primary = await this.providerFor(purpose);
+    if (primary) chain.push(primary);
+    for (const name of this.router.getProviderOrder()) {
+      const p = this.registry.getProvider(name);
+      if (p && p.isAvailable() && !chain.some((c) => c.name === p.name)) {
+        chain.push(p);
+      }
+    }
+    return chain;
+  }
+
+  /**
    * A provider that re-resolves this purpose on every call, so a runtime model
    * switch (`/model`) takes effect without a restart. Use for long-lived
    * background consumers that would otherwise capture a provider at startup.
+   *
+   * Non-pinned purposes additionally get the PROVIDER_ORDER cascade, so a local
+   * primary (e.g. P40 Ornith) transparently fails over to cloud on an outage.
+   * Pinned purposes (eval) keep single-provider behavior — they must not drift
+   * off their configured model.
    */
   dynamicProviderFor(purpose: ModelPurpose): LLMProvider {
-    return new DynamicProvider(() => this.providerFor(purpose), purpose);
+    const chain = this.pinnedPurposes.has(purpose)
+      ? undefined
+      : () => this.providersFor(purpose);
+    return new DynamicProvider(() => this.providerFor(purpose), purpose, chain, this.logger);
   }
 
   private async resolve(ref: ModelRef): Promise<LLMProvider | undefined> {
