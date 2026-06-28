@@ -150,6 +150,14 @@ export interface LLMProvider {
   name: string;
 
   /**
+   * The configured model id this provider sends upstream (e.g. 'ornith',
+   * 'qwen/qwen3.6-plus'). Surfaced for identity/diagnostics — lets the agent
+   * tell the user which model it actually runs on. Optional: wrappers like
+   * DynamicProvider have no single model.
+   */
+  readonly model?: string;
+
+  /**
    * Create a completion (non-streaming)
    */
   complete(request: CompletionRequest): Promise<CompletionResponse>;

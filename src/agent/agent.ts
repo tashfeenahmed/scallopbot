@@ -27,6 +27,7 @@ import type { SubAgentExecutor } from '../subagent/executor.js';
 import type { BoardService } from '../board/board-service.js';
 import type { InterruptQueue } from './interrupt-queue.js';
 import { type ThinkLevel, booleanToThinkLevel, mapThinkLevelToProvider, pickFallbackLevel } from './thinking.js';
+import { primaryChatProvider, modelIdentityPrompt } from './identity.js';
 import { ToolLoopDetector, type LoopDetection } from './tool-loop-detector.js';
 import { triggerHook, type HookEvent } from '../hooks/hooks.js';
 import { applyToolPolicyPipeline, type ToolPolicy } from '../skills/tool-policy.js';
@@ -1092,6 +1093,12 @@ Only install skills when the user asks, or when you determine a skill would help
     const now = new Date();
     const tzOptions = { timeZone: userTimezone };
     dynamic += `\n\nCurrent date and time: ${now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', ...tzOptions })} at ${now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true, ...tzOptions })}`;
+
+    // Model self-identity: tell the bot which model it actually runs on, derived
+    // from the active chat provider, so it answers "which model are you?"
+    // truthfully instead of confabulating a name from memory context. Dynamic so
+    // it tracks the live /model switch + cascade without busting the stable cache.
+    dynamic += modelIdentityPrompt(primaryChatProvider(this.router, this.provider));
 
     if (memoryResult.dynamicContext) {
       dynamic += memoryResult.dynamicContext;
