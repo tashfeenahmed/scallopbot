@@ -11,6 +11,7 @@ import { storeFusedMemory } from './gardener-fusion-storage.js';
 import { dream } from './dream.js';
 import type { DreamResult } from './dream.js';
 import { reflect } from './reflection.js';
+import { triggerHook } from '../hooks/hooks.js';
 
 // ============ Step functions ============
 
@@ -25,6 +26,14 @@ export async function runDreamCycle(ctx: GardenerContext): Promise<void> {
     let totalFused = 0;
     let totalMerged = 0;
     let totalDiscoveries = 0;
+    const storedFusions: Array<{
+      memoryId: string;
+      sourceMemoryIds: string[];
+      category: string;
+      importance: number;
+      confidence: number;
+      prominence: number;
+    }> = [];
 
     // Get memories with NREM's wider prominence window [0.05, 0.8)
     const allMemories = ctx.db.getMemoriesByUser(userId, {
@@ -50,7 +59,7 @@ export async function runDreamCycle(ctx: GardenerContext): Promise<void> {
       if (dreamResult.nrem) {
         for (const result of dreamResult.nrem.fusionResults) {
           try {
-            await storeFusedMemory({
+            const stored = await storeFusedMemory({
               scallopStore: ctx.scallopStore,
               db: ctx.db,
               userId,
@@ -64,6 +73,14 @@ export async function runDreamCycle(ctx: GardenerContext): Promise<void> {
               extraMetadata: { nrem: true },
             }, allMemories);
 
+            storedFusions.push({
+              memoryId: stored.fusedMemory.id,
+              sourceMemoryIds: result.sourceMemoryIds,
+              category: result.category,
+              importance: result.importance,
+              confidence: result.confidence,
+              prominence: stored.fusedProminence,
+            });
             totalFused++;
             totalMerged += result.sourceMemoryIds.length;
           } catch (err) {
@@ -78,6 +95,24 @@ export async function runDreamCycle(ctx: GardenerContext): Promise<void> {
             memoriesConsolidated: dreamResult.nrem.fusionResults.length,
             failures: dreamResult.nrem.failures,
           }, 'NREM consolidation complete for user');
+
+          triggerHook({
+            type: 'memory',
+            action: 'consolidation_complete',
+            sessionId: `background:${userId}`,
+            context: {
+              userId,
+              phase: 'nrem',
+              clustersProcessed: dreamResult.nrem.clustersProcessed,
+              memoriesConsolidated: storedFusions.length,
+              sourceMemoriesMerged: totalMerged,
+              failures: dreamResult.nrem.failures,
+              memoryDiff: {
+                created: storedFusions,
+              },
+            },
+            timestamp: new Date(),
+          }).catch(() => {});
         }
       }
 
@@ -137,6 +172,12 @@ export async function runSelfReflection(ctx: GardenerContext): Promise<void> {
     const userId = DEFAULT_USER_ID;
     let totalInsights = 0;
     let soulUpdated = false;
+    const storedInsights: Array<{
+      memoryId: string;
+      content: string;
+      topics: string[];
+      sourceSessionIds: string[];
+    }> = [];
 
     const allSummaries = ctx.db.getSessionSummariesByUser(userId, 50);
     const oneDayAgo = Date.now() - 24 * 60 * 60 * 1000;
@@ -179,6 +220,12 @@ export async function runSelfReflection(ctx: GardenerContext): Promise<void> {
           detectRelations: false,
         });
         ctx.db.updateMemory(mem.id, { memoryType: 'derived' });
+        storedInsights.push({
+          memoryId: mem.id,
+          content: insight.content,
+          topics: insight.topics,
+          sourceSessionIds: insight.sourceSessionIds,
+        });
         totalInsights++;
       } catch (err) {
         ctx.logger.warn({ error: (err as Error).message, userId }, 'Reflection insight storage failed');
@@ -198,10 +245,25 @@ export async function runSelfReflection(ctx: GardenerContext): Promise<void> {
 
     ctx.logger.info({
       userId,
-      insightsGenerated: result.insights.length,
-      soulUpdated: result.updatedSoul !== null,
+      insightsGenerated: totalInsights,
+      soulUpdated,
       sessionsReflected: todaySummaries.length,
     }, 'Self-reflection complete');
+
+    triggerHook({
+      type: 'memory',
+      action: 'reflection_output',
+      sessionId: `background:${userId}`,
+      context: {
+        userId,
+        insightsGenerated: result.insights.length,
+        insightsStored: totalInsights,
+        soulUpdated,
+        sessionsReflected: todaySummaries.length,
+        insights: storedInsights,
+      },
+      timestamp: new Date(),
+    }).catch(() => {});
 
   } catch (err) {
     ctx.logger.warn({ error: (err as Error).message }, 'Self-reflection failed');

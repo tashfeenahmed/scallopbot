@@ -45,6 +45,8 @@ import { BoardService } from '../board/board-service.js';
 import { SubAgentRegistry, SubAgentExecutor, AnnounceQueue } from '../subagent/index.js';
 import { InterruptQueue } from '../agent/interrupt-queue.js';
 import { setTraceSink } from '../routing/trace-tap.js';
+import { setHookLogger } from '../hooks/hooks.js';
+import { registerWebhookEventRelay } from '../hooks/webhook-relay.js';
 
 export interface GatewayOptions {
   config: Config;
@@ -93,12 +95,35 @@ export class Gateway {
     this.logger = options.logger;
   }
 
+  private configureLifecycleEventRelay(): void {
+    setHookLogger((msg, error) => {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      this.logger.warn({ error: errorMessage }, msg);
+    });
+
+    const relay = this.config.eventRelay;
+    if (!relay?.webhookUrl) return;
+
+    const registeredHandlers = registerWebhookEventRelay({
+      url: relay.webhookUrl,
+      agentId: relay.agentId,
+      secret: relay.webhookSecret,
+      timeoutMs: relay.webhookTimeoutMs,
+    });
+
+    this.logger.info(
+      { agentId: relay.agentId, handlers: registeredHandlers },
+      'Lifecycle event webhook relay enabled'
+    );
+  }
+
   async initialize(): Promise<void> {
     if (this.isInitialized) {
       return;
     }
 
     this.logger.info('Initializing gateway...');
+    this.configureLifecycleEventRelay();
 
     // Initialize provider registry
     this.providerRegistry = new ProviderRegistry();

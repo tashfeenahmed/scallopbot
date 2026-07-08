@@ -180,6 +180,21 @@ Custom providers behave like built-ins everywhere: they can be pinned per purpos
 `/model` command. With the toggle off, `CUSTOM_PROVIDER_*` entries are ignored (a
 warning is logged), so the default single-model setup stays untouched.
 
+### Lifecycle Event Relay (optional)
+
+Set `SCALLOPBOT_EVENT_WEBHOOK_URL` to emit key lifecycle events to an external
+orchestrator:
+
+```bash
+SCALLOPBOT_EVENT_WEBHOOK_URL=https://orchestrator.example.com/scallopbot/events
+SCALLOPBOT_EVENT_WEBHOOK_SECRET=replace-with-shared-secret
+SCALLOPBOT_AGENT_ID=scallopbot
+```
+
+The webhook receives POST payloads for `memory.consolidation_complete`,
+`memory.reflection_output`, and `session.affect_change`. If a secret is set, it is
+sent as a bearer token.
+
 ## Bundled Skills
 
 16 skills ship out of the box:

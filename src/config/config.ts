@@ -152,6 +152,13 @@ const costSchema = z.object({
   customPricing: z.record(z.string(), modelPricingSchema).default({}),
 });
 
+const eventRelaySchema = z.object({
+  webhookUrl: z.string().url().optional(),
+  webhookSecret: z.string().optional(),
+  webhookTimeoutMs: z.number().int().positive().default(5000),
+  agentId: z.string().min(1).default('scallopbot'),
+});
+
 // Context management configuration schema (M2: Sliding Window)
 const contextSchema = z.object({
   hotWindowSize: z.number().int().positive().default(200),
@@ -335,6 +342,7 @@ export const configSchema = z.object({
   logging: loggingSchema.default({ level: 'info' }),
   routing: routingSchema.default({ providerOrder: ['anthropic', 'openai', 'groq', 'ollama'], enableComplexityAnalysis: true }),
   cost: costSchema.default({ warningThreshold: 0.75, customPricing: {} }),
+  eventRelay: eventRelaySchema.default({ webhookTimeoutMs: 5000, agentId: 'scallopbot' }),
   context: contextSchema.default({ hotWindowSize: 200, maxContextTokens: 128000, compressionThreshold: 0.7, maxToolOutputBytes: 30000 }),
   memory: memorySchema.default({ filePath: 'memories.jsonl', persist: true, dbPath: 'memories.db', mmrEnabled: false, mmrLambda: 0.7 }),
   tools: toolPolicySchema.default({}),
@@ -363,6 +371,7 @@ export type AgentConfig = z.infer<typeof agentSchema>;
 export type LoggingConfig = z.infer<typeof loggingSchema>;
 export type RoutingConfig = z.infer<typeof routingSchema>;
 export type CostConfig = z.infer<typeof costSchema>;
+export type EventRelayConfig = z.infer<typeof eventRelaySchema>;
 export type ContextConfig = z.infer<typeof contextSchema>;
 export type MemoryConfig = z.infer<typeof memorySchema>;
 export type GatewayConfig = z.infer<typeof gatewaySchema>;
@@ -569,6 +578,12 @@ export function loadConfig(): Config {
         ? parseFloat(process.env.BUDGET_WARNING_THRESHOLD) || 0.75
         : 0.75,
       customPricing: parseCostModelPricingEnv(),
+    },
+    eventRelay: {
+      webhookUrl: process.env.SCALLOPBOT_EVENT_WEBHOOK_URL || undefined,
+      webhookSecret: process.env.SCALLOPBOT_EVENT_WEBHOOK_SECRET || undefined,
+      webhookTimeoutMs: envInt('SCALLOPBOT_EVENT_WEBHOOK_TIMEOUT_MS', 5000),
+      agentId: process.env.SCALLOPBOT_AGENT_ID || 'scallopbot',
     },
     context: {
       hotWindowSize: process.env.HOT_WINDOW_SIZE ? parseInt(process.env.HOT_WINDOW_SIZE, 10) : 200,

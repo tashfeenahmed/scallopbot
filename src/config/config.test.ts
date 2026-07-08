@@ -227,6 +227,25 @@ describe('Config Schema', () => {
       });
     });
 
+    it('should parse lifecycle event relay settings', async () => {
+      process.env.ANTHROPIC_API_KEY = 'sk-ant-env-key';
+      process.env.TELEGRAM_BOT_TOKEN = 'env-bot-token';
+      process.env.SCALLOPBOT_EVENT_WEBHOOK_URL = 'https://example.com/scallopbot/events';
+      process.env.SCALLOPBOT_EVENT_WEBHOOK_SECRET = 'shared-secret';
+      process.env.SCALLOPBOT_EVENT_WEBHOOK_TIMEOUT_MS = '2500';
+      process.env.SCALLOPBOT_AGENT_ID = 'tashbot';
+
+      const { loadConfig } = await import('./config.js');
+      const config = loadConfig();
+
+      expect(config.eventRelay).toEqual({
+        webhookUrl: 'https://example.com/scallopbot/events',
+        webhookSecret: 'shared-secret',
+        webhookTimeoutMs: 2500,
+        agentId: 'tashbot',
+      });
+    });
+
     describe('multi-model mode (CUSTOM_PROVIDER_*)', () => {
       beforeEach(() => {
         process.env.ANTHROPIC_API_KEY = 'sk-ant-env-key';

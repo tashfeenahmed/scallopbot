@@ -400,8 +400,16 @@ export class Agent {
         const profileManager = this.scallopStore.getProfileManager();
         const existingPatterns = profileManager.getBehavioralPatterns(resolvedUserId);
         const currentState = existingPatterns?.affectState ?? createInitialAffectState();
+        const previousSmoothed = existingPatterns?.smoothedAffect
+          ?? (currentState.lastUpdateMs > 0 ? getSmoothedAffect(currentState) : null);
         const newState = updateAffectEMA(currentState, rawAffect, Date.now());
         const smoothed = getSmoothedAffect(newState);
+        const stateChanged =
+          newState.fastValence !== currentState.fastValence ||
+          newState.slowValence !== currentState.slowValence ||
+          newState.fastArousal !== currentState.fastArousal ||
+          newState.slowArousal !== currentState.slowArousal ||
+          newState.lastUpdateMs !== currentState.lastUpdateMs;
 
         // Persist affect EMA state and smoothed affect
         profileManager.updateBehavioralPatterns(resolvedUserId, {
@@ -416,6 +424,36 @@ export class Agent {
           { emotion: smoothed.emotion, valence: smoothed.valence.toFixed(2), arousal: smoothed.arousal.toFixed(2), goalSignal: smoothed.goalSignal },
           'Affect classified'
         );
+
+        if (stateChanged) {
+          triggerHook({
+            type: 'session',
+            action: 'affect_change',
+            sessionId,
+            context: {
+              userId: resolvedUserId,
+              fromState: previousSmoothed ? {
+                emotion: previousSmoothed.emotion,
+                valence: Number(previousSmoothed.valence.toFixed(3)),
+                arousal: Number(previousSmoothed.arousal.toFixed(3)),
+                goalSignal: previousSmoothed.goalSignal,
+              } : null,
+              toState: {
+                emotion: smoothed.emotion,
+                valence: Number(smoothed.valence.toFixed(3)),
+                arousal: Number(smoothed.arousal.toFixed(3)),
+                goalSignal: smoothed.goalSignal,
+              },
+              rawAffect: {
+                emotion: rawAffect.emotion,
+                valence: Number(rawAffect.valence.toFixed(3)),
+                arousal: Number(rawAffect.arousal.toFixed(3)),
+                confidence: Number(rawAffect.confidence.toFixed(3)),
+              },
+            },
+            timestamp: new Date(),
+          }).catch(() => {});
+        }
       } catch (error) {
         this.logger.warn({ error: (error as Error).message }, 'Affect classification failed');
       }
