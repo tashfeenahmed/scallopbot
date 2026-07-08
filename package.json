@@ -4,6 +4,9 @@
   "description": "An economical and smart bot architecture",
   "main": "dist/index.js",
   "type": "module",
+  "engines": {
+    "node": ">=24.0.0"
+  },
   "scripts": {
     "clean": "rm -rf dist",
     "build:web": "cd web && npm install && npm run build",

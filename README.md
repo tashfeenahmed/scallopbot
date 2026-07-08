@@ -133,7 +133,7 @@ npm run build
 node dist/cli.js start
 ```
 
-Requires Node.js 22+.
+Requires Node.js 24+.
 
 ## Providers
 
@@ -160,6 +160,12 @@ own name:
 MULTI_MODEL_ENABLED=true
 CUSTOM_PROVIDER_MY_TOOLS=http://localhost:11434/v1|my-tools-model
 CUSTOM_PROVIDER_MY_MEMORY=http://localhost:11434/v1|my-memory-model
+
+# Optional exact token limits for custom/local models
+MODEL_TOKEN_LIMITS='{"my_memory":{"contextWindowTokens":262144,"maxOutputTokens":32768}}'
+
+# Optional pricing for paid custom endpoints; local/free custom endpoints stay $0
+COST_MODEL_PRICING='{"my_tools/my-tools-model":{"inputPerMillion":0.3,"outputPerMillion":1.8}}'
 
 # Pin background purposes to the memory model...
 MODEL_FACT_EXTRACTION=my_memory
@@ -334,7 +340,7 @@ Actionable reminders automatically execute when they contain action words (check
 ```bash
 git clone https://github.com/tashfeenahmed/scallopbot.git /opt/scallopbot
 cd /opt/scallopbot
-bash scripts/server-install.sh    # Installs Node 22, PM2, voice deps, Ollama
+bash scripts/server-install.sh    # Installs Node 24, PM2, voice deps, Ollama
 cp .env.example .env && nano .env
 pm2 start ecosystem.config.cjs --env production && pm2 save
 ```
@@ -343,7 +349,7 @@ The install script is idempotent and sets up:
 
 | Component | Purpose |
 |-----------|---------|
-| Node.js 22 + PM2 | Runtime and process management |
+| Node.js 24 + PM2 | Runtime and process management |
 | Python venv (kokoro-onnx, faster-whisper) | Local voice -- zero API cost TTS/STT |
 | Ollama + nomic-embed-text | Local embeddings for semantic memory search |
 | ffmpeg + sox | Audio format conversion |

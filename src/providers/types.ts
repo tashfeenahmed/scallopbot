@@ -103,13 +103,16 @@ export interface CompletionRequest {
   /**
    * Fine-tune trace tag (see src/routing/trace-tap.ts). Set at the call site
    * to record this completion in llm_traces: 'fact_extract' | 'memory_manage'
-   * | 'relation_classify' | 'rerank' | 'session_summary' | 'tool_call'.
-   * Requests with tools are implicitly tagged 'tool_call'. Metadata only —
+   * | 'relation_classify' | 'rerank' | 'session_summary'
+   * | 'compaction_summary' | 'tool_call'. Requests with tools are
+   * implicitly tagged 'tool_call'. Metadata only —
    * never sent upstream.
    */
   purpose?: string;
   /** Session/run id attached to the trace row (metadata only). */
   traceSessionId?: string;
+  /** Extra local diagnostics for trace rows. Metadata only; never sent upstream. */
+  traceMetadata?: Record<string, unknown>;
 }
 
 // Token usage tracking
@@ -150,7 +153,7 @@ export interface LLMProvider {
   name: string;
 
   /**
-   * The configured model id this provider sends upstream (e.g. 'ornith',
+   * The configured model id this provider sends upstream (e.g. 'my-local-model',
    * 'qwen/qwen3.6-plus'). Surfaced for identity/diagnostics — lets the agent
    * tell the user which model it actually runs on. Optional: wrappers like
    * DynamicProvider have no single model.

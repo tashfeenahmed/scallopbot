@@ -7,7 +7,9 @@
  * - EXTENDS: Adds information about an existing entity/relationship
  */
 
-import type { LLMProvider, CompletionRequest, ContentBlock } from '../providers/types.js';
+import type { LLMProvider, CompletionRequest } from '../providers/types.js';
+import { completionBudgetForPurpose } from '../routing/model-limits.js';
+import { extractResponseText } from '../proactive/proactive-utils.js';
 
 /**
  * A fact to be classified
@@ -37,6 +39,9 @@ export interface ClassificationResult {
   confidence: number;
   reason: string;
 }
+
+const MAX_EXISTING_FACTS_IN_PROMPT = 40;
+const MAX_FACT_CONTENT_CHARS = 320;
 
 /**
  * Prompt for relationship classification
@@ -117,12 +122,12 @@ export class RelationshipClassifier {
       const request: CompletionRequest = {
         messages: [{ role: 'user', content: prompt }],
         temperature: 0.1, // Low temperature for consistent classification
-        maxTokens: 200,
+        maxTokens: completionBudgetForPurpose(this.provider, 'relation_classify', 768),
         purpose: 'relation_classify',
       };
 
       const response = await this.provider.complete(request);
-      const content = this.extractTextContent(response.content);
+      const content = extractResponseText(response.content);
       return this.parseClassificationResponse(content);
     } catch (error) {
       // Default to NEW on error
@@ -173,13 +178,27 @@ export class RelationshipClassifier {
       const request: CompletionRequest = {
         messages: [{ role: 'user', content: prompt }],
         temperature: 0.1,
-        maxTokens: 100 + newFacts.length * 100, // Scale tokens with batch size
+        maxTokens: completionBudgetForPurpose(
+          this.provider,
+          'relation_classify',
+          Math.max(1024, 320 + newFacts.length * 180)
+        ),
         purpose: 'relation_classify',
       };
 
       const response = await this.provider.complete(request);
-      const content = this.extractTextContent(response.content);
-      return this.parseBatchClassificationResponse(content, newFacts.length);
+      const content = extractResponseText(response.content);
+      const parsed = this.parseBatchClassificationResponse(content, newFacts.length);
+
+      const parseFailed = parsed.some((r) => r.reason === 'Failed to parse batch response');
+      if (response.stopReason === 'max_tokens' && parseFailed && newFacts.length > 1) {
+        const midpoint = Math.ceil(newFacts.length / 2);
+        const first = await this.classifyBatch(newFacts.slice(0, midpoint), existingFacts);
+        const second = await this.classifyBatch(newFacts.slice(midpoint), existingFacts);
+        return [...first, ...second];
+      }
+
+      return parsed;
     } catch (error) {
       // Default all to NEW on error
       return newFacts.map(() => ({
@@ -197,8 +216,8 @@ export class RelationshipClassifier {
     newFact: FactToClassify,
     existingFacts: ExistingFact[]
   ): string {
-    const existingFactsStr = existingFacts
-      .map((f) => `- [${f.id}] (${f.subject}, ${f.category}): "${f.content}"`)
+    const existingFactsStr = this.selectExistingFacts([newFact], existingFacts)
+      .map((f) => `- [${f.id}] (${f.subject}, ${f.category}): "${this.trimFactText(f.content)}"`)
       .join('\n');
 
     return `${CLASSIFICATION_PROMPT}
@@ -209,7 +228,7 @@ ${existingFactsStr}
 NEW FACT:
 Subject: ${newFact.subject}
 Category: ${newFact.category}
-Content: "${newFact.content}"
+Content: "${this.trimFactText(newFact.content)}"
 
 Classify this new fact:`;
   }
@@ -221,12 +240,12 @@ Classify this new fact:`;
     newFacts: FactToClassify[],
     existingFacts: ExistingFact[]
   ): string {
-    const existingFactsStr = existingFacts
-      .map((f) => `- [${f.id}] (${f.subject}, ${f.category}): "${f.content}"`)
+    const existingFactsStr = this.selectExistingFacts(newFacts, existingFacts)
+      .map((f) => `- [${f.id}] (${f.subject}, ${f.category}): "${this.trimFactText(f.content)}"`)
       .join('\n');
 
     const newFactsStr = newFacts
-      .map((f, i) => `${i + 1}. Subject: ${f.subject}, Category: ${f.category}, Content: "${f.content}"`)
+      .map((f, i) => `${i + 1}. Subject: ${f.subject}, Category: ${f.category}, Content: "${this.trimFactText(f.content)}"`)
       .join('\n');
 
     return `${CLASSIFICATION_PROMPT}
@@ -246,16 +265,22 @@ Classify ALL new facts. Respond with a JSON array:
 }`;
   }
 
-  /**
-   * Extract text content from LLM response (handles ContentBlock[])
-   */
-  private extractTextContent(content: ContentBlock[] | string): string {
-    if (typeof content === 'string') {
-      return content;
-    }
-    return content
-      .map((block) => ('text' in block ? block.text : ''))
-      .join('');
+  private trimFactText(content: string): string {
+    const compact = content.replace(/\s+/g, ' ').trim();
+    if (compact.length <= MAX_FACT_CONTENT_CHARS) return compact;
+    return compact.slice(0, MAX_FACT_CONTENT_CHARS) + '...';
+  }
+
+  private selectExistingFacts(newFacts: FactToClassify[], existingFacts: ExistingFact[]): ExistingFact[] {
+    const subjects = new Set(newFacts.map((f) => f.subject.toLowerCase()));
+    const categories = new Set(newFacts.map((f) => f.category.toLowerCase()));
+    return [...existingFacts]
+      .sort((a, b) => {
+        const aScore = (subjects.has(a.subject.toLowerCase()) ? 2 : 0) + (categories.has(a.category.toLowerCase()) ? 1 : 0);
+        const bScore = (subjects.has(b.subject.toLowerCase()) ? 2 : 0) + (categories.has(b.category.toLowerCase()) ? 1 : 0);
+        return bScore - aScore;
+      })
+      .slice(0, MAX_EXISTING_FACTS_IN_PROMPT);
   }
 
   /**

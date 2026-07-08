@@ -29,11 +29,15 @@ describe('wrapProviderWithTraceTap', () => {
 
   it('records tagged calls with parsed_ok=1 for valid JSON', async () => {
     const p = wrapProviderWithTraceTap(makeProvider({}));
-    await p.complete({ messages: [{ role: 'user', content: 'hi' }], purpose: 'fact_extract' });
+    await p.complete({ messages: [{ role: 'user', content: 'hi' }], purpose: 'fact_extract', maxTokens: 777 });
     expect(rows).toHaveLength(1);
     expect(rows[0].purpose).toBe('fact_extract');
     expect(rows[0].parsedOk).toBe(1);
     expect(rows[0].provider).toBe('fake');
+    expect(rows[0].stopReason).toBe('end_turn');
+    expect(rows[0].requestMaxTokens).toBe(777);
+    expect(rows[0].modelContextWindowTokens).toBeGreaterThan(0);
+    expect(rows[0].modelMaxOutputTokens).toBeGreaterThan(0);
   });
 
   it('records parsed_ok=0 when a JSON purpose returns unparseable text', async () => {

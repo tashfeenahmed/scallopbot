@@ -7,6 +7,7 @@
  */
 
 import type { LLMProvider, Message, ContentBlock } from '../providers/types.js';
+import { completionBudgetForPurpose } from './model-limits.js';
 
 const BASE_CHUNK_RATIO = 0.4;
 const MIN_CHUNK_RATIO = 0.15;
@@ -114,10 +115,12 @@ export async function summarizeChunk(
     : `Conversation chunk:\n${conversationText}\n\nProvide a concise summary that preserves: decisions made, open questions, TODO items, constraints, key facts, and tool results. Be brief (2-4 sentences).`;
 
   try {
+    const maxTokens = completionBudgetForPurpose(provider, 'compaction_summary', 1024);
     const response = await provider.complete({
       messages: [{ role: 'user', content: prompt }],
       system: 'You are a conversation summarizer. Produce concise, factual summaries that preserve actionable context. Never add information not in the original.',
-      maxTokens: 512,
+      maxTokens,
+      purpose: 'compaction_summary',
     });
 
     const text = response.content

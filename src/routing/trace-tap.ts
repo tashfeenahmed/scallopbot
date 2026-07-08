@@ -15,6 +15,7 @@
 
 import type { LLMProvider, CompletionRequest, CompletionResponse } from '../providers/types.js';
 import { extractJSON, extractResponseText } from '../proactive/proactive-utils.js';
+import { getModelTokenLimits } from './model-limits.js';
 
 /** Purposes whose responses are expected to be parseable JSON. */
 const JSON_PURPOSES = new Set([
@@ -38,6 +39,10 @@ export interface LlmTraceRow {
   parsedOk: number;
   sessionId: string | null;
   latencyMs: number;
+  stopReason: CompletionResponse['stopReason'];
+  requestMaxTokens: number | null;
+  modelContextWindowTokens: number;
+  modelMaxOutputTokens: number;
 }
 
 export type TraceSink = (row: LlmTraceRow) => void;
@@ -109,16 +114,25 @@ export function wrapProviderWithTraceTap(provider: LLMProvider): LLMProvider {
         const started = Date.now();
         const response = await target.complete(request);
         try {
+          const model = response.model || (target as { model?: string }).model || target.name;
+          const limits = getModelTokenLimits({
+            name: target.name,
+            model,
+          });
           activeSink({
             ts: started,
             purpose,
-            model: response.model || (target as { model?: string }).model || target.name,
+            model,
             provider: target.name,
             prompt: truncate(serializePrompt(request)),
             response: truncate(serializeResponse(response)),
             parsedOk: computeParsedOk(purpose, response),
             sessionId: request.traceSessionId ?? null,
             latencyMs: Date.now() - started,
+            stopReason: response.stopReason,
+            requestMaxTokens: request.maxTokens ?? request.thinkingBudgetTokens ?? null,
+            modelContextWindowTokens: limits.contextWindowTokens,
+            modelMaxOutputTokens: limits.maxOutputTokens,
           });
         } catch {
           // Tracing must never break the call path.

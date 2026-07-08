@@ -9,6 +9,8 @@
  */
 
 import type { LLMProvider, CompletionRequest } from '../providers/types.js';
+import { completionBudgetForPurpose } from '../routing/model-limits.js';
+import { extractResponseText } from '../proactive/proactive-utils.js';
 
 /** Options for re-ranking */
 export interface RerankOptions {
@@ -49,6 +51,7 @@ const SCORE_THRESHOLD = 0.15;
 
 /** Default maximum candidates to send to the LLM */
 const DEFAULT_MAX_CANDIDATES = 20;
+const DEFAULT_CANDIDATE_CONTENT_CHARS = 320;
 
 /**
  * Re-rank memory search results using an LLM to score relevance.
@@ -79,16 +82,32 @@ export async function rerankResults(
   // Attempt LLM re-ranking
   let llmScores: Map<number, number> | null = null;
   try {
-    const request = buildRerankPrompt(query, truncated);
+    const maxTokens = completionBudgetForPurpose(
+      provider,
+      'rerank',
+      Math.max(1024, truncated.length * 48 + 256)
+    );
+    const request = buildRerankPrompt(query, truncated, {
+      maxTokens,
+      maxContentChars: DEFAULT_CANDIDATE_CONTENT_CHARS,
+    });
     request.purpose = 'rerank';
     const response = await provider.complete(request);
 
-    // Extract text from ContentBlock[] response (same pattern as fact-extractor.ts)
-    const responseText = Array.isArray(response.content)
-      ? response.content.map(block => 'text' in block ? block.text : '').join('')
-      : String(response.content);
-
+    const responseText = extractResponseText(response.content);
     llmScores = parseRerankResponse(responseText);
+
+    if (llmScores === null && response.stopReason === 'max_tokens' && truncated.length > 5) {
+      const retryCandidates = truncated.slice(0, Math.ceil(truncated.length / 2));
+      const retryMaxTokens = completionBudgetForPurpose(provider, 'rerank', maxTokens * 2);
+      const retryRequest = buildRerankPrompt(query, retryCandidates, {
+        maxTokens: retryMaxTokens,
+        maxContentChars: Math.floor(DEFAULT_CANDIDATE_CONTENT_CHARS / 2),
+      });
+      retryRequest.purpose = 'rerank';
+      const retryResponse = await provider.complete(retryRequest);
+      llmScores = parseRerankResponse(extractResponseText(retryResponse.content));
+    }
   } catch {
     // LLM call failed — fall through to graceful fallback
   }
@@ -135,6 +154,7 @@ export async function rerankResults(
 export function buildRerankPrompt(
   query: string,
   candidates: RerankCandidate[],
+  options?: { maxTokens?: number; maxContentChars?: number },
 ): CompletionRequest {
   const system = `You are a relevance scoring system. Score each memory's relevance to the user's query on a 0.0 to 1.0 scale.
 
@@ -148,7 +168,7 @@ Rules:
 Respond with a JSON array only: [{ "index": number, "score": number }, ...]`;
 
   const candidateLines = candidates
-    .map((c, i) => `${i + 1}. "${c.content}"`)
+    .map((c, i) => `${i + 1}. "${truncateCandidateContent(c.content, options?.maxContentChars)}"`)
     .join('\n');
 
   const userMessage = `Query: "${query}"
@@ -162,8 +182,14 @@ Score each memory's relevance to the query (JSON array only):`;
     messages: [{ role: 'user', content: userMessage }],
     system,
     temperature: 0.1,
-    maxTokens: 500,
+    maxTokens: options?.maxTokens ?? 1024,
   };
+}
+
+function truncateCandidateContent(content: string, maxChars = DEFAULT_CANDIDATE_CONTENT_CHARS): string {
+  const compact = content.replace(/\s+/g, ' ').trim();
+  if (compact.length <= maxChars) return compact;
+  return compact.slice(0, maxChars) + '...';
 }
 
 /**

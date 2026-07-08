@@ -27,6 +27,28 @@ function envFloat(name: string, fallback: number): number {
   return Number.isFinite(n) ? n : fallback;
 }
 
+const modelPricingSchema = z.object({
+  inputPerMillion: z.number().min(0),
+  outputPerMillion: z.number().min(0),
+});
+
+function parseCostModelPricingEnv(): Record<string, z.infer<typeof modelPricingSchema>> {
+  const raw = process.env.COST_MODEL_PRICING;
+  if (!raw) return {};
+
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const result: Record<string, z.infer<typeof modelPricingSchema>> = {};
+    for (const [key, value] of Object.entries(parsed)) {
+      result[key] = modelPricingSchema.parse(value);
+    }
+    return result;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`COST_MODEL_PRICING must be JSON like {"provider/model":{"inputPerMillion":1,"outputPerMillion":2}}: ${message}`);
+  }
+}
+
 // Provider configuration schemas
 const anthropicProviderSchema = z.object({
   apiKey: z.string().default(''),
@@ -127,6 +149,7 @@ const costSchema = z.object({
   dailyBudget: z.number().positive().optional(),
   monthlyBudget: z.number().positive().optional(),
   warningThreshold: z.number().min(0).max(1).default(0.75),
+  customPricing: z.record(z.string(), modelPricingSchema).default({}),
 });
 
 // Context management configuration schema (M2: Sliding Window)
@@ -311,7 +334,7 @@ export const configSchema = z.object({
   agent: agentSchema,
   logging: loggingSchema.default({ level: 'info' }),
   routing: routingSchema.default({ providerOrder: ['anthropic', 'openai', 'groq', 'ollama'], enableComplexityAnalysis: true }),
-  cost: costSchema.default({ warningThreshold: 0.75 }),
+  cost: costSchema.default({ warningThreshold: 0.75, customPricing: {} }),
   context: contextSchema.default({ hotWindowSize: 200, maxContextTokens: 128000, compressionThreshold: 0.7, maxToolOutputBytes: 30000 }),
   memory: memorySchema.default({ filePath: 'memories.jsonl', persist: true, dbPath: 'memories.db', mmrEnabled: false, mmrLambda: 0.7 }),
   tools: toolPolicySchema.default({}),
@@ -545,6 +568,7 @@ export function loadConfig(): Config {
       warningThreshold: process.env.BUDGET_WARNING_THRESHOLD
         ? parseFloat(process.env.BUDGET_WARNING_THRESHOLD) || 0.75
         : 0.75,
+      customPricing: parseCostModelPricingEnv(),
     },
     context: {
       hotWindowSize: process.env.HOT_WINDOW_SIZE ? parseInt(process.env.HOT_WINDOW_SIZE, 10) : 200,

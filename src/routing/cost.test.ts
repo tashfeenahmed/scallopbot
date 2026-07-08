@@ -107,6 +107,32 @@ describe('CostTracker', () => {
       const orSonnet45 = tracker.getModelPricing('anthropic/claude-sonnet-4.5');
       expect(orSonnet45.inputPerMillion).toBe(3);
       expect(orSonnet45.outputPerMillion).toBe(15);
+
+      const qwenPlus = tracker.getModelPricing('qwen/qwen3.6-plus');
+      expect(qwenPlus.inputPerMillion).toBe(0.325);
+      expect(qwenPlus.outputPerMillion).toBe(1.95);
+    });
+
+    it('should treat custom/local providers as zero cost without warning', () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const pricing = tracker.getModelPricing('private-memory-model', 'my_memory');
+      expect(pricing).toEqual({ inputPerMillion: 0, outputPerMillion: 0 });
+      expect(warnSpy).not.toHaveBeenCalled();
+      warnSpy.mockRestore();
+    });
+
+    it('should allow provider-scoped custom pricing', () => {
+      tracker = new CostTracker({
+        customPricing: {
+          'paid_custom/private-model': { inputPerMillion: 0.3, outputPerMillion: 1.8 },
+        },
+      });
+      const cost = tracker.calculateCost(
+        'private-model',
+        { inputTokens: 1_000_000, outputTokens: 1_000_000 },
+        'paid_custom'
+      );
+      expect(cost).toBeCloseTo(2.1, 4);
     });
   });
 
@@ -526,6 +552,7 @@ describe('CostTracker', () => {
     function createMockProvider(name: string, model: string): LLMProvider {
       return {
         name,
+        model,
         isAvailable: () => true,
         complete: vi.fn().mockResolvedValue({
           content: [{ type: 'text', text: 'response' }],
@@ -572,6 +599,7 @@ describe('CostTracker', () => {
       const wrapped = tracker.wrapProvider(mock, 'test-session');
 
       expect(wrapped.name).toBe('xai');
+      expect(wrapped.model).toBe('grok-4');
       expect(wrapped.isAvailable()).toBe(true);
     });
 

@@ -33,6 +33,7 @@ import { triggerHook, type HookEvent } from '../hooks/hooks.js';
 import { applyToolPolicyPipeline, type ToolPolicy } from '../skills/tool-policy.js';
 import { enqueueInLane } from './command-queue.js';
 import { compact, compactSync, estimateMessagesTokens } from '../routing/compaction-pipeline.js';
+import { effectiveContextWindowTokens } from '../routing/model-limits.js';
 import { selectBest, scoreResponseHeuristic } from './critic.js';
 import type { EvolutionRecorder } from '../evolution/signals.js';
 
@@ -138,6 +139,10 @@ GOOD: *npm install -D prettier* "Installed. Formatting now..."
 
 ## CAPABILITIES
 You have skills for: **web search** (via bash), **web browsing** (via bash), **file operations**, **memory**, **communication**, **scheduling**, and **goal tracking**. See the full skill list at the end of this prompt.
+
+## SYSTEM ACCESS
+- Use the Workspace path shown in this prompt as the project root. Do not guess deployment paths such as /root/...; resolve files relative to the workspace unless a tool gives an absolute path.
+- For SQLite work, use the installed Node.js SQLite package (better-sqlite3) when the sqlite3 CLI is unavailable.
 
 ## MEMORY
 - USER PROFILE (location, name, timezone) is always available — use it automatically
@@ -552,7 +557,10 @@ export class Agent {
       // run here; the expensive LLM-summary escalation stays in the recovery path.
       if (this.contextManager) {
         const estimatedTokens = estimateMessagesTokens(messages);
-        const maxTokenLimit = this.contextManager.getMaxContextTokens();
+        const maxTokenLimit = effectiveContextWindowTokens(
+          activeProvider,
+          this.contextManager.getMaxContextTokens()
+        );
         if (estimatedTokens > maxTokenLimit * 0.85) {
           const result = compactSync(messages, {
             targetTokens: Math.floor(maxTokenLimit * 0.8),
@@ -563,6 +571,8 @@ export class Agent {
               before: result.estimatedTokensBefore,
               after: result.estimatedTokensAfter,
               stages: result.stagesApplied,
+              model: activeProvider.model || activeProvider.name,
+              contextWindowTokens: maxTokenLimit,
               usage: (estimatedTokens / maxTokenLimit * 100).toFixed(1) + '%',
             },
             'Proactive graduated compaction applied'
@@ -1551,7 +1561,10 @@ Only install skills when the user asks, or when you determine a skill would help
           this.logger.warn({ error: err.message }, 'Context overflow detected, attempting graduated compaction');
 
           if (this.contextManager && request.messages.length > 6) {
-            const maxTokens = this.contextManager.getMaxContextTokens();
+            const maxTokens = effectiveContextWindowTokens(
+              provider,
+              this.contextManager.getMaxContextTokens()
+            );
 
             // Graduated cheapest-first pipeline: dedupe → snip → drop-thinking →
             // prune → (LLM) summarize, stopping as soon as we fit. The provider
@@ -1565,7 +1578,13 @@ Only install skills when the user asks, or when you determine a skill would help
                 contextWindowTokens: maxTokens,
               });
               this.logger.info(
-                { stages: result.stagesApplied, before: result.estimatedTokensBefore, after: result.estimatedTokensAfter },
+                {
+                  stages: result.stagesApplied,
+                  before: result.estimatedTokensBefore,
+                  after: result.estimatedTokensAfter,
+                  model: provider.model || provider.name,
+                  contextWindowTokens: maxTokens,
+                },
                 'Graduated compaction (recovery) applied'
               );
               triggerHook({

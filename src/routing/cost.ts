@@ -39,6 +39,7 @@ export interface CostTrackerOptions {
   dailyBudget?: number;
   monthlyBudget?: number;
   warningThreshold?: number;
+  customPricing?: Record<string, ModelPricing>;
   db?: ScallopDatabase;
 }
 
@@ -54,7 +55,7 @@ export interface RequestCheck {
   reason?: string;
 }
 
-// Default pricing per million tokens (updated Feb 2026)
+// Default pricing per million tokens.
 const DEFAULT_PRICING: Record<string, ModelPricing> = {
   // Anthropic
   'claude-sonnet-4-20250514': { inputPerMillion: 3, outputPerMillion: 15 },
@@ -124,13 +125,20 @@ const DEFAULT_PRICING: Record<string, ModelPricing> = {
   // OpenRouter
   'anthropic/claude-3.5-sonnet': { inputPerMillion: 6, outputPerMillion: 30 },
   'anthropic/claude-sonnet-4.5': { inputPerMillion: 3, outputPerMillion: 15 },
-  'qwen/qwen3.6-plus': { inputPerMillion: 0.8, outputPerMillion: 4 },
-  'qwen/qwen3.6-plus-04-02': { inputPerMillion: 0.8, outputPerMillion: 4 },
+  'qwen/qwen3.6-plus': { inputPerMillion: 0.325, outputPerMillion: 1.95 },
+  'qwen/qwen3.6-plus-04-02': { inputPerMillion: 0.325, outputPerMillion: 1.95 },
+  'qwen/qwen3.6-flash': { inputPerMillion: 0.1875, outputPerMillion: 1.125 },
+  'qwen/qwen3.6-max-preview': { inputPerMillion: 1.04, outputPerMillion: 6.24 },
+  'qwen/qwen3.6-max-preview-20260420': { inputPerMillion: 1.04, outputPerMillion: 6.24 },
+  'qwen/qwen3.6-35b-a3b': { inputPerMillion: 0.14, outputPerMillion: 1 },
+  'qwen/qwen3.6-35b-a3b-20260415': { inputPerMillion: 0.14, outputPerMillion: 1 },
+  'qwen/qwen3.6-27b': { inputPerMillion: 0.285, outputPerMillion: 2.4 },
+  'qwen/qwen3.6-27b-20260422': { inputPerMillion: 0.285, outputPerMillion: 2.4 },
 
   // Free/Local
   'llama3.2': { inputPerMillion: 0, outputPerMillion: 0 },
   'mistral': { inputPerMillion: 0, outputPerMillion: 0 },
-  // Dell local LLM (LAN-only, no cost)
+  // Local/LAN LLMs (no API billing)
   'qwen3.6': { inputPerMillion: 0, outputPerMillion: 0 },
   'qwen3.6-27b': { inputPerMillion: 0, outputPerMillion: 0 },
   'qwen3.6-uncen': { inputPerMillion: 0, outputPerMillion: 0 },
@@ -138,6 +146,34 @@ const DEFAULT_PRICING: Record<string, ModelPricing> = {
   'qwen3-coder': { inputPerMillion: 0, outputPerMillion: 0 },
   'glm4.7-flash': { inputPerMillion: 0, outputPerMillion: 0 },
 };
+
+const KNOWN_BILLABLE_PROVIDERS = new Set([
+  'anthropic',
+  'openai',
+  'groq',
+  'moonshot',
+  'xai',
+  'openrouter',
+]);
+
+function normalizePricingKey(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function pricingKeys(model: string, provider?: string): string[] {
+  const normalizedModel = normalizePricingKey(model);
+  const normalizedProvider = provider ? normalizePricingKey(provider) : undefined;
+  return [
+    normalizedProvider && `${normalizedProvider}/${normalizedModel}`,
+    normalizedModel,
+  ].filter((key): key is string => Boolean(key));
+}
+
+function isLocalOrCustomProvider(provider?: string): boolean {
+  if (!provider) return false;
+  const normalized = normalizePricingKey(provider);
+  return normalized === 'ollama' || normalized.startsWith('local') || !KNOWN_BILLABLE_PROVIDERS.has(normalized);
+}
 
 export class CostTracker {
   private dailyBudget?: number;
@@ -153,6 +189,9 @@ export class CostTracker {
     this.monthlyBudget = options.monthlyBudget;
     this.warningThreshold = options.warningThreshold ?? 0.75;
     this.db = options.db;
+    for (const [key, pricing] of Object.entries(options.customPricing ?? {})) {
+      this.customPricing.set(normalizePricingKey(key), pricing);
+    }
 
     // Load only current billing period (last 31 days) from SQLite on startup
     if (this.db) {
@@ -180,15 +219,28 @@ export class CostTracker {
     return this.monthlyBudget;
   }
 
-  getModelPricing(model: string): ModelPricing {
+  getModelPricing(model: string, provider?: string): ModelPricing {
     // Check custom pricing first
-    if (this.customPricing.has(model)) {
-      return this.customPricing.get(model)!;
+    for (const key of pricingKeys(model, provider)) {
+      if (this.customPricing.has(key)) {
+        return this.customPricing.get(key)!;
+      }
     }
 
     // Check default pricing
-    if (model in DEFAULT_PRICING) {
-      return DEFAULT_PRICING[model];
+    for (const key of pricingKeys(model, provider)) {
+      if (key in DEFAULT_PRICING) {
+        return DEFAULT_PRICING[key];
+      }
+    }
+
+    const normalizedModel = normalizePricingKey(model);
+    if (normalizedModel.endsWith(':free')) {
+      return { inputPerMillion: 0, outputPerMillion: 0 };
+    }
+
+    if (isLocalOrCustomProvider(provider)) {
+      return { inputPerMillion: 0, outputPerMillion: 0 };
     }
 
     // Unknown model - log warning (once per model) and return zero pricing
@@ -199,15 +251,17 @@ export class CostTracker {
     return { inputPerMillion: 0, outputPerMillion: 0 };
   }
 
-  setModelPricing(model: string, pricing: ModelPricing): void {
-    this.customPricing.set(model, pricing);
+  setModelPricing(model: string, pricing: ModelPricing, provider?: string): void {
+    const [key] = pricingKeys(model, provider);
+    this.customPricing.set(key, pricing);
   }
 
   calculateCost(
     model: string,
-    usage: { inputTokens: number; outputTokens: number }
+    usage: { inputTokens: number; outputTokens: number },
+    provider?: string
   ): number {
-    const pricing = this.getModelPricing(model);
+    const pricing = this.getModelPricing(model, provider);
     const inputCost = (usage.inputTokens / 1_000_000) * pricing.inputPerMillion;
     const outputCost = (usage.outputTokens / 1_000_000) * pricing.outputPerMillion;
     return inputCost + outputCost;
@@ -223,7 +277,7 @@ export class CostTracker {
     const cost = this.calculateCost(params.model, {
       inputTokens: params.inputTokens,
       outputTokens: params.outputTokens,
-    });
+    }, params.provider);
 
     const record: UsageRecord = {
       ...params,
@@ -336,12 +390,13 @@ export class CostTracker {
     const tracker = this;
     return {
       name: provider.name,
+      model: provider.model,
       isAvailable: () => provider.isAvailable(),
       stream: provider.stream?.bind(provider),
       async complete(request) {
         const response = await provider.complete(request);
         tracker.recordUsage({
-          model: response.model,
+          model: response.model || provider.model || provider.name,
           inputTokens: response.usage.inputTokens,
           outputTokens: response.usage.outputTokens,
           provider: provider.name,

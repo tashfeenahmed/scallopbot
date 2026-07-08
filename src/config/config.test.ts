@@ -211,6 +211,22 @@ describe('Config Schema', () => {
       expect(config.agent.workspace).toBe(process.cwd());
     });
 
+    it('should parse custom cost pricing from COST_MODEL_PRICING', async () => {
+      process.env.ANTHROPIC_API_KEY = 'sk-ant-env-key';
+      process.env.TELEGRAM_BOT_TOKEN = 'env-bot-token';
+      process.env.COST_MODEL_PRICING = JSON.stringify({
+        'my_provider/my-model': { inputPerMillion: 0.3, outputPerMillion: 1.8 },
+      });
+
+      const { loadConfig } = await import('./config.js');
+      const config = loadConfig();
+
+      expect(config.cost.customPricing['my_provider/my-model']).toEqual({
+        inputPerMillion: 0.3,
+        outputPerMillion: 1.8,
+      });
+    });
+
     describe('multi-model mode (CUSTOM_PROVIDER_*)', () => {
       beforeEach(() => {
         process.env.ANTHROPIC_API_KEY = 'sk-ant-env-key';
@@ -392,14 +408,14 @@ describe('Config Schema', () => {
 
       it('accepts a CUSTOM_PROVIDER_* name as the switch target', async () => {
         process.env.MULTI_MODEL_ENABLED = 'true';
-        process.env.CUSTOM_PROVIDER_ORNITH = 'http://localhost:11434/v1|ornith';
-        process.env.MODEL = 'ornith';
+        process.env.CUSTOM_PROVIDER_MY_LOCAL = 'http://localhost:11434/v1|my-local-model';
+        process.env.MODEL = 'my_local';
 
         const { loadConfig } = await import('./config.js');
         const config = loadConfig();
 
-        expect(config.routing.providerOrder).toEqual(['ornith']);
-        expect(config.models.cognition).toEqual({ provider: 'ornith' });
+        expect(config.routing.providerOrder).toEqual(['my_local']);
+        expect(config.models.cognition).toEqual({ provider: 'my_local' });
       });
 
       it('throws on an unknown provider name (typo)', async () => {

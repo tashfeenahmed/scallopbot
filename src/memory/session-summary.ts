@@ -10,6 +10,8 @@ import type { Logger } from 'pino';
 import type { LLMProvider } from '../providers/types.js';
 import type { EmbeddingProvider } from './embeddings.js';
 import type { ScallopDatabase, SessionMessageRow } from './db.js';
+import { completionBudgetForPurpose, charsForTokenBudget, getModelTokenLimits } from '../routing/model-limits.js';
+import { extractJSON, extractResponseText } from '../proactive/proactive-utils.js';
 
 export interface SessionSummarizerOptions {
   provider: LLMProvider;
@@ -156,7 +158,38 @@ export class SessionSummarizer {
    * Generate summary from session messages using LLM.
    */
   private async generateSummary(messages: SessionMessageRow[]): Promise<SessionSummaryResult | null> {
-    // Build conversation text (cap at ~4000 chars to keep LLM call cheap)
+    const firstBudget = completionBudgetForPurpose(this.provider, 'session_summary');
+    const retryBudget = completionBudgetForPurpose(
+      this.provider,
+      'session_summary_retry',
+      firstBudget * 2,
+      { minTokens: firstBudget + 1 }
+    );
+    const limits = getModelTokenLimits(this.provider);
+    const promptTokenBudget = Math.max(
+      1000,
+      Math.floor((limits.contextWindowTokens - firstBudget - 512) * 0.5)
+    );
+    const conversationCharLimit = Math.min(12_000, Math.max(4_000, charsForTokenBudget(promptTokenBudget)));
+    const conversationText = this.buildConversationText(messages, conversationCharLimit);
+
+    const first = await this.requestSummary(conversationText, firstBudget);
+    const firstParsed = this.parseSummaryResponse(extractResponseText(first.content));
+    if (firstParsed) return firstParsed;
+
+    if (first.stopReason === 'max_tokens' && retryBudget > firstBudget) {
+      this.logger.debug(
+        { firstBudget, retryBudget, model: first.model, modelContextWindowTokens: limits.contextWindowTokens },
+        'Session summary hit max_tokens; retrying with larger output budget'
+      );
+      const retry = await this.requestSummary(conversationText, retryBudget);
+      return this.parseSummaryResponse(extractResponseText(retry.content));
+    }
+
+    return null;
+  }
+
+  private buildConversationText(messages: SessionMessageRow[], maxChars: number): string {
     let conversationText = '';
     for (const msg of messages) {
       const role = msg.role === 'user' ? 'User' : 'Assistant';
@@ -176,34 +209,33 @@ export class SessionSummarizer {
         text = msg.content;
       }
 
-      const line = `${role}: ${text.substring(0, 500)}\n`;
-      if (conversationText.length + line.length > 4000) break;
+      const line = `${role}: ${text.substring(0, 700)}\n`;
+      if (conversationText.length + line.length > maxChars) break;
       conversationText += line;
     }
+    return conversationText;
+  }
 
+  private async requestSummary(conversationText: string, maxTokens: number) {
     const prompt = SESSION_SUMMARY_PROMPT + conversationText;
 
-    const response = await this.provider.complete({
+    return this.provider.complete({
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.1,
-      // Bumped from 300 so thinking models (qwen3.6) have budget for reasoning_content
-      // plus the actual 2-3 sentence JSON summary.
-      maxTokens: 600,
+      maxTokens,
       purpose: 'session_summary',
+      traceMetadata: {
+        conversationChars: conversationText.length,
+      },
     });
+  }
 
-    const responseText = Array.isArray(response.content)
-      ? response.content.map(block => 'text' in block ? block.text : '').join('')
-      : String(response.content);
-
-    const jsonMatch = responseText.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) return null;
-
-    const parsed = JSON.parse(jsonMatch[0]) as { summary?: string; topics?: string[] };
-    if (!parsed.summary) return null;
+  private parseSummaryResponse(responseText: string): SessionSummaryResult | null {
+    const parsed = extractJSON<{ summary?: unknown; topics?: unknown }>(responseText);
+    if (!parsed || typeof parsed.summary !== 'string' || parsed.summary.trim().length === 0) return null;
 
     return {
-      summary: parsed.summary,
+      summary: parsed.summary.trim(),
       topics: Array.isArray(parsed.topics) ? parsed.topics : [],
     };
   }

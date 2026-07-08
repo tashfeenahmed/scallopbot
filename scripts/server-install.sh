@@ -3,7 +3,7 @@
 # ScallopBot Server Installation Script
 #
 # Installs all dependencies for running ScallopBot on a fresh Ubuntu 24.04 server.
-# Covers: Node.js 22, PM2, Python venv (voice), Ollama (embeddings), ffmpeg, sox.
+# Covers: Node.js 24, PM2, Python venv (voice), Ollama (embeddings), ffmpeg, sox.
 #
 # Usage:
 #   curl -fsSL <raw-url>/scripts/server-install.sh | bash
@@ -31,12 +31,12 @@ apt-get install -y -qq \
   python3 python3-venv python3-pip \
   ffmpeg sox
 
-# ── 2. Node.js 22 ───────────────────────────────────────────────────
-if command -v node &>/dev/null && [[ "$(node -v)" == v22.* ]]; then
+# ── 2. Node.js 24 ───────────────────────────────────────────────────
+if command -v node &>/dev/null && [[ "$(node -v)" == v24.* ]]; then
   echo "==> Node.js $(node -v) already installed"
 else
-  echo "==> Installing Node.js 22..."
-  curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+  echo "==> Installing Node.js 24..."
+  curl -fsSL https://deb.nodesource.com/setup_24.x | bash -
   apt-get install -y -qq nodejs
 fi
 echo "    Node: $(node -v), npm: $(npm -v)"

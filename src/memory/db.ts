@@ -759,7 +759,11 @@ export class ScallopDatabase {
         response TEXT NOT NULL,
         parsed_ok INTEGER NOT NULL,
         session_id TEXT,
-        latency_ms INTEGER
+        latency_ms INTEGER,
+        stop_reason TEXT,
+        request_max_tokens INTEGER,
+        model_context_window_tokens INTEGER,
+        model_max_output_tokens INTEGER
       );
       CREATE INDEX IF NOT EXISTS idx_llm_traces_ts ON llm_traces(ts DESC);
       CREATE INDEX IF NOT EXISTS idx_llm_traces_purpose ON llm_traces(purpose, ts DESC);
@@ -857,6 +861,9 @@ export class ScallopDatabase {
 
     // Migration: Create FTS5 virtual table for transcript chunk search
     this.migrateCreateTranscriptFTS();
+
+    // Migration: Add model/token-limit diagnostics to llm_traces
+    this.migrateAddLlmTraceMetadataColumns();
   }
 
   /**
@@ -1181,6 +1188,28 @@ export class ScallopDatabase {
       if (error instanceof Error) {
         // eslint-disable-next-line no-console
         console.warn(`[migration] migrateCreateTranscriptFTS: ${error.message}`);
+      }
+    }
+  }
+
+  private migrateAddLlmTraceMetadataColumns(): void {
+    try {
+      const tableInfo = this.db.prepare("PRAGMA table_info(llm_traces)").all() as Array<{ name: string }>;
+      const columns = new Set(tableInfo.map((c) => c.name));
+      const additions: Array<[string, string]> = [
+        ['stop_reason', 'TEXT'],
+        ['request_max_tokens', 'INTEGER'],
+        ['model_context_window_tokens', 'INTEGER'],
+        ['model_max_output_tokens', 'INTEGER'],
+      ];
+      for (const [column, type] of additions) {
+        if (!columns.has(column)) {
+          this.db.exec(`ALTER TABLE llm_traces ADD COLUMN ${column} ${type}`);
+        }
+      }
+    } catch (error) {
+      if (error instanceof Error) {
+        console.warn(`[migration] migrateAddLlmTraceMetadataColumns: ${error.message}`);
       }
     }
   }
@@ -2705,11 +2734,33 @@ export class ScallopDatabase {
     parsedOk: number;
     sessionId: string | null;
     latencyMs: number;
+    stopReason?: string;
+    requestMaxTokens?: number | null;
+    modelContextWindowTokens?: number;
+    modelMaxOutputTokens?: number;
   }): void {
     this.db.prepare(`
-      INSERT INTO llm_traces (ts, purpose, model, provider, prompt, response, parsed_ok, session_id, latency_ms)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(row.ts, row.purpose, row.model, row.provider, row.prompt, row.response, row.parsedOk, row.sessionId, row.latencyMs);
+      INSERT INTO llm_traces (
+        ts, purpose, model, provider, prompt, response, parsed_ok, session_id,
+        latency_ms, stop_reason, request_max_tokens, model_context_window_tokens,
+        model_max_output_tokens
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      row.ts,
+      row.purpose,
+      row.model,
+      row.provider,
+      row.prompt,
+      row.response,
+      row.parsedOk,
+      row.sessionId,
+      row.latencyMs,
+      row.stopReason ?? null,
+      row.requestMaxTokens ?? null,
+      row.modelContextWindowTokens ?? null,
+      row.modelMaxOutputTokens ?? null
+    );
 
     if (++this.llmTraceInsertCount % 200 === 0) {
       this.pruneLlmTraces(Date.now() - 45 * 24 * 60 * 60 * 1000);

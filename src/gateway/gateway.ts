@@ -197,6 +197,7 @@ export class Gateway {
       dailyBudget: this.config.cost.dailyBudget,
       monthlyBudget: this.config.cost.monthlyBudget,
       warningThreshold: this.config.cost.warningThreshold,
+      customPricing: this.config.cost.customPricing,
       db: this.scallopMemoryStore.getDatabase(),
     });
     this.logger.debug('Cost tracker initialized');
