@@ -169,6 +169,120 @@ describe('Gateway', () => {
     });
   });
 
+  describe('native send_file skill', () => {
+    type GatewayWithFileSend = {
+      handleFileSend: (userId: string, filePath: string, caption?: string) => Promise<boolean>;
+    };
+
+    async function createGatewayWithSendFile() {
+      const { Gateway } = await import('./gateway.js');
+      const { pino } = await import('pino');
+
+      const gateway = new Gateway({
+        config: createMockConfig(testDir),
+        logger: pino({ level: 'silent' }),
+      });
+
+      await gateway.initialize();
+
+      const sendFileSkill = gateway.getSkillRegistry().getSkill('send_file');
+      expect(sendFileSkill?.handler).toBeDefined();
+
+      return { gateway, handler: sendFileSkill!.handler! };
+    }
+
+    function spyOnFileSend(gateway: unknown) {
+      return vi.spyOn(gateway as GatewayWithFileSend, 'handleFileSend').mockResolvedValue(true);
+    }
+
+    it('allows files from the workspace output directory', async () => {
+      const { gateway, handler } = await createGatewayWithSendFile();
+      const outputDir = path.join(testDir, 'output');
+      await fs.mkdir(outputDir, { recursive: true });
+      const filePath = path.join(outputDir, 'report.pdf');
+      await fs.writeFile(filePath, 'fake pdf content');
+
+      const sendSpy = spyOnFileSend(gateway);
+
+      const result = await handler({
+        args: { file_path: filePath, caption: 'Report' },
+        workspace: testDir,
+        sessionId: 'session-1',
+        userId: 'telegram:123',
+      });
+
+      expect(result.success).toBe(true);
+      expect(sendSpy).toHaveBeenCalledWith('telegram:123', await fs.realpath(filePath), 'Report');
+    });
+
+    it('rejects files outside the workspace output directory', async () => {
+      const { gateway, handler } = await createGatewayWithSendFile();
+      const filePath = path.join(testDir, 'secret.txt');
+      await fs.writeFile(filePath, 'do not send');
+
+      const sendSpy = spyOnFileSend(gateway);
+
+      const result = await handler({
+        args: { file_path: filePath },
+        workspace: testDir,
+        sessionId: 'session-1',
+        userId: 'telegram:123',
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.output).toContain('Access denied');
+      expect(sendSpy).not.toHaveBeenCalled();
+    });
+
+    it('rejects symlinks from output to files outside output', async () => {
+      const { gateway, handler } = await createGatewayWithSendFile();
+      const outputDir = path.join(testDir, 'output');
+      const privateDir = path.join(testDir, 'private');
+      await fs.mkdir(outputDir, { recursive: true });
+      await fs.mkdir(privateDir, { recursive: true });
+      const secretPath = path.join(privateDir, 'secret.txt');
+      const linkPath = path.join(outputDir, 'secret-link.txt');
+      await fs.writeFile(secretPath, 'do not send');
+      await fs.symlink(secretPath, linkPath);
+
+      const sendSpy = spyOnFileSend(gateway);
+
+      const result = await handler({
+        args: { file_path: linkPath },
+        workspace: testDir,
+        sessionId: 'session-1',
+        userId: 'telegram:123',
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.output).toContain('Access denied');
+      expect(sendSpy).not.toHaveBeenCalled();
+    });
+
+    it('rejects a workspace output directory that is itself a symlink', async () => {
+      const { gateway, handler } = await createGatewayWithSendFile();
+      const outputDir = path.join(testDir, 'output');
+      const privateDir = path.join(testDir, 'private');
+      await fs.mkdir(privateDir, { recursive: true });
+      const secretPath = path.join(privateDir, 'secret.txt');
+      await fs.writeFile(secretPath, 'do not send');
+      await fs.symlink(privateDir, outputDir);
+
+      const sendSpy = spyOnFileSend(gateway);
+
+      const result = await handler({
+        args: { file_path: path.join(outputDir, 'secret.txt') },
+        workspace: testDir,
+        sessionId: 'session-1',
+        userId: 'telegram:123',
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.output).toContain('Access denied');
+      expect(sendSpy).not.toHaveBeenCalled();
+    });
+  });
+
   describe('channel management', () => {
     it('should not start telegram channel when disabled', async () => {
       const { Gateway } = await import('./gateway.js');

@@ -882,7 +882,7 @@ export class Gateway {
       .inputSchema({
         type: 'object',
         properties: {
-          file_path: { type: 'string', description: 'Absolute path to the file to send' },
+          file_path: { type: 'string', description: 'Path to a file under the workspace output/ directory' },
           caption: { type: 'string', description: 'Optional caption/message to accompany the file' },
         },
         required: ['file_path'],
@@ -899,7 +899,17 @@ export class Gateway {
 
         const fsMod = await import('fs/promises');
         const pathMod = await import('path');
-        const absolutePath = pathMod.isAbsolute(filePath) ? filePath : pathMod.join(ctx.workspace, filePath);
+        const workspaceRoot = pathMod.resolve(ctx.workspace);
+        const outputRoot = pathMod.resolve(workspaceRoot, 'output');
+        const absolutePath = pathMod.resolve(workspaceRoot, filePath);
+        const isWithinDirectory = (root: string, target: string): boolean => {
+          const relative = pathMod.relative(root, target);
+          return relative === '' || (!!relative && !relative.startsWith('..') && !pathMod.isAbsolute(relative));
+        };
+
+        if (!isWithinDirectory(outputRoot, absolutePath)) {
+          return { success: false, output: 'Access denied: send_file can only send files from the workspace output/ directory' };
+        }
 
         try {
           await fsMod.access(absolutePath);
@@ -907,7 +917,17 @@ export class Gateway {
           return { success: false, output: `File not found: ${absolutePath}` };
         }
 
-        const stats = await fsMod.stat(absolutePath);
+        const [realWorkspaceRoot, realOutputRoot, realFilePath] = await Promise.all([
+          fsMod.realpath(workspaceRoot),
+          fsMod.realpath(outputRoot),
+          fsMod.realpath(absolutePath),
+        ]);
+        const expectedRealOutputRoot = pathMod.resolve(realWorkspaceRoot, 'output');
+        if (realOutputRoot !== expectedRealOutputRoot || !isWithinDirectory(realOutputRoot, realFilePath)) {
+          return { success: false, output: 'Access denied: send_file cannot follow paths outside the workspace output/ directory' };
+        }
+
+        const stats = await fsMod.stat(realFilePath);
         if (!stats.isFile()) {
           return { success: false, output: `Not a file: ${absolutePath}` };
         }
@@ -916,9 +936,9 @@ export class Gateway {
           return { success: false, output: `File too large: ${(stats.size / 1024 / 1024).toFixed(2)}MB (max 50MB)` };
         }
 
-        const ok = await this.handleFileSend(ctx.userId, absolutePath, caption);
+        const ok = await this.handleFileSend(ctx.userId, realFilePath, caption);
         if (ok) {
-          const fileName = pathMod.basename(absolutePath);
+          const fileName = pathMod.basename(realFilePath);
           const sizeKB = (stats.size / 1024).toFixed(1);
           return { success: true, output: `File sent successfully: ${fileName} (${sizeKB}KB)` };
         }
