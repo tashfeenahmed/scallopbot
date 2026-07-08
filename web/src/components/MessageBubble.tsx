@@ -1,5 +1,6 @@
 import { useMemo } from 'react';
 import { marked } from 'marked';
+import DOMPurify from 'dompurify';
 import type { ChatMessage } from '../App';
 
 marked.setOptions({ breaks: true, gfm: true });
@@ -12,9 +13,10 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
   const html = useMemo(() => {
     if (message.isMarkdown && message.content) {
       try {
-        return marked.parse(message.content) as string;
+        const parsed = marked.parse(message.content) as string;
+        return DOMPurify.sanitize(parsed);
       } catch {
-        return message.content;
+        return null;
       }
     }
     return null;

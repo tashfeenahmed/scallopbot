@@ -36,33 +36,36 @@
     "tsx": "^4.0.0",
     "typescript": "^5.0.0",
     "typescript-eslint": "^8.54.0",
-    "vitest": "^2.0.0"
+    "vitest": "^3.2.7"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.72.1",
     "afinn-165": "^2.0.2",
-    "agent-browser": "^0.9.1",
+    "agent-browser": "^0.31.1",
     "bcrypt": "^6.0.0",
     "better-sqlite3": "^12.6.2",
     "chalk": "^5.6.2",
     "commander": "^14.0.3",
-    "discord.js": "^14.25.1",
+    "discord.js": "^14.26.4",
     "dotenv": "^17.2.3",
     "fflate": "^0.8.2",
     "grammy": "^1.39.3",
     "groq-sdk": "^0.37.0",
-    "js-yaml": "^4.1.1",
+    "js-yaml": "^4.3.0",
     "nanoid": "^5.1.6",
     "node-cron": "^4.2.1",
     "openai": "^6.17.0",
     "pino": "^10.3.0",
-    "ws": "^8.19.0",
+    "ws": "^8.21.0",
     "zod": "^4.3.6"
   },
   "optionalDependencies": {
     "@hapi/boom": "^10.0.1",
     "@slack/bolt": "^4.3.1",
-    "@whiskeysockets/baileys": "^6.7.17",
-    "matrix-js-sdk": "^36.2.0"
+    "@whiskeysockets/baileys": "^7.0.0-rc13",
+    "matrix-js-sdk": "^41.9.0"
+  },
+  "overrides": {
+    "undici": "6.27.0"
   }
 }

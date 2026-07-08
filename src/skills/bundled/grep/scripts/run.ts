@@ -80,6 +80,7 @@ function searchWithRipgrep(pattern: string, searchRoot: string, glob: string | u
   const args = [
     '--no-heading',
     '--line-number',
+    '--no-require-git',
     '--max-count', String(maxResults),
     '--color', 'never',
   ];

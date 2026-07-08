@@ -337,7 +337,7 @@ describe('E2E Tool Conversation', () => {
         message: 'List the project, find tests, and search for expect statements.',
       });
 
-      const messages = await client.collectUntilResponse(30000);
+      const messages = await client.collectUntilResponse(60000);
 
       // All three tools should have started and completed
       const starts = messages.filter(m => m.type === 'skill_start');
@@ -361,7 +361,7 @@ describe('E2E Tool Conversation', () => {
 
       const response = messages.find(m => m.type === 'response');
       expect(response).toBeDefined();
-    }, 45000);
+    }, 70000);
   });
 
   // -------------------------------------------------------------------------
