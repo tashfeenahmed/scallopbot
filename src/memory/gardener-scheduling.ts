@@ -10,6 +10,8 @@ import { getHourInTimezone } from '../proactive/proactive-utils.js';
 export interface ScheduleProactiveItemInput {
   db: ScallopDatabase;
   userId: string;
+  /** Conversation that supplied the context for this proactive item. */
+  sessionId?: string | null;
   message: string;
   context: string | null;
   type: string;
@@ -49,7 +51,7 @@ export function scheduleProactiveItem(input: ScheduleProactiveItemInput): Schedu
 
   const item = input.db.addScheduledItem({
     userId: input.userId,
-    sessionId: null,
+    sessionId: input.sessionId ?? null,
     source: 'agent',
     kind: input.kind ?? 'nudge',
     type: input.type as 'follow_up',
@@ -95,4 +97,3 @@ export function getLastProactiveAt(db: ScallopDatabase, userId: string): number 
     .sort((a, b) => (b.firedAt ?? 0) - (a.firedAt ?? 0));
   return lastFiredAgent.length > 0 ? lastFiredAgent[0].firedAt : null;
 }
-

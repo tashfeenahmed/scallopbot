@@ -2063,6 +2063,29 @@ export class ScallopDatabase {
     return { messages: rows.map(row => this.rowToSessionMessage(row)), hasMore };
   }
 
+  /**
+   * Get recent messages belonging to one user across their sessions.
+   *
+   * Session messages do not carry a user_id themselves; the owning session
+   * does. Keeping the join here avoids accidental cross-user chat context in
+   * background tasks and proactive evaluation. `default` remains a backwards-
+   * compatible single-user alias for installations created before channel IDs
+   * were recorded on sessions.
+   */
+  getRecentMessagesByUserId(userId: string, limit: number): SessionMessageRow[] {
+    const stmt = this.db.prepare(`
+      SELECT sm.*
+      FROM session_messages sm
+      INNER JOIN sessions s ON s.id = sm.session_id
+      WHERE (? = 'default' OR json_extract(s.metadata, '$.userId') = ?)
+      ORDER BY sm.id DESC
+      LIMIT ?
+    `);
+    const rows = stmt.all(userId, userId, limit) as Record<string, unknown>[];
+    rows.reverse();
+    return rows.map(row => this.rowToSessionMessage(row));
+  }
+
   findSessionByUserId(userId: string): SessionRow | null {
     const stmt = this.db.prepare(
       "SELECT * FROM sessions WHERE json_extract(metadata, '$.userId') = ? ORDER BY updated_at DESC LIMIT 1"

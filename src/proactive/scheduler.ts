@@ -408,7 +408,7 @@ export class UnifiedScheduler {
 
     try {
       // Fetch recent chat context so the sub-agent is aware of ongoing conversations
-      const chatContext = getRecentChatContext(this.db);
+      const chatContext = getRecentChatContext(this.db, item.userId);
 
       // Grounding directive: scheduled tasks run unattended, so a sub-agent that
       // skips its data tools and improvises output goes unnoticed (e.g. the daily
@@ -572,13 +572,40 @@ export class UnifiedScheduler {
         };
 
         const formatted = formatProactiveMessage((channel ?? 'telegram') as 'telegram' | 'api', formatInput);
-        await this.onSendMessage(item.userId, formatted);
+        await this.deliverAndRecordConversation(item, formatted, message);
         return;
       }
     }
 
     // User-sourced items or unknown channels: send as-is
-    await this.onSendMessage(item.userId, message);
+    await this.deliverAndRecordConversation(item, message);
+  }
+
+  /**
+   * Keep an agent-initiated message in its source conversation after delivery.
+   * A later user reply can then be understood as a reply to the proactive
+   * nudge, including after a process restart when the channel rehydrates the
+   * same session. This is deliberately conversation state, not a delivery
+   * filter: the agent sees and reasons over the full exchange on its next turn.
+   */
+  private async deliverAndRecordConversation(
+    item: ScheduledItem,
+    deliveredMessage: string,
+    conversationMessage: string = deliveredMessage,
+  ): Promise<void> {
+    const sent = await this.onSendMessage(item.userId, deliveredMessage);
+    if (!sent || item.source !== 'agent' || !item.sessionId || !this.sessionManager) return;
+
+    try {
+      await this.sessionManager.addMessage(item.sessionId, {
+        role: 'assistant',
+        content: conversationMessage,
+      });
+      this.logger.debug({ itemId: item.id, sessionId: item.sessionId }, 'Recorded proactive message in source conversation');
+    } catch (err) {
+      // A missing/deleted source session must not make delivery fail.
+      this.logger.warn({ itemId: item.id, sessionId: item.sessionId, error: (err as Error).message }, 'Failed to record proactive message in source conversation');
+    }
   }
 
   /**

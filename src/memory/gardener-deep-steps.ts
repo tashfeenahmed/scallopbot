@@ -15,6 +15,7 @@ import { checkGoalDeadlines } from './goal-deadline-check.js';
 import { evaluateProactive } from './proactive-evaluator.js';
 import { getTodayStartMs } from '../proactive/proactive-utils.js';
 import { DIAL_BUDGETS, PROACTIVE_COOLDOWN_MS } from '../proactive/proactive-config.js';
+import { getRecentChatContext } from '../proactive/chat-context.js';
 
 // ============ Step functions ============
 
@@ -445,6 +446,11 @@ export async function runInnerThoughts(ctx: GardenerContext): Promise<void> {
       userId,
       todayItemCount,
       userPreferences,
+      recentChatContext: getRecentChatContext(ctx.db, userId, {
+        maxMessages: 12,
+        maxCharsPerMessage: 300,
+        stalenessMs: SESSION_CONTEXT_WINDOW_MS,
+      })?.formattedContext,
     }, ctx.fusionProvider);
 
     // Schedule each output item
@@ -456,6 +462,7 @@ export async function runInnerThoughts(ctx: GardenerContext): Promise<void> {
       const proResult = createProactiveItem({
         db: ctx.db,
         userId,
+        sessionId: sessionSummary?.sessionId ?? null,
         message: item.message,
         context: item.context,
         type: 'follow_up',

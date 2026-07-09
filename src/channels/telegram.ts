@@ -1527,9 +1527,22 @@ export class TelegramChannel {
       }
     }
 
+    // Rehydrate the user's durable session after a bot restart. Without this,
+    // the next reply starts a fresh context and the agent cannot relate it to
+    // the proactive message or earlier conversation that preceded the restart.
+    const prefixedUserId = `telegram:${userId}`;
+    const existing = this.db.findSessionByUserId(prefixedUserId);
+    if (existing) {
+      const session = await this.sessionManager.getSession(existing.id);
+      if (session) {
+        this.userSessions.set(userId, existing.id);
+        return existing.id;
+      }
+    }
+
     // Prefix userId with channel for trigger routing (reminders, etc.)
     const session = await this.sessionManager.createSession({
-      userId: `telegram:${userId}`,
+      userId: prefixedUserId,
       channelId: 'telegram',
     });
 

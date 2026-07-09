@@ -58,6 +58,8 @@ export interface ProactiveEvalInput {
   userId: string;
   /** Board summary for LLM context */
   boardSummary?: string;
+  /** Recent user-scoped transcript; it lets the evaluator avoid stale or already-resolved nudges. */
+  recentChatContext?: string;
   /** Number of agent-sourced items created today */
   todayItemCount?: number;
   /** User-stated preferences relevant to proactiveness (e.g. "agent should check in frequently") */
@@ -154,15 +156,17 @@ export function buildEvaluatorPrompt(
     ? `\n\nSTATED PREFERENCES (the user has told the assistant these things — honor them):\n${(input.userPreferences ?? []).map(p => `- ${p}`).join('\n')}`
     : '';
 
-  const system = `You are a proactive personal assistant deciding whether to send follow-up messages.
+  const system = `You are the background proactive reasoning agent for a personal assistant. Deliberate privately before deciding whether a follow-up would add genuine value.
 
-Rules:
+Your working approach:
+- Reconstruct the user's situation from the recent transcript, earlier conversation history, session summary, stated preferences, task board, and the candidate signals. Treat the newest direct conversation as the most current source of truth.
+- Use older chats as context, not as isolated triggers. Reconcile them with what the user has said most recently, including outcomes, corrections, changed plans, and requests to stop or defer something.
+- Consider the assistant's next helpful action internally. The user should receive a warm, self-contained message only when it is timely and useful; otherwise represent the decision as "skip".
 - Proactiveness dial: ${input.dial}. ${dialGuidance[input.dial]}
 - User's current mood: ${mood}
-- Write nudge messages that feel natural and warm, like a helpful friend. 1-3 sentences max.
-- The "message" field must be the exact text to send to the user. Do not write instructions like "ask the user..." or "send a message...".
-- If you cannot write a direct user-facing message, choose "skip".
-- Respond with JSON only. No additional text outside the JSON object.${prefsBlock}
+- A nudge is a natural, friendly 1-3 sentence message, as if casually texting a helpful friend.
+- The "message" field is the final text addressed to the user. It must never describe the assistant's reasoning, plan, tools, or a task it needs to perform.
+- Return JSON only. Keep all deliberation private.${prefsBlock}
 
 Response format:
 {"items": [{"index": <signal index, 1-based>, "action": "skip" | "nudge", "message": "<message for nudge>", "urgency": "low" | "medium" | "high"}]}
@@ -179,6 +183,20 @@ Topics: ${s.topics.join(', ')}
 Messages: ${s.messageCount}
 Duration: ${Math.round(s.durationMs / 60_000)}min
 Summary: ${s.summary}`);
+  }
+
+  if (input.recentChatContext) {
+    parts.push(`RECENT CHAT TRANSCRIPT (most current; use it to avoid stale follow-ups):\n${input.recentChatContext}`);
+  }
+
+  const earlierSessions = input.allSessionSummaries
+    .filter((summary) => summary.id !== input.sessionSummary?.id)
+    .slice(0, 4);
+  if (earlierSessions.length > 0) {
+    const history = earlierSessions
+      .map((summary, index) => `${index + 1}. Topics: ${summary.topics.join(', ') || 'general'}\n   Summary: ${summary.summary}`)
+      .join('\n');
+    parts.push(`EARLIER CONVERSATION HISTORY (context for the current decision):\n${history}`);
   }
 
   // Gap signals

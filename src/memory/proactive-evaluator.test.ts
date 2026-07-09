@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseEvaluatorResponse } from './proactive-evaluator.js';
+import { buildEvaluatorPrompt, parseEvaluatorResponse } from './proactive-evaluator.js';
 import type { GapSignal } from './gap-scanner.js';
 
 function makeSignal(overrides?: Partial<GapSignal>): GapSignal {
@@ -35,5 +35,36 @@ describe('parseEvaluatorResponse', () => {
     );
 
     expect(result).toEqual([]);
+  });
+
+  it('grounds evaluation in the recent chat transcript', () => {
+    const prompt = buildEvaluatorPrompt({
+      sessionSummary: null,
+      behavioralPatterns: null,
+      activeGoals: [],
+      boardItems: [],
+      allSessionSummaries: [{
+        id: 'earlier-session',
+        sessionId: 'session-earlier',
+        userId: 'telegram:42',
+        summary: 'The user was preparing the prototype review and asked for a follow-up later.',
+        topics: ['prototype review'],
+        messageCount: 4,
+        durationMs: 10 * 60_000,
+        embedding: null,
+        createdAt: 1_705_000_000_000,
+      }],
+      existingItems: [],
+      dial: 'moderate',
+      affect: null,
+      lastProactiveAt: null,
+      activeHours: [],
+      userId: 'telegram:42',
+      recentChatContext: 'User: I already finished the prototype review.\nAssistant: Great work.',
+    }, [makeSignal()]);
+
+    expect(prompt.system).toContain('Deliberate privately');
+    expect(String(prompt.messages[0].content)).toContain('I already finished the prototype review.');
+    expect(String(prompt.messages[0].content)).toContain('preparing the prototype review');
   });
 });

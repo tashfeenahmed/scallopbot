@@ -30,6 +30,7 @@ function makeMessage(overrides?: Partial<SessionMessageRow>): SessionMessageRow 
 function makeMockDb(messages: SessionMessageRow[]): ScallopDatabase {
   return {
     getAllMessagesPaginated: vi.fn().mockReturnValue({ messages, hasMore: false }),
+    getRecentMessagesByUserId: vi.fn().mockReturnValue(messages),
   } as unknown as ScallopDatabase;
 }
 
@@ -109,6 +110,17 @@ describe('getRecentChatContext', () => {
 
     getRecentChatContext(db, { maxMessages: 3 });
     expect(db.getAllMessagesPaginated).toHaveBeenCalledWith(3);
+  });
+
+  it('uses a user-scoped query when a user ID is supplied', () => {
+    const messages = [makeMessage({ content: 'Private chat', createdAt: NOW - HOUR_MS })];
+    const db = makeMockDb(messages);
+
+    const result = getRecentChatContext(db, 'telegram:123');
+
+    expect(result?.formattedContext).toBe('User: Private chat');
+    expect(db.getRecentMessagesByUserId).toHaveBeenCalledWith('telegram:123', 10);
+    expect(db.getAllMessagesPaginated).not.toHaveBeenCalled();
   });
 
   it('respects custom maxCharsPerMessage option', () => {

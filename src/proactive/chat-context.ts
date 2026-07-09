@@ -2,7 +2,8 @@
  * Recent Chat Context — lightweight utility to retrieve recent conversation
  * history and format it for injection into sub-agent system prompts.
  *
- * Uses the existing db.getAllMessagesPaginated() API (synchronous, no new DB queries).
+ * Uses the database's synchronous session-message APIs. When a user ID is
+ * supplied, the context is scoped to that user's sessions.
  */
 
 import type { ScallopDatabase, SessionMessageRow } from '../memory/db.js';
@@ -55,13 +56,18 @@ function extractText(content: string): string {
  */
 export function getRecentChatContext(
   db: ScallopDatabase,
-  options?: RecentChatContextOptions,
+  userIdOrOptions?: string | RecentChatContextOptions,
+  maybeOptions?: RecentChatContextOptions,
 ): RecentChatContext | null {
+  const userId = typeof userIdOrOptions === 'string' ? userIdOrOptions : undefined;
+  const options = typeof userIdOrOptions === 'string' ? maybeOptions : userIdOrOptions;
   const maxMessages = options?.maxMessages ?? DEFAULT_MAX_MESSAGES;
   const maxChars = options?.maxCharsPerMessage ?? DEFAULT_MAX_CHARS;
   const stalenessMs = options?.stalenessMs ?? DEFAULT_STALENESS_MS;
 
-  const { messages } = db.getAllMessagesPaginated(maxMessages);
+  const messages = userId
+    ? db.getRecentMessagesByUserId(userId, maxMessages)
+    : db.getAllMessagesPaginated(maxMessages).messages;
 
   if (messages.length === 0) return null;
 

@@ -95,6 +95,23 @@ describe('gardener-scheduling', () => {
 
       expect(result.timing.deliverAt).toBeGreaterThanOrEqual(fixedNow);
     });
+
+    it('preserves the source conversation for a later reply', () => {
+      scheduleProactiveItem({
+        db,
+        userId: 'telegram:123',
+        sessionId: 'conversation-1',
+        message: 'How did the prototype review go?',
+        context: null,
+        type: 'follow_up',
+        quietHours: { start: 2, end: 5 },
+        activeHours: [],
+        lastProactiveAt: null,
+        urgency: 'low',
+      });
+
+      expect(db.getScheduledItemsByUser('telegram:123')[0].sessionId).toBe('conversation-1');
+    });
   });
 
   describe('getLastProactiveAt', () => {
