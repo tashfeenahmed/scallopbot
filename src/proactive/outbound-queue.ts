@@ -17,6 +17,7 @@ import type { Logger } from 'pino';
 import type { Router } from '../routing/router.js';
 
 import { DRAIN_INTERVAL_MS, MAX_QUEUE_SIZE } from './proactive-config.js';
+import { sanitizeProactiveMessage } from './message-safety.js';
 
 // ============ LLM Combine Prompt ============
 
@@ -202,11 +203,12 @@ export class OutboundQueue {
 
       const textBlock = result.response.content.find(b => b.type === 'text');
       const combined = textBlock && 'text' in textBlock ? textBlock.text.trim() : '';
-      if (combined.length > 0) {
-        return combined;
+      const safeCombined = sanitizeProactiveMessage(combined);
+      if (safeCombined) {
+        return safeCombined;
       }
 
-      this.logger.warn('LLM returned empty combined message, using fallback');
+      this.logger.warn('LLM returned empty or unsafe combined message, using fallback');
       return this.fallbackJoin(messages);
     } catch (err) {
       this.logger.warn(

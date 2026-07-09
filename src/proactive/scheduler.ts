@@ -23,6 +23,7 @@ import { formatProactiveMessage, type ProactiveFormatInput } from './proactive-f
 import { detectProactiveEngagement } from './feedback.js';
 import { getRecentChatContext } from './chat-context.js';
 import { wordOverlap } from '../utils/text-similarity.js';
+import { sanitizeProactiveMessage } from './message-safety.js';
 
 /** How long to remember recently sent messages for dedup (2 hours).
  *  Extended from 30min so a recurring cognitive-layer signal that fires every
@@ -494,6 +495,25 @@ export class UnifiedScheduler {
         this.logger.warn({ err: (err as Error).message, itemId: item.id }, 'Failed to defer min-gap-throttled item');
       }
       return;
+    }
+
+    if (item.source === 'agent') {
+      const safeMessage = sanitizeProactiveMessage(message);
+      if (!safeMessage) {
+        this.logger.warn(
+          { itemId: item.id, userId: item.userId, source: item.source },
+          'Suppressing unsafe agent proactive message'
+        );
+        this.db.recordProactiveDecision({
+          userId: item.userId,
+          stage: 'deliver',
+          outcome: 'suppressed',
+          reason: 'unsafe_message',
+          detail: { itemId: item.id },
+        });
+        return;
+      }
+      message = safeMessage;
     }
 
     // Send-time dedup: skip if a similar message was sent recently to this user

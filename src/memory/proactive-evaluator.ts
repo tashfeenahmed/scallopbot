@@ -23,6 +23,7 @@ import { scanForGaps } from './gap-scanner.js';
 import { safeBehavioralPatterns } from './gardener-context.js';
 import { isDuplicate, type ExistingItemForDedup, type GapScheduledItem } from './gap-pipeline.js';
 import { extractResponseText, extractJSON } from '../proactive/proactive-utils.js';
+import { sanitizeProactiveMessage } from '../proactive/message-safety.js';
 import {
   PROACTIVE_COOLDOWN_MS,
   MIN_SESSION_MESSAGES,
@@ -159,6 +160,8 @@ Rules:
 - Proactiveness dial: ${input.dial}. ${dialGuidance[input.dial]}
 - User's current mood: ${mood}
 - Write nudge messages that feel natural and warm, like a helpful friend. 1-3 sentences max.
+- The "message" field must be the exact text to send to the user. Do not write instructions like "ask the user..." or "send a message...".
+- If you cannot write a direct user-facing message, choose "skip".
 - Respond with JSON only. No additional text outside the JSON object.${prefsBlock}
 
 Response format:
@@ -235,7 +238,8 @@ export function parseEvaluatorResponse(
     if (entry.action === 'skip' || entry.action !== 'nudge') continue;
 
     const signal = signals[index];
-    const message = typeof entry.message === 'string' ? entry.message : signal.description;
+    const message = sanitizeProactiveMessage(typeof entry.message === 'string' ? entry.message : '');
+    if (!message) continue;
     const urgency = typeof entry.urgency === 'string' && validUrgencies.has(entry.urgency)
       ? entry.urgency
       : signal.severity;

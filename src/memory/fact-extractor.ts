@@ -17,6 +17,7 @@ import {
   createRelationshipClassifier,
   type ExistingFact,
 } from './relation-classifier.js';
+import { sanitizeProactiveMessage } from '../proactive/message-safety.js';
 
 /**
  * Categories for extracted facts
@@ -209,8 +210,11 @@ KIND RULES:
 NUDGE TONE — CRITICAL:
 The description for nudges is sent DIRECTLY to the user as a chat message. Write it like a casual, friendly message from a mate — not a robotic notification.
 - Use natural, conversational language. Imagine you're texting a friend.
+- The description must be the exact user-facing text. Do NOT write instructions like "ask the user...", "send a message...", or "check in with the user...".
 - BAD: "Eir fibre appointment tomorrow between 10am and 5pm"
 - GOOD: "Hey, just a heads up — your Eir fibre appointment is tomorrow, they said between 10 and 5."
+- BAD: "Ask the user how the agent mode proto is going"
+- GOOD: "Hey, how's the agent mode proto coming along?"
 - BAD: "Check progress on agent mode proto for Dan"
 - GOOD: "Hey, how's the agent mode proto for Dan coming along? Wanted to check in on that."
 - BAD: "Dentist appointment at 2pm"
@@ -1383,14 +1387,25 @@ Respond with JSON only:
 
       if (!trigger.description || !trigger.trigger_time || !trigger.context) continue;
 
+      // Determine kind: explicit from LLM, or default based on type.
+      const kind = trigger.kind || (trigger.type === 'event_prep' ? 'task' : 'nudge');
+      const message = sanitizeProactiveMessage(trigger.description);
+      if (!message) {
+        this.logger.warn(
+          { description: trigger.description.slice(0, 120) },
+          'Skipping unsafe proactive trigger description'
+        );
+        continue;
+      }
+
       const triggerAt = this.parseTriggerTime(trigger.trigger_time);
       if (!triggerAt) {
         this.logger.debug({ trigger_time: trigger.trigger_time }, 'Invalid trigger time, skipping');
         continue;
       }
 
-      if (db.hasSimilarPendingScheduledItem(userId, trigger.description)) {
-        this.logger.debug({ description: trigger.description }, 'Similar scheduled item already exists, skipping');
+      if (db.hasSimilarPendingScheduledItem(userId, message)) {
+        this.logger.debug({ description: message }, 'Similar scheduled item already exists, skipping');
         continue;
       }
 
@@ -1412,13 +1427,10 @@ Respond with JSON only:
         recurring = trigger.recurring;
       }
 
-      // Determine kind: explicit from LLM, or default based on type
-      const kind = trigger.kind || (trigger.type === 'event_prep' ? 'task' : 'nudge');
-
       // Build taskConfig for task-kind items
       const taskConfig = kind === 'task'
         ? {
-            goal: trigger.goal || trigger.guidance || trigger.description,
+            goal: trigger.goal || trigger.guidance || message,
             tools: Array.isArray(trigger.tools) ? trigger.tools : undefined,
           }
         : null;
@@ -1432,7 +1444,7 @@ Respond with JSON only:
         source: 'agent',
         kind,
         type: trigger.type || 'follow_up',
-        message: trigger.description,
+        message,
         context: storedContext,
         triggerAt,
         recurring,
@@ -1446,7 +1458,7 @@ Respond with JSON only:
         {
           type: trigger.type,
           kind,
-          description: trigger.description,
+          description: message,
           triggerAt: new Date(triggerAt).toISOString(),
           hasGuidance: !!trigger.guidance,
           hasGoal: !!trigger.goal,

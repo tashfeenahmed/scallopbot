@@ -175,13 +175,20 @@ describe('parseGapPipelineResponse', () => {
     expect(result).toHaveLength(1);
   });
 
-  it('uses signal description as fallback when message missing', () => {
+  it('skips entries with missing message instead of sending signal descriptions', () => {
     const response = JSON.stringify({
       items: [{ index: 1, action: 'nudge' }],
     });
     const result = parseGapPipelineResponse(response, signals);
-    expect(result).toHaveLength(1);
-    expect(result[0].message).toContain('Learn Rust');
+    expect(result).toEqual([]);
+  });
+
+  it('skips nudge entries whose message is an internal instruction', () => {
+    const response = JSON.stringify({
+      items: [{ index: 1, action: 'nudge', message: 'Ask the user whether they made progress on Rust.' }],
+    });
+    const result = parseGapPipelineResponse(response, signals);
+    expect(result).toEqual([]);
   });
 });
 

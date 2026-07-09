@@ -15,6 +15,7 @@ import type { LLMProvider, CompletionRequest } from '../providers/types.js';
 import type { ScheduledItemKind, TaskConfig } from './db.js';
 import { wordOverlap, DEDUP_OVERLAP_THRESHOLD } from '../utils/text-similarity.js';
 import { extractResponseText } from '../proactive/proactive-utils.js';
+import { sanitizeProactiveMessage } from '../proactive/message-safety.js';
 
 // Re-export for backward compatibility
 export { wordOverlap } from '../utils/text-similarity.js';
@@ -140,6 +141,8 @@ Rules:
 - Nudge: A short, friendly message delivered directly. Use for check-ins, reminders, encouragement.
 - Task: Background research the bot does before messaging. Use when info lookup would help (flight status, weather, etc).
 - Write nudge messages that feel natural and warm, like a helpful friend. 1-3 sentences max.
+- The "message" field must be the exact text to send to the user. Do not write instructions like "ask the user..." or "send a message...".
+- If you cannot write a direct user-facing message, choose "skip".
 - For tasks, describe the goal clearly so a sub-agent can execute it.
 
 Response format (JSON only, no other text):
@@ -190,7 +193,8 @@ export function parseGapPipelineResponse(
       if (action === 'skip') continue;
 
       const signal = signals[index];
-      const message = typeof entry.message === 'string' ? entry.message : signal.description;
+      const message = sanitizeProactiveMessage(typeof entry.message === 'string' ? entry.message : '');
+      if (!message) continue;
 
       if (action === 'task') {
         const goal = typeof entry.goal === 'string' ? entry.goal : message;
@@ -275,4 +279,3 @@ export async function runGapPipeline(
     return [];
   }
 }
-

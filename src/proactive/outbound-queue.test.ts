@@ -175,6 +175,22 @@ describe('OutboundQueue', () => {
 
       expect(sendMessage).toHaveBeenCalledWith('user1', 'Msg A\n\nMsg B\n\nMsg C');
     });
+
+    it('falls back when LLM returns internal instructions instead of a message', async () => {
+      const unsafeRouter = createMockRouter('Ask the user whether they finished the prototype.');
+      const { queue, sendMessage } = createQueue({ router: unsafeRouter });
+
+      queue.enqueue('user1', 'Hey, how is the prototype going?');
+      queue.enqueue('user1', 'Just checking whether the gym plan is still on.');
+
+      const handler = queue.createHandler();
+      await handler('user1', 'Quick reminder, dentist at 2.');
+
+      expect(sendMessage).toHaveBeenCalledWith(
+        'user1',
+        'Hey, how is the prototype going?\n\nJust checking whether the gym plan is still on.\n\nQuick reminder, dentist at 2.',
+      );
+    });
   });
 
   describe('queue size cap', () => {
