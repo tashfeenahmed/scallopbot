@@ -110,9 +110,9 @@ perturbed queries at average cosine 0.849, indexed candidate recall was 0.97
 index added 9.82 MB. The benchmark exits non-zero below 2x latency improvement,
 2x heap improvement, 0.95 perturbed-query recall, or 1.00 exact recall.
 
-Repository verification passed 161 test files / 2,310 tests, with one existing
+Repository verification passed 161 test files / 2,313 tests, with one existing
 slow timeout test intentionally skipped. The focused intelligence command
-passed 25 files / 221 tests plus that skip. TypeScript, repository-wide lint,
+passed 25 files / 223 tests plus that skip. TypeScript, repository-wide lint,
 the production build, and the whitespace audit all passed.
 
 `benchmark:memory` generates a deterministic 10,000-memory corpus with

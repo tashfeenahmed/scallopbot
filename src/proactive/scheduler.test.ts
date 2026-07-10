@@ -247,6 +247,92 @@ describe('UnifiedScheduler proactive delivery safety', () => {
     }
   });
 
+  it('fails startup closed when a legacy provenance column is incompatible', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'scheduled-provenance-invalid-'));
+    const dbPath = join(dir, 'legacy.sqlite');
+
+    try {
+      new ScallopDatabase(dbPath).close();
+      const legacySqlite = new Database(dbPath);
+      legacySqlite.exec('ALTER TABLE scheduled_items DROP COLUMN message_provenance');
+      legacySqlite.exec("ALTER TABLE scheduled_items ADD COLUMN message_provenance TEXT DEFAULT 'generated'");
+      legacySqlite.close();
+
+      expect(() => new ScallopDatabase(dbPath)).toThrow(
+        /migrateAddScheduledMessageProvenance failed.*incompatible schema/,
+      );
+
+      // The failed constructor releases its SQLite connection.
+      const reopened = new Database(dbPath, { readonly: true });
+      expect(
+        reopened.prepare("SELECT \"notnull\" AS not_null FROM pragma_table_info('scheduled_items') WHERE name = 'message_provenance'")
+          .get(),
+      ).toEqual({ not_null: 0 });
+      reopened.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rolls back a partially applied required worker migration', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'scheduled-worker-migration-'));
+    const dbPath = join(dir, 'legacy.sqlite');
+    const originalExec = Database.prototype.exec;
+    let execSpy: ReturnType<typeof vi.spyOn> | undefined;
+    let recovered: ScallopDatabase | undefined;
+    let recoveredSqlite: InstanceType<typeof Database> | undefined;
+
+    try {
+      new ScallopDatabase(dbPath).close();
+      const legacySqlite = new Database(dbPath);
+      legacySqlite.exec('DROP INDEX IF EXISTS idx_scheduled_preferred_worker');
+      legacySqlite.exec('ALTER TABLE scheduled_items DROP COLUMN worker_id');
+      legacySqlite.exec('ALTER TABLE scheduled_items DROP COLUMN preferred_worker_id');
+      legacySqlite.close();
+
+      execSpy = vi.spyOn(Database.prototype, 'exec').mockImplementation(function (sql: string) {
+        if (sql.includes('ADD COLUMN preferred_worker_id')) {
+          throw new Error('simulated required migration failure');
+        }
+        return originalExec.call(this, sql);
+      });
+
+      expect(() => new ScallopDatabase(dbPath)).toThrow(
+        /migrateAddBoardExecutionColumns failed.*simulated required migration failure/,
+      );
+      execSpy.mockRestore();
+      execSpy = undefined;
+
+      const afterFailure = new Database(dbPath, { readonly: true });
+      const columnsAfterFailure = new Set(
+        (afterFailure.prepare('PRAGMA table_info(scheduled_items)').all() as Array<{ name: string }>)
+          .map(column => column.name),
+      );
+      expect(columnsAfterFailure.has('worker_id')).toBe(false);
+      expect(columnsAfterFailure.has('preferred_worker_id')).toBe(false);
+      afterFailure.close();
+
+      // A later clean startup can retry the complete migration successfully.
+      recovered = new ScallopDatabase(dbPath);
+      recoveredSqlite = new Database(dbPath, { readonly: true });
+      const columnsAfterRecovery = new Set(
+        (recoveredSqlite.prepare('PRAGMA table_info(scheduled_items)').all() as Array<{ name: string }>)
+          .map(column => column.name),
+      );
+      expect(columnsAfterRecovery.has('worker_id')).toBe(true);
+      expect(columnsAfterRecovery.has('preferred_worker_id')).toBe(true);
+      recoveredSqlite.close();
+      recoveredSqlite = undefined;
+      recovered.close();
+      recovered = undefined;
+    } finally {
+      execSpy?.mockRestore();
+      recoveredSqlite?.close();
+      recovered?.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('preserves generated provenance when a recurring reminder creates its successor', async () => {
     const send = vi.fn().mockResolvedValue(true);
     const router = {

@@ -466,6 +466,13 @@ export interface SubAgentRunRow {
   completedAt: number | null;
 }
 
+interface SqliteTableColumn {
+  name: string;
+  type: string;
+  notnull: number;
+  dflt_value: string | null;
+}
+
 /**
  * SQLite Database Manager for ScallopMemory
  */
@@ -488,8 +495,15 @@ export class ScallopDatabase {
     // Enable WAL mode for better concurrent performance
     this.db.pragma('journal_mode = WAL');
 
-    // Initialize schema
-    this.initializeSchema();
+    // A partially initialized connection must never escape when a required
+    // migration fails. Closing here also releases WAL/lock resources before
+    // the startup error is reported to the caller.
+    try {
+      this.initializeSchema();
+    } catch (error) {
+      this.db.close();
+      throw error;
+    }
   }
 
   /**
@@ -934,9 +948,6 @@ export class ScallopDatabase {
     // Migration: Add durable task lease/retry/handoff columns
     this.migrateAddBoardExecutionColumns();
 
-    // Migration: Backfill board_status for legacy items where it's NULL
-    this.migrateBackfillBoardStatus();
-
     // Migration: Create FTS5 virtual table for transcript chunk search
     this.migrateCreateTranscriptFTS();
 
@@ -1297,21 +1308,17 @@ export class ScallopDatabase {
    * Backfills event_prep items as kind='task'.
    */
   private migrateAddKindColumn(): void {
-    try {
-      const tableInfo = this.db.prepare("PRAGMA table_info(scheduled_items)").all() as Array<{ name: string }>;
-      const hasKindColumn = tableInfo.some(col => col.name === 'kind');
-
-      if (!hasKindColumn) {
-        this.db.exec("ALTER TABLE scheduled_items ADD COLUMN kind TEXT NOT NULL DEFAULT 'nudge'");
-        this.db.exec("ALTER TABLE scheduled_items ADD COLUMN task_config TEXT DEFAULT NULL");
-        // Backfill: event_prep items become tasks
+    this.runRequiredScheduledItemsMigration(
+      'migrateAddKindColumn',
+      [
+        ['kind', "TEXT NOT NULL DEFAULT 'nudge'"],
+        ['task_config', 'TEXT DEFAULT NULL'],
+      ],
+      () => {
+        // Backfill: event_prep items become tasks.
         this.db.exec("UPDATE scheduled_items SET kind = 'task' WHERE type = 'event_prep'");
-      }
-    } catch (error) {
-      if (error instanceof Error) {
-        console.warn(`[migration] migrateAddKindColumn: ${error.message}`);
-      }
-    }
+      },
+    );
   }
 
   /**
@@ -1320,20 +1327,40 @@ export class ScallopDatabase {
    * deliberately `generated`.
    */
   private migrateAddScheduledMessageProvenance(): void {
-    try {
-      const tableInfo = this.db.prepare("PRAGMA table_info(scheduled_items)").all() as Array<{ name: string }>;
-      if (!tableInfo.some(column => column.name === 'message_provenance')) {
-        this.db.exec(`
-          ALTER TABLE scheduled_items
-          ADD COLUMN message_provenance TEXT NOT NULL DEFAULT 'generated'
-          CHECK (message_provenance IN ('user_literal', 'generated'))
-        `);
-      }
-    } catch (error) {
-      if (error instanceof Error) {
-        console.warn(`[migration] migrateAddScheduledMessageProvenance: ${error.message}`);
-      }
-    }
+    this.runRequiredScheduledItemsMigration(
+      'migrateAddScheduledMessageProvenance',
+      [[
+        'message_provenance',
+        "TEXT NOT NULL DEFAULT 'generated' CHECK (message_provenance IN ('user_literal', 'generated'))",
+      ]],
+      undefined,
+      columns => {
+        const provenance = columns.get('message_provenance')!;
+        const defaultValue = provenance.dflt_value?.trim();
+        if (
+          provenance.type.trim().toUpperCase() !== 'TEXT'
+          || provenance.notnull !== 1
+          || (defaultValue !== "'generated'" && defaultValue !== '"generated"')
+        ) {
+          throw new Error(
+            'scheduled_items.message_provenance has an incompatible schema; '
+            + "expected TEXT NOT NULL DEFAULT 'generated'",
+          );
+        }
+
+        const invalid = this.db.prepare(`
+          SELECT COUNT(*) AS count
+          FROM scheduled_items
+          WHERE message_provenance IS NULL
+             OR message_provenance NOT IN ('user_literal', 'generated')
+        `).get() as { count: number };
+        if (invalid.count > 0) {
+          throw new Error(
+            `scheduled_items.message_provenance contains ${invalid.count} invalid value(s)`,
+          );
+        }
+      },
+    );
   }
 
   /**
@@ -1341,36 +1368,41 @@ export class ScallopDatabase {
    * Adds: board_status, priority, labels, result, depends_on, goal_id
    */
   private migrateAddBoardColumns(): void {
-    try {
-      const tableInfo = this.db.prepare("PRAGMA table_info(scheduled_items)").all() as Array<{ name: string }>;
-      const hasBoardStatus = tableInfo.some(col => col.name === 'board_status');
-
-      if (!hasBoardStatus) {
-        this.db.exec("ALTER TABLE scheduled_items ADD COLUMN board_status TEXT DEFAULT NULL");
-        this.db.exec("ALTER TABLE scheduled_items ADD COLUMN priority TEXT DEFAULT 'medium'");
-        this.db.exec("ALTER TABLE scheduled_items ADD COLUMN labels TEXT DEFAULT NULL");
-        this.db.exec("ALTER TABLE scheduled_items ADD COLUMN result TEXT DEFAULT NULL");
-        this.db.exec("ALTER TABLE scheduled_items ADD COLUMN depends_on TEXT DEFAULT NULL");
-        this.db.exec("ALTER TABLE scheduled_items ADD COLUMN goal_id TEXT DEFAULT NULL");
-
-        // Indexes for board queries
-        this.db.exec("CREATE INDEX IF NOT EXISTS idx_scheduled_board ON scheduled_items(user_id, board_status)");
-        this.db.exec("CREATE INDEX IF NOT EXISTS idx_scheduled_priority ON scheduled_items(priority)");
-        this.db.exec("CREATE INDEX IF NOT EXISTS idx_scheduled_goal ON scheduled_items(goal_id)");
-      }
-    } catch (error) {
-      if (error instanceof Error) {
-        console.warn(`[migration] migrateAddBoardColumns: ${error.message}`);
-      }
-    }
+    this.runRequiredScheduledItemsMigration(
+      'migrateAddBoardColumns',
+      [
+        ['board_status', 'TEXT DEFAULT NULL'],
+        ['priority', "TEXT DEFAULT 'medium'"],
+        ['labels', 'TEXT DEFAULT NULL'],
+        ['result', 'TEXT DEFAULT NULL'],
+        ['depends_on', 'TEXT DEFAULT NULL'],
+        ['goal_id', 'TEXT DEFAULT NULL'],
+      ],
+      () => {
+        this.db.exec('CREATE INDEX IF NOT EXISTS idx_scheduled_board ON scheduled_items(user_id, board_status)');
+        this.db.exec('CREATE INDEX IF NOT EXISTS idx_scheduled_priority ON scheduled_items(priority)');
+        this.db.exec('CREATE INDEX IF NOT EXISTS idx_scheduled_goal ON scheduled_items(goal_id)');
+        this.db.exec(`
+          UPDATE scheduled_items
+          SET board_status = CASE
+            WHEN status = 'pending' AND trigger_at > 0 THEN 'scheduled'
+            WHEN status = 'pending' THEN 'inbox'
+            WHEN status = 'processing' THEN 'in_progress'
+            WHEN status IN ('fired', 'acted') THEN 'done'
+            WHEN status IN ('dismissed', 'expired') THEN 'archived'
+            ELSE 'inbox'
+          END
+          WHERE board_status IS NULL
+        `);
+      },
+    );
   }
 
   /** Add durable worker ownership, lease, retry, and handoff fields. */
   private migrateAddBoardExecutionColumns(): void {
-    try {
-      const tableInfo = this.db.prepare("PRAGMA table_info(scheduled_items)").all() as Array<{ name: string }>;
-      const existing = new Set(tableInfo.map((column) => column.name));
-      const columns: Array<[string, string]> = [
+    this.runRequiredScheduledItemsMigration(
+      'migrateAddBoardExecutionColumns',
+      [
         ['worker_id', 'TEXT DEFAULT NULL'],
         ['preferred_worker_id', 'TEXT DEFAULT NULL'],
         ['lease_token', 'TEXT DEFAULT NULL'],
@@ -1380,44 +1412,74 @@ export class ScallopDatabase {
         ['max_attempts', 'INTEGER NOT NULL DEFAULT 3'],
         ['last_error', 'TEXT DEFAULT NULL'],
         ['handed_off_from', 'TEXT DEFAULT NULL'],
-      ];
-      for (const [name, definition] of columns) {
-        if (!existing.has(name)) {
-          this.db.exec(`ALTER TABLE scheduled_items ADD COLUMN ${name} ${definition}`);
+      ],
+      () => {
+        this.db.exec('CREATE INDEX IF NOT EXISTS idx_scheduled_task_lease ON scheduled_items(kind, status, lease_expires_at)');
+        this.db.exec('CREATE INDEX IF NOT EXISTS idx_scheduled_preferred_worker ON scheduled_items(preferred_worker_id)');
+      },
+      columns => {
+        for (const [name, expectedDefault] of [
+          ['attempt_count', '0'],
+          ['max_attempts', '3'],
+        ] as const) {
+          const column = columns.get(name)!;
+          if (
+            column.type.trim().toUpperCase() !== 'INTEGER'
+            || column.notnull !== 1
+            || column.dflt_value?.trim() !== expectedDefault
+          ) {
+            throw new Error(
+              `scheduled_items.${name} has an incompatible schema; `
+              + `expected INTEGER NOT NULL DEFAULT ${expectedDefault}`,
+            );
+          }
         }
-      }
-      this.db.exec('CREATE INDEX IF NOT EXISTS idx_scheduled_task_lease ON scheduled_items(kind, status, lease_expires_at)');
-      this.db.exec('CREATE INDEX IF NOT EXISTS idx_scheduled_preferred_worker ON scheduled_items(preferred_worker_id)');
-    } catch (error) {
-      if (error instanceof Error) {
-        console.warn(`[migration] migrateAddBoardExecutionColumns: ${error.message}`);
-      }
-    }
+      },
+    );
   }
 
   /**
-   * Backfill board_status for legacy rows where it's NULL.
-   * Uses the same CASE logic as computeBoardStatus() in board/types.ts.
+   * Apply a runtime-required scheduled_items column group atomically. Required
+   * schema migrations intentionally abort startup: continuing after a failed
+   * ALTER would expose application code to a partially upgraded table.
    */
-  private migrateBackfillBoardStatus(): void {
-    try {
-      this.db.exec(`
-        UPDATE scheduled_items
-        SET board_status = CASE
-          WHEN status = 'pending' AND trigger_at > 0 THEN 'scheduled'
-          WHEN status = 'pending' THEN 'inbox'
-          WHEN status = 'processing' THEN 'in_progress'
-          WHEN status IN ('fired', 'acted') THEN 'done'
-          WHEN status IN ('dismissed', 'expired') THEN 'archived'
-          ELSE 'inbox'
-        END
-        WHERE board_status IS NULL
-      `);
-    } catch (error) {
-      if (error instanceof Error) {
-        console.warn(`[migration] migrateBackfillBoardStatus: ${error.message}`);
+  private runRequiredScheduledItemsMigration(
+    name: string,
+    requiredColumns: ReadonlyArray<readonly [name: string, definition: string]>,
+    finalize?: () => void,
+    validate?: (columns: ReadonlyMap<string, SqliteTableColumn>) => void,
+  ): void {
+    const migrate = this.db.transaction(() => {
+      const before = this.getScheduledItemColumns();
+      for (const [column, definition] of requiredColumns) {
+        if (!before.has(column)) {
+          this.db.exec(`ALTER TABLE scheduled_items ADD COLUMN ${column} ${definition}`);
+        }
       }
+
+      finalize?.();
+
+      const after = this.getScheduledItemColumns();
+      const missing = requiredColumns
+        .map(([column]) => column)
+        .filter(column => !after.has(column));
+      if (missing.length > 0) {
+        throw new Error(`scheduled_items is missing required column(s): ${missing.join(', ')}`);
+      }
+      validate?.(after);
+    });
+
+    try {
+      migrate();
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(`[migration] ${name} failed: ${detail}`, { cause: error });
     }
+  }
+
+  private getScheduledItemColumns(): ReadonlyMap<string, SqliteTableColumn> {
+    const rows = this.db.prepare('PRAGMA table_info(scheduled_items)').all() as SqliteTableColumn[];
+    return new Map(rows.map(column => [column.name, column]));
   }
 
   /**

@@ -1624,11 +1624,25 @@ Only install skills when the user asks, or when you determine a skill would help
     tier: 'fast' | 'standard' | 'capable'
   ): Promise<CompletionResponse> {
     const MAX_RETRIES = 3;
+    // Provider overrides/defaults may not belong to this Router. Only feed
+    // outcomes back for a provider the Router actually owns.
+    const reportSuccess = (): void => {
+      if (this.router?.getProviderHealth(provider.name)) {
+        this.router.recordProviderSuccess(provider.name);
+      }
+    };
+    const reportFailure = (error: Error): void => {
+      if (this.router?.getProviderHealth(provider.name)) {
+        this.router.recordProviderFailure(provider.name, error);
+      }
+    };
 
     // Layer 0: Rate limit retry with exponential backoff
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       try {
-        return await provider.complete(request);
+        const response = await provider.complete(request);
+        reportSuccess();
+        return response;
       } catch (error) {
         const err = error as Error & { status?: number; headers?: Record<string, string> };
 
@@ -1684,7 +1698,9 @@ Only install skills when the user asks, or when you determine a skill would help
               }).catch(() => {});
 
               try {
-                return await provider.complete({ ...request, messages: result.messages });
+                const response = await provider.complete({ ...request, messages: result.messages });
+                reportSuccess();
+                return response;
               } catch (compactError) {
                 this.logger.warn({ error: (compactError as Error).message }, 'Compacted request still overflowed, trying emergency slice');
               }
@@ -1694,7 +1710,9 @@ Only install skills when the user asks, or when you determine a skill would help
 
             // Last resort: keep only the most recent 3 messages.
             try {
-              return await provider.complete({ ...request, messages: request.messages.slice(-3) });
+              const response = await provider.complete({ ...request, messages: request.messages.slice(-3) });
+              reportSuccess();
+              return response;
             } catch (retryError) {
               this.logger.error({ error: (retryError as Error).message }, 'Retry after emergency compression failed');
             }
@@ -1703,6 +1721,10 @@ Only install skills when the user asks, or when you determine a skill would help
 
         // Layer 2: Try fallback providers via router
         if (this.router) {
+          // Same-provider retries and compaction are exhausted. Feed the
+          // concrete primary failure into shared health before selecting a
+          // fallback, so the next turn honors cooldown.
+          reportFailure(err);
           this.logger.warn({ provider: provider.name, error: err.message }, 'Provider failed, trying fallback');
 
           try {
