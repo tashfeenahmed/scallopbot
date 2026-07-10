@@ -167,6 +167,28 @@ describe('Gateway', () => {
       const sessionManager = gateway.getSessionManager();
       expect(sessionManager).toBeDefined();
     });
+
+    it('fails closed when a workflow session cannot be resolved', async () => {
+      const { Gateway } = await import('./gateway.js');
+      const { pino } = await import('pino');
+      const gateway = new Gateway({
+        config: createMockConfig(testDir),
+        logger: pino({ level: 'silent' }),
+      });
+      await gateway.initialize();
+
+      const workflow = gateway.getSkillRegistry().getSkill('execute_workflow');
+      expect(workflow?.handler).toBeDefined();
+      const result = await workflow!.handler!({
+        args: { steps: [{ id: 'read', tool: 'memory_get', args: { id: 'missing' } }] },
+        workspace: testDir,
+        sessionId: 'missing-session',
+        userId: 'api:benchmark-user',
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('denied by the active session policy');
+    });
   });
 
   describe('native send_file skill', () => {

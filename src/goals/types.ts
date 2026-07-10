@@ -17,6 +17,74 @@ export type GoalType = 'goal' | 'milestone' | 'task';
  */
 export type GoalStatus = 'backlog' | 'active' | 'completed';
 
+/** Runtime state for an autonomous, verified goal execution. */
+export type GoalExecutionState =
+  | 'idle'
+  | 'running'
+  | 'waiting'
+  | 'blocked'
+  | 'budget_exhausted'
+  | 'completed';
+
+/** A deterministic acceptance check. Qualitative checks can be delegated to a judge. */
+export interface GoalAcceptanceCriterion {
+  /** Stable identifier used when supplying manual evidence. */
+  id: string;
+  /** Human-readable statement of the condition that must hold. */
+  description: string;
+  /** How to evaluate the final worker output. */
+  kind: 'contains' | 'regex' | 'equals' | 'manual';
+  /** Expected text or regular expression (not used for manual criteria). */
+  expected?: string;
+  /** Defaults to true. Optional criteria are reported but do not block completion. */
+  required?: boolean;
+}
+
+/** Completion contract that prevents an agent from declaring success without evidence. */
+export interface GoalContract {
+  acceptanceCriteria: GoalAcceptanceCriterion[];
+  constraints?: string[];
+  /** If true (the default), every required criterion must pass. */
+  requireAll?: boolean;
+}
+
+/** Hard execution limits. These counters are persisted with the goal. */
+export interface GoalBudget {
+  maxTurns: number;
+  maxCostUsd?: number;
+  /** Absolute epoch-ms deadline for execution. */
+  deadlineAt?: number;
+}
+
+export interface GoalCriterionResult {
+  id: string;
+  passed: boolean;
+  required: boolean;
+  reason: string;
+}
+
+export interface GoalVerification {
+  passed: boolean;
+  criteria: GoalCriterionResult[];
+  judgedAt: number;
+  judgeReason?: string;
+}
+
+/** Persistent execution journal embedded in goal metadata. */
+export interface GoalExecutionMetadata {
+  state: GoalExecutionState;
+  turnsUsed: number;
+  costUsedUsd: number;
+  startedAt?: number;
+  updatedAt: number;
+  parkedAt?: number;
+  resumeAt?: number;
+  parkReason?: string;
+  blockedReason?: string;
+  lastOutput?: string;
+  lastVerification?: GoalVerification;
+}
+
 /**
  * Check-in frequency for proactive triggers
  */
@@ -44,6 +112,12 @@ export interface GoalMetadata {
   lastCheckin?: number;
   /** User-defined tags */
   tags?: string[];
+  /** Optional acceptance contract for verified autonomous execution. */
+  contract?: GoalContract;
+  /** Optional hard turn/cost/time limits for autonomous execution. */
+  budget?: GoalBudget;
+  /** Durable execution state and counters. */
+  execution?: GoalExecutionMetadata;
   /** Allow additional properties for compatibility */
   [key: string]: unknown;
 }
@@ -105,6 +179,10 @@ export interface CreateGoalOptions {
   status?: GoalStatus;
   /** Tags for organization */
   tags?: string[];
+  /** Acceptance contract for autonomous execution. */
+  contract?: GoalContract;
+  /** Hard execution limits (defaults to 10 turns when a contract is supplied). */
+  budget?: GoalBudget;
 }
 
 /**
@@ -149,6 +227,49 @@ export interface UpdateGoalOptions {
   checkinFrequency?: CheckinFrequency;
   /** New tags */
   tags?: string[];
+  /** Replace the verified-execution contract. */
+  contract?: GoalContract;
+  /** Replace the verified-execution budget. */
+  budget?: GoalBudget;
+}
+
+/** Input supplied to one autonomous goal turn. */
+export interface GoalTurnContext {
+  goal: GoalItem;
+  contract: GoalContract;
+  budget: GoalBudget;
+  turnNumber: number;
+  previousOutput?: string;
+}
+
+/** Result from one autonomous goal turn. */
+export interface GoalTurnOutcome {
+  output: string;
+  /** Evidence for manual criteria, keyed by criterion id. */
+  evidence?: Record<string, boolean>;
+  costUsd?: number;
+  /** False when the worker stopped without a natural or explicit completion. */
+  taskComplete?: boolean;
+  failureReason?: string;
+  /** Park the goal until an external condition or time is ready. */
+  parkUntil?: number;
+  parkReason?: string;
+}
+
+export type GoalTurnRunner = (context: GoalTurnContext) => Promise<GoalTurnOutcome>;
+
+export type GoalJudge = (input: {
+  goal: GoalItem;
+  output: string;
+  deterministicResults: GoalCriterionResult[];
+}) => Promise<{ passed: boolean; reason?: string }>;
+
+export interface GoalRunResult {
+  goal: GoalItem;
+  state: GoalExecutionState;
+  turnsThisRun: number;
+  verification?: GoalVerification;
+  reason: string;
 }
 
 /**

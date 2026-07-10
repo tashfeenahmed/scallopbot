@@ -278,6 +278,13 @@ export default function App() {
           }
           break;
 
+        case 'proactive':
+          setIsWaiting(false);
+          if (data.content) {
+            addMessage({ type: 'assistant', content: data.content, isMarkdown: true });
+          }
+          break;
+
         case 'file':
           addMessage({
             type: 'file',

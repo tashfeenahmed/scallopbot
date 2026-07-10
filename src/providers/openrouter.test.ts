@@ -164,6 +164,110 @@ describe('OpenRouterProvider', () => {
       expect(mockFetch).toHaveBeenCalledTimes(2);
       expect(response.content[0]).toEqual({ type: 'text', text: 'OK' });
     });
+
+    it('aborts a hanging fetch when the configured per-attempt timeout expires', async () => {
+      vi.useFakeTimers();
+
+      try {
+        const timedProvider = new OpenRouterProvider({
+          apiKey: 'test-key',
+          timeout: 50,
+          maxRetries: 6,
+        });
+        mockFetch.mockImplementationOnce(() => new Promise<Response>(() => {}));
+
+        const completion = timedProvider.complete({
+          messages: [{ role: 'user', content: 'Hi' }],
+        });
+        const rejection = expect(completion).rejects.toMatchObject({
+          name: 'TimeoutError',
+          message: 'Provider request timed out after 50ms',
+        });
+
+        await vi.advanceTimersByTimeAsync(50);
+        await rejection;
+
+        expect(mockFetch).toHaveBeenCalledTimes(1);
+        const signal = (mockFetch.mock.calls[0][1] as RequestInit).signal;
+        expect(signal).toBeInstanceOf(AbortSignal);
+        expect(signal?.aborted).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('aborts when headers arrive but the response body stalls', async () => {
+      vi.useFakeTimers();
+
+      try {
+        const timedProvider = new OpenRouterProvider({
+          apiKey: 'test-key',
+          timeout: 50,
+          maxRetries: 6,
+        });
+        mockFetch.mockResolvedValueOnce(new Response(
+          new ReadableStream({ start() {} }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ));
+
+        const completion = timedProvider.complete({
+          messages: [{ role: 'user', content: 'Hi' }],
+        });
+        const rejection = expect(completion).rejects.toMatchObject({
+          name: 'TimeoutError',
+          message: 'Provider request timed out after 50ms',
+        });
+
+        await vi.advanceTimersByTimeAsync(50);
+        await rejection;
+
+        expect(mockFetch).toHaveBeenCalledTimes(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('honours caller cancellation without waiting for the provider timeout', async () => {
+      const controller = new AbortController();
+      const abortReason = new Error('caller cancelled');
+      const timedProvider = new OpenRouterProvider({
+        apiKey: 'test-key',
+        timeout: 60_000,
+        maxRetries: 6,
+      });
+      mockFetch.mockImplementationOnce(() => new Promise<Response>(() => {}));
+
+      const completion = timedProvider.complete({
+        messages: [{ role: 'user', content: 'Hi' }],
+        signal: controller.signal,
+      });
+      controller.abort(abortReason);
+
+      await expect(completion).rejects.toBe(abortReason);
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      const signal = (mockFetch.mock.calls[0][1] as RequestInit).signal;
+      expect(signal).not.toBe(controller.signal);
+      expect(signal?.aborted).toBe(true);
+    });
+
+    it.each(['AbortError', 'TimeoutError'] as const)(
+      'does not multiply attempts after a transport %s',
+      async (name) => {
+        const retryingProvider = new OpenRouterProvider({
+          apiKey: 'test-key',
+          maxRetries: 6,
+        });
+        mockFetch.mockRejectedValueOnce(new DOMException('transport cancelled', name));
+
+        await expect(
+          retryingProvider.complete({
+            messages: [{ role: 'user', content: 'Hi' }],
+          })
+        ).rejects.toMatchObject({ name });
+
+        expect(mockFetch).toHaveBeenCalledTimes(1);
+      }
+    );
   });
 
   describe('prompt caching (Anthropic via OpenRouter)', () => {

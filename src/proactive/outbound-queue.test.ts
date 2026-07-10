@@ -77,6 +77,13 @@ describe('OutboundQueue', () => {
 
       expect(sendMessage).toHaveBeenCalledWith('user1', 'Reminder: meeting at 3pm');
     });
+
+    it('returns the underlying delivery result rather than queue acceptance', async () => {
+      const sendMessage = vi.fn().mockResolvedValue(false);
+      const { queue } = createQueue({ sendMessage });
+
+      await expect(queue.createHandler()('user1', 'Reminder: meeting at 3pm')).resolves.toBe(false);
+    });
   });
 
   describe('LLM combining for 2+ messages', () => {
@@ -119,6 +126,18 @@ describe('OutboundQueue', () => {
         }),
         'fast'
       );
+    });
+
+    it('never combines or misroutes messages belonging to different users', async () => {
+      const { queue, sendMessage, router } = createQueue();
+      queue.enqueue('user1', 'Message for one');
+      queue.enqueue('user1', 'Second message for one');
+
+      await queue.createHandler()('user2', 'Message for two');
+
+      expect(sendMessage).toHaveBeenCalledWith('user1', 'Combined message from LLM');
+      expect(sendMessage).toHaveBeenCalledWith('user2', 'Message for two');
+      expect(router.executeWithFallback).toHaveBeenCalledTimes(1);
     });
   });
 

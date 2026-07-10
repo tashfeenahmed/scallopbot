@@ -20,7 +20,12 @@ export interface WatchdogDb {
   getActiveEvolutionVersion(target: string): { id: number; target: string; kind: string; at: number; baselineFitness: number | null; snapshot: string | null } | null;
   getRecentEvolutionSignals(limit: number): Array<StoredEvolutionSignal>;
   markEvolutionVersionRolledBack(id: number): void;
-  rollbackPromptOverride(fragmentId: string, restoreContent: string | null, at: number): void;
+  rollbackPromptEvolutionVersion(
+    versionId: number,
+    fragmentId: string,
+    restoreContent: string | null,
+    at: number,
+  ): void;
   recordEvolutionDecision(d: {
     at: number; stage: string; outcome: string; reason?: string | null; target?: string | null; detail?: Record<string, unknown> | null;
   }): void;
@@ -75,7 +80,7 @@ export async function runRollbackWatchdog(deps: WatchdogDeps): Promise<WatchdogS
             restore = null;
           }
         }
-        deps.db.rollbackPromptOverride(fragmentId, restore, now);
+        deps.db.rollbackPromptEvolutionVersion(version.id, fragmentId, restore, now);
       } else {
         // Skill: restore the snapshot files (or delete if there was none).
         const full = deps.db.getActiveEvolutionVersion(version.target);
@@ -90,7 +95,7 @@ export async function runRollbackWatchdog(deps: WatchdogDeps): Promise<WatchdogS
         await deps.store.rollback(version.target, snapshot);
         await deps.reloadFromDisk();
       }
-      deps.db.markEvolutionVersionRolledBack(version.id);
+      if (!isPrompt) deps.db.markEvolutionVersionRolledBack(version.id);
       deps.db.recordEvolutionDecision({
         at: now, stage: 'rollback', outcome: 'rolled_back', reason: 'regressed', target: version.target,
         detail: { failuresSincePromotion: failures, kind: version.kind },

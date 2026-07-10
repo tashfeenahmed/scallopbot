@@ -17,11 +17,10 @@ import { ScallopMemoryStore } from '../memory/scallop-store.js';
 import { BotConfigManager } from '../channels/bot-config.js';
 import { ContextManager } from '../routing/context.js';
 import { Router } from '../routing/router.js';
-import { ProviderRegistry } from '../providers/registry.js';
 import { CostTracker } from '../routing/cost.js';
 import { LLMFactExtractor } from '../memory/fact-extractor.js';
 import { createSkillRegistry, type SkillRegistry } from '../skills/registry.js';
-import { createSkillExecutor, type SkillExecutor } from '../skills/executor.js';
+import { createSkillExecutor } from '../skills/executor.js';
 import type {
   LLMProvider,
   CompletionRequest,
@@ -442,7 +441,7 @@ export function createWsClient(port: number): Promise<WsClient> {
         },
 
         collectUntilResponse(timeout = 15000): Promise<WsResponse[]> {
-          return new Promise((res, rej) => {
+          return new Promise((res) => {
             const messages: WsResponse[] = [];
 
             const timer = setTimeout(() => {
@@ -474,7 +473,7 @@ export function createWsClient(port: number): Promise<WsClient> {
           return new Promise((res) => {
             const messages: WsResponse[] = [];
 
-            const timer = setTimeout(() => {
+            setTimeout(() => {
               ws.removeListener('message', onMessage);
               res(messages);
             }, timeout);
@@ -507,6 +506,23 @@ export function createWsClient(port: number): Promise<WsClient> {
       resolve(client);
     });
   });
+}
+
+/**
+ * Opt a WebSocket test client into safe progress events.
+ *
+ * Dashboard clients are private by default, so E2E cases that explicitly
+ * assert tool, planning, or memory lifecycle events must enable verbose mode
+ * before sending the message under test.
+ */
+export async function enableVerboseProgress(client: WsClient): Promise<void> {
+  const acknowledgement = client.waitForResponse('response');
+  client.send({ type: 'chat', message: '/verbose' });
+  const response = await acknowledgement;
+
+  if (!response.content?.includes('Verbose mode ON')) {
+    throw new Error('Failed to enable verbose progress for E2E client');
+  }
 }
 
 // ---------------------------------------------------------------------------

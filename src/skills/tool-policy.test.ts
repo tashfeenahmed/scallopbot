@@ -77,6 +77,11 @@ describe('matchesPolicy', () => {
     expect(matchesPolicy('bash', policy)).toBe(false);
   });
 
+  it('treats an explicitly empty allow list as deny-all', () => {
+    expect(matchesPolicy('read_file', { allow: [] })).toBe(false);
+    expect(matchesPolicy('bash', { allow: [] })).toBe(false);
+  });
+
   it('supports group references in allow', () => {
     const policy = { allow: ['group:read'] };
     expect(matchesPolicy('read_file', policy)).toBe(true);

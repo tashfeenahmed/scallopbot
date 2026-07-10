@@ -10,6 +10,7 @@ dotenv.config();
 const DEFAULT_HOST = '127.0.0.1';
 const DEFAULT_OLLAMA_BASE_URL = 'http://localhost:11434';
 const DEFAULT_API_PORT = 3000;
+const DEFAULT_MULTI_MODEL_TIMEOUT_MS = 60_000;
 
 /** Parse an integer env var, falling back to a default when unset/invalid. */
 function envInt(name: string, fallback: number): number {
@@ -192,8 +193,6 @@ const toolPolicySchema = z.object({
   policy: toolPolicyEntrySchema.optional(),
   /** Per-channel tool policies */
   channelPolicies: z.record(z.string(), toolPolicyEntrySchema).optional(),
-  /** Named tool profiles */
-  profiles: z.record(z.string(), toolPolicyEntrySchema).optional(),
 });
 
 // Gateway configuration schema
@@ -288,8 +287,15 @@ const evolutionSchema = z.object({
   lowQualityThreshold: z.number().min(0).max(1).default(DEFAULT_EVOLUTION_CONFIG.lowQualityThreshold),
   maxProposals: z.number().int().positive().default(DEFAULT_EVOLUTION_CONFIG.maxProposals),
   fitnessEpsilon: z.number().min(0).max(1).default(DEFAULT_EVOLUTION_CONFIG.fitnessEpsilon),
+  requireFitnessGate: z.literal(true).default(true),
+  includeSessionContent: z.boolean().default(DEFAULT_EVOLUTION_CONFIG.includeSessionContent),
+  allowSeparateEvalProvider: z.boolean().default(DEFAULT_EVOLUTION_CONFIG.allowSeparateEvalProvider),
   rollbackWindow: z.number().int().positive().default(DEFAULT_EVOLUTION_CONFIG.rollbackWindow),
   useLlmJudge: z.boolean().default(DEFAULT_EVOLUTION_CONFIG.useLlmJudge),
+  curatorEnabled: z.boolean().default(DEFAULT_EVOLUTION_CONFIG.curatorEnabled),
+  curatorStaleDays: z.number().int().positive().default(DEFAULT_EVOLUTION_CONFIG.curatorStaleDays),
+  curatorArchiveDays: z.number().int().positive().default(DEFAULT_EVOLUTION_CONFIG.curatorArchiveDays),
+  curatorBackupKeep: z.number().int().positive().default(DEFAULT_EVOLUTION_CONFIG.curatorBackupKeep),
 });
 
 const modelsSchema = z.object({
@@ -320,6 +326,8 @@ const customProviderSchema = z.object({
 const multiModelSchema = z.object({
   enabled: z.boolean().default(false),
   providers: z.array(customProviderSchema).default([]),
+  /** Per-attempt timeout for user-defined OpenAI-compatible endpoints. */
+  timeoutMs: z.number().int().min(5_000).max(600_000).default(DEFAULT_MULTI_MODEL_TIMEOUT_MS),
 });
 
 /** Built-in provider names that CUSTOM_PROVIDER_* entries may not shadow. */
@@ -334,9 +342,13 @@ export const configSchema = z.object({
   // Purposes explicitly pinned via MODEL_<PURPOSE> — excluded from the runtime
   // /model switch so memory/tools can stay on a separate model.
   modelPins: z.array(z.string()).default([]),
-  multiModel: multiModelSchema.default({ enabled: false, providers: [] }),
+  multiModel: multiModelSchema.default({
+    enabled: false,
+    providers: [],
+    timeoutMs: DEFAULT_MULTI_MODEL_TIMEOUT_MS,
+  }),
   tuning: tuningSchema.default(TUNING_DEFAULTS),
-  evolution: evolutionSchema.default(DEFAULT_EVOLUTION_CONFIG),
+  evolution: evolutionSchema.default({ ...DEFAULT_EVOLUTION_CONFIG, requireFitnessGate: true as const }),
   channels: channelsSchema,
   agent: agentSchema,
   logging: loggingSchema.default({ level: 'info' }),
@@ -399,6 +411,15 @@ export function loadConfig(): Config {
     ? parseInt(process.env.AGENT_MAX_ITERATIONS, 10)
     : 100;
   const logLevel = process.env.LOG_LEVEL || 'info';
+  const parsePolicyJson = (name: string): unknown => {
+    const raw = process.env[name];
+    if (!raw) return undefined;
+    try {
+      return JSON.parse(raw);
+    } catch (error) {
+      throw new Error(`${name}: expected valid JSON (${(error as Error).message})`);
+    }
+  };
 
   // Multi-model mode: CUSTOM_PROVIDER_<NAME>="<baseUrl>|<model>[|<apiKey>]".
   // Always parsed (so a typo fails fast at startup), only registered by the
@@ -473,6 +494,7 @@ export function loadConfig(): Config {
     multiModel: {
       enabled: process.env.MULTI_MODEL_ENABLED === 'true',
       providers: customProviders,
+      timeoutMs: envInt('MULTI_MODEL_TIMEOUT_MS', DEFAULT_MULTI_MODEL_TIMEOUT_MS),
     },
     tuning: {
       gardener: {
@@ -492,14 +514,21 @@ export function loadConfig(): Config {
       },
     },
     evolution: {
-      enabled: process.env.EVOLUTION_ENABLED !== 'false',
+      enabled: process.env.EVOLUTION_ENABLED === 'true',
       minToolCalls: envInt('EVOLUTION_MIN_TOOL_CALLS', DEFAULT_EVOLUTION_CONFIG.minToolCalls),
       reusableScoreBar: envFloat('EVOLUTION_REUSABLE_SCORE_BAR', DEFAULT_EVOLUTION_CONFIG.reusableScoreBar),
       lowQualityThreshold: envFloat('EVOLUTION_LOW_QUALITY_THRESHOLD', DEFAULT_EVOLUTION_CONFIG.lowQualityThreshold),
       maxProposals: envInt('EVOLUTION_MAX_PROPOSALS', DEFAULT_EVOLUTION_CONFIG.maxProposals),
       fitnessEpsilon: envFloat('EVOLUTION_FITNESS_EPSILON', DEFAULT_EVOLUTION_CONFIG.fitnessEpsilon),
+      requireFitnessGate: true,
+      includeSessionContent: process.env.EVOLUTION_INCLUDE_SESSION_CONTENT === 'true',
+      allowSeparateEvalProvider: process.env.EVOLUTION_ALLOW_SEPARATE_EVAL_PROVIDER === 'true',
       rollbackWindow: envInt('EVOLUTION_ROLLBACK_WINDOW', DEFAULT_EVOLUTION_CONFIG.rollbackWindow),
-      useLlmJudge: process.env.EVOLUTION_USE_LLM_JUDGE === 'true',
+      useLlmJudge: process.env.EVOLUTION_USE_LLM_JUDGE !== 'false',
+      curatorEnabled: process.env.EVOLUTION_CURATOR_ENABLED !== 'false',
+      curatorStaleDays: envInt('EVOLUTION_CURATOR_STALE_DAYS', DEFAULT_EVOLUTION_CONFIG.curatorStaleDays),
+      curatorArchiveDays: envInt('EVOLUTION_CURATOR_ARCHIVE_DAYS', DEFAULT_EVOLUTION_CONFIG.curatorArchiveDays),
+      curatorBackupKeep: envInt('EVOLUTION_CURATOR_BACKUP_KEEP', DEFAULT_EVOLUTION_CONFIG.curatorBackupKeep),
     },
     providers: {
       anthropic: {
@@ -598,7 +627,10 @@ export function loadConfig(): Config {
       mmrEnabled: process.env.MMR_ENABLED === 'true',
       mmrLambda: process.env.MMR_LAMBDA ? parseFloat(process.env.MMR_LAMBDA) : 0.7,
     },
-    tools: {},
+    tools: {
+      policy: parsePolicyJson('TOOL_POLICY_JSON'),
+      channelPolicies: parsePolicyJson('TOOL_CHANNEL_POLICIES_JSON'),
+    },
     gateway: {
       port: process.env.GATEWAY_PORT ? parseInt(process.env.GATEWAY_PORT, 10) : DEFAULT_API_PORT,
       host: process.env.GATEWAY_HOST || DEFAULT_HOST,

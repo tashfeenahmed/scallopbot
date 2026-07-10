@@ -5,9 +5,9 @@
  * - LLM-powered message combining when multiple messages pile up
  * - Queue size cap to prevent unbounded growth
  *
- * This is a single-user system. When 2+ messages accumulate while a
- * drain is in progress, the queue uses an LLM to combine them into
- * a single natural Telegram message instead of separate pings.
+ * When 2+ messages for the same user accumulate while a drain is in progress,
+ * the queue uses an LLM to combine them into a single natural message instead
+ * of separate pings. Different users are always delivered independently.
  *
  * All proactive subsystems (scheduler, gardener, fact-extractor) route
  * through this queue so simultaneous messages get merged.
@@ -18,6 +18,7 @@ import type { Router } from '../routing/router.js';
 
 import { DRAIN_INTERVAL_MS, MAX_QUEUE_SIZE } from './proactive-config.js';
 import { sanitizeProactiveMessage } from './message-safety.js';
+import { extractResponseText } from './proactive-utils.js';
 
 // ============ LLM Combine Prompt ============
 
@@ -50,6 +51,7 @@ interface QueuedMessage {
   userId: string;
   message: string;
   enqueuedAt: number;
+  resolve?: (sent: boolean) => void;
 }
 
 // ============ Class ============
@@ -91,6 +93,8 @@ export class OutboundQueue {
       clearInterval(this.drainHandle);
       this.drainHandle = null;
     }
+    for (const item of this.queue) item.resolve?.(false);
+    this.queue = [];
   }
 
   /**
@@ -98,18 +102,22 @@ export class OutboundQueue {
    * Returns true if the message was queued, false if it was dropped (queue full).
    */
   enqueue(userId: string, message: string): boolean {
+    return this.enqueueInternal({ userId, message, enqueuedAt: Date.now() });
+  }
+
+  private enqueueInternal(item: QueuedMessage): boolean {
     // Queue size cap
     if (this.queue.length >= MAX_QUEUE_SIZE) {
       this.logger.warn(
-        { queueSize: this.queue.length, dropped: message.substring(0, 80) },
+        { queueSize: this.queue.length, dropped: item.message.substring(0, 80) },
         'Outbound queue full, dropping message'
       );
       return false;
     }
 
-    this.queue.push({ userId, message, enqueuedAt: Date.now() });
+    this.queue.push(item);
     this.logger.debug(
-      { queueSize: this.queue.length, messagePreview: message.substring(0, 80) },
+      { queueSize: this.queue.length, messagePreview: item.message.substring(0, 80) },
       'Message enqueued'
     );
 
@@ -121,13 +129,17 @@ export class OutboundQueue {
    * Drop-in replacement for the raw sendMessage callback.
    */
   createHandler(): (userId: string, message: string) => Promise<boolean> {
-    return async (userId: string, message: string): Promise<boolean> => {
-      const queued = this.enqueue(userId, message);
-      if (queued) {
-        await this.drain();
+    return (userId: string, message: string): Promise<boolean> => new Promise((resolve) => {
+      const queued = this.enqueueInternal({ userId, message, enqueuedAt: Date.now(), resolve });
+      if (!queued) {
+        resolve(false);
+        return;
       }
-      return queued;
-    };
+      void this.drain().catch(err => {
+        this.logger.error({ error: (err as Error).message }, 'Queue drain failed');
+        resolve(false);
+      });
+    });
   }
 
   /**
@@ -139,39 +151,49 @@ export class OutboundQueue {
     this.draining = true;
 
     try {
-      // Take ownership of all queued messages
-      const messages = this.queue;
-      const userId = messages[0].userId;
-      this.queue = [];
+      // Keep draining until messages that arrived during an in-flight send have
+      // also been handled. Receipt promises must never wait for the interval.
+      while (this.queue.length > 0) {
+        const batch = this.queue;
+        this.queue = [];
 
-      // Combine or pass through
-      let finalMessage: string;
-      if (messages.length === 1) {
-        finalMessage = messages[0].message;
-      } else {
-        finalMessage = await this.combineMessages(messages);
-        this.logger.info(
-          { messageCount: messages.length },
-          'Combined multiple proactive messages via LLM'
-        );
-      }
-
-      try {
-        const sent = await this.sendMessage(userId, finalMessage);
-        if (sent) {
-          this.logger.debug(
-            { combined: messages.length > 1 },
-            'Proactive message delivered'
-          );
+        const byUser = new Map<string, QueuedMessage[]>();
+        for (const item of batch) {
+          const messages = byUser.get(item.userId) ?? [];
+          messages.push(item);
+          byUser.set(item.userId, messages);
         }
-      } catch (err) {
-        this.logger.error(
-          { error: (err as Error).message },
-          'Failed to deliver queued message'
-        );
+
+        for (const [userId, messages] of byUser) {
+          await this.deliverUserBatch(userId, messages);
+        }
       }
     } finally {
       this.draining = false;
+    }
+  }
+
+  private async deliverUserBatch(userId: string, messages: QueuedMessage[]): Promise<void> {
+    let sent = false;
+    try {
+      const finalMessage = messages.length === 1
+        ? messages[0].message
+        : await this.combineMessages(messages);
+
+      if (messages.length > 1) {
+        this.logger.info({ userId, messageCount: messages.length }, 'Combined multiple proactive messages via LLM');
+      }
+
+      sent = await this.sendMessage(userId, finalMessage);
+      if (sent) {
+        this.logger.debug({ userId, combined: messages.length > 1 }, 'Proactive message delivered');
+      } else {
+        this.logger.warn({ userId, combined: messages.length > 1 }, 'Proactive message delivery returned false');
+      }
+    } catch (err) {
+      this.logger.error({ userId, error: (err as Error).message }, 'Failed to deliver queued message');
+    } finally {
+      for (const item of messages) item.resolve?.(sent);
     }
   }
 
@@ -201,8 +223,7 @@ export class OutboundQueue {
         'fast'
       );
 
-      const textBlock = result.response.content.find(b => b.type === 'text');
-      const combined = textBlock && 'text' in textBlock ? textBlock.text.trim() : '';
+      const combined = extractResponseText(result.response.content);
       const safeCombined = sanitizeProactiveMessage(combined);
       if (safeCombined) {
         return safeCombined;

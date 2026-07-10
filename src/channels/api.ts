@@ -35,9 +35,69 @@ import { nanoid } from 'nanoid';
 import type { InterruptQueue } from '../agent/interrupt-queue.js';
 import type { BotConfigManager } from './bot-config.js';
 import type { ProviderRegistry } from '../providers/registry.js';
+import { stripThinkTags } from '../utils/output-safety.js';
+import { redactSensitiveText } from '../security/redaction.js';
 
 /** Maximum request body size (1MB) */
 const MAX_BODY_SIZE = 1024 * 1024;
+/** Keep opt-in debug payloads useful without turning them into an unbounded data channel. */
+const MAX_DEBUG_TEXT_LENGTH = 2_000;
+
+/**
+ * Dashboard history is user-facing, even though the session transcript also
+ * contains provider reasoning and tool protocol blocks needed by the agent.
+ * Only return conversational text/media at this boundary. The full transcript
+ * remains in SQLite for context replay and internal diagnostics.
+ */
+function sanitizeHistoryMessage<T extends { role: string; content: string }>(message: T): T {
+  const trimmed = message.content.trimStart();
+  if (!trimmed.startsWith('[')) {
+    if (message.role !== 'assistant') return message;
+    return { ...message, content: stripThinkTags(message.content) };
+  }
+
+  try {
+    const parsed = JSON.parse(message.content) as unknown;
+    if (!Array.isArray(parsed)) return message;
+    // Text emitted alongside a tool call is intermediate planning, not the
+    // assistant's final answer. It belongs in internal/verbose traces only.
+    const hasToolUse = parsed.some(block => (
+      !!block && typeof block === 'object' && (block as Record<string, unknown>).type === 'tool_use'
+    ));
+
+    const visibleBlocks = parsed.flatMap((block): unknown[] => {
+      if (!block || typeof block !== 'object') return [];
+      const candidate = block as Record<string, unknown>;
+      if (candidate.type === 'text' && typeof candidate.text === 'string') {
+        if (message.role === 'assistant' && hasToolUse) return [];
+        const text = message.role === 'assistant'
+          ? stripThinkTags(candidate.text)
+          : candidate.text;
+        return text ? [{ type: 'text', text }] : [];
+      }
+      if (candidate.type === 'image') return [block];
+      return [];
+    });
+
+    return { ...message, content: JSON.stringify(visibleBlocks) };
+  } catch {
+    return message.role === 'assistant'
+      ? { ...message, content: stripThinkTags(message.content) }
+      : message;
+  }
+}
+
+function safeDebugText(text: string): string {
+  const redacted = redactSensitiveText(text).trim();
+  if (redacted.length <= MAX_DEBUG_TEXT_LENGTH) return redacted;
+  return `${redacted.slice(0, MAX_DEBUG_TEXT_LENGTH)}\n…(truncated)`;
+}
+
+/** Strip provider reasoning markup before a final reply crosses the API boundary. */
+function safeAssistantResponse(text: string): string {
+  const visible = stripThinkTags(text);
+  return visible || 'I could not produce a user-facing response. Please try again.';
+}
 
 /**
  * API Channel configuration
@@ -70,7 +130,7 @@ export interface ApiChannelConfig {
   /** Interrupt queue for mid-loop user message injection */
   interruptQueue?: InterruptQueue;
   /** Callback when a WebSocket user sends a message (for engagement tracking) */
-  onUserMessage?: (prefixedUserId: string) => void;
+  onUserMessage?: (prefixedUserId: string, userMessage?: string) => void;
   /** Bot config manager for /settings and /model commands (optional) */
   configManager?: BotConfigManager;
   /** Provider registry for /model command (optional) */
@@ -198,7 +258,7 @@ export class ApiChannel implements Channel, TriggerSource {
   private activeProcessing: Set<string> = new Set();
   private interruptQueue: InterruptQueue | null = null;
   private authService: AuthService | null = null;
-  private onUserMessage?: (prefixedUserId: string) => void;
+  private onUserMessage?: ApiChannelConfig['onUserMessage'];
   private configManager: BotConfigManager | null = null;
   private providerRegistry: ProviderRegistry | null = null;
   private db: ScallopDatabase | null = null;
@@ -292,6 +352,9 @@ export class ApiChannel implements Channel, TriggerSource {
 
     // Clear client tracking before closing connections
     this.clientsByUser.clear();
+    this.verboseClients.clear();
+    this.stopRequests.clear();
+    this.activeProcessing.clear();
 
     // Close WebSocket connections
     if (this.wss) {
@@ -697,7 +760,7 @@ export class ApiChannel implements Channel, TriggerSource {
       const result = await this.config.agent.processMessage(sessionId, body.message);
 
       const chatResponse: ChatResponse = {
-        response: result.response,
+        response: safeAssistantResponse(result.response),
         sessionId,
       };
 
@@ -748,7 +811,7 @@ export class ApiChannel implements Channel, TriggerSource {
 
       // Send response event
       res.write(`event: message\n`);
-      res.write(`data: ${JSON.stringify({ sessionId, content: result.response })}\n\n`);
+      res.write(`data: ${JSON.stringify({ sessionId, content: safeAssistantResponse(result.response) })}\n\n`);
 
       // Send done event
       res.write(`event: done\n`);
@@ -830,7 +893,7 @@ export class ApiChannel implements Channel, TriggerSource {
     const beforeParam = url.searchParams.get('before');
     const before = beforeParam ? parseInt(beforeParam, 10) : undefined;
     const { messages, hasMore } = this.db.getAllMessagesPaginated(limit, before);
-    this.sendJson(res, 200, { messages, hasMore });
+    this.sendJson(res, 200, { messages: messages.map(sanitizeHistoryMessage), hasMore });
   }
 
   /**
@@ -845,7 +908,7 @@ export class ApiChannel implements Channel, TriggerSource {
     const beforeParam = url.searchParams.get('before');
     const before = beforeParam ? parseInt(beforeParam, 10) : undefined;
     const { messages, hasMore } = this.db.getSessionMessagesPaginated(sessionId, limit, before);
-    this.sendJson(res, 200, { messages, hasMore });
+    this.sendJson(res, 200, { messages: messages.map(sanitizeHistoryMessage), hasMore });
   }
 
   /**
@@ -1060,6 +1123,9 @@ export class ApiChannel implements Channel, TriggerSource {
 
     ws.on('close', () => {
       this.removeClientFromUser(prefixedUserId, ws);
+      this.verboseClients.delete(clientId);
+      this.stopRequests.delete(clientId);
+      this.activeProcessing.delete(clientId);
       this.logger.debug({ clientId, userId }, 'WebSocket client disconnected');
     });
 
@@ -1187,7 +1253,7 @@ export class ApiChannel implements Channel, TriggerSource {
           this.sendWsMessage(ws, { type: 'response', content: 'Verbose mode OFF' });
         } else {
           this.verboseClients.add(clientId);
-          this.sendWsMessage(ws, { type: 'response', content: "Verbose mode ON — you'll see memory lookups, tool calls, and thinking." });
+          this.sendWsMessage(ws, { type: 'response', content: "Verbose mode ON — you'll see safe progress summaries, memory lookups, and tool activity." });
         }
         return true;
       }
@@ -1377,7 +1443,7 @@ export class ApiChannel implements Channel, TriggerSource {
         const sessionId = await this.getOrCreateSession(userId);
 
         // Notify engagement tracker (trust feedback loop)
-        this.onUserMessage?.(`api:${userId}`);
+        this.onUserMessage?.(`api:${userId}`, message.message);
 
         // If already processing and no attachments, inject via interrupt queue
         const hasAttachments = message.attachments && message.attachments.length > 0;
@@ -1394,46 +1460,58 @@ export class ApiChannel implements Channel, TriggerSource {
 
         this.activeProcessing.add(clientId);
         try {
-          // Progress callback to send debug updates to WebSocket
-          const onProgress = async (update: { type: string; message: string; toolName?: string; iteration?: number; count?: number; action?: string; items?: { type: string; content: string; subject?: string }[] }) => {
-            if (update.type === 'tool_start') {
-              this.sendWsMessage(ws, {
-                type: 'skill_start',
-                skill: update.toolName || 'skill',
-                input: update.message
-              });
-            } else if (update.type === 'tool_complete') {
-              this.sendWsMessage(ws, {
-                type: 'skill_complete',
-                skill: update.toolName || 'skill',
-                output: update.message
-              });
-            } else if (update.type === 'tool_error') {
-              this.sendWsMessage(ws, {
-                type: 'skill_error',
-                skill: update.toolName || 'skill',
-                error: update.message
-              });
-            } else if (update.type === 'thinking' || update.type === 'planning') {
-              this.sendWsMessage(ws, {
-                type: update.type,
-                message: update.message
-              });
-            } else if (update.type === 'memory') {
-              this.sendWsMessage(ws, {
-                type: 'memory',
-                action: update.action || 'search',
-                message: update.message,
-                count: update.count,
-                items: update.items
-              });
-            } else if (update.type === 'status') {
-              this.sendWsMessage(ws, {
-                type: 'debug',
-                message: update.message
-              });
-            }
-          };
+          // Internal progress is opt-in. Reasoning text itself is never sent,
+          // even in verbose mode; verbose clients receive a lifecycle summary.
+          const onProgress = this.verboseClients.has(clientId)
+            ? async (update: { type: string; message: string; toolName?: string; iteration?: number; count?: number; action?: string; items?: { type: string; content: string; subject?: string }[] }) => {
+                if (update.type === 'tool_start') {
+                  this.sendWsMessage(ws, {
+                    type: 'skill_start',
+                    skill: update.toolName || 'skill',
+                    input: safeDebugText(update.message)
+                  });
+                } else if (update.type === 'tool_complete') {
+                  this.sendWsMessage(ws, {
+                    type: 'skill_complete',
+                    skill: update.toolName || 'skill',
+                    output: safeDebugText(update.message)
+                  });
+                } else if (update.type === 'tool_error') {
+                  this.sendWsMessage(ws, {
+                    type: 'skill_error',
+                    skill: update.toolName || 'skill',
+                    error: safeDebugText(update.message)
+                  });
+                } else if (update.type === 'thinking') {
+                  this.sendWsMessage(ws, {
+                    type: 'thinking',
+                    message: 'Reasoning in progress…'
+                  });
+                } else if (update.type === 'planning') {
+                  this.sendWsMessage(ws, {
+                    type: 'planning',
+                    message: 'Planning next steps…'
+                  });
+                } else if (update.type === 'memory') {
+                  this.sendWsMessage(ws, {
+                    type: 'memory',
+                    action: update.action || 'search',
+                    message: safeDebugText(update.message),
+                    count: update.count,
+                    items: update.items?.map(item => ({
+                      ...item,
+                      content: safeDebugText(item.content),
+                      ...(item.subject ? { subject: safeDebugText(item.subject) } : {}),
+                    }))
+                  });
+                } else if (update.type === 'status') {
+                  this.sendWsMessage(ws, {
+                    type: 'debug',
+                    message: safeDebugText(update.message)
+                  });
+                }
+              }
+            : undefined;
 
           // Convert WebSocket attachments to agent Attachment format
           let attachments: Attachment[] | undefined;
@@ -1464,7 +1542,11 @@ export class ApiChannel implements Channel, TriggerSource {
           // Clear stop request after completion
           this.stopRequests.delete(clientId);
 
-          this.sendWsMessage(ws, { type: 'response', sessionId, content: result.response });
+          this.sendWsMessage(ws, {
+            type: 'response',
+            sessionId,
+            content: safeAssistantResponse(result.response),
+          });
         } catch (error) {
           const err = error as Error;
           this.logger.error({ clientId, sessionId, error: err.message }, 'WebSocket chat error');

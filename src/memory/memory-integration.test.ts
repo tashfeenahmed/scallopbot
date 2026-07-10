@@ -41,7 +41,7 @@ function cleanup() {
 function createTestEmbedder(): EmbeddingProvider {
   const VOCAB = [
     'work', 'microsoft', 'google', 'office', 'dublin', 'cork',
-    'wife', 'husband', 'hayat', 'cooking', 'programming', 'typescript',
+    'wife', 'husband', 'partner', 'cooking', 'programming', 'typescript',
     'python', 'music', 'guitar', 'dog', 'cat', 'berlin', 'coffee',
     'tea', 'morning', 'evening', 'project', 'deadline', 'travel',
     'japan', 'sushi', 'running', 'gym', 'yoga', 'meeting', 'api',

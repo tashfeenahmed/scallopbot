@@ -28,6 +28,7 @@ import { rerankResults, type RerankCandidate } from './reranker.js';
 import type { LLMProvider } from '../providers/types.js';
 import { projectTo3D } from '../utils/pca.js';
 import { applyMMR, type MMRItem } from './mmr.js';
+import { SEMANTIC_CANDIDATE_LIMIT } from './semantic-index.js';
 
 /**
  * Options for ScallopMemoryStore
@@ -371,11 +372,14 @@ export class ScallopMemoryStore {
   /**
    * Search memories with hybrid semantic + keyword search.
    *
-   * Two-stage pipeline to avoid loading 768-dim embeddings for every memory:
-   *   Stage 1 — light fetch (no embeddings) + BM25 scoring → top-50 candidates
-   *   Stage 2 — load embeddings only for top-50 → cosine similarity scoring
+   * Indexed candidate-union pipeline:
+   *   Stage 1 — light fetch (no embeddings) + independent BM25 top-K
+   *   Stage 2 — SQLite LSH lookup + bounded exact semantic top-K
+   *   Stage 3 — union both candidate sets, fuse scores, then rerank/MMR
    *
-   * The query embedding is computed in parallel with the light fetch + BM25.
+   * The prior BM25-gated pipeline loaded embeddings only for lexical top-K.
+   * That made semantic search unable to recover paraphrases which shared no
+   * query words — precisely the cases embeddings are intended to find.
    */
   async search(query: string, options: ScallopSearchOptions = {}): Promise<ScallopSearchResult[]> {
     const {
@@ -446,13 +450,17 @@ export class ScallopMemoryStore {
       docFreq,
     };
 
-    const BM25_TOP_K = 50;
+    const CANDIDATE_TOP_K = 50;
     const bm25Scored = lightCandidates.map(memory => ({
       memory,
       rawBM25: calculateBM25Score(queryLower, memory.content.toLowerCase(), bm25Options),
     }));
     bm25Scored.sort((a, b) => b.rawBM25 - a.rawBM25);
-    const bm25Top = bm25Scored.slice(0, BM25_TOP_K);
+    // A zero BM25 score is not a lexical match. Keeping zero-score rows used to
+    // assign arbitrary documents a high rank merely because they appeared first.
+    const bm25Top = bm25Scored
+      .filter(({ rawBM25 }) => rawBM25 > 0)
+      .slice(0, CANDIDATE_TOP_K);
 
     // Build rank-based BM25 normalization map (only for top-K)
     const bm25RankMap = new Map<string, number>();
@@ -460,29 +468,81 @@ export class ScallopMemoryStore {
       bm25RankMap.set(item.memory.id, rank);
     });
 
-    // ── Stage 2: Load embeddings only for top-50 candidates ─────────
+    // ── Stage 2: Independent semantic top-K ─────────────────────────
     queryEmbedding = await embeddingPromise;
-    const topIds = bm25Top.map(item => item.memory.id);
-    const embeddingMap = queryEmbedding ? this.db.getEmbeddingsByIds(topIds) : new Map<string, number[]>();
+    // Small corpora fit inside the hard bound and can be searched exactly.
+    // Larger corpora use the SQLite-backed LSH index, avoiding an O(N) vector
+    // JSON parse/heap spike while retaining semantic candidates independent of
+    // the lexical BM25 gate.
+    // Reuse this map for LSH eligibility, priority tie-breaking, and final
+    // result promotion. This avoids duplicate 10k-entry Sets/Maps on Pi.
+    const lightById = new Map(lightCandidates.map((memory) => [memory.id, memory]));
+    const semanticCandidateIds = queryEmbedding
+      ? lightCandidates.length <= SEMANTIC_CANDIDATE_LIMIT
+        ? lightCandidates.map((memory) => memory.id)
+        : this.db.getSemanticCandidateIds(queryEmbedding, {
+            userId,
+            category,
+            minProminence,
+            isLatest,
+            eventDateRange,
+            documentDateRange,
+            maxCandidates: SEMANTIC_CANDIDATE_LIMIT,
+            eligibleIds: lightById,
+            candidatePriorities: lightById,
+          })
+      : [];
+    const embeddingIds = [...new Set([
+      ...semanticCandidateIds,
+      ...bm25Top.map(({ memory }) => memory.id),
+    ])];
+    const embeddingMap = queryEmbedding
+      ? this.db.getEmbeddingsByIds(embeddingIds)
+      : new Map<string, number[]>();
 
-    // Score top-K with combined BM25 rank + semantic similarity
-    const results: ScallopSearchResult[] = [];
-    for (const { memory, rawBM25 } of bm25Top) {
-      const bm25Rank = bm25RankMap.get(memory.id) ?? bm25Top.length;
-      const keywordScore = 1 / (1 + bm25Rank);
-
-      let semanticScore = 0;
-      const memEmbedding = embeddingMap.get(memory.id);
-      if (queryEmbedding && memEmbedding) {
-        semanticScore = cosineSimilarity(queryEmbedding, memEmbedding);
+    const semanticScoreMap = new Map<string, number>();
+    if (queryEmbedding) {
+      for (const [id, embedding] of embeddingMap) {
+        semanticScoreMap.set(id, cosineSimilarity(queryEmbedding, embedding));
       }
+    }
+    const semanticTop = queryEmbedding
+      ? semanticCandidateIds
+          .map((id) => {
+            const memory = lightById.get(id);
+            const score = semanticScoreMap.get(id) ?? 0;
+            return { memory, score };
+          })
+          .filter((item): item is { memory: ScallopMemoryEntryLight; score: number } =>
+            Boolean(item.memory) && item.score > 0)
+          .sort((a, b) => b.score - a.score)
+          .slice(0, CANDIDATE_TOP_K)
+      : [];
+
+    // ── Stage 3: Union lexical and semantic candidates ──────────────
+    const candidateIds = [...new Set([
+      ...bm25Top.map(({ memory }) => memory.id),
+      ...semanticTop.map(({ memory }) => memory.id),
+    ])];
+    const rawBM25Map = new Map(bm25Scored.map(({ memory, rawBM25 }) => [memory.id, rawBM25]));
+
+    // Score the union with combined BM25 rank + semantic similarity.
+    const results: ScallopSearchResult[] = [];
+    for (const id of candidateIds) {
+      const memory = lightById.get(id);
+      if (!memory) continue;
+
+      const rawBM25 = rawBM25Map.get(id) ?? 0;
+      const bm25Rank = bm25RankMap.get(id);
+      const keywordScore = bm25Rank === undefined ? 0 : 1 / (1 + bm25Rank);
+      const semanticScore = semanticScoreMap.get(id) ?? 0;
+      const memEmbedding = embeddingMap.get(id);
 
       let matchType: 'semantic' | 'keyword' | 'hybrid' = 'keyword';
-      if (semanticScore > 0) {
-        matchType = keywordScore > semanticScore ? 'keyword' : 'semantic';
-        if (rawBM25 > 0 && semanticScore > 0) {
-          matchType = 'hybrid';
-        }
+      if (rawBM25 > 0 && semanticScore > 0) {
+        matchType = 'hybrid';
+      } else if (semanticScore > 0) {
+        matchType = 'semantic';
       }
 
       const relevanceScore = keywordScore * SEARCH_WEIGHTS.keyword + semanticScore * SEARCH_WEIGHTS.semantic;
@@ -515,10 +575,15 @@ export class ScallopMemoryStore {
       }
     }
 
-    // Sort by score and over-fetch for re-ranking.
+    // Sort by score and over-fetch whenever a later stage needs a candidate
+    // choice. The old MMR path received exactly `limit` rows, so it could only
+    // reorder duplicates, never replace one with a more diverse candidate.
     results.sort((a, b) => b.score - a.score);
-    const rerankPoolSize = this.rerankProvider ? limit * 4 : limit;
-    let topResults = results.slice(0, rerankPoolSize);
+    const needsCandidatePool = Boolean(this.rerankProvider) || this.mmrEnabled;
+    const candidatePoolSize = needsCandidatePool
+      ? Math.min(results.length, Math.max(limit, limit * 4))
+      : limit;
+    let topResults = results.slice(0, candidatePoolSize);
 
     // LLM re-ranking: refine top results using semantic relevance scoring
     if (this.rerankProvider && topResults.length > 0) {
@@ -531,16 +596,15 @@ export class ScallopMemoryStore {
 
         const reranked = await rerankResults(query, rerankCandidates, this.rerankProvider, { maxCandidates: 20 });
 
-        // Map re-ranked scores back to search results, then trim to requested limit
+        // Map re-ranked scores back to search results. MMR needs the over-fetched
+        // pool, so final limiting happens only after diversity selection.
         const rerankedMap = new Map(reranked.map(r => [r.id, r.finalScore]));
         topResults = topResults
           .filter(r => rerankedMap.has(r.memory.id))
           .map(r => ({ ...r, score: rerankedMap.get(r.memory.id)! }))
-          .sort((a, b) => b.score - a.score)
-          .slice(0, limit);
+          .sort((a, b) => b.score - a.score);
       } catch (err) {
         this.logger.warn({ error: (err as Error).message }, 'LLM re-ranking failed, using original scores');
-        topResults = topResults.slice(0, limit);
       }
     }
 
@@ -554,6 +618,8 @@ export class ScallopMemoryStore {
       const mmrResults = applyMMR(mmrItems, { lambda: this.mmrLambda });
       topResults = mmrResults.map(r => r.item);
     }
+
+    topResults = topResults.slice(0, limit);
 
     // Add related memories using spreading activation (ranked by activation score)
     for (const result of topResults) {

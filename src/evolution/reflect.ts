@@ -12,6 +12,7 @@
 
 import type { LLMProvider, ContentBlock } from '../providers/types.js';
 import type { StoredEvolutionSignal, SkillMutation, PromptMutation, SkillFiles } from './types.js';
+import { findUnsafeEvolutionContentReason } from './privacy.js';
 
 export interface SignalCluster {
   /** What the cluster is about: a skill name (patch), a synthetic key (new skill), or a prompt fragment. */
@@ -28,12 +29,18 @@ export interface SignalCluster {
 const SYSTEM_PROMPT =
   'You are a self-improvement optimizer for an autonomous agent. You read execution ' +
   'signals and propose ONE concrete skill mutation that would make the agent more ' +
-  'reliable. A skill is a directory with a SKILL.md (YAML frontmatter: name, description, ' +
-  'optional inputSchema, scripts) and optional scripts/ files. ' +
+  'reliable. This runtime accepts machine-authored documentation/procedure skills only. ' +
+  'Return exactly one file named SKILL.md (maximum 12 KiB). Its YAML frontmatter must contain ' +
+  'exactly three keys: name, description, and user-invocable. The description must be plain ' +
+  'single-line text of at most 300 characters, and user-invocable must be false. Do not add ' +
+  'inputSchema, triggers, metadata, command fields, scripts, executable code, or shell commands. ' +
   'Respond with STRICT JSON only, no prose, matching:\n' +
-  '{"target":"skill_name","rationale":"...","files":{"SKILL.md":"...","scripts/run.ts":"..."}}\n' +
-  'Rules: target is lowercase letters/digits/hyphens; SKILL.md must be valid; for a patch, ' +
-  'return the FULL updated files (not a diff); keep scripts minimal and dependency-free.';
+  '{"target":"skill_name","rationale":"...","files":{"SKILL.md":"..."}}\n' +
+  'Rules: target is lowercase letters/digits/hyphens/underscores, at most 128 characters; ' +
+  'SKILL.md must be valid; for a patch, ' +
+  'return the FULL updated files (not a diff). ' +
+  'Generalize the procedure: NEVER copy personal names, contact details, account IDs, home paths, ' +
+  'conversation quotes, credentials, or user-specific facts into a skill.';
 
 function extractText(content: ContentBlock[]): string {
   return content
@@ -110,7 +117,7 @@ export function parseMutation(text: string, intent: 'create_skill' | 'patch_skil
   const target = typeof o.target === 'string' ? o.target.trim() : '';
   const rationale = typeof o.rationale === 'string' ? o.rationale : '';
   const files = o.files;
-  if (!target || !files || typeof files !== 'object') return null;
+  if (!/^[a-z][a-z0-9_-]{0,127}$/.test(target) || !files || typeof files !== 'object') return null;
   const fileMap: SkillFiles = {};
   for (const [k, v] of Object.entries(files as Record<string, unknown>)) {
     if (typeof v === 'string') fileMap[k] = v;
@@ -151,8 +158,6 @@ const PROMPT_SYSTEM_PROMPT =
 
 const PROMPT_MAX_CONTENT = 1200;
 /** Reject guidance that tries to smuggle role markers / tool syntax into the prompt. */
-const PROMPT_INJECTION = /<\/?(system|tool_call|tool_response|tools)\b|^\s*(system|assistant|user)\s*:/im;
-
 /** Parse + sanity-check a prompt mutation. Returns null on deviation. */
 export function parsePromptMutation(text: string, fragmentId: string): PromptMutation | null {
   const json = extractJsonObject(text);
@@ -168,8 +173,9 @@ export function parsePromptMutation(text: string, fragmentId: string): PromptMut
   const content = typeof o.content === 'string' ? o.content.trim() : '';
   const rationale = typeof o.rationale === 'string' ? o.rationale : '';
   if (!content || content.length > PROMPT_MAX_CONTENT) return null;
-  if (PROMPT_INJECTION.test(content)) return null;
   const fid = typeof o.fragmentId === 'string' && o.fragmentId ? o.fragmentId : fragmentId;
+  if (fid !== fragmentId || !/^[a-z][a-z0-9_-]{0,63}$/.test(fid)) return null;
+  if (findUnsafeEvolutionContentReason(`${content}\n${rationale}`)) return null;
   return { kind: 'patch_prompt', fragmentId: fid, content, rationale };
 }
 

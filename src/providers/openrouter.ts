@@ -97,6 +97,7 @@ export class OpenRouterProvider implements LLMProvider {
 
   private apiKey: string;
   private maxRetries: number;
+  private timeout?: number;
   private siteUrl: string;
   private siteName: string;
 
@@ -104,6 +105,7 @@ export class OpenRouterProvider implements LLMProvider {
     this.apiKey = options.apiKey;
     this.model = options.model || DEFAULT_MODEL;
     this.maxRetries = options.maxRetries || DEFAULT_MAX_RETRIES;
+    this.timeout = options.timeout;
     this.siteUrl = options.siteUrl || 'https://scallopbot.local';
     this.siteName = options.siteName || 'ScallopBot';
   }
@@ -182,28 +184,33 @@ export class OpenRouterProvider implements LLMProvider {
       }));
     }
 
-    const response = await this.executeWithRetry(() =>
-      fetch(API_URL, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${this.apiKey}`,
-          'HTTP-Referer': this.siteUrl,
-          'X-Title': this.siteName,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(body),
-        ...(request.signal ? { signal: request.signal } : {}),
-      })
+    const { response, bodyData, bodyError } = await this.executeWithRetry(
+      (signal) =>
+        fetch(API_URL, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${this.apiKey}`,
+            'HTTP-Referer': this.siteUrl,
+            'X-Title': this.siteName,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(body),
+          ...(signal ? { signal } : {}),
+        }),
+      request.signal
     );
 
     if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
+      const errorData = bodyError === undefined ? bodyData : {};
       throw new Error(
         `OpenRouter API error: ${response.status} ${response.statusText} - ${JSON.stringify(errorData)}`
       );
     }
 
-    const data = (await response.json()) as OpenRouterResponse;
+    // Parsing errors were not provider-retryable before body timeout handling;
+    // preserve that behavior after the bounded body read completes.
+    if (bodyError !== undefined) throw bodyError;
+    const data = bodyData as OpenRouterResponse;
     return this.formatResponse(data);
   }
 
@@ -357,12 +364,28 @@ export class OpenRouterProvider implements LLMProvider {
     }
   }
 
-  private async executeWithRetry(fn: () => Promise<Response>): Promise<Response> {
+  private async executeWithRetry(
+    fn: (signal?: AbortSignal) => Promise<Response>,
+    callerSignal?: AbortSignal
+  ): Promise<{ response: Response; bodyData?: unknown; bodyError?: unknown }> {
     let lastError: Error | undefined;
 
     for (let attempt = 0; attempt < this.maxRetries; attempt++) {
       try {
-        const response = await fn();
+        // Consume the response body before the attempt timer is cleared. Fetch
+        // resolves as soon as response headers arrive, so timing only `fn()`
+        // would still allow a stalled body stream to hang the provider forever.
+        const result = await this.executeAttempt(async (signal) => {
+          const response = await fn(signal);
+          // A 429 body is not used and should not delay the retry decision.
+          if (response.status === 429) return { response };
+          try {
+            return { response, bodyData: await response.json() as unknown };
+          } catch (bodyError) {
+            return { response, bodyError };
+          }
+        }, callerSignal);
+        const { response } = result;
 
         // Retry on rate limit
         if (response.status === 429) {
@@ -371,21 +394,99 @@ export class OpenRouterProvider implements LLMProvider {
           const delay = !isNaN(retryAfterSecs)
             ? retryAfterSecs * 1000
             : RETRY_DELAY_MS * Math.pow(2, attempt);
-          await this.delay(delay);
+          await this.delay(delay, callerSignal);
           continue;
         }
 
-        return response;
+        return result;
       } catch (error) {
         lastError = error as Error;
-        await this.delay(RETRY_DELAY_MS * Math.pow(2, attempt));
+
+        // Cancellation is a control-flow signal, not a transient provider
+        // failure. Retrying it would multiply the configured timeout and delay
+        // Router fallback (or ignore an explicit caller cancellation).
+        if (callerSignal?.aborted || this.isAbortOrTimeoutError(error)) {
+          throw error;
+        }
+
+        await this.delay(RETRY_DELAY_MS * Math.pow(2, attempt), callerSignal);
       }
     }
 
     throw lastError || new Error('Max retries exceeded');
   }
 
-  private delay(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
+  /** Run one provider attempt with its own timeout and caller cancellation. */
+  private async executeAttempt<T>(
+    fn: (signal?: AbortSignal) => Promise<T>,
+    callerSignal?: AbortSignal
+  ): Promise<T> {
+    const timeoutController = this.timeout !== undefined ? new AbortController() : undefined;
+    const timeoutMs = this.timeout;
+    const signals = [callerSignal, timeoutController?.signal].filter(
+      (signal): signal is AbortSignal => signal !== undefined
+    );
+    const signal = signals.length > 1 ? AbortSignal.any(signals) : signals[0];
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    let abortHandler: (() => void) | undefined;
+
+    if (timeoutController && timeoutMs !== undefined) {
+      timeoutId = setTimeout(() => {
+        timeoutController.abort(
+          new DOMException(`Provider request timed out after ${timeoutMs}ms`, 'TimeoutError')
+        );
+      }, timeoutMs);
+    }
+
+    try {
+      signal?.throwIfAborted();
+
+      if (!signal) {
+        return await fn();
+      }
+
+      // Native fetch rejects on abort, but racing the signal also guarantees
+      // the provider returns promptly if a custom fetch implementation fails
+      // to settle after receiving cancellation.
+      const aborted = new Promise<never>((_, reject) => {
+        abortHandler = () => reject(signal.reason ?? this.createAbortError());
+        signal.addEventListener('abort', abortHandler, { once: true });
+      });
+
+      return await Promise.race([fn(signal), aborted]);
+    } finally {
+      if (timeoutId !== undefined) clearTimeout(timeoutId);
+      if (signal && abortHandler) signal.removeEventListener('abort', abortHandler);
+    }
+  }
+
+  private isAbortOrTimeoutError(error: unknown): boolean {
+    if (!error || typeof error !== 'object' || !('name' in error)) return false;
+    const name = (error as { name?: unknown }).name;
+    return name === 'AbortError' || name === 'TimeoutError';
+  }
+
+  private createAbortError(): DOMException {
+    return new DOMException('Request aborted', 'AbortError');
+  }
+
+  private delay(ms: number, signal?: AbortSignal): Promise<void> {
+    if (!signal) {
+      return new Promise((resolve) => setTimeout(resolve, ms));
+    }
+
+    signal.throwIfAborted();
+
+    return new Promise((resolve, reject) => {
+      const timeoutId = setTimeout(() => {
+        signal.removeEventListener('abort', onAbort);
+        resolve();
+      }, ms);
+      const onAbort = () => {
+        clearTimeout(timeoutId);
+        reject(signal.reason ?? this.createAbortError());
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
   }
 }

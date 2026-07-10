@@ -9,6 +9,7 @@ import type { SessionManager, Session } from '../agent/session.js';
 import type { Logger } from 'pino';
 import http from 'http';
 import WebSocket from 'ws';
+import { ScallopDatabase } from '../memory/db.js';
 
 // Create mock logger
 const createMockLogger = (): Logger =>
@@ -267,6 +268,22 @@ describe('ApiChannel', () => {
         expect((res.body as Record<string, unknown>).sessionId).toBeDefined();
       });
 
+      it('strips inline reasoning from the final REST response', async () => {
+        vi.mocked(mockAgent.processMessage).mockResolvedValueOnce({
+          response: '<think>REST_FINAL_THOUGHT_SECRET</think>Safe REST answer.',
+          tokenUsage: { inputTokens: 10, outputTokens: 20 },
+          iterationsUsed: 1,
+          completionReason: 'natural_end',
+        });
+
+        const res = await makeRequest('/api/chat', 'POST', { message: 'Hello!' });
+
+        expect(res.status).toBe(200);
+        expect((res.body as Record<string, unknown>).response).toBe('Safe REST answer.');
+        expect(JSON.stringify(res.body)).not.toContain('REST_FINAL_THOUGHT_SECRET');
+        expect(JSON.stringify(res.body)).not.toContain('<think>');
+      });
+
       it('should use provided sessionId', async () => {
         const res = await makeRequest('/api/chat', 'POST', {
           message: 'Hello!',
@@ -323,6 +340,36 @@ describe('ApiChannel', () => {
 
         expect(events.some((e) => e.includes('event: message'))).toBe(true);
         expect(events.some((e) => e.includes('event: done'))).toBe(true);
+      });
+
+      it('strips inline reasoning from the final SSE response', async () => {
+        vi.mocked(mockAgent.processMessage).mockResolvedValueOnce({
+          response: '<think>SSE_FINAL_THOUGHT_SECRET</think>Safe SSE answer.',
+          tokenUsage: { inputTokens: 10, outputTokens: 20 },
+          iterationsUsed: 1,
+          completionReason: 'natural_end',
+        });
+
+        const payload = await new Promise<string>((resolve, reject) => {
+          const req = http.request({
+            hostname: '127.0.0.1',
+            port,
+            path: '/api/chat/stream',
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+          }, (res) => {
+            let data = '';
+            res.on('data', chunk => { data += chunk.toString(); });
+            res.on('end', () => resolve(data));
+          });
+          req.on('error', reject);
+          req.write(JSON.stringify({ message: 'Hello!' }));
+          req.end();
+        });
+
+        expect(payload).toContain('Safe SSE answer.');
+        expect(payload).not.toContain('SSE_FINAL_THOUGHT_SECRET');
+        expect(payload).not.toContain('<think>');
       });
     });
 
@@ -494,6 +541,144 @@ describe('ApiChannel', () => {
       expect((response as Record<string, unknown>).sessionId).toBeDefined();
     });
 
+    it('strips inline reasoning from the final WebSocket response', async () => {
+      vi.mocked(mockAgent.processMessage).mockResolvedValueOnce({
+        response: '<think>WS_FINAL_THOUGHT_SECRET</think>Safe WebSocket answer.',
+        tokenUsage: { inputTokens: 10, outputTokens: 20 },
+        iterationsUsed: 1,
+        completionReason: 'natural_end',
+      });
+      const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+
+      const response = await new Promise<Record<string, unknown>>((resolve, reject) => {
+        ws.on('open', () => ws.send(JSON.stringify({ type: 'chat', message: 'Hello!' })));
+        ws.on('message', (data) => {
+          ws.close();
+          resolve(JSON.parse(data.toString()) as Record<string, unknown>);
+        });
+        ws.on('error', reject);
+      });
+
+      expect(response).toMatchObject({ type: 'response', content: 'Safe WebSocket answer.' });
+      expect(JSON.stringify(response)).not.toContain('WS_FINAL_THOUGHT_SECRET');
+      expect(JSON.stringify(response)).not.toContain('<think>');
+    });
+
+    it('does not send internal progress unless the client explicitly enables verbose mode', async () => {
+      vi.mocked(mockAgent.processMessage).mockImplementation(async (
+        _sessionId,
+        _message,
+        _attachments,
+        onProgress,
+      ) => {
+        await onProgress?.({
+          type: 'thinking',
+          message: 'CHAIN_OF_THOUGHT_SECRET: I should inspect the private state.',
+          iteration: 1,
+        });
+        await onProgress?.({
+          type: 'planning',
+          message: 'INTERNAL_PLAN_SECRET: call three tools before replying.',
+          iteration: 1,
+        });
+        return {
+          response: 'Safe final answer.',
+          tokenUsage: { inputTokens: 10, outputTokens: 20 },
+          iterationsUsed: 1,
+          completionReason: 'natural_end',
+        };
+      });
+
+      const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+      const messages = await new Promise<Record<string, unknown>[]>((resolve, reject) => {
+        const received: Record<string, unknown>[] = [];
+        const timeout = setTimeout(() => reject(new Error('Timed out waiting for WebSocket response')), 5_000);
+        ws.on('open', () => ws.send(JSON.stringify({ type: 'chat', message: 'Hello!' })));
+        ws.on('message', (data) => {
+          const parsed = JSON.parse(data.toString()) as Record<string, unknown>;
+          received.push(parsed);
+          if (parsed.type === 'response') {
+            clearTimeout(timeout);
+            ws.close();
+            resolve(received);
+          }
+        });
+        ws.on('error', reject);
+      });
+
+      expect(messages).toEqual([
+        expect.objectContaining({ type: 'response', content: 'Safe final answer.' }),
+      ]);
+      expect(JSON.stringify(messages)).not.toContain('CHAIN_OF_THOUGHT_SECRET');
+      expect(JSON.stringify(messages)).not.toContain('INTERNAL_PLAN_SECRET');
+    });
+
+    it('sends redacted lifecycle summaries, never raw reasoning, to verbose clients', async () => {
+      vi.mocked(mockAgent.processMessage).mockImplementation(async (
+        _sessionId,
+        _message,
+        _attachments,
+        onProgress,
+      ) => {
+        await onProgress?.({
+          type: 'thinking',
+          message: 'CHAIN_OF_THOUGHT_SECRET: I should inspect the private state.',
+          iteration: 1,
+        });
+        await onProgress?.({
+          type: 'planning',
+          message: 'INTERNAL_PLAN_SECRET: call three tools before replying.',
+          iteration: 1,
+        });
+        await onProgress?.({
+          type: 'tool_start',
+          message: 'Using credential sk-abcdefghijklmnop to call the service',
+          toolName: 'example_tool',
+          iteration: 1,
+        });
+        return {
+          response: 'Safe final answer.',
+          tokenUsage: { inputTokens: 10, outputTokens: 20 },
+          iterationsUsed: 1,
+          completionReason: 'natural_end',
+        };
+      });
+
+      const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+      const messages = await new Promise<Record<string, unknown>[]>((resolve, reject) => {
+        const received: Record<string, unknown>[] = [];
+        const timeout = setTimeout(() => reject(new Error('Timed out waiting for verbose WebSocket response')), 5_000);
+        ws.on('open', () => ws.send(JSON.stringify({ type: 'chat', message: '/verbose' })));
+        ws.on('message', (data) => {
+          const parsed = JSON.parse(data.toString()) as Record<string, unknown>;
+          received.push(parsed);
+          if (parsed.type === 'response' && String(parsed.content).startsWith('Verbose mode ON')) {
+            ws.send(JSON.stringify({ type: 'chat', message: 'Hello!' }));
+          } else if (parsed.type === 'response' && parsed.content === 'Safe final answer.') {
+            clearTimeout(timeout);
+            ws.close();
+            resolve(received);
+          }
+        });
+        ws.on('error', reject);
+      });
+
+      expect(messages).toEqual(expect.arrayContaining([
+        expect.objectContaining({ type: 'thinking', message: 'Reasoning in progress…' }),
+        expect.objectContaining({ type: 'planning', message: 'Planning next steps…' }),
+        expect.objectContaining({
+          type: 'skill_start',
+          skill: 'example_tool',
+          input: 'Using credential [REDACTED] to call the service',
+        }),
+        expect.objectContaining({ type: 'response', content: 'Safe final answer.' }),
+      ]));
+      const serialized = JSON.stringify(messages);
+      expect(serialized).not.toContain('CHAIN_OF_THOUGHT_SECRET');
+      expect(serialized).not.toContain('INTERNAL_PLAN_SECRET');
+      expect(serialized).not.toContain('sk-abcdefghijklmnop');
+    });
+
     it('should return error for missing message in chat', async () => {
       const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
 
@@ -528,6 +713,74 @@ describe('ApiChannel', () => {
 
       expect((response as Record<string, unknown>).type).toBe('error');
       expect((response as Record<string, unknown>).error).toContain('Unknown message type');
+    });
+  });
+
+  describe('history presentation safety', () => {
+    it('removes stored reasoning and tool protocol blocks from default API history', async () => {
+      const db = new ScallopDatabase(':memory:');
+      db.createAuthUser('test@example.com', 'unused-test-hash');
+      db.createSession('history-session', { userId: 'api:default', channelId: 'api' });
+      db.addSessionMessage('history-session', 'assistant', JSON.stringify([
+        { type: 'thinking', thinking: 'HISTORICAL_THOUGHT_SECRET' },
+        { type: 'text', text: 'INTERNAL_PLAN_TEXT: I should call the tool now.' },
+        { type: 'tool_use', id: 'tool-1', name: 'bash', input: { command: 'PRIVATE_TOOL_INPUT' } },
+      ]));
+      db.addSessionMessage('history-session', 'user', JSON.stringify([
+        { type: 'tool_result', tool_use_id: 'tool-1', content: 'PRIVATE_TOOL_OUTPUT' },
+      ]));
+      db.addSessionMessage('history-session', 'assistant', JSON.stringify([
+        { type: 'thinking', thinking: 'SECOND_HISTORICAL_THOUGHT_SECRET' },
+        { type: 'text', text: '<think>INLINE_THOUGHT_SECRET</think>Safe historical answer.' },
+      ]));
+
+      port = 6_000 + Math.floor(Math.random() * 1_000);
+      channel = new ApiChannel({
+        port,
+        host: '127.0.0.1',
+        apiKey: 'history-test-key',
+        db,
+        agent: mockAgent,
+        sessionManager: mockSessionManager,
+        logger: mockLogger,
+      });
+
+      try {
+        await channel.start();
+        const response = await new Promise<{ status: number; body: Record<string, unknown> }>((resolve, reject) => {
+          const req = http.request({
+            hostname: '127.0.0.1',
+            port,
+            path: '/api/messages?limit=50',
+            method: 'GET',
+            headers: { 'X-API-Key': 'history-test-key' },
+          }, (res) => {
+            let data = '';
+            res.on('data', chunk => { data += chunk; });
+            res.on('end', () => resolve({
+              status: res.statusCode ?? 0,
+              body: JSON.parse(data) as Record<string, unknown>,
+            }));
+          });
+          req.on('error', reject);
+          req.end();
+        });
+
+        expect(response.status).toBe(200);
+        const serialized = JSON.stringify(response.body);
+        expect(serialized).toContain('Safe historical answer.');
+        expect(serialized).not.toContain('HISTORICAL_THOUGHT_SECRET');
+        expect(serialized).not.toContain('SECOND_HISTORICAL_THOUGHT_SECRET');
+        expect(serialized).not.toContain('INLINE_THOUGHT_SECRET');
+        expect(serialized).not.toContain('INTERNAL_PLAN_TEXT');
+        expect(serialized).not.toContain('PRIVATE_TOOL_INPUT');
+        expect(serialized).not.toContain('PRIVATE_TOOL_OUTPUT');
+        expect(serialized).not.toContain('tool_use');
+        expect(serialized).not.toContain('tool_result');
+      } finally {
+        await channel.stop();
+        db.close();
+      }
     });
   });
 

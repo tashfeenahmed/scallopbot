@@ -15,10 +15,18 @@ import type {
   SpawnAgentInput,
 } from './types.js';
 import { DEFAULT_SUBAGENT_CONFIG } from './types.js';
+import type { SubAgentRunRow } from '../memory/db.js';
+
+export interface SubAgentPersistence {
+  insertSubAgentRun(run: SubAgentRunRow): void;
+  updateSubAgentRun(id: string, updates: Partial<SubAgentRunRow>): void;
+}
 
 export interface SubAgentRegistryOptions {
   config?: Partial<SubAgentConfig>;
   logger: Logger;
+  /** Optional durable store. ScallopDatabase implements this interface. */
+  persistence?: SubAgentPersistence;
 }
 
 export class SubAgentRegistry {
@@ -26,10 +34,12 @@ export class SubAgentRegistry {
   private parentIndex: Map<string, Set<string>> = new Map();
   private config: SubAgentConfig;
   private logger: Logger;
+  private persistence?: SubAgentPersistence;
 
   constructor(options: SubAgentRegistryOptions) {
     this.config = { ...DEFAULT_SUBAGENT_CONFIG, ...options.config };
     this.logger = options.logger.child({ module: 'subagent-registry' });
+    this.persistence = options.persistence;
   }
 
   /**
@@ -64,6 +74,8 @@ export class SubAgentRegistry {
       this.parentIndex.set(parentSessionId, new Set());
     }
     this.parentIndex.get(parentSessionId)!.add(id);
+
+    this.persistence?.insertSubAgentRun(this.toPersistenceRow(run));
 
     this.logger.debug({ runId: id, label: run.label, parent: parentSessionId }, 'Sub-agent run created');
     return run;
@@ -109,6 +121,16 @@ export class SubAgentRegistry {
       run.error = error;
     }
 
+    this.persistence?.updateSubAgentRun(runId, {
+      status: run.status,
+      resultResponse: run.result?.response,
+      resultIterations: run.result?.iterationsUsed,
+      resultTaskComplete: run.result?.taskComplete,
+      error: run.error,
+      startedAt: run.startedAt,
+      completedAt: run.completedAt,
+    });
+
     this.logger.debug({ runId, status, label: run.label }, 'Sub-agent run status updated');
   }
 
@@ -119,6 +141,10 @@ export class SubAgentRegistry {
     const run = this.runs.get(runId);
     if (run) {
       run.tokenUsage = usage;
+      this.persistence?.updateSubAgentRun(runId, {
+        inputTokens: usage.inputTokens,
+        outputTokens: usage.outputTokens,
+      });
     }
   }
 
@@ -255,6 +281,11 @@ export class SubAgentRegistry {
         run.status = 'failed';
         run.error = 'Process restarted — orphaned sub-agent';
         run.completedAt = Date.now();
+        this.persistence?.updateSubAgentRun(run.id, {
+          status: run.status,
+          error: run.error,
+          completedAt: run.completedAt,
+        });
         orphaned++;
       }
 
@@ -273,5 +304,28 @@ export class SubAgentRegistry {
 
   getConfig(): SubAgentConfig {
     return this.config;
+  }
+
+  private toPersistenceRow(run: SubAgentRun): SubAgentRunRow {
+    return {
+      id: run.id,
+      parentSessionId: run.parentSessionId,
+      childSessionId: run.childSessionId,
+      task: run.task,
+      label: run.label,
+      status: run.status,
+      allowedSkills: run.allowedSkills.join(','),
+      modelTier: run.modelTier,
+      timeoutMs: run.timeoutMs,
+      resultResponse: run.result?.response ?? null,
+      resultIterations: run.result?.iterationsUsed ?? null,
+      resultTaskComplete: run.result?.taskComplete ?? null,
+      error: run.error ?? null,
+      inputTokens: run.tokenUsage.inputTokens,
+      outputTokens: run.tokenUsage.outputTokens,
+      createdAt: run.createdAt,
+      startedAt: run.startedAt ?? null,
+      completedAt: run.completedAt ?? null,
+    };
   }
 }

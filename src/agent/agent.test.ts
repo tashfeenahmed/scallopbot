@@ -1,10 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'fs/promises';
-import * as fsSync from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { pino } from 'pino';
-import type { CompletionResponse, LLMProvider, Message } from '../providers/types.js';
+import type { CompletionResponse, LLMProvider } from '../providers/types.js';
 import { flattenSystem } from '../providers/types.js';
 import { ScallopDatabase } from '../memory/db.js';
 import { ScallopMemoryStore } from '../memory/scallop-store.js';
@@ -68,7 +67,207 @@ describe('Agent', () => {
       const result = await agent.processMessage(session.id, 'Hello');
 
       expect(result.response).toBe('Hello! How can I help you?');
+      expect(result.completionReason).toBe('natural_end');
       expect(provider.complete).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps structured reasoning internal and strips inline think markup from AgentResult', async () => {
+      const { Agent } = await import('./agent.js');
+      const { SessionManager } = await import('./session.js');
+      const providerContent: CompletionResponse['content'] = [
+        { type: 'thinking', thinking: 'structured reasoning retained for internal replay' },
+        { type: 'text', text: '<think>inline reasoning must stay private</think>Visible answer.' },
+      ];
+      const provider = createMockProvider([{
+        content: providerContent,
+        stopReason: 'end_turn',
+        usage: { inputTokens: 10, outputTokens: 8 },
+        model: 'test-model',
+      }]);
+      const sessionManager = new SessionManager(db);
+      const agent = new Agent({
+        provider,
+        sessionManager,
+        workspace: testDir,
+        logger: pino({ level: 'silent' }),
+        maxIterations: 20,
+      });
+      const session = await sessionManager.createSession();
+      const onProgress = vi.fn(async () => {});
+
+      const result = await agent.processMessage(session.id, 'Give me the answer', undefined, onProgress);
+
+      expect(result.response).toBe('Visible answer.');
+      expect(result.response).not.toContain('<think>');
+      expect(onProgress).toHaveBeenCalledWith({
+        type: 'thinking',
+        message: 'structured reasoning retained for internal replay',
+        iteration: 1,
+      });
+
+      const stored = await sessionManager.getSession(session.id);
+      expect(stored?.messages.at(-1)).toEqual({ role: 'assistant', content: providerContent });
+    });
+
+    it('retries a think-only visible response instead of returning reasoning or silence', async () => {
+      const { Agent } = await import('./agent.js');
+      const { SessionManager } = await import('./session.js');
+      const provider = createMockProvider([
+        {
+          content: [{ type: 'text', text: '<think>unfinished private reasoning' }],
+          stopReason: 'end_turn',
+          usage: { inputTokens: 10, outputTokens: 8 },
+          model: 'test-model',
+        },
+        {
+          content: [{ type: 'text', text: 'Here is the user-facing answer.' }],
+          stopReason: 'end_turn',
+          usage: { inputTokens: 12, outputTokens: 6 },
+          model: 'test-model',
+        },
+      ]);
+      const sessionManager = new SessionManager(db);
+      const agent = new Agent({
+        provider,
+        sessionManager,
+        workspace: testDir,
+        logger: pino({ level: 'silent' }),
+        maxIterations: 20,
+      });
+      const session = await sessionManager.createSession();
+
+      const result = await agent.processMessage(session.id, 'Give me the answer');
+
+      expect(result.response).toBe('Here is the user-facing answer.');
+      expect(provider.complete).toHaveBeenCalledTimes(2);
+    });
+
+    it('tracks a selected primary failure so later turns honor cooldown and recover', async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-07-10T12:00:00Z'));
+      try {
+        const { Agent } = await import('./agent.js');
+        const { SessionManager } = await import('./session.js');
+        const { Router } = await import('../routing/router.js');
+        let primaryFails = true;
+        const completion = (text: string, model: string): CompletionResponse => ({
+          content: [{ type: 'text', text }],
+          stopReason: 'end_turn',
+          usage: { inputTokens: 2, outputTokens: 2 },
+          model,
+        });
+        const primary: LLMProvider = {
+          name: 'primary',
+          isAvailable: () => true,
+          complete: vi.fn(async () => {
+            if (primaryFails) throw new Error('primary is offline');
+            return completion('Primary recovered.', 'primary-model');
+          }),
+        };
+        const fallback: LLMProvider = {
+          name: 'fallback',
+          isAvailable: () => true,
+          complete: vi.fn(async () => completion('Fallback response.', 'fallback-model')),
+        };
+        const router = new Router({
+          providerOrder: ['primary', 'fallback'],
+          tierMapping: {
+            fast: ['primary', 'fallback'],
+            standard: ['primary', 'fallback'],
+            capable: ['primary', 'fallback'],
+          },
+          unhealthyThreshold: 1,
+          healthRecoveryMs: 60_000,
+        });
+        router.registerProvider(primary);
+        router.registerProvider(fallback);
+
+        const sessionManager = new SessionManager(db);
+        const agent = new Agent({
+          provider: primary,
+          router,
+          sessionManager,
+          workspace: testDir,
+          logger: pino({ level: 'silent' }),
+          maxIterations: 5,
+        });
+        const session = await sessionManager.createSession();
+
+        const first = await agent.processMessage(session.id, 'First request');
+        expect(first.response).toBe('Fallback response.');
+        expect(primary.complete).toHaveBeenCalledTimes(1);
+        expect(router.getProviderHealth('primary')).toMatchObject({
+          isHealthy: false,
+          consecutiveFailures: 1,
+        });
+
+        const second = await agent.processMessage(session.id, 'Second request');
+        expect(second.response).toBe('Fallback response.');
+        expect(primary.complete).toHaveBeenCalledTimes(1);
+        expect(fallback.complete).toHaveBeenCalledTimes(2);
+
+        primaryFails = false;
+        vi.advanceTimersByTime(60_001);
+        const recovered = await agent.processMessage(session.id, 'Third request');
+        expect(recovered.response).toBe('Primary recovered.');
+        expect(primary.complete).toHaveBeenCalledTimes(2);
+        expect(router.getProviderHealth('primary')).toMatchObject({
+          isHealthy: true,
+          consecutiveFailures: 0,
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('reports explicit completion even though the DONE marker is stripped', async () => {
+      const { Agent } = await import('./agent.js');
+      const { SessionManager } = await import('./session.js');
+      const provider = createMockProvider([{
+        content: [{ type: 'text', text: 'Finished the requested work. [DONE]' }],
+        stopReason: 'end_turn',
+        usage: { inputTokens: 10, outputTokens: 5 },
+        model: 'test-model',
+      }]);
+      const sessionManager = new SessionManager(db);
+      const agent = new Agent({
+        provider,
+        sessionManager,
+        workspace: testDir,
+        logger: pino({ level: 'silent' }),
+        maxIterations: 20,
+      });
+      const session = await sessionManager.createSession();
+
+      const result = await agent.processMessage(session.id, 'Finish it');
+
+      expect(result.response).toBe('Finished the requested work.');
+      expect(result.completionReason).toBe('explicit_done');
+    });
+
+    it('reports a stop request as incomplete without calling the provider', async () => {
+      const { Agent } = await import('./agent.js');
+      const { SessionManager } = await import('./session.js');
+      const provider = createMockProvider([{
+        content: [{ type: 'text', text: 'should not run' }],
+        stopReason: 'end_turn',
+        usage: { inputTokens: 1, outputTokens: 1 },
+        model: 'test-model',
+      }]);
+      const sessionManager = new SessionManager(db);
+      const agent = new Agent({
+        provider,
+        sessionManager,
+        workspace: testDir,
+        logger: pino({ level: 'silent' }),
+        maxIterations: 20,
+      });
+      const session = await sessionManager.createSession();
+
+      const result = await agent.processMessage(session.id, 'Start', undefined, undefined, () => true);
+
+      expect(result.completionReason).toBe('stopped');
+      expect(provider.complete).not.toHaveBeenCalled();
     });
 
     it('should execute tool and continue conversation', async () => {
@@ -222,6 +421,7 @@ describe('Agent', () => {
 
       // Should have stopped due to max iterations
       expect(result.response).toContain('maximum iterations');
+      expect(result.completionReason).toBe('iteration_limit');
       expect(infiniteProvider.complete).toHaveBeenCalledTimes(5);
     });
 

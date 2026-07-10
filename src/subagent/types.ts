@@ -51,6 +51,8 @@ export interface SubAgentResult {
   response: string;
   iterationsUsed: number;
   taskComplete: boolean;
+  /** Actual tracked LLM spend for this isolated child session. */
+  costUsd: number;
 }
 
 /**

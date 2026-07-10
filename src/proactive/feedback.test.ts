@@ -9,7 +9,11 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { detectProactiveEngagement } from './feedback.js';
+import {
+  attributeProactiveEngagement,
+  detectProactiveEngagement,
+  proactiveIdentityCandidates,
+} from './feedback.js';
 import type { ScheduledItem } from '../memory/db.js';
 
 // ============ Constants for test readability ============
@@ -49,7 +53,7 @@ function makeItem(overrides?: Partial<ScheduledItem>): ScheduledItem {
 
 describe('detectProactiveEngagement', () => {
   it('returns empty array when no fired items', () => {
-    const result = detectProactiveEngagement('user-1', [], undefined, NOW);
+    const result = detectProactiveEngagement('user-1', [], undefined, NOW, { userMessage: 'How is the project?' });
     expect(result).toEqual([]);
   });
 
@@ -58,18 +62,20 @@ describe('detectProactiveEngagement', () => {
       makeItem({ id: 'old-1', firedAt: NOW - 20 * MIN_MS }),
       makeItem({ id: 'old-2', firedAt: NOW - 30 * MIN_MS }),
     ];
-    const result = detectProactiveEngagement('user-1', items, undefined, NOW);
+    const result = detectProactiveEngagement('user-1', items, undefined, NOW, { userMessage: 'How is the project?' });
     expect(result).toEqual([]);
   });
 
-  it('returns IDs of items within engagement window', () => {
+  it('attributes a reply to only the best recent item, not every item in the window', () => {
     const items = [
-      makeItem({ id: 'recent-1', firedAt: NOW - 5 * MIN_MS }),
-      makeItem({ id: 'recent-2', firedAt: NOW - 10 * MIN_MS }),
+      makeItem({ id: 'recent-1', message: 'Did you finish the TypeScript project?', firedAt: NOW - 5 * MIN_MS }),
+      makeItem({ id: 'recent-2', message: 'Have you booked the dentist?', firedAt: NOW - 10 * MIN_MS }),
       makeItem({ id: 'old-1', firedAt: NOW - 20 * MIN_MS }),
     ];
-    const result = detectProactiveEngagement('user-1', items, undefined, NOW);
-    expect(result).toEqual(['recent-1', 'recent-2']);
+    const result = detectProactiveEngagement('user-1', items, undefined, NOW, {
+      userMessage: 'The TypeScript project is finished now',
+    });
+    expect(result).toEqual(['recent-1']);
   });
 
   it('ignores items with source !== agent', () => {
@@ -77,7 +83,7 @@ describe('detectProactiveEngagement', () => {
       makeItem({ id: 'user-item', source: 'user', firedAt: NOW - 5 * MIN_MS }),
       makeItem({ id: 'agent-item', source: 'agent', firedAt: NOW - 5 * MIN_MS }),
     ];
-    const result = detectProactiveEngagement('user-1', items, undefined, NOW);
+    const result = detectProactiveEngagement('user-1', items, undefined, NOW, { userMessage: 'How is the project?' });
     expect(result).toEqual(['agent-item']);
   });
 
@@ -87,7 +93,7 @@ describe('detectProactiveEngagement', () => {
       makeItem({ id: 'dismissed-item', status: 'dismissed', firedAt: NOW - 5 * MIN_MS }),
       makeItem({ id: 'fired-item', status: 'fired', firedAt: NOW - 5 * MIN_MS }),
     ];
-    const result = detectProactiveEngagement('user-1', items, undefined, NOW);
+    const result = detectProactiveEngagement('user-1', items, undefined, NOW, { userMessage: 'How is the project?' });
     expect(result).toEqual(['fired-item']);
   });
 
@@ -96,7 +102,7 @@ describe('detectProactiveEngagement', () => {
       makeItem({ id: 'no-fired-at', firedAt: null }),
       makeItem({ id: 'has-fired-at', firedAt: NOW - 5 * MIN_MS }),
     ];
-    const result = detectProactiveEngagement('user-1', items, undefined, NOW);
+    const result = detectProactiveEngagement('user-1', items, undefined, NOW, { userMessage: 'How is the project?' });
     expect(result).toEqual(['has-fired-at']);
   });
 
@@ -106,7 +112,7 @@ describe('detectProactiveEngagement', () => {
       makeItem({ id: 'within-custom', firedAt: NOW - 3 * MIN_MS }),
       makeItem({ id: 'outside-custom', firedAt: NOW - 7 * MIN_MS }),
     ];
-    const result = detectProactiveEngagement('user-1', items, customWindow, NOW);
+    const result = detectProactiveEngagement('user-1', items, customWindow, NOW, { userMessage: 'How is the project?' });
     expect(result).toEqual(['within-custom']);
   });
 
@@ -116,7 +122,104 @@ describe('detectProactiveEngagement', () => {
       makeItem({ id: 'item-1', firedAt: NOW - 5 * MIN_MS }), // 65 min before customNow
       makeItem({ id: 'item-2', firedAt: customNow - 5 * MIN_MS }), // 5 min before customNow
     ];
-    const result = detectProactiveEngagement('user-1', items, undefined, customNow);
+    const result = detectProactiveEngagement('user-1', items, undefined, customNow, { userMessage: 'How is the project?' });
     expect(result).toEqual(['item-2']);
+  });
+
+  it('does not count an unrelated nearby message as engagement', () => {
+    const items = [makeItem({ message: 'Remember to renew your passport before Spain' })];
+    expect(detectProactiveEngagement('user-1', items, undefined, NOW, {
+      userMessage: 'Can you explain this TypeScript error?',
+    })).toEqual([]);
+  });
+
+  it('does not count a dismissal as positive engagement', () => {
+    const items = [makeItem({ message: 'Remember to renew your passport before Spain' })];
+    expect(detectProactiveEngagement('user-1', items, undefined, NOW, {
+      userMessage: 'Not now, stop reminding me about the passport',
+    })).toEqual([]);
+  });
+
+  it('attributes a terse acknowledgement only to the newest item', () => {
+    const items = [
+      makeItem({ id: 'older', firedAt: NOW - 8 * MIN_MS }),
+      makeItem({ id: 'newest', firedAt: NOW - 2 * MIN_MS }),
+    ];
+    const matches = attributeProactiveEngagement('user-1', items, { userMessage: 'Thanks!' }, undefined, NOW);
+    expect(matches).toEqual([{ itemId: 'newest', score: 0.5, reason: 'acknowledgement' }]);
+  });
+
+  it('requires replied-to text to match before trusting direct-reply metadata', () => {
+    const items = [makeItem({ message: 'Remember to renew your passport before Spain' })];
+    expect(attributeProactiveEngagement('user-1', items, {
+      userMessage: 'Sure',
+      directReply: true,
+      repliedToText: 'Here is your unrelated build output',
+    }, undefined, NOW)[0]?.reason).toBe('acknowledgement');
+
+    expect(attributeProactiveEngagement('user-1', items, {
+      userMessage: 'I renewed it',
+      directReply: true,
+      repliedToText: 'Remember to renew your passport before Spain',
+    }, undefined, NOW)[0]?.reason).toBe('direct_reply');
+  });
+
+  it('matches exact, raw, and canonical single-user identities', () => {
+    expect(proactiveIdentityCandidates('telegram:123')).toEqual(['telegram:123', '123']);
+    expect(proactiveIdentityCandidates('telegram:123', ['123'])).toEqual(['telegram:123', '123', 'default']);
+    expect(proactiveIdentityCandidates('api:default')).toEqual(['api:default', 'default']);
+    expect(proactiveIdentityCandidates('default')).toEqual(['default']);
+
+    const item = makeItem({ userId: 'default' });
+    expect(detectProactiveEngagement('telegram:123', [item], undefined, NOW, {
+      userMessage: 'How is the project?',
+      identityCandidates: proactiveIdentityCandidates('telegram:123', ['123']),
+    }))
+      .toEqual(['item-1']);
+  });
+
+  it('does not attribute one public channel user to the shared default identity implicitly', () => {
+    const item = makeItem({ userId: 'default' });
+    expect(detectProactiveEngagement('telegram:999', [item], undefined, NOW, {
+      userMessage: 'How is the project?',
+    })).toEqual([]);
+  });
+
+  it('rejects future fired timestamps', () => {
+    const item = makeItem({ firedAt: NOW + MIN_MS });
+    expect(detectProactiveEngagement('user-1', [item], undefined, NOW, { userMessage: 'How is the project?' }))
+      .toEqual([]);
+  });
+
+  it('measures higher attribution precision than the former time-only heuristic', () => {
+    const item = makeItem({ message: 'Remember to renew your passport before Spain' });
+    const fixtures = [
+      { text: 'I renewed my passport for Spain', expected: true },
+      { text: 'Thanks!', expected: true },
+      { text: 'Can you explain this TypeScript error?', expected: false },
+      { text: 'Hello, what model are you?', expected: false },
+      { text: 'Not now, stop reminding me about the passport', expected: false },
+    ];
+
+    // Previous implementation classified every message in the time window as
+    // engagement. On this deterministic fixture: TP=2, FP=3 (precision 40%).
+    const baselinePredictions = fixtures.map(() => true);
+    const candidatePredictions = fixtures.map(fixture =>
+      detectProactiveEngagement('user-1', [item], undefined, NOW, { userMessage: fixture.text }).length > 0
+    );
+    const precision = (predictions: boolean[]) => {
+      const predictedPositive = predictions.filter(Boolean).length;
+      const truePositive = predictions.filter((prediction, index) => prediction && fixtures[index].expected).length;
+      return truePositive / predictedPositive;
+    };
+    const recall = (predictions: boolean[]) => {
+      const actualPositive = fixtures.filter(fixture => fixture.expected).length;
+      const truePositive = predictions.filter((prediction, index) => prediction && fixtures[index].expected).length;
+      return truePositive / actualPositive;
+    };
+
+    expect(precision(baselinePredictions)).toBe(0.4);
+    expect(precision(candidatePredictions)).toBe(1);
+    expect(recall(candidatePredictions)).toBe(1);
   });
 });

@@ -106,6 +106,27 @@ describe('wrapProviderWithTraceTap', () => {
     expect(rows[0].sessionId).toBe('sess-1');
   });
 
+  it('redacts secrets before persisting prompts and responses', async () => {
+    const previous = process.env.TEST_API_KEY;
+    process.env.TEST_API_KEY = 'trace-secret-value-123';
+    try {
+      const p = wrapProviderWithTraceTap(makeProvider({
+        content: [{ type: 'text', text: 'response leaked trace-secret-value-123' }],
+      }));
+      await p.complete({
+        messages: [{ role: 'user', content: 'prompt leaked trace-secret-value-123' }],
+        purpose: 'tool_call',
+      });
+      expect(rows[0].prompt).not.toContain('trace-secret-value-123');
+      expect(rows[0].response).not.toContain('trace-secret-value-123');
+      expect(rows[0].prompt).toContain('[REDACTED]');
+      expect(rows[0].response).toContain('[REDACTED]');
+    } finally {
+      if (previous === undefined) delete process.env.TEST_API_KEY;
+      else process.env.TEST_API_KEY = previous;
+    }
+  });
+
   it('passes through when no sink is set', async () => {
     setTraceSink(null);
     const p = wrapProviderWithTraceTap(makeProvider({}));

@@ -23,20 +23,15 @@ import { cosineSimilarity } from '../memory/embeddings.js';
 import type { LLMProvider, ContentBlock } from '../providers/types.js';
 
 import {
-  createTrackedProvider,
   createEvalProviders,
   categorizeMessage,
   estimateImportance,
   extractFactsWithLLM,
   decideMem0Action,
-  type TrackedProvider,
 } from './eval-runner.js';
 import {
   createModeSearch,
   type EvalModeConfig,
-  OPENCLAW_MODE,
-  MEM0_MODE,
-  SCALLOPBOT_MODE,
   ALL_MODES,
 } from './modes.js';
 import { mapConcurrent } from './emobench-eval.js';

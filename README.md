@@ -13,7 +13,7 @@
   <a href="https://github.com/tashfeenahmed/scallopbot/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/tashfeenahmed/scallopbot/ci.yml?branch=main&style=for-the-badge&label=build" alt="CI status"></a>
   <a href="https://github.com/tashfeenahmed/scallopbot/releases"><img src="https://img.shields.io/github/v/release/tashfeenahmed/scallopbot?style=for-the-badge" alt="GitHub release"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge" alt="MIT License"></a>
-  <a href="https://nodejs.org"><img src="https://img.shields.io/badge/node-%3E%3D22-brightgreen?style=for-the-badge" alt="Node.js"></a>
+  <a href="https://nodejs.org"><img src="https://img.shields.io/badge/node-%3E%3D24-brightgreen?style=for-the-badge" alt="Node.js"></a>
 </p>
 
 <p align="center">
@@ -100,6 +100,10 @@ Speech-to-text via faster-whisper (CTranslate2-optimized Whisper) and text-to-sp
 ### Skills-Only Architecture
 
 All capabilities -- bash, browser, file I/O, git, Docker, PDF, web search, memory -- are implemented as self-contained skills using the [OpenClaw](https://github.com/openclaw/openclaw) SKILL.md format. Skills declare their own requirements (binaries, env vars, OS) and are gated at load time. Community skills install from [ClawHub](https://clawhub.ai) with a single CLI command.
+
+### Evidence-Gated Procedural Learning
+
+An optional, default-off evolution loop can distill reusable multi-tool workflows into documentation-only skills. Candidates are replayed against held-out tasks, safety and privacy checked, promoted only after a measured improvement, tracked for real use, and automatically rolled back or recoverably archived when they regress or become stale. Machine-authored executable scripts remain blocked without OS isolation. See the [intelligence roadmap and reproducible evidence](docs/INTELLIGENCE_ROADMAP.md).
 
 ## Daily Cost Breakdown
 
@@ -412,6 +416,10 @@ sudo systemctl enable --now scallopbot
 | `skill uninstall <name>` | Remove a skill |
 | `skill list` | List installed skills |
 | `skill update [name]` | Update one or all skills |
+| `skill-curator status` | Show usage and lifecycle state for agent-created skills |
+| `skill-curator run` | Mark stale and archive unused agent-created skills |
+| `skill-curator pin <name>` | Keep an agent-created skill active |
+| `skill-curator restore <name>` | Restore a recoverably archived skill |
 | `migrate run` | Migrate legacy JSONL memories to SQLite |
 
 ## Project Structure
@@ -430,6 +438,9 @@ src/
 ├── reliability/    # Circuit breaker, graceful degradation
 ├── routing/        # Cost tracking, complexity analysis, model selection
 ├── skills/         # Loader, registry, executor, ClawHub client (16 bundled)
+├── evolution/      # Evidence-gated procedural skill learning and curation
+├── goals/          # Persistent, budgeted, verified autonomous goals
+├── workflow/       # Context-efficient validated tool DAG execution
 ├── voice/          # STT (faster-whisper/Groq/OpenAI), TTS (Kokoro/OpenAI)
 ├── cli.ts          # CLI entry point
 └── index.ts        # Library exports

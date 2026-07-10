@@ -41,8 +41,12 @@ export interface TelegramChannelOptions {
   enableVoiceReply?: boolean;
   voiceManager?: VoiceManager; // Optional shared voice manager
   providerRegistry?: ProviderRegistry; // For /model command
-  /** Called when a user sends a message (for engagement detection) */
-  onUserMessage?: (prefixedUserId: string) => void;
+  /** Called when a user sends a message (for evidence-based engagement detection). */
+  onUserMessage?: (
+    prefixedUserId: string,
+    userMessage?: string,
+    context?: { directReply?: boolean; repliedToText?: string },
+  ) => void;
   /** Interrupt queue for mid-loop user message injection */
   interruptQueue?: InterruptQueue;
 }
@@ -131,7 +135,7 @@ export class TelegramChannel {
   private workspacePath: string;
   private db: ScallopDatabase;
   private providerRegistry: ProviderRegistry | null = null;
-  private onUserMessage?: (prefixedUserId: string) => void;
+  private onUserMessage?: TelegramChannelOptions['onUserMessage'];
   private interruptQueue: InterruptQueue | null = null;
   // Buffer for collecting media group photos (multiple photos sent at once).
   // Bounded to prevent OOM if a user spams groups or the process never calls
@@ -542,7 +546,6 @@ export class TelegramChannel {
    * Handle /usage command - show token usage and costs
    */
   private async handleUsage(ctx: Context): Promise<void> {
-    const now = Date.now();
     const todayStart = new Date();
     todayStart.setHours(0, 0, 0, 0);
     const monthStart = new Date();
@@ -898,11 +901,6 @@ export class TelegramChannel {
 
     this.logger.info({ userId }, 'Received voice message');
 
-    // Notify engagement detector (proactive feedback loop)
-    if (this.onUserMessage) {
-      this.onUserMessage(`telegram:${userId}`);
-    }
-
     const typingInterval = this.startTypingIndicator(ctx);
 
     try {
@@ -927,6 +925,12 @@ export class TelegramChannel {
         await ctx.reply('Could not understand the audio. Please try again.');
         return;
       }
+
+      this.onUserMessage?.(
+        `telegram:${userId}`,
+        transcription.text,
+        this.getReplyAttributionContext(ctx),
+      );
 
       // Process transcribed text as regular message (don't echo transcription back)
       const sessionId = await this.getOrCreateSession(userId);
@@ -993,10 +997,12 @@ export class TelegramChannel {
 
     this.logger.info({ userId, fileName: document.file_name, mimeType: document.mime_type }, 'Received document');
 
-    // Notify engagement detector (proactive feedback loop)
-    if (this.onUserMessage) {
-      this.onUserMessage(`telegram:${userId}`);
-    }
+    const caption = ctx.message?.caption || '';
+    this.onUserMessage?.(
+      `telegram:${userId}`,
+      caption || document.file_name || undefined,
+      this.getReplyAttributionContext(ctx),
+    );
 
     const typingInterval = this.startTypingIndicator(ctx);
 
@@ -1028,7 +1034,6 @@ export class TelegramChannel {
       this.logger.debug({ savedPath }, 'Document saved');
 
       // Get caption or generate prompt
-      const caption = ctx.message?.caption || '';
       const prompt = caption
         ? `The user sent a file (${document.file_name || 'document'}). Caption: "${caption}"\n\nFile saved at: ${savedPath}`
         : `The user sent a file (${document.file_name || 'document'}).\n\nFile saved at: ${savedPath}\n\nAnalyze this file and summarize what it contains.`;
@@ -1086,10 +1091,11 @@ export class TelegramChannel {
 
     this.logger.info({ userId, width: photo.width, height: photo.height, mediaGroupId }, 'Received photo');
 
-    // Notify engagement detector (proactive feedback loop)
-    if (this.onUserMessage) {
-      this.onUserMessage(`telegram:${userId}`);
-    }
+    this.onUserMessage?.(
+      `telegram:${userId}`,
+      caption || undefined,
+      this.getReplyAttributionContext(ctx),
+    );
 
     try {
       // Download the photo
@@ -1353,10 +1359,11 @@ export class TelegramChannel {
 
     this.logger.info({ userId, message: messageText.substring(0, 100), hasReply: fullMessage !== messageText }, 'Received message');
 
-    // Notify engagement detector (proactive feedback loop)
-    if (this.onUserMessage) {
-      this.onUserMessage(`telegram:${userId}`);
-    }
+    this.onUserMessage?.(
+      `telegram:${userId}`,
+      messageText,
+      this.getReplyAttributionContext(ctx),
+    );
 
     const typingInterval = this.startTypingIndicator(ctx);
 
@@ -1423,6 +1430,16 @@ export class TelegramChannel {
     const sender = isBot ? 'You (assistant)' : (reply.from?.first_name || 'User');
 
     return `[Replying to ${sender}: "${replyText}"]\n\n${messageText}`;
+  }
+
+  /** Return trusted reply metadata only for replies to this bot. */
+  private getReplyAttributionContext(ctx: Context): { directReply?: boolean; repliedToText?: string } {
+    const reply = ctx.message?.reply_to_message;
+    if (!reply) return {};
+    const repliedToText = reply.text || reply.caption || '';
+    const isThisBot = Boolean(reply.from?.is_bot && reply.from?.id === this.bot.botInfo?.id);
+    if (!isThisBot || !repliedToText) return {};
+    return { directReply: true, repliedToText };
   }
 
   /**

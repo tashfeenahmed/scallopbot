@@ -257,7 +257,7 @@ export function scanUnresolvedThreads(
     // it at 'medium' (was 'low' for non-question threads, which the dial skipped
     // wholesale). Question topics still surface in the blurb below.
     const questionTopics = summary.topics.filter((t) => t.includes('?'));
-    const severity: 'medium' = 'medium';
+    const severity = 'medium' as const;
     const topicBlurb = questionTopics.length > 0
       ? questionTopics.join(', ')
       : summary.topics.slice(0, 3).join(', ') || summary.summary.slice(0, 80);

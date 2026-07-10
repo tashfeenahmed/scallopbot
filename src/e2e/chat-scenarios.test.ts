@@ -11,6 +11,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from
 import {
   createE2EGateway,
   createWsClient,
+  enableVerboseProgress,
   cleanupE2E,
   type E2EGatewayContext,
   type WsClient,
@@ -88,6 +89,7 @@ describe('E2E Chat Scenarios', () => {
       afterEach(async () => { await client.close(); });
 
       it('should execute a single tool use and return final response', async () => {
+        await enableVerboseProgress(client);
         client.send({ type: 'chat', message: 'Echo hello world' });
         const messages = await client.collectUntilResponse(15000);
 
@@ -176,6 +178,7 @@ describe('E2E Chat Scenarios', () => {
       afterEach(async () => { await client.close(); });
 
       it('should chain multiple tool calls across iterations', async () => {
+        await enableVerboseProgress(client);
         client.send({ type: 'chat', message: 'Run both tools' });
         const messages = await client.collectUntilResponse(15000);
 
@@ -243,6 +246,7 @@ describe('E2E Chat Scenarios', () => {
       afterEach(async () => { await client.close(); });
 
       it('should execute parallel tool_use blocks and feed back both results', async () => {
+        await enableVerboseProgress(client);
         client.send({ type: 'chat', message: 'Run parallel' });
         const messages = await client.collectUntilResponse(15000);
 
@@ -322,6 +326,7 @@ describe('E2E Chat Scenarios', () => {
       afterEach(async () => { await client.close(); });
 
       it('should search memories via tool and return results to LLM', async () => {
+        await enableVerboseProgress(client);
         client.send({ type: 'chat', message: 'What is my favorite color?' });
         const messages = await client.collectUntilResponse(15000);
 
@@ -511,6 +516,7 @@ describe('E2E Chat Scenarios', () => {
       afterEach(async () => { await client.close(); });
 
       it('should handle tool execution failure and recover', async () => {
+        await enableVerboseProgress(client);
         client.send({ type: 'chat', message: 'Use the failing tool' });
         const messages = await client.collectUntilResponse(15000);
 
@@ -846,6 +852,7 @@ describe('E2E Chat Scenarios', () => {
       afterEach(async () => { await client.close(); });
 
       it('should send memory progress event before response', async () => {
+        await enableVerboseProgress(client);
         client.send({ type: 'chat', message: 'What is my cat named?' });
         const messages = await client.collectUntilResponse(15000);
 

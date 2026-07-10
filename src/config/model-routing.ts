@@ -168,10 +168,15 @@ export class PurposeRouter {
   async providersFor(purpose: ModelPurpose): Promise<LLMProvider[]> {
     const chain: LLMProvider[] = [];
     const primary = await this.providerFor(purpose);
-    if (primary) chain.push(primary);
+    if (primary && this.router.canAttemptProvider(primary.name)) chain.push(primary);
     for (const name of this.router.getProviderOrder()) {
       const p = this.registry.getProvider(name);
-      if (p && p.isAvailable() && !chain.some((c) => c.name === p.name)) {
+      if (
+        p &&
+        p.isAvailable() &&
+        this.router.canAttemptProvider(p.name) &&
+        !chain.some((c) => c.name === p.name)
+      ) {
         chain.push(p);
       }
     }
@@ -192,7 +197,16 @@ export class PurposeRouter {
     const chain = this.pinnedPurposes.has(purpose)
       ? undefined
       : () => this.providersFor(purpose);
-    return new DynamicProvider(() => this.providerFor(purpose), purpose, chain, this.logger);
+    return new DynamicProvider(
+      () => this.providerFor(purpose),
+      purpose,
+      chain,
+      this.logger,
+      {
+        success: (provider) => this.router.recordProviderSuccess(provider),
+        failure: (provider, error) => this.router.recordProviderFailure(provider, error),
+      },
+    );
   }
 
   private async resolve(ref: ModelRef): Promise<LLMProvider | undefined> {

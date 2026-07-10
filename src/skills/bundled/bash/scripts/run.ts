@@ -81,8 +81,10 @@ function validateCwd(cwd: string, basePath: string): ValidationResult {
   const resolvedCwd = path.resolve(basePath, cwd);
   const resolvedBase = path.resolve(basePath);
 
-  // Check if resolved path starts with base path
-  if (!resolvedCwd.startsWith(resolvedBase)) {
+  // Use path.relative instead of a string prefix: `/tmp/workspace-evil` starts
+  // with `/tmp/workspace` but is not inside it.
+  const relative = path.relative(resolvedBase, resolvedCwd);
+  if (relative.startsWith('..') || path.isAbsolute(relative)) {
     return {
       valid: false,
       reason: `Path traversal blocked: ${cwd} escapes workspace`,
@@ -94,7 +96,8 @@ function validateCwd(cwd: string, basePath: string): ValidationResult {
     if (fs.existsSync(resolvedCwd)) {
       const realPath = fs.realpathSync(resolvedCwd);
       const realBase = fs.realpathSync(resolvedBase);
-      if (!realPath.startsWith(realBase)) {
+      const realRelative = path.relative(realBase, realPath);
+      if (realRelative.startsWith('..') || path.isAbsolute(realRelative)) {
         return {
           valid: false,
           reason: `Symlink escape blocked: resolves to ${realPath} outside workspace`,
@@ -181,8 +184,8 @@ function parseArgs(): BashArgs {
     throw new Error('Missing command');
   }
 
-  // Determine workspace root (from SKILL_DIR or cwd)
-  const workspaceRoot = process.env.SKILL_DIR || process.cwd();
+  // SKILL_DIR is the skill installation folder, not the user's workspace.
+  const workspaceRoot = process.env.SKILL_WORKSPACE || process.cwd();
 
   // Determine target cwd
   const targetCwd =

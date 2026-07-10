@@ -26,11 +26,11 @@ inputSchema:
       description: "Filter by label (for view)"
     title:
       type: string
-      description: "Item title/message (for add/update)"
+      description: "For kind=nudge, the exact message delivered to the user; write it directly to them, never as an instruction such as 'ask the user'. For kind=task, a short board label."
     kind:
       type: string
       enum: [nudge, task]
-      description: "nudge=message reminder, task=sub-agent work (for add/update)"
+      description: "nudge=pre-written user-facing message, task=sub-agent work that requires task_config (for add/update)"
     trigger_time:
       type: string
       description: "For ONE-OFF items only: 'in 30 min', 'tomorrow 9am', 'at 3pm', 'today 7pm'. For recurring schedules (every day / daily / every Monday / weekdays / weekends) use the `recurring` object instead — do NOT put 'every day at 8am' in trigger_time."
@@ -110,15 +110,26 @@ Unified kanban task board that replaces the reminder and progress skills.
 - `update`: Edit an item. Required: item_id. Optional: title, priority, labels, trigger_time, kind
 - `done`: Mark complete. Required: item_id. Optional: result (completion note)
 - `archive`: Dismiss/archive an item. Required: item_id
-- `detail`: Show full item detail with result. Required: item_id
+- `detail`: Show full item detail, including durable worker/attempt/lease/error state and result cost. Required: item_id
 - `snooze`: Reschedule trigger time. Required: item_id, time
 
 ## Priority Levels
 urgent > high > medium (default) > low
 
 ## Item Kinds
-- `nudge`: A message/reminder delivered to the user
-- `task`: Sub-agent work that runs autonomously and stores results
+- `nudge`: A pre-written message/reminder delivered verbatim to the user. The `title` must address them directly.
+- `task`: Sub-agent work that runs autonomously under a durable lease with heartbeats and bounded retries, then stores its result. Put internal instructions in `task_config.goal`, not in a nudge.
+
+### User-facing nudge text
+
+For a scheduled `nudge`, `title` is the exact notification text. Never store a plan for what the bot should say.
+
+- BAD: `Daily check-in with Sam - ask about priorities and deadlines`
+- GOOD: `Hey Sam, what are your priorities and deadlines today? How are things going?`
+- BAD: `Send the user a reminder to take their medication`
+- GOOD: `Quick reminder to take your medication.`
+
+If the bot must gather data or perform work before messaging, use `kind: "task"` and put the work in `task_config.goal`.
 
 ## Recurring vs one-off
 

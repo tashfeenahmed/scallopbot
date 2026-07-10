@@ -6,7 +6,7 @@
 import type { GardenerContext } from './gardener-context.js';
 import { DEFAULT_USER_ID } from './gardener-context.js';
 import { storeFusedMemory } from './gardener-fusion-storage.js';
-import { scheduleProactiveItem, getLastProactiveAt, createProactiveItem } from './gardener-scheduling.js';
+import { getLastProactiveAt, createProactiveItem } from './gardener-scheduling.js';
 import { findFusionClusters, fuseMemoryCluster } from './fusion.js';
 import { auditRetrievalHistory } from './retrieval-audit.js';
 import { archiveLowUtilityMemories, pruneOrphanedRelations } from './utility-score.js';

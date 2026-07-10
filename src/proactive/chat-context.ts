@@ -6,7 +6,7 @@
  * supplied, the context is scoped to that user's sessions.
  */
 
-import type { ScallopDatabase, SessionMessageRow } from '../memory/db.js';
+import type { ScallopDatabase } from '../memory/db.js';
 
 export interface RecentChatContext {
   formattedContext: string;

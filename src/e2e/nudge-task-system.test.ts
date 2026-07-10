@@ -5,7 +5,7 @@
  * 1. User mentions an upcoming flight → fact extractor creates a task-kind scheduled item
  * 2. User asks to be reminded → fact extractor creates a nudge-kind scheduled item
  * 3. Scheduler fires nudge items by sending pre-written message directly
- * 4. Scheduler fires task items by falling back to nudge (no sub-agent in test env)
+ * 4. Scheduler suppresses raw task titles when no sub-agent is available
  * 5. DB state verifies kind and taskConfig are correctly persisted
  */
 
@@ -167,7 +167,7 @@ describe('E2E Nudge/Task System', () => {
         sourceMemoryId: null,
       });
 
-      // Manually insert a task item that's already due (no sub-agent available → falls back to nudge)
+      // Manually insert a task item that's already due (no sub-agent available → suppress raw title)
       db.addScheduledItem({
         userId: 'default',
         sessionId: null,
@@ -209,20 +209,17 @@ describe('E2E Nudge/Task System', () => {
       await cleanupE2E(ctx);
     }, 15000);
 
-    it('fires both nudge and task items on evaluate()', async () => {
+    it('fires the nudge without leaking the task title on evaluate()', async () => {
       // Manually trigger evaluation
       await scheduler.evaluate();
-
-      // Both items should have been sent (task falls back to nudge since no sub-agent)
-      expect(sentMessages.length).toBeGreaterThanOrEqual(2);
 
       // Check that nudge message was sent
       const waterMsg = sentMessages.find(m => m.message.includes('water'));
       expect(waterMsg).toBeDefined();
 
-      // Check that task fallback message was sent (the item.message since no sub-agent)
+      // Task titles are internal work descriptions and must never be fallback messages.
       const flightMsg = sentMessages.find(m => m.message.includes('flight') || m.message.includes('EK204'));
-      expect(flightMsg).toBeDefined();
+      expect(flightMsg).toBeUndefined();
 
       // Verify items are now fired in DB
       const db = ctx.scallopStore.getDatabase();
@@ -232,6 +229,8 @@ describe('E2E Nudge/Task System', () => {
       );
       // Should have been moved out of pending
       expect(firedItems).toHaveLength(0);
+      const task = db.getScheduledItemsByUser('default').find(i => i.message.includes('flight'));
+      expect(task?.result?.response).toContain('no sub-agent executor');
     });
   });
 

@@ -19,23 +19,24 @@ import type { ScallopMemoryStore } from '../memory/scallop-store.js';
 import type { ContextManager } from '../routing/context.js';
 import type { MediaProcessor } from '../media/index.js';
 import type { Attachment } from '../channels/types.js';
-import { analyzeComplexity } from '../routing/complexity.js';
+import { analyzeComplexity, ComplexityTier, type ComplexityResult } from '../routing/complexity.js';
 import type { GoalService } from '../goals/index.js';
 import type { BotConfigManager } from '../channels/bot-config.js';
 import type { AnnounceQueue } from '../subagent/announce-queue.js';
 import type { SubAgentExecutor } from '../subagent/executor.js';
 import type { BoardService } from '../board/board-service.js';
 import type { InterruptQueue } from './interrupt-queue.js';
-import { type ThinkLevel, booleanToThinkLevel, mapThinkLevelToProvider, pickFallbackLevel } from './thinking.js';
+import { type ThinkLevel, booleanToThinkLevel, mapThinkLevelToProvider } from './thinking.js';
 import { primaryChatProvider, modelIdentityPrompt } from './identity.js';
-import { ToolLoopDetector, type LoopDetection } from './tool-loop-detector.js';
-import { triggerHook, type HookEvent } from '../hooks/hooks.js';
-import { applyToolPolicyPipeline, type ToolPolicy } from '../skills/tool-policy.js';
+import { ToolLoopDetector } from './tool-loop-detector.js';
+import { triggerHook } from '../hooks/hooks.js';
+import { applyToolPolicyPipeline, matchesPolicy, type ToolPolicy } from '../skills/tool-policy.js';
 import { enqueueInLane } from './command-queue.js';
 import { compact, compactSync, estimateMessagesTokens } from '../routing/compaction-pipeline.js';
 import { effectiveContextWindowTokens } from '../routing/model-limits.js';
 import { selectBest, scoreResponseHeuristic } from './critic.js';
 import type { EvolutionRecorder } from '../evolution/signals.js';
+import { stripThinkTags } from '../utils/output-safety.js';
 
 export interface AgentOptions {
   provider: LLMProvider;
@@ -60,6 +61,8 @@ export interface AgentOptions {
   thinkLevel?: ThinkLevel;
   /** Global tool policy for filtering available tools */
   toolPolicy?: ToolPolicy;
+  /** Optional per-channel restrictions, keyed by channelId (e.g. telegram, api). */
+  channelToolPolicies?: Record<string, ToolPolicy>;
   /** Announce queue for receiving sub-agent results (main agent only) */
   announceQueue?: AnnounceQueue;
   /** Sub-agent executor for cancellation propagation (main agent only) */
@@ -86,12 +89,25 @@ export interface AgentOptions {
   bestOfNThreshold?: number;
   /** Optional self-evolution recorder: captures improvement signals at turn end (best-effort). */
   evolutionRecorder?: EvolutionRecorder;
+  /** Disable heuristic tier selection and use the standard tier for every turn. */
+  enableComplexityAnalysis?: boolean;
 }
+
+export type AgentCompletionReason =
+  | 'explicit_done'
+  | 'natural_end'
+  | 'iteration_limit'
+  | 'stopped'
+  | 'budget_exhausted'
+  | 'max_tokens'
+  | 'tool_loop';
 
 export interface AgentResult {
   response: string;
   tokenUsage: TokenUsage;
   iterationsUsed: number;
+  /** Why the agent loop stopped. Unlike response text, this survives output cleanup. */
+  completionReason: AgentCompletionReason;
 }
 
 /**
@@ -165,7 +181,7 @@ BAD: "I have successfully completed the file creation process."
 GOOD: "Done! File's saved." [DONE]
 
 ## FOLLOW-UPS
-If you tell the user you'll "check back", "follow up", or "check on this later", you MUST schedule it using the **board** skill right then — don't rely on remembering. Use \`action: "add", kind: "task", trigger_time: "in X min"\` with a goal describing what to check. If you don't schedule it, it won't happen.
+If you tell the user you'll "check back", "follow up", or "check on this later", you MUST schedule it using the **board** skill right then — don't rely on remembering. For a simple check-in, use \`kind: "nudge"\` and make \`title\` the exact friendly message the user should receive. For work that must happen first, use \`kind: "task"\` and put the internal instructions in \`task_config.goal\`. Never put instructions like "ask the user..." in a nudge title. If you don't schedule it, it won't happen.
 
 You're on the user's server. Be autonomous, persistent, helpful.`;
 
@@ -194,6 +210,8 @@ export class Agent {
   private thinkLevel: ThinkLevel;
   /** Global tool policy */
   private toolPolicy: ToolPolicy | undefined;
+  /** Channel-specific tool policies, applied after the global policy. */
+  private channelToolPolicies: Record<string, ToolPolicy>;
   /** Announce queue for receiving sub-agent results */
   private announceQueue: AnnounceQueue | null;
   /** Sub-agent executor for cancellation propagation */
@@ -208,6 +226,7 @@ export class Agent {
   private bestOfNThreshold: number;
   /** Optional self-evolution signal recorder (best-effort, turn-end). */
   private evolutionRecorder: EvolutionRecorder | null;
+  private enableComplexityAnalysis: boolean;
 
   /** Enhanced tool loop detector */
   private toolLoopDetector = new ToolLoopDetector();
@@ -232,6 +251,7 @@ export class Agent {
     this.enableThinking = options.enableThinking ?? false;
     this.thinkLevel = options.thinkLevel ?? booleanToThinkLevel(this.enableThinking);
     this.toolPolicy = options.toolPolicy;
+    this.channelToolPolicies = options.channelToolPolicies ?? {};
     this.announceQueue = options.announceQueue || null;
     this.subAgentExecutor = options.subAgentExecutor || null;
     this.boardService = options.boardService || null;
@@ -239,6 +259,7 @@ export class Agent {
     this.bestOfN = Math.max(1, options.bestOfN ?? 1);
     this.bestOfNThreshold = options.bestOfNThreshold ?? 0.85;
     this.evolutionRecorder = options.evolutionRecorder ?? null;
+    this.enableComplexityAnalysis = options.enableComplexityAnalysis ?? true;
 
     this.logger.info({ enableThinking: this.enableThinking, bestOfN: this.bestOfN, bestOfNThreshold: this.bestOfNThreshold }, 'Agent thinking mode configured');
   }
@@ -260,9 +281,13 @@ export class Agent {
     abortSignal?: AbortSignal
   ): Promise<AgentResult> {
     // Session lane serialization: ensure sequential processing per session
-    return enqueueInLane(`session:${sessionId}`, async () => {
+    const result = await enqueueInLane(`session:${sessionId}`, async () => {
       return this._processMessageInner(sessionId, userMessage, attachments, onProgress, shouldStop, providerOverride, abortSignal);
     }, { warnAfterMs: 5000 });
+
+    // Every channel consumes AgentResult.response. Enforce the public-output
+    // invariant here as a final guard, independent of channel formatting.
+    return { ...result, response: stripThinkTags(result.response) };
   }
 
   /**
@@ -313,6 +338,7 @@ export class Agent {
           response: `I cannot process this request: ${budgetCheck.reason}`,
           tokenUsage: { inputTokens: 0, outputTokens: 0 },
           iterationsUsed: 0,
+          completionReason: 'budget_exhausted',
         };
       }
     }
@@ -348,7 +374,20 @@ export class Agent {
     }
 
     // Analyze message complexity for provider selection
-    const complexity = analyzeComplexity(userMessage);
+    const complexity: ComplexityResult = this.enableComplexityAnalysis
+      ? analyzeComplexity(userMessage)
+      : {
+          tier: ComplexityTier.Moderate,
+          suggestedModelTier: 'standard',
+          confidence: 1,
+          signals: {
+            estimatedTokens: Math.ceil(userMessage.length / 4),
+            hasCode: false,
+            complexityKeywords: [],
+            predictedTools: [],
+            isMultiStep: false,
+          },
+        };
     this.logger.debug(
       { complexity: complexity.tier, suggestedTier: complexity.suggestedModelTier },
       'Complexity analysis'
@@ -487,6 +526,7 @@ export class Agent {
     let maxTokensContinuations = 0;
     let emptyEndTurnRetries = 0;
     let finalResponse = '';
+    let completionReason: AgentCompletionReason | null = null;
     // Self-evolution signal accounting (best-effort, captured at turn end).
     let totalToolCalls = 0;
     const failedSkills: string[] = [];
@@ -504,6 +544,7 @@ export class Agent {
         }
         this.interruptQueue?.clear(sessionId);
         finalResponse = 'Stopped by user request.';
+        completionReason = 'stopped';
         break;
       }
 
@@ -557,7 +598,10 @@ export class Agent {
         const channelId = session?.metadata?.channelId as string | undefined;
         tools = applyToolPolicyPipeline(tools, [
           { label: 'global', policy: this.toolPolicy },
-          { label: `channel:${channelId || 'unknown'}` },
+          {
+            label: `channel:${channelId || 'unknown'}`,
+            policy: channelId ? this.channelToolPolicies[channelId] : undefined,
+          },
         ]);
       }
 
@@ -567,6 +611,7 @@ export class Agent {
         if (!budgetCheck.allowed) {
           this.logger.warn({ sessionId, iteration: iterations }, 'Budget exceeded mid-conversation');
           finalResponse = `I had to stop processing: ${budgetCheck.reason}`;
+          completionReason = 'budget_exhausted';
           break;
         }
       }
@@ -704,6 +749,7 @@ export class Agent {
         // Avoid infinite continuation loops
         if (maxTokensContinuations >= 3) {
           finalResponse = textContent || 'My response was too long and got cut off. Please try a more specific request.';
+          completionReason = 'max_tokens';
           if (response.content.length > 0) {
             await this.persistAssistantMessage(sessionId, response.content);
           }
@@ -809,6 +855,7 @@ export class Agent {
         // Add assistant response to session
         await this.persistAssistantMessage(sessionId, persistContent);
 
+        completionReason = taskComplete ? 'explicit_done' : 'natural_end';
         break;
       }
 
@@ -901,6 +948,7 @@ export class Agent {
         // On block severity, force exit the loop
         if (loopDetection.severity === 'block') {
           finalResponse = `I got stuck in a loop and had to stop. ${loopDetection.message}`;
+          completionReason = 'tool_loop';
           break;
         }
       }
@@ -914,14 +962,20 @@ export class Agent {
         }
         this.interruptQueue?.clear(sessionId);
         finalResponse = 'Stopped by user request.';
+        completionReason = 'stopped';
         break;
       }
 
       // If this is the last iteration, add a warning
       if (iterations >= this.maxIterations) {
         finalResponse = `I've reached the maximum iterations (${this.maxIterations}). Here's what I've done so far: ${textContent || 'Multiple tool operations completed.'}`;
+        completionReason = 'iteration_limit';
       }
     }
+
+    // A zero-iteration configuration or a future loop exit that does not set a
+    // more specific reason is still an iteration-budget stop, never success.
+    completionReason ??= 'iteration_limit';
 
     // Clean up tool loop detector for this session
     this.toolLoopDetector.clearSession(sessionId);
@@ -931,7 +985,7 @@ export class Agent {
       type: 'agent',
       action: 'complete',
       sessionId,
-      context: { iterations, inputTokens: totalInputTokens, outputTokens: totalOutputTokens },
+      context: { iterations, inputTokens: totalInputTokens, outputTokens: totalOutputTokens, completionReason },
       timestamp: new Date(),
     }).catch(() => {});
 
@@ -1006,6 +1060,7 @@ export class Agent {
       response: finalResponse,
       tokenUsage,
       iterationsUsed: iterations,
+      completionReason,
     };
   }
 
@@ -1402,10 +1457,11 @@ Only install skills when the user asks, or when you determine a skill would help
   }
 
   private extractTextContent(content: ContentBlock[]): string {
-    return content
+    const text = content
       .filter((block): block is { type: 'text'; text: string } => block.type === 'text')
       .map((block) => block.text)
       .join('\n');
+    return stripThinkTags(text);
   }
 
   private extractToolUses(content: ContentBlock[]): ToolUseContent[] {
@@ -1574,11 +1630,25 @@ Only install skills when the user asks, or when you determine a skill would help
     tier: 'fast' | 'standard' | 'capable'
   ): Promise<CompletionResponse> {
     const MAX_RETRIES = 3;
+    // Provider overrides/defaults may not belong to this Router. Only feed
+    // outcomes back for a provider the Router actually owns.
+    const reportSuccess = (): void => {
+      if (this.router?.getProviderHealth(provider.name)) {
+        this.router.recordProviderSuccess(provider.name);
+      }
+    };
+    const reportFailure = (error: Error): void => {
+      if (this.router?.getProviderHealth(provider.name)) {
+        this.router.recordProviderFailure(provider.name, error);
+      }
+    };
 
     // Layer 0: Rate limit retry with exponential backoff
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       try {
-        return await provider.complete(request);
+        const response = await provider.complete(request);
+        reportSuccess();
+        return response;
       } catch (error) {
         const err = error as Error & { status?: number; headers?: Record<string, string> };
 
@@ -1634,7 +1704,9 @@ Only install skills when the user asks, or when you determine a skill would help
               }).catch(() => {});
 
               try {
-                return await provider.complete({ ...request, messages: result.messages });
+                const response = await provider.complete({ ...request, messages: result.messages });
+                reportSuccess();
+                return response;
               } catch (compactError) {
                 this.logger.warn({ error: (compactError as Error).message }, 'Compacted request still overflowed, trying emergency slice');
               }
@@ -1644,7 +1716,9 @@ Only install skills when the user asks, or when you determine a skill would help
 
             // Last resort: keep only the most recent 3 messages.
             try {
-              return await provider.complete({ ...request, messages: request.messages.slice(-3) });
+              const response = await provider.complete({ ...request, messages: request.messages.slice(-3) });
+              reportSuccess();
+              return response;
             } catch (retryError) {
               this.logger.error({ error: (retryError as Error).message }, 'Retry after emergency compression failed');
             }
@@ -1653,10 +1727,19 @@ Only install skills when the user asks, or when you determine a skill would help
 
         // Layer 2: Try fallback providers via router
         if (this.router) {
+          // Same-provider retries and compaction are exhausted. Feed the
+          // concrete primary failure into shared health before selecting a
+          // fallback, so the next turn honors cooldown.
+          reportFailure(err);
           this.logger.warn({ provider: provider.name, error: err.message }, 'Provider failed, trying fallback');
 
           try {
-            const result = await this.router.executeWithFallback(request, tier);
+            // The active provider already failed above; do not immediately pay
+            // for the same dead endpoint again inside the fallback chain.
+            const result = await this.router.executeWithFallback(request, tier, {
+              excludeProviders: [provider.name],
+            });
+            this.costTracker?.recordResponse(result.response, result.provider, sessionId);
             this.logger.info({ fallbackProvider: result.provider, attempted: result.attemptedProviders }, 'Fallback succeeded');
             return result.response;
           } catch (fallbackError) {
@@ -1794,6 +1877,25 @@ Only install skills when the user asks, or when you determine a skill would help
       }
     }
 
+    // Recheck policy at the execution boundary. Schema filtering is only a UX
+    // hint; models can hallucinate or text-encode calls to hidden tools.
+    const resolvedToolName = skill?.name ?? toolUse.name;
+    const toolSession = await this.sessionManager.getSession(sessionId);
+    const channelId = toolSession?.metadata?.channelId as string | undefined;
+    const allowedByPolicy =
+      (!this.toolPolicy || matchesPolicy(resolvedToolName, this.toolPolicy)) &&
+      (!channelId || !this.channelToolPolicies[channelId] ||
+        matchesPolicy(resolvedToolName, this.channelToolPolicies[channelId]));
+    if (!allowedByPolicy) {
+      this.logger.warn({ toolName: resolvedToolName, channelId }, 'Blocked tool call at dispatch policy boundary');
+      return {
+        type: 'tool_result',
+        tool_use_id: toolUse.id,
+        content: `Error: Tool "${resolvedToolName}" is not permitted in this session.`,
+        is_error: true,
+      };
+    }
+
     // Documentation-only skills cannot be invoked as tools
     if (skill && !skill.hasScripts) {
       this.logger.warn({ skillName: toolUse.name }, 'LLM tried to invoke documentation-only skill as tool');
@@ -1895,7 +1997,10 @@ Only install skills when the user asks, or when you determine a skill would help
     // Skill not found — provide helpful error with available tool names
     this.logger.warn({ name: toolUse.name }, 'Unknown skill requested');
     const availableTools = this.skillRegistry
-      ? this.skillRegistry.getToolDefinitions().map(t => t.name).join(', ')
+      ? applyToolPolicyPipeline(this.skillRegistry.getToolDefinitions(), [
+          { label: 'global', policy: this.toolPolicy },
+          { label: `channel:${channelId || 'unknown'}`, policy: channelId ? this.channelToolPolicies[channelId] : undefined },
+        ]).map(t => t.name).join(', ')
       : '(none)';
 
     return {

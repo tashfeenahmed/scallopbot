@@ -11,7 +11,6 @@ import { completionBudgetForPurpose } from './model-limits.js';
 
 const BASE_CHUNK_RATIO = 0.4;
 const MIN_CHUNK_RATIO = 0.15;
-const SAFETY_MARGIN = 1.2;
 
 /**
  * Compute an adaptive chunk ratio based on average message size vs context window.

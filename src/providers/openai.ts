@@ -84,6 +84,10 @@ export class OpenAIProvider implements LLMProvider {
       apiKey,
       ...(this.baseUrl && { baseURL: this.baseUrl }),
       ...(this.timeout && { timeout: this.timeout }),
+      // Retries, credential rotation, and Router fallback are handled above
+      // this SDK. Hidden SDK retries multiply configured request timeouts and
+      // can otherwise stall a chat turn for several minutes.
+      maxRetries: 0,
     });
   }
 

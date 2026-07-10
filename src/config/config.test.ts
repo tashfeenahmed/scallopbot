@@ -1,5 +1,4 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { z } from 'zod';
 
 // We'll import these once implemented
 // import { configSchema, loadConfig, Config } from './config.js';
@@ -61,6 +60,14 @@ describe('Config Schema', () => {
         expect(result.data.agent.maxIterations).toBe(100);
         expect(result.data.logging.level).toBe('info');
         expect(result.data.providers.anthropic.model).toBe('claude-sonnet-4-20250514');
+        expect(result.data.evolution).toMatchObject({
+          enabled: false,
+          requireFitnessGate: true,
+          includeSessionContent: false,
+          allowSeparateEvalProvider: false,
+          useLlmJudge: true,
+          curatorEnabled: true,
+        });
       }
     });
 
@@ -169,6 +176,17 @@ describe('Config Schema', () => {
       const result = configSchema.safeParse(configWithNegativeIterations);
       expect(result.success).toBe(false);
     });
+
+    it('does not accept a configuration that disables autonomous fitness evaluation', async () => {
+      const { configSchema } = await import('./config.js');
+      const result = configSchema.safeParse({
+        providers: { anthropic: { apiKey: 'sk-ant-test-key' } },
+        channels: { telegram: { enabled: false, botToken: '' } },
+        agent: { workspace: '/tmp/workspace' },
+        evolution: { requireFitnessGate: false },
+      });
+      expect(result.success).toBe(false);
+    });
   });
 
   describe('loadConfig', () => {
@@ -198,6 +216,13 @@ describe('Config Schema', () => {
       expect(config.agent.workspace).toBe('/env/workspace');
       expect(config.agent.maxIterations).toBe(15);
       expect(config.logging.level).toBe('debug');
+    });
+
+    it('keeps the fitness gate mandatory even if a legacy environment flag says false', async () => {
+      process.env.ANTHROPIC_API_KEY = 'sk-ant-env-key';
+      process.env.EVOLUTION_REQUIRE_FITNESS_GATE = 'false';
+      const { loadConfig } = await import('./config.js');
+      expect(loadConfig().evolution.requireFitnessGate).toBe(true);
     });
 
     it('should use default workspace if not provided', async () => {
@@ -233,7 +258,7 @@ describe('Config Schema', () => {
       process.env.SCALLOPBOT_EVENT_WEBHOOK_URL = 'https://example.com/scallopbot/events';
       process.env.SCALLOPBOT_EVENT_WEBHOOK_SECRET = 'shared-secret';
       process.env.SCALLOPBOT_EVENT_WEBHOOK_TIMEOUT_MS = '2500';
-      process.env.SCALLOPBOT_AGENT_ID = 'tashbot';
+      process.env.SCALLOPBOT_AGENT_ID = 'example-bot';
 
       const { loadConfig } = await import('./config.js');
       const config = loadConfig();
@@ -242,7 +267,7 @@ describe('Config Schema', () => {
         webhookUrl: 'https://example.com/scallopbot/events',
         webhookSecret: 'shared-secret',
         webhookTimeoutMs: 2500,
-        agentId: 'tashbot',
+        agentId: 'example-bot',
       });
     });
 
@@ -252,7 +277,11 @@ describe('Config Schema', () => {
         process.env.TELEGRAM_BOT_TOKEN = 'env-bot-token';
         // Isolate from any ambient custom-provider vars
         for (const k of Object.keys(process.env)) {
-          if (k.startsWith('CUSTOM_PROVIDER_') || k === 'MULTI_MODEL_ENABLED') delete process.env[k];
+          if (
+            k.startsWith('CUSTOM_PROVIDER_')
+            || k === 'MULTI_MODEL_ENABLED'
+            || k === 'MULTI_MODEL_TIMEOUT_MS'
+          ) delete process.env[k];
         }
       });
 
@@ -261,6 +290,7 @@ describe('Config Schema', () => {
         const config = loadConfig();
         expect(config.multiModel.enabled).toBe(false);
         expect(config.multiModel.providers).toEqual([]);
+        expect(config.multiModel.timeoutMs).toBe(60_000);
       });
 
       it('parses CUSTOM_PROVIDER_<NAME> as baseUrl|model|apiKey with lowercased name', async () => {
@@ -275,6 +305,15 @@ describe('Config Schema', () => {
         const byName = Object.fromEntries(config.multiModel.providers.map((p) => [p.name, p]));
         expect(byName.my_memory).toMatchObject({ baseUrl: 'http://localhost:11434/v1', model: 'my-memory-q5', apiKey: 'sk-whatever' });
         expect(byName.tools).toMatchObject({ model: 'my-tools-q5', apiKey: 'sk-local' }); // apiKey defaulted
+      });
+
+      it('loads and validates the custom-provider request timeout', async () => {
+        process.env.MULTI_MODEL_TIMEOUT_MS = '45000';
+        const { loadConfig } = await import('./config.js');
+        expect(loadConfig().multiModel.timeoutMs).toBe(45_000);
+
+        process.env.MULTI_MODEL_TIMEOUT_MS = '1000';
+        expect(() => loadConfig()).toThrow(/multiModel\.timeoutMs/);
       });
 
       it('still parses providers when the toggle is off (gateway ignores them)', async () => {
@@ -504,6 +543,26 @@ describe('Config Schema', () => {
       expect(config.tuning.critic.bestOfN).toBe(3);
       expect(config.tuning.critic.bestOfNThreshold).toBe(0.7);
       expect(config.tuning.skills.timeoutMs).toBe(30000);
+    });
+
+    it('loads global and per-channel tool policies from validated JSON', async () => {
+      process.env.ANTHROPIC_API_KEY = 'sk-ant-env-key';
+      process.env.AGENT_WORKSPACE = '/env/workspace';
+      process.env.TOOL_POLICY_JSON = JSON.stringify({ deny: ['bash'] });
+      process.env.TOOL_CHANNEL_POLICIES_JSON = JSON.stringify({ telegram: { allow: ['read_file'] } });
+
+      const { loadConfig } = await import('./config.js');
+      const config = loadConfig();
+
+      expect(config.tools.policy).toEqual({ deny: ['bash'] });
+      expect(config.tools.channelPolicies?.telegram).toEqual({ allow: ['read_file'] });
+    });
+
+    it('fails fast on malformed tool-policy JSON', async () => {
+      process.env.ANTHROPIC_API_KEY = 'sk-ant-env-key';
+      process.env.TOOL_POLICY_JSON = '{bad json';
+      const { loadConfig } = await import('./config.js');
+      expect(() => loadConfig()).toThrow(/TOOL_POLICY_JSON/);
     });
   });
 });

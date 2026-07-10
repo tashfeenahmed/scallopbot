@@ -13,7 +13,6 @@ import type {
   GoalTree,
   GoalFilter,
   GoalMetadata,
-  GoalType,
   GoalStatus,
   CheckinFrequency,
   CreateGoalOptions,
@@ -21,6 +20,14 @@ import type {
   CreateTaskOptions,
   UpdateGoalOptions,
   GoalProgress,
+  GoalContract,
+  GoalBudget,
+  GoalExecutionMetadata,
+  GoalVerification,
+  GoalCriterionResult,
+  GoalTurnRunner,
+  GoalJudge,
+  GoalRunResult,
 } from './types.js';
 import { isGoalItem } from './types.js';
 
@@ -55,6 +62,76 @@ function calculateNextCheckin(frequency: CheckinFrequency): number {
   }
 }
 
+const DEFAULT_GOAL_BUDGET: GoalBudget = { maxTurns: 10 };
+const MAX_PERSISTED_OUTPUT_CHARS = 4_000;
+
+function validateContract(contract: GoalContract): void {
+  if (!Array.isArray(contract.acceptanceCriteria) || contract.acceptanceCriteria.length === 0) {
+    throw new Error('A verified goal requires at least one acceptance criterion');
+  }
+  if (contract.acceptanceCriteria.length > 25) {
+    throw new Error('A verified goal supports at most 25 acceptance criteria');
+  }
+
+  const ids = new Set<string>();
+  for (const criterion of contract.acceptanceCriteria) {
+    if (!/^[A-Za-z0-9._-]{1,64}$/.test(criterion.id ?? '') || !criterion.description?.trim()) {
+      throw new Error('Every acceptance criterion requires an id and description');
+    }
+    if (criterion.description.length > 500) {
+      throw new Error(`Acceptance criterion ${criterion.id} has an overlong description`);
+    }
+    if (ids.has(criterion.id)) {
+      throw new Error(`Duplicate acceptance criterion id: ${criterion.id}`);
+    }
+    ids.add(criterion.id);
+    if (!['contains', 'regex', 'equals', 'manual'].includes(criterion.kind)) {
+      throw new Error(`Acceptance criterion ${criterion.id} has an invalid kind`);
+    }
+    if (criterion.kind !== 'manual' && !criterion.expected?.length) {
+      throw new Error(`Acceptance criterion ${criterion.id} requires an expected value`);
+    }
+    if ((criterion.expected?.length ?? 0) > 2_000) {
+      throw new Error(`Acceptance criterion ${criterion.id} has an overlong expected value`);
+    }
+    if (criterion.kind === 'regex') {
+      if (
+        criterion.expected!.length > 256 ||
+        /\([^)]*(?:[+*]|\{\d+(?:,\d*)?\})[^)]*\)\s*(?:[+*]|\{\d+(?:,\d*)?\})/.test(criterion.expected!)
+      ) {
+        throw new Error(`Acceptance criterion ${criterion.id} has a potentially unsafe regular expression`);
+      }
+      try {
+        // Validate once at configuration time rather than failing mid-run.
+        new RegExp(criterion.expected!, 'i');
+      } catch {
+        throw new Error(`Acceptance criterion ${criterion.id} has an invalid regular expression`);
+      }
+    }
+  }
+}
+
+function validateBudget(budget: GoalBudget): void {
+  if (!Number.isInteger(budget.maxTurns) || budget.maxTurns < 1) {
+    throw new Error('Goal budget maxTurns must be a positive integer');
+  }
+  if (budget.maxCostUsd !== undefined && (!Number.isFinite(budget.maxCostUsd) || budget.maxCostUsd < 0)) {
+    throw new Error('Goal budget maxCostUsd must be a non-negative number');
+  }
+  if (budget.deadlineAt !== undefined && !Number.isFinite(budget.deadlineAt)) {
+    throw new Error('Goal budget deadlineAt must be an epoch-millisecond timestamp');
+  }
+}
+
+function initialExecution(now: number = Date.now()): GoalExecutionMetadata {
+  return {
+    state: 'idle',
+    turnsUsed: 0,
+    costUsedUsd: 0,
+    updatedAt: now,
+  };
+}
+
 /**
  * GoalService - Manages hierarchical goal tracking
  */
@@ -85,6 +162,9 @@ export class GoalService {
    * Create a new goal
    */
   async createGoal(userId: string, options: CreateGoalOptions): Promise<GoalItem> {
+    if (options.contract) validateContract(options.contract);
+    if (options.budget) validateBudget(options.budget);
+
     const metadata: GoalMetadata = {
       goalType: 'goal',
       status: options.status ?? 'backlog',
@@ -92,6 +172,9 @@ export class GoalService {
       checkinFrequency: options.checkinFrequency,
       tags: options.tags,
       progress: 0,
+      contract: options.contract,
+      budget: options.contract ? (options.budget ?? DEFAULT_GOAL_BUDGET) : options.budget,
+      execution: options.contract ? initialExecution() : undefined,
     };
 
     const embedding = await this.generateEmbedding(options.title);
@@ -314,6 +397,24 @@ export class GoalService {
     if (options.tags !== undefined) {
       metadataUpdates.tags = options.tags;
     }
+    if (options.contract !== undefined) {
+      if (goal.metadata.goalType !== 'goal') {
+        throw new Error('Verified execution contracts can only be attached to top-level goals');
+      }
+      validateContract(options.contract);
+      metadataUpdates.contract = options.contract;
+      metadataUpdates.execution = goal.metadata.execution ?? initialExecution();
+      if (!goal.metadata.budget && options.budget === undefined) {
+        metadataUpdates.budget = DEFAULT_GOAL_BUDGET;
+      }
+    }
+    if (options.budget !== undefined) {
+      if (goal.metadata.goalType !== 'goal') {
+        throw new Error('Execution budgets can only be attached to top-level goals');
+      }
+      validateBudget(options.budget);
+      metadataUpdates.budget = options.budget;
+    }
 
     const newMetadata = { ...goal.metadata, ...metadataUpdates };
     updates.metadata = newMetadata;
@@ -420,6 +521,377 @@ export class GoalService {
     }
 
     return updated;
+  }
+
+  // ============ Verified Persistent Execution ============
+
+  /**
+   * Attach or replace a completion contract and hard budget on a top-level goal.
+   * Execution counters are retained by default so changing a contract cannot
+   * silently reset spend. Pass reset=true only for an explicit fresh run.
+   */
+  async configureExecution(
+    id: string,
+    contract: GoalContract,
+    budget: GoalBudget = DEFAULT_GOAL_BUDGET,
+    reset: boolean = false,
+  ): Promise<GoalItem> {
+    const goal = await this.getGoal(id);
+    if (!goal || goal.metadata.goalType !== 'goal') {
+      throw new Error(`Top-level goal ${id} not found`);
+    }
+    validateContract(contract);
+    validateBudget(budget);
+
+    const execution = reset || !goal.metadata.execution
+      ? initialExecution()
+      : { ...goal.metadata.execution, updatedAt: Date.now() };
+    this.db.updateMemory(id, {
+      metadata: { ...goal.metadata, contract, budget, execution },
+    });
+    return (await this.getGoal(id))!;
+  }
+
+  /** Park execution while waiting on a person, process, or future time. */
+  async parkExecution(id: string, reason: string, resumeAt?: number): Promise<GoalItem> {
+    const goal = await this.requireExecutableGoal(id);
+    const now = Date.now();
+    const execution: GoalExecutionMetadata = {
+      ...(goal.metadata.execution ?? initialExecution(now)),
+      state: 'waiting',
+      parkedAt: now,
+      resumeAt,
+      parkReason: reason,
+      blockedReason: undefined,
+      updatedAt: now,
+    };
+    return this.persistExecution(goal, execution);
+  }
+
+  /** Resume a parked or blocked goal without resetting its durable counters. */
+  async resumeExecution(id: string): Promise<GoalItem> {
+    const goal = await this.requireExecutableGoal(id);
+    if (goal.metadata.status === 'completed') {
+      throw new Error(`Goal ${id} is already completed`);
+    }
+    const now = Date.now();
+    const execution: GoalExecutionMetadata = {
+      ...(goal.metadata.execution ?? initialExecution(now)),
+      state: 'idle',
+      resumeAt: undefined,
+      parkedAt: undefined,
+      parkReason: undefined,
+      blockedReason: undefined,
+      updatedAt: now,
+    };
+    return this.persistExecution(goal, execution);
+  }
+
+  /**
+   * Evaluate evidence against deterministic criteria and an optional qualitative
+   * judge. Judge errors fail closed: an unavailable judge can never mark a goal
+   * complete.
+   */
+  async verifyExecution(
+    id: string,
+    output: string,
+    evidence: Record<string, boolean> = {},
+    judge?: GoalJudge,
+  ): Promise<GoalVerification> {
+    const goal = await this.requireExecutableGoal(id);
+    const verification = await this.evaluateVerification(goal, output, evidence, judge);
+    const now = Date.now();
+    const execution: GoalExecutionMetadata = {
+      ...(goal.metadata.execution ?? initialExecution(now)),
+      state: verification.passed ? 'completed' : (goal.metadata.execution?.state ?? 'idle'),
+      updatedAt: now,
+      lastOutput: output.slice(0, MAX_PERSISTED_OUTPUT_CHARS),
+      lastVerification: verification,
+    };
+
+    this.db.updateMemory(id, {
+      metadata: {
+        ...goal.metadata,
+        status: verification.passed ? 'completed' : goal.metadata.status,
+        completedAt: verification.passed ? now : goal.metadata.completedAt,
+        progress: verification.passed ? 100 : goal.metadata.progress,
+        execution,
+      },
+    });
+    return verification;
+  }
+
+  /**
+   * Run a goal until its completion contract passes, it parks, it blocks, or a
+   * hard budget is exhausted. State and counters are persisted after every turn,
+   * making a subsequent call or process restart safe to resume.
+   */
+  async runUntilVerified(
+    id: string,
+    runner: GoalTurnRunner,
+    options: { judge?: GoalJudge; maxTurnsThisRun?: number; now?: () => number } = {},
+  ): Promise<GoalRunResult> {
+    let goal = await this.requireExecutableGoal(id);
+    const contract = goal.metadata.contract!;
+    const budget = goal.metadata.budget ?? DEFAULT_GOAL_BUDGET;
+    validateContract(contract);
+    validateBudget(budget);
+
+    const clock = options.now ?? Date.now;
+    const initialNow = clock();
+    let execution = goal.metadata.execution ?? initialExecution(initialNow);
+
+    if (goal.metadata.status === 'completed' || execution.state === 'completed') {
+      return {
+        goal,
+        state: 'completed',
+        turnsThisRun: 0,
+        verification: execution.lastVerification,
+        reason: 'Goal was already verified and completed',
+      };
+    }
+
+    if (execution.state === 'waiting' && (!execution.resumeAt || execution.resumeAt > initialNow)) {
+      return {
+        goal,
+        state: 'waiting',
+        turnsThisRun: 0,
+        verification: execution.lastVerification,
+        reason: execution.parkReason
+          ?? (execution.resumeAt ? `Parked until ${new Date(execution.resumeAt).toISOString()}` : 'Goal is parked'),
+      };
+    }
+    if (execution.state === 'blocked') {
+      return {
+        goal,
+        state: 'blocked',
+        turnsThisRun: 0,
+        verification: execution.lastVerification,
+        reason: execution.blockedReason ?? 'Goal is blocked; resume explicitly after resolving the blocker',
+      };
+    }
+
+    execution = {
+      ...execution,
+      state: 'running',
+      startedAt: execution.startedAt ?? initialNow,
+      resumeAt: undefined,
+      parkedAt: undefined,
+      parkReason: undefined,
+      blockedReason: undefined,
+      updatedAt: initialNow,
+    };
+    goal = await this.persistExecution(goal, execution, 'active');
+
+    const remainingTurns = Math.max(0, budget.maxTurns - execution.turnsUsed);
+    const runLimit = Math.min(
+      remainingTurns,
+      options.maxTurnsThisRun === undefined
+        ? remainingTurns
+        : Math.max(0, Math.floor(options.maxTurnsThisRun)),
+    );
+    let turnsThisRun = 0;
+
+    while (turnsThisRun < runLimit) {
+      const now = clock();
+      const budgetReason = this.getBudgetExhaustionReason(execution, budget, now);
+      if (budgetReason) {
+        execution = { ...execution, state: 'budget_exhausted', blockedReason: budgetReason, updatedAt: now };
+        goal = await this.persistExecution(goal, execution);
+        return { goal, state: execution.state, turnsThisRun, verification: execution.lastVerification, reason: budgetReason };
+      }
+
+      let outcome;
+      try {
+        outcome = await runner({
+          goal,
+          contract,
+          budget,
+          turnNumber: execution.turnsUsed + 1,
+          previousOutput: execution.lastOutput,
+        });
+      } catch (error) {
+        const reason = `Goal worker failed: ${(error as Error).message}`;
+        execution = { ...execution, state: 'blocked', blockedReason: reason, updatedAt: clock() };
+        goal = await this.persistExecution(goal, execution);
+        return { goal, state: execution.state, turnsThisRun, verification: execution.lastVerification, reason };
+      }
+
+      turnsThisRun++;
+      const cost = Number.isFinite(outcome.costUsd) && (outcome.costUsd ?? 0) > 0 ? outcome.costUsd! : 0;
+      execution = {
+        ...execution,
+        turnsUsed: execution.turnsUsed + 1,
+        costUsedUsd: execution.costUsedUsd + cost,
+        lastOutput: outcome.output.slice(0, MAX_PERSISTED_OUTPUT_CHARS),
+        updatedAt: clock(),
+      };
+      goal = await this.persistExecution(goal, execution);
+
+      if (budget.maxCostUsd !== undefined && execution.costUsedUsd > budget.maxCostUsd) {
+        const reason = `Cost budget exceeded ($${execution.costUsedUsd.toFixed(4)}/$${budget.maxCostUsd.toFixed(4)})`;
+        execution = { ...execution, state: 'budget_exhausted', blockedReason: reason, updatedAt: clock() };
+        goal = await this.persistExecution(goal, execution);
+        return { goal, state: execution.state, turnsThisRun, verification: execution.lastVerification, reason };
+      }
+
+      if (outcome.taskComplete === false) {
+        const reason = outcome.failureReason ?? 'Goal worker stopped without completing its turn';
+        execution = { ...execution, state: 'blocked', blockedReason: reason, updatedAt: clock() };
+        goal = await this.persistExecution(goal, execution);
+        return { goal, state: execution.state, turnsThisRun, verification: execution.lastVerification, reason };
+      }
+
+      if (outcome.parkUntil !== undefined || outcome.parkReason) {
+        const reason = outcome.parkReason ?? 'Waiting for an external condition';
+        goal = await this.parkExecution(id, reason, outcome.parkUntil);
+        return { goal, state: 'waiting', turnsThisRun, verification: execution.lastVerification, reason };
+      }
+
+      const verification = await this.evaluateVerification(
+        goal,
+        outcome.output,
+        outcome.evidence ?? {},
+        options.judge,
+      );
+      execution = { ...execution, lastVerification: verification, updatedAt: clock() };
+
+      if (verification.passed) {
+        const completedAt = clock();
+        execution = { ...execution, state: 'completed', updatedAt: completedAt };
+        this.db.updateMemory(id, {
+          metadata: {
+            ...goal.metadata,
+            status: 'completed',
+            completedAt,
+            progress: 100,
+            execution,
+          },
+        });
+        goal = (await this.getGoal(id))!;
+        return {
+          goal,
+          state: 'completed',
+          turnsThisRun,
+          verification,
+          reason: 'All required acceptance criteria passed',
+        };
+      }
+
+      goal = await this.persistExecution(goal, execution);
+    }
+
+    const finalNow = clock();
+    const exhausted = this.getBudgetExhaustionReason(execution, budget, finalNow);
+    if (exhausted) {
+      execution = { ...execution, state: 'budget_exhausted', blockedReason: exhausted, updatedAt: finalNow };
+      goal = await this.persistExecution(goal, execution);
+      return { goal, state: execution.state, turnsThisRun, verification: execution.lastVerification, reason: exhausted };
+    }
+
+    // A bounded invocation slice is not an external wait condition. Keep the
+    // execution runnable so the next execute_goal call resumes automatically.
+    const reason = 'Execution turn slice finished; goal remains runnable';
+    execution = {
+      ...execution,
+      state: 'running',
+      parkReason: undefined,
+      parkedAt: undefined,
+      updatedAt: finalNow,
+    };
+    goal = await this.persistExecution(goal, execution);
+    return { goal, state: 'running', turnsThisRun, verification: execution.lastVerification, reason };
+  }
+
+  private async requireExecutableGoal(id: string): Promise<GoalItem> {
+    const goal = await this.getGoal(id);
+    if (!goal || goal.metadata.goalType !== 'goal') {
+      throw new Error(`Top-level goal ${id} not found`);
+    }
+    if (!goal.metadata.contract) {
+      throw new Error(`Goal ${id} has no completion contract`);
+    }
+    return goal;
+  }
+
+  private async persistExecution(
+    goal: GoalItem,
+    execution: GoalExecutionMetadata,
+    status?: GoalStatus,
+  ): Promise<GoalItem> {
+    this.db.updateMemory(goal.id, {
+      metadata: { ...goal.metadata, status: status ?? goal.metadata.status, execution },
+    });
+    return (await this.getGoal(goal.id))!;
+  }
+
+  private getBudgetExhaustionReason(
+    execution: GoalExecutionMetadata,
+    budget: GoalBudget,
+    now: number,
+  ): string | null {
+    if (execution.turnsUsed >= budget.maxTurns) {
+      return `Turn budget exhausted (${execution.turnsUsed}/${budget.maxTurns})`;
+    }
+    if (budget.maxCostUsd !== undefined && execution.costUsedUsd >= budget.maxCostUsd) {
+      return `Cost budget exhausted ($${execution.costUsedUsd.toFixed(4)}/$${budget.maxCostUsd.toFixed(4)})`;
+    }
+    if (budget.deadlineAt !== undefined && now >= budget.deadlineAt) {
+      return `Execution deadline reached (${new Date(budget.deadlineAt).toISOString()})`;
+    }
+    return null;
+  }
+
+  private async evaluateVerification(
+    goal: GoalItem,
+    output: string,
+    evidence: Record<string, boolean>,
+    judge?: GoalJudge,
+  ): Promise<GoalVerification> {
+    const contract = goal.metadata.contract!;
+    const criteria: GoalCriterionResult[] = contract.acceptanceCriteria.map((criterion) => {
+      const required = criterion.required !== false;
+      let passed = false;
+      let reason: string;
+      switch (criterion.kind) {
+        case 'contains':
+          passed = output.toLocaleLowerCase().includes(criterion.expected!.toLocaleLowerCase());
+          reason = passed ? 'Expected text was present' : `Missing expected text: ${criterion.expected}`;
+          break;
+        case 'equals':
+          passed = output.trim() === criterion.expected!.trim();
+          reason = passed ? 'Output matched exactly' : 'Output did not match the expected value';
+          break;
+        case 'regex':
+          passed = new RegExp(criterion.expected!, 'i').test(output);
+          reason = passed ? 'Output matched the required pattern' : `Output did not match /${criterion.expected}/i`;
+          break;
+        case 'manual':
+          passed = evidence[criterion.id] === true;
+          reason = passed ? 'Required evidence was supplied' : 'Required evidence was not supplied';
+          break;
+      }
+      return { id: criterion.id, passed, required, reason };
+    });
+
+    const required = criteria.filter((criterion) => criterion.required);
+    let passed = contract.requireAll === false
+      ? required.some((criterion) => criterion.passed)
+      : required.every((criterion) => criterion.passed);
+    let judgeReason: string | undefined;
+
+    if (passed && judge) {
+      try {
+        const judgment = await judge({ goal, output, deterministicResults: criteria });
+        passed = judgment.passed;
+        judgeReason = judgment.reason;
+      } catch (error) {
+        passed = false;
+        judgeReason = `Judge failed closed: ${(error as Error).message}`;
+      }
+    }
+
+    return { passed, criteria, judgedAt: Date.now(), judgeReason };
   }
 
   // ============ Queries ============
@@ -770,6 +1242,25 @@ export class GoalService {
         context += ` | Due: ${due}${isOverdue ? ' (OVERDUE)' : ''}`;
       }
       context += '\n';
+
+      if (goal.metadata.contract && goal.metadata.execution) {
+        const execution = goal.metadata.execution;
+        const budget = goal.metadata.budget ?? DEFAULT_GOAL_BUDGET;
+        context += `Execution: ${execution.state} · turns ${execution.turnsUsed}/${budget.maxTurns}`;
+        if (budget.maxCostUsd !== undefined) {
+          context += ` · cost $${execution.costUsedUsd.toFixed(4)}/$${budget.maxCostUsd.toFixed(4)}`;
+        }
+        context += '\n';
+        context += 'Acceptance contract:\n';
+        for (const criterion of goal.metadata.contract.acceptanceCriteria) {
+          const latest = execution.lastVerification?.criteria.find((result) => result.id === criterion.id);
+          const marker = latest?.passed ? '[x]' : '[ ]';
+          context += `  ${marker} ${criterion.description}\n`;
+        }
+        if (execution.parkReason || execution.blockedReason) {
+          context += `Execution note: ${execution.parkReason ?? execution.blockedReason}\n`;
+        }
+      }
 
       for (const { milestone, tasks } of tree.milestones) {
         const status = milestone.metadata.status === 'completed' ? '[x]' : '[ ]';
