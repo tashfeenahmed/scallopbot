@@ -10,6 +10,7 @@ dotenv.config();
 const DEFAULT_HOST = '127.0.0.1';
 const DEFAULT_OLLAMA_BASE_URL = 'http://localhost:11434';
 const DEFAULT_API_PORT = 3000;
+const DEFAULT_MULTI_MODEL_TIMEOUT_MS = 60_000;
 
 /** Parse an integer env var, falling back to a default when unset/invalid. */
 function envInt(name: string, fallback: number): number {
@@ -325,6 +326,8 @@ const customProviderSchema = z.object({
 const multiModelSchema = z.object({
   enabled: z.boolean().default(false),
   providers: z.array(customProviderSchema).default([]),
+  /** Per-attempt timeout for user-defined OpenAI-compatible endpoints. */
+  timeoutMs: z.number().int().min(5_000).max(600_000).default(DEFAULT_MULTI_MODEL_TIMEOUT_MS),
 });
 
 /** Built-in provider names that CUSTOM_PROVIDER_* entries may not shadow. */
@@ -339,7 +342,11 @@ export const configSchema = z.object({
   // Purposes explicitly pinned via MODEL_<PURPOSE> — excluded from the runtime
   // /model switch so memory/tools can stay on a separate model.
   modelPins: z.array(z.string()).default([]),
-  multiModel: multiModelSchema.default({ enabled: false, providers: [] }),
+  multiModel: multiModelSchema.default({
+    enabled: false,
+    providers: [],
+    timeoutMs: DEFAULT_MULTI_MODEL_TIMEOUT_MS,
+  }),
   tuning: tuningSchema.default(TUNING_DEFAULTS),
   evolution: evolutionSchema.default({ ...DEFAULT_EVOLUTION_CONFIG, requireFitnessGate: true as const }),
   channels: channelsSchema,
@@ -487,6 +494,7 @@ export function loadConfig(): Config {
     multiModel: {
       enabled: process.env.MULTI_MODEL_ENABLED === 'true',
       providers: customProviders,
+      timeoutMs: envInt('MULTI_MODEL_TIMEOUT_MS', DEFAULT_MULTI_MODEL_TIMEOUT_MS),
     },
     tuning: {
       gardener: {

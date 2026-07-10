@@ -71,6 +71,77 @@ describe('Agent', () => {
       expect(provider.complete).toHaveBeenCalledTimes(1);
     });
 
+    it('keeps structured reasoning internal and strips inline think markup from AgentResult', async () => {
+      const { Agent } = await import('./agent.js');
+      const { SessionManager } = await import('./session.js');
+      const providerContent: CompletionResponse['content'] = [
+        { type: 'thinking', thinking: 'structured reasoning retained for internal replay' },
+        { type: 'text', text: '<think>inline reasoning must stay private</think>Visible answer.' },
+      ];
+      const provider = createMockProvider([{
+        content: providerContent,
+        stopReason: 'end_turn',
+        usage: { inputTokens: 10, outputTokens: 8 },
+        model: 'test-model',
+      }]);
+      const sessionManager = new SessionManager(db);
+      const agent = new Agent({
+        provider,
+        sessionManager,
+        workspace: testDir,
+        logger: pino({ level: 'silent' }),
+        maxIterations: 20,
+      });
+      const session = await sessionManager.createSession();
+      const onProgress = vi.fn(async () => {});
+
+      const result = await agent.processMessage(session.id, 'Give me the answer', undefined, onProgress);
+
+      expect(result.response).toBe('Visible answer.');
+      expect(result.response).not.toContain('<think>');
+      expect(onProgress).toHaveBeenCalledWith({
+        type: 'thinking',
+        message: 'structured reasoning retained for internal replay',
+        iteration: 1,
+      });
+
+      const stored = await sessionManager.getSession(session.id);
+      expect(stored?.messages.at(-1)).toEqual({ role: 'assistant', content: providerContent });
+    });
+
+    it('retries a think-only visible response instead of returning reasoning or silence', async () => {
+      const { Agent } = await import('./agent.js');
+      const { SessionManager } = await import('./session.js');
+      const provider = createMockProvider([
+        {
+          content: [{ type: 'text', text: '<think>unfinished private reasoning' }],
+          stopReason: 'end_turn',
+          usage: { inputTokens: 10, outputTokens: 8 },
+          model: 'test-model',
+        },
+        {
+          content: [{ type: 'text', text: 'Here is the user-facing answer.' }],
+          stopReason: 'end_turn',
+          usage: { inputTokens: 12, outputTokens: 6 },
+          model: 'test-model',
+        },
+      ]);
+      const sessionManager = new SessionManager(db);
+      const agent = new Agent({
+        provider,
+        sessionManager,
+        workspace: testDir,
+        logger: pino({ level: 'silent' }),
+        maxIterations: 20,
+      });
+      const session = await sessionManager.createSession();
+
+      const result = await agent.processMessage(session.id, 'Give me the answer');
+
+      expect(result.response).toBe('Here is the user-facing answer.');
+      expect(provider.complete).toHaveBeenCalledTimes(2);
+    });
+
     it('tracks a selected primary failure so later turns honor cooldown and recover', async () => {
       vi.useFakeTimers();
       vi.setSystemTime(new Date('2026-07-10T12:00:00Z'));

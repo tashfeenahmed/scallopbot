@@ -21,6 +21,7 @@ import * as os from 'os';
 import {
   createE2EGateway,
   createWsClient,
+  enableVerboseProgress,
   cleanupE2E,
   type E2EGatewayContext,
   type WsClient,
@@ -203,6 +204,8 @@ describe('E2E Tool Conversation', () => {
       // batch should NOT be a tool (disable-model-invocation: true)
       expect(toolNames).not.toContain('batch');
 
+      await enableVerboseProgress(client);
+
       // Send the exploration request
       client.send({
         type: 'chat',
@@ -332,6 +335,7 @@ describe('E2E Tool Conversation', () => {
     });
 
     it('should execute read-only tools in parallel', async () => {
+      await enableVerboseProgress(client);
       client.send({
         type: 'chat',
         message: 'List the project, find tests, and search for expect statements.',
@@ -760,6 +764,7 @@ describe('E2E Tool Conversation', () => {
     });
 
     it('should detect and break out of doom loops', async () => {
+      await enableVerboseProgress(client);
       client.send({
         type: 'chat',
         message: 'What files are in this project?',
@@ -937,6 +942,7 @@ describe('E2E Tool Conversation', () => {
     });
 
     it('should deliver WS events in correct order: skill_start -> skill_complete -> response', async () => {
+      await enableVerboseProgress(client);
       client.send({
         type: 'chat',
         message: 'What is in this project?',

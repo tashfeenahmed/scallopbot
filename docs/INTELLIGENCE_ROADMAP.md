@@ -9,10 +9,10 @@ addresses, or bot-specific configuration.
 
 | # | Area | Improvement | Evidence gate |
 |---:|---|---|---|
-| 1 | Model routing | Complexity tiers now choose distinct primary models, preserve configured fallbacks, track fallback cost, and avoid repeatedly probing unhealthy background providers. | `src/routing/routing-quality.test.ts` |
+| 1 | Model routing | Complexity tiers now choose distinct primary models, preserve configured fallbacks, track fallback cost, and avoid repeatedly probing unhealthy background providers. Provider attempts are bounded through response-body parsing and hidden SDK retries cannot multiply the fallback delay; custom OpenAI-compatible endpoints have a configurable timeout. | `src/routing/routing-quality.test.ts`, `src/providers/openai.test.ts`, `src/providers/openrouter.test.ts` |
 | 2 | Memory retrieval | BM25 is unioned with an independent, bounded SQLite LSH semantic candidate set and exact cosine re-ranking. MMR can reduce duplicate results. | `src/memory/retrieval-quality.test.ts`, `src/memory/semantic-index.test.ts`, `npm run benchmark:memory` |
-| 3 | Proactive messages | Generators must return a structured `userFacingMessage`. Independent authorship provenance keeps model/tool-created schedules on the rendering path even when the user initiated them; only proven literal user text can bypass rewriting. Internal plans are rejected at generation and delivery, recurring items retain provenance, and feedback attribution is channel/user scoped. | `src/proactive/*.test.ts`, `src/memory/proactive-evaluator.test.ts` |
-| 4 | Tool safety | Allow/deny policy is enforced again at dispatch, including workflows and subagents. Skill environments use an allowlist and logs/traces redact secrets. | `src/agent/tool-policy-dispatch.test.ts`, `src/skills/executor.test.ts`, `src/security/redaction.test.ts` |
+| 3 | Proactive messages | Generators must return a structured `userFacingMessage`. Independent authorship provenance keeps model/tool-created schedules on the rendering path even when the user initiated them; only proven literal user text can bypass rewriting. Internal plans and scheduler labels are rejected at generation and delivery, unsafe/empty rewrites retry and otherwise remain pending, recurring items retain provenance, and feedback attribution is channel/user scoped. | `src/proactive/*.test.ts`, `src/memory/proactive-evaluator.test.ts` |
+| 4 | Output and tool safety | Allow/deny policy is enforced again at dispatch, including workflows and subagents. Skill environments use an allowlist and logs/traces redact secrets. Inline model reasoning is removed from every channel's final response; the dashboard withholds progress by default, exposes only redacted lifecycle summaries when explicitly made verbose, and removes reasoning/tool protocol from user-facing history. | `src/agent/tool-policy-dispatch.test.ts`, `src/agent/agent.test.ts`, `src/channels/api.test.ts`, `src/skills/executor.test.ts`, `src/security/redaction.test.ts` |
 | 5 | Verified goals | Hierarchical goals have persistent budgets, evidence, independent completion checks, continuation across turns, and actual subagent cost accounting. | `src/goals/verified-goal.test.ts`, `src/goals/skill.test.ts` |
 | 6 | Context-efficient workflows | `execute_workflow` executes a validated DAG while keeping unselected tool output and hidden errors out of the model-visible transcript. Output/error bytes are bounded and caller policy is rechecked immediately before every node. | `src/workflow/executor.test.ts` |
 | 7 | MCP | The bundled MCP skill supports progressive stdio discovery and calls with owner-only config, explicit per-server tool allowlists, advertised-schema validation, scoped-secret redaction, bounded I/O, and process-tree cleanup. | `src/skills/bundled/mcp/mcp.test.ts` |
@@ -70,7 +70,7 @@ model weights. The engine is off by default (`EVOLUTION_ENABLED=false`).
 npm run benchmark:intelligence
 npm run benchmark:memory
 npm run typecheck
-npm test -- --run
+npm test -- --run --maxWorkers=2
 npm run lint
 npm run build
 git diff --check
@@ -110,10 +110,32 @@ perturbed queries at average cosine 0.849, indexed candidate recall was 0.97
 index added 9.82 MB. The benchmark exits non-zero below 2x latency improvement,
 2x heap improvement, 0.95 perturbed-query recall, or 1.00 exact recall.
 
-Repository verification passed 161 test files / 2,313 tests, with one existing
+Repository verification passed 161 test files / 2,329 tests, with one existing
 slow timeout test intentionally skipped. The focused intelligence command
-passed 25 files / 223 tests plus that skip. TypeScript, repository-wide lint,
+passed 25 files / 224 tests plus that skip. TypeScript, repository-wide lint,
 the production build, and the whitespace audit all passed.
+
+### Provider-backed isolated smoke run
+
+The final candidate was also exercised against real configured model providers
+in an isolated runtime with a temporary workspace/database, disabled outbound
+channels, and no production conversation writes:
+
+- A three-turn WebSocket conversation returned the exact arithmetic answer,
+  acknowledged two temporary values, then recalled both values exactly. Every
+  turn produced one `response` frame and no thinking, planning, tool, memory,
+  or debug frames. The history API contained no thinking/tool protocol. Turn
+  latency was 14.76-16.92 seconds with a 15-second custom-provider attempt
+  bound; no turn hung.
+- Three independently scheduled generated check-ins produced three concise,
+  direct questions and all three items reached `fired`. No stored scheduler
+  label, internal instruction, or thinking markup crossed the delivery
+  boundary. The three real-model renders completed in 48.24 seconds total.
+- Three additional direct renderer trials also produced user-facing questions
+  with zero raw/internal drafts.
+
+These provider-backed timings validate the fallback and presentation behavior,
+but are environment-dependent rather than deterministic CI thresholds.
 
 `benchmark:memory` generates a deterministic 10,000-memory corpus with
 768-dimensional embeddings. It reports exact/full-scan and indexed latency,

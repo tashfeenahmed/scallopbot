@@ -35,6 +35,20 @@ describe('OpenAIProvider', () => {
       });
       expect(customProvider.model).toBe('gpt-4o-mini');
     });
+
+    it('disables hidden SDK retries so configured timeouts reach router fallback', async () => {
+      const { default: OpenAI } = await import('openai');
+      new OpenAIProvider({
+        apiKey: 'test-key',
+        baseUrl: 'http://localhost:1234/v1',
+        timeout: 45_000,
+      });
+      expect(OpenAI).toHaveBeenLastCalledWith(expect.objectContaining({
+        baseURL: 'http://localhost:1234/v1',
+        timeout: 45_000,
+        maxRetries: 0,
+      }));
+    });
   });
 
   describe('isAvailable', () => {

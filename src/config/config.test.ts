@@ -277,7 +277,11 @@ describe('Config Schema', () => {
         process.env.TELEGRAM_BOT_TOKEN = 'env-bot-token';
         // Isolate from any ambient custom-provider vars
         for (const k of Object.keys(process.env)) {
-          if (k.startsWith('CUSTOM_PROVIDER_') || k === 'MULTI_MODEL_ENABLED') delete process.env[k];
+          if (
+            k.startsWith('CUSTOM_PROVIDER_')
+            || k === 'MULTI_MODEL_ENABLED'
+            || k === 'MULTI_MODEL_TIMEOUT_MS'
+          ) delete process.env[k];
         }
       });
 
@@ -286,6 +290,7 @@ describe('Config Schema', () => {
         const config = loadConfig();
         expect(config.multiModel.enabled).toBe(false);
         expect(config.multiModel.providers).toEqual([]);
+        expect(config.multiModel.timeoutMs).toBe(60_000);
       });
 
       it('parses CUSTOM_PROVIDER_<NAME> as baseUrl|model|apiKey with lowercased name', async () => {
@@ -300,6 +305,15 @@ describe('Config Schema', () => {
         const byName = Object.fromEntries(config.multiModel.providers.map((p) => [p.name, p]));
         expect(byName.my_memory).toMatchObject({ baseUrl: 'http://localhost:11434/v1', model: 'my-memory-q5', apiKey: 'sk-whatever' });
         expect(byName.tools).toMatchObject({ model: 'my-tools-q5', apiKey: 'sk-local' }); // apiKey defaulted
+      });
+
+      it('loads and validates the custom-provider request timeout', async () => {
+        process.env.MULTI_MODEL_TIMEOUT_MS = '45000';
+        const { loadConfig } = await import('./config.js');
+        expect(loadConfig().multiModel.timeoutMs).toBe(45_000);
+
+        process.env.MULTI_MODEL_TIMEOUT_MS = '1000';
+        expect(() => loadConfig()).toThrow(/multiModel\.timeoutMs/);
       });
 
       it('still parses providers when the toggle is off (gateway ignores them)', async () => {

@@ -12,6 +12,7 @@ import * as path from 'path';
 import {
   createE2EGateway,
   createWsClient,
+  enableVerboseProgress,
   cleanupE2E,
   type E2EGatewayContext,
   type WsClient,
@@ -189,6 +190,8 @@ describe('E2E Skill Hot-Loading', () => {
 
       // "weather" skill should NOT be present yet
       expect(toolsBefore.find(t => t.name === 'weather')).toBeUndefined();
+
+      await enableVerboseProgress(client);
 
       // Send chat message
       client.send({ type: 'chat', message: 'Find and install a weather skill from ClawHub' });

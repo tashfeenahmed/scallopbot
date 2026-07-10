@@ -508,6 +508,23 @@ export function createWsClient(port: number): Promise<WsClient> {
   });
 }
 
+/**
+ * Opt a WebSocket test client into safe progress events.
+ *
+ * Dashboard clients are private by default, so E2E cases that explicitly
+ * assert tool, planning, or memory lifecycle events must enable verbose mode
+ * before sending the message under test.
+ */
+export async function enableVerboseProgress(client: WsClient): Promise<void> {
+  const acknowledgement = client.waitForResponse('response');
+  client.send({ type: 'chat', message: '/verbose' });
+  const response = await acknowledgement;
+
+  if (!response.content?.includes('Verbose mode ON')) {
+    throw new Error('Failed to enable verbose progress for E2E client');
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Cleanup
 // ---------------------------------------------------------------------------

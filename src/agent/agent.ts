@@ -36,6 +36,7 @@ import { compact, compactSync, estimateMessagesTokens } from '../routing/compact
 import { effectiveContextWindowTokens } from '../routing/model-limits.js';
 import { selectBest, scoreResponseHeuristic } from './critic.js';
 import type { EvolutionRecorder } from '../evolution/signals.js';
+import { stripThinkTags } from '../utils/output-safety.js';
 
 export interface AgentOptions {
   provider: LLMProvider;
@@ -280,9 +281,13 @@ export class Agent {
     abortSignal?: AbortSignal
   ): Promise<AgentResult> {
     // Session lane serialization: ensure sequential processing per session
-    return enqueueInLane(`session:${sessionId}`, async () => {
+    const result = await enqueueInLane(`session:${sessionId}`, async () => {
       return this._processMessageInner(sessionId, userMessage, attachments, onProgress, shouldStop, providerOverride, abortSignal);
     }, { warnAfterMs: 5000 });
+
+    // Every channel consumes AgentResult.response. Enforce the public-output
+    // invariant here as a final guard, independent of channel formatting.
+    return { ...result, response: stripThinkTags(result.response) };
   }
 
   /**
@@ -1452,10 +1457,11 @@ Only install skills when the user asks, or when you determine a skill would help
   }
 
   private extractTextContent(content: ContentBlock[]): string {
-    return content
+    const text = content
       .filter((block): block is { type: 'text'; text: string } => block.type === 'text')
       .map((block) => block.text)
       .join('\n');
+    return stripThinkTags(text);
   }
 
   private extractToolUses(content: ContentBlock[]): ToolUseContent[] {

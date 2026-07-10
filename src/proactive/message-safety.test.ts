@@ -31,6 +31,7 @@ describe('sanitizeProactiveMessage', () => {
     expect(sanitizeProactiveMessage('I should ask whether the project is finished.')).toBeNull();
     expect(sanitizeProactiveMessage('Daily check-in with Sam - ask about priorities and deadlines')).toBeNull();
     expect(sanitizeProactiveMessage('Evening check-in with Sam — recap the day and any follow-ups')).toBeNull();
+    expect(sanitizeProactiveMessage('How did your evening check-in with Sam go?')).toBeNull();
     expect(sanitizeProactiveMessage('It would be helpful to check whether they completed the task.')).toBeNull();
     expect(sanitizeProactiveMessage('Follow up with Sam about deadlines.')).toBeNull();
     expect(sanitizeProactiveMessage('We can ask Sam how the project is going.')).toBeNull();
@@ -66,6 +67,15 @@ describe('renderUserFacingProactiveMessage', () => {
       'Daily check-in with Sam - ask about priorities, deadlines, and how things are going',
       router as any,
     )).resolves.toBe('Hey Sam, what are your priorities and deadlines today? How are things going?');
+    expect(router.executeWithFallback).toHaveBeenCalledWith(
+      expect.objectContaining({
+        maxTokens: 4_096,
+        thinkingBudgetTokens: 4_096,
+        enableThinking: false,
+        purpose: 'proactive_rewrite',
+      }),
+      'fast',
+    );
   });
 
   it('fails closed for opaque structured output and unsafe rewrites', async () => {
@@ -81,5 +91,24 @@ describe('renderUserFacingProactiveMessage', () => {
 
     await expect(renderUserFacingProactiveMessage('I should ask about work.', router as any))
       .resolves.toBeNull();
+    expect(router.executeWithFallback).toHaveBeenCalledTimes(2);
+  });
+
+  it('retries a misleading check-in-as-an-event rewrite', async () => {
+    const router = {
+      executeWithFallback: vi.fn()
+        .mockResolvedValueOnce({
+          response: { content: [{ type: 'text', text: 'How did your evening check-in with Sam go?' }] },
+        })
+        .mockResolvedValueOnce({
+          response: { content: [{ type: 'text', text: 'Hey Sam, how did your day go? Any follow-ups for tomorrow?' }] },
+        }),
+    };
+
+    await expect(renderUserFacingProactiveMessage(
+      'Evening check-in with Sam - recap what happened today, any follow-ups needed',
+      router as any,
+    )).resolves.toBe('Hey Sam, how did your day go? Any follow-ups for tomorrow?');
+    expect(router.executeWithFallback).toHaveBeenCalledTimes(2);
   });
 });

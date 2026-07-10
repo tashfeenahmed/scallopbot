@@ -5,24 +5,11 @@
  * gardener-scheduling.ts, and gardener-sleep-steps.ts.
  */
 
-// ============ LLM Response Parsing ============
+import { stripThinkTags } from '../utils/output-safety.js';
 
-/**
- * Strip inline thinking/reasoning markup that local models (qwen3.6 via
- * llama.cpp, GLM, DeepSeek-style) emit in their visible text. Handles both
- * closed `<think>...</think>` blocks and an unterminated leading `<think>`
- * (which happens when max_tokens cuts the response off mid-reasoning).
- */
-export function stripThinkTags(text: string): string {
-  let out = text.replace(/<think>[\s\S]*?<\/think>/gi, '');
-  // Unterminated think block: everything after the orphan tag is reasoning.
-  const orphan = out.search(/<think>/i);
-  if (orphan !== -1) out = out.slice(0, orphan);
-  // Some models close a block they never opened (prefix reasoning).
-  const orphanClose = out.search(/<\/think>/i);
-  if (orphanClose !== -1) out = out.slice(orphanClose + '</think>'.length);
-  return out.trim();
-}
+export { stripThinkTags } from '../utils/output-safety.js';
+
+// ============ LLM Response Parsing ============
 
 /**
  * Extract response text from LLM CompletionResponse content blocks.

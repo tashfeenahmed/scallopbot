@@ -681,7 +681,7 @@ export class Gateway {
     // fallback chain (PROVIDER_ORDER=my-tools,openrouter).
     // Optional-chained: hand-rolled configs (tests, embedders) may omit the
     // section; zod-loaded configs always have it.
-    const multiModel = this.config.multiModel ?? { enabled: false, providers: [] };
+    const multiModel = this.config.multiModel ?? { enabled: false, providers: [], timeoutMs: 60_000 };
     if (multiModel.enabled) {
       for (const cp of multiModel.providers) {
         const custom = new OpenAIProvider({
@@ -689,7 +689,9 @@ export class Gateway {
           baseUrl: cp.baseUrl,
           apiKey: cp.apiKey,
           model: cp.model,
-          timeout: 600000, // local fine-tunes on modest GPUs can be slow; match 'local'
+          // Bound a dead endpoint so Router can reach the next provider. Slow
+          // local models can opt into a larger value with MULTI_MODEL_TIMEOUT_MS.
+          timeout: multiModel.timeoutMs ?? 60_000,
         });
         this.providerRegistry.registerProvider(custom);
         this.logger.info({ provider: cp.name, model: cp.model, baseUrl: cp.baseUrl }, 'Custom provider registered (multi-model mode)');
