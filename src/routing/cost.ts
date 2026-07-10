@@ -5,7 +5,7 @@
  */
 
 import type { ScallopDatabase } from '../memory/db.js';
-import type { LLMProvider } from '../providers/types.js';
+import type { CompletionResponse, LLMProvider } from '../providers/types.js';
 
 export interface ModelPricing {
   inputPerMillion: number;
@@ -301,6 +301,21 @@ export class CostTracker {
     }
   }
 
+  /**
+   * Record a concrete completion using the provider that actually served it.
+   * Keeping this operation here prevents fallback call sites from accidentally
+   * attributing usage to the initially selected (failed) provider.
+   */
+  recordResponse(response: CompletionResponse, provider: string, sessionId: string): void {
+    this.recordUsage({
+      model: response.model || provider,
+      inputTokens: response.usage.inputTokens,
+      outputTokens: response.usage.outputTokens,
+      provider,
+      sessionId,
+    });
+  }
+
   getDailySpend(): number {
     const today = this.getDateKey(new Date());
     return this.usageHistory
@@ -387,23 +402,22 @@ export class CostTracker {
    * Returns a proxy provider that behaves identically but tracks cost.
    */
   wrapProvider(provider: LLMProvider, sessionId?: string): LLMProvider {
-    const tracker = this;
+    const complete: LLMProvider['complete'] = async (request) => {
+      const response = await provider.complete(request);
+      this.recordResponse(
+        response.model ? response : { ...response, model: provider.model || provider.name },
+        provider.name,
+        sessionId ?? 'unknown',
+      );
+      return response;
+    };
+
     return {
       name: provider.name,
       model: provider.model,
       isAvailable: () => provider.isAvailable(),
       stream: provider.stream?.bind(provider),
-      async complete(request) {
-        const response = await provider.complete(request);
-        tracker.recordUsage({
-          model: response.model || provider.model || provider.name,
-          inputTokens: response.usage.inputTokens,
-          outputTokens: response.usage.outputTokens,
-          provider: provider.name,
-          sessionId: sessionId ?? 'unknown',
-        });
-        return response;
-      },
+      complete,
     };
   }
 

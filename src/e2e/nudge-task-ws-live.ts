@@ -148,7 +148,6 @@ async function main() {
   }
   console.log('[✓] Done waiting.');
   // Print provider call counts for debugging
-  const factProvider = (ctx as unknown as Record<string, unknown>);
   console.log(`    Agent provider calls: ${ctx.mockProvider.callCount}`);
   // List all items including duplicates or other states
   const allItems = db.getScheduledItemsByUser('default');

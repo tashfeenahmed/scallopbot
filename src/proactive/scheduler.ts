@@ -2,7 +2,7 @@
  * Unified Scheduler - Processes scheduled items and delivers messages.
  *
  * Nudge-kind items are delivered as pre-written messages.
- * Task-kind items are executed by a sub-agent (falls back to nudge if unavailable).
+ * Task-kind items are executed by a sub-agent and never fall back to raw task text.
  * Supports recurring items with automatic rescheduling.
  */
 
@@ -18,12 +18,17 @@ import { computeBoardStatus } from '../board/types.js';
 import type { GoalService } from '../goals/index.js';
 import type { SessionManager } from '../agent/session.js';
 import type { SubAgentExecutor } from '../subagent/index.js';
+import type { Router } from '../routing/router.js';
 import { parseUserIdPrefix } from '../triggers/types.js';
 import { formatProactiveMessage, type ProactiveFormatInput } from './proactive-format.js';
-import { detectProactiveEngagement } from './feedback.js';
+import {
+  attributeProactiveEngagement,
+  proactiveIdentityCandidates,
+  type ProactiveEngagementContext,
+} from './feedback.js';
 import { getRecentChatContext } from './chat-context.js';
 import { wordOverlap } from '../utils/text-similarity.js';
-import { sanitizeProactiveMessage } from './message-safety.js';
+import { renderUserFacingProactiveMessage } from './message-safety.js';
 
 /** How long to remember recently sent messages for dedup (2 hours).
  *  Extended from 30min so a recurring cognitive-layer signal that fires every
@@ -44,6 +49,33 @@ const MIN_AGENT_PROACTIVE_GAP_MS = (() => {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : 60 * 60 * 1000;
 })();
 
+function getLocalTimeParts(now: Date, timeZone: string): { hour: number; minute: number } {
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone,
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).formatToParts(now);
+    const hour = parseInt(parts.find(part => part.type === 'hour')?.value ?? '', 10) % 24;
+    const minute = parseInt(parts.find(part => part.type === 'minute')?.value ?? '', 10);
+    if (Number.isFinite(hour) && Number.isFinite(minute)) return { hour, minute };
+  } catch {
+    // Fall through to server-local time for an invalid timezone.
+  }
+  return { hour: now.getHours(), minute: now.getMinutes() };
+}
+
+function millisecondsUntilLocalMorning(now: Date, timeZone: string): number {
+  const { hour, minute } = getLocalTimeParts(now, timeZone);
+  const currentMinute = hour * 60 + minute;
+  const morningMinute = 8 * 60;
+  const minutesUntilMorning = currentMinute < morningMinute
+    ? morningMinute - currentMinute
+    : 24 * 60 - currentMinute + morningMinute;
+  return Math.max(60_000, minutesUntilMorning * 60_000 - now.getSeconds() * 1000 - now.getMilliseconds());
+}
+
 /**
  * Strip internal markup, XML function calls, error prefixes, and thinking blocks
  * from raw sub-agent output so it's safe to show to the user.
@@ -52,7 +84,7 @@ const MIN_AGENT_PROACTIVE_GAP_MS = (() => {
 function sanitizeAgentResponse(raw: string): string {
   if (!raw) return '';
 
-  let cleaned = raw
+  const cleaned = raw
     // Strip <function_calls>...</function_calls> blocks (and unclosed ones)
     .replace(/<function_calls>[\s\S]*?(<\/function_calls>|$)/g, '')
     // Strip <invoke ...>...</invoke> blocks
@@ -77,6 +109,19 @@ function sanitizeAgentResponse(raw: string): string {
  * Handler for sending messages to users
  */
 export type MessageHandler = (userId: string, message: string) => Promise<boolean>;
+type ProcessOutcome = 'sent' | 'suppressed' | 'deferred' | 'failed';
+
+interface TaskLeaseContext {
+  leaseToken: string;
+  isActive: () => boolean;
+  renew: () => boolean;
+}
+
+interface TaskProcessResult {
+  outcome: ProcessOutcome;
+  result?: BoardItemResult;
+  error?: string;
+}
 
 /**
  * Options for UnifiedScheduler
@@ -90,8 +135,10 @@ export interface UnifiedSchedulerOptions {
   goalService?: GoalService;
   /** Session manager for creating scheduler session */
   sessionManager?: SessionManager;
-  /** Sub-agent executor for task-kind items (optional — falls back to nudge) */
+  /** Sub-agent executor for task-kind items (optional — unavailable tasks are suppressed) */
   subAgentExecutor?: SubAgentExecutor;
+  /** LLM router used only to rewrite instruction-shaped reminder drafts. */
+  router?: Pick<Router, 'executeWithFallback'>;
   /** Check interval in milliseconds (default: 30 seconds) */
   interval?: number;
   /** Maximum age for expired items in milliseconds (default: 24 hours) */
@@ -104,6 +151,16 @@ export interface UnifiedSchedulerOptions {
    *  user. Defaults to 1h. Set to 0 in tests that need multiple agent items
    *  to fire in a single tick. */
   minAgentProactiveGapMs?: number;
+  /** Durable worker identity; injectable so multiple schedulers can be tested. */
+  workerId?: string;
+  /** Lease duration for scheduled task work (default 90 seconds). */
+  taskLeaseMs?: number;
+  /** Heartbeat cadence while a task sub-agent is running (default lease/3). */
+  taskHeartbeatMs?: number;
+  /** Delay before retrying execution or delivery failures (default 60 seconds). */
+  taskRetryDelayMs?: number;
+  /** Explicit deployment-owned IDs that map to the single-user `default` record. */
+  canonicalSingleUserIds?: string[];
 }
 
 /**
@@ -115,6 +172,7 @@ export class UnifiedScheduler {
   private goalService?: GoalService;
   private sessionManager?: SessionManager;
   private subAgentExecutor?: SubAgentExecutor;
+  private router?: Pick<Router, 'executeWithFallback'>;
   private interval: number;
   private maxItemAge: number;
   private onSendMessage: MessageHandler;
@@ -135,7 +193,13 @@ export class UnifiedScheduler {
    *  Bounded by pruning empty arrays after each dedup check to keep memory flat. */
   private recentSends = new Map<string, { message: string; time: number; source: string }[]>();
   private minAgentProactiveGapMs: number;
+  private workerId: string;
+  private taskLeaseMs: number;
+  private taskHeartbeatMs: number;
+  private taskRetryDelayMs: number;
+  private canonicalSingleUserIds: string[];
   private static readonly MAX_RECENT_SEND_USERS = 500;
+  private static readonly MAX_TASKS_PER_EVALUATION = 100;
 
   constructor(options: UnifiedSchedulerOptions) {
     this.db = options.db;
@@ -143,12 +207,36 @@ export class UnifiedScheduler {
     this.goalService = options.goalService;
     this.sessionManager = options.sessionManager;
     this.subAgentExecutor = options.subAgentExecutor;
+    this.router = options.router;
     this.interval = options.interval ?? 30 * 1000; // 30 seconds
     this.maxItemAge = options.maxItemAge ?? 24 * 60 * 60 * 1000; // 24 hours
     this.onSendMessage = options.onSendMessage;
     this.getTimezone = options.getTimezone ?? (() => Intl.DateTimeFormat().resolvedOptions().timeZone);
     this.minAgentProactiveGapMs = options.minAgentProactiveGapMs ?? MIN_AGENT_PROACTIVE_GAP_MS;
+    // Stable across restarts so a task handed to the built-in scheduler does
+    // not become orphaned when the process PID or deployment changes.
+    this.workerId = options.workerId ?? 'scheduler';
+    this.taskLeaseMs = Math.max(1_000, Math.floor(options.taskLeaseMs ?? 90_000));
+    this.taskHeartbeatMs = Math.max(
+      250,
+      Math.min(this.taskLeaseMs - 1, Math.floor(options.taskHeartbeatMs ?? this.taskLeaseMs / 3)),
+    );
+    this.taskRetryDelayMs = Math.max(1_000, Math.floor(options.taskRetryDelayMs ?? 60_000));
+    this.canonicalSingleUserIds = [...new Set(options.canonicalSingleUserIds ?? [])];
     this.boardService = new BoardService(this.db, this.logger);
+  }
+
+  private async ensureSchedulerSession(): Promise<string | null> {
+    if (this.schedulerSessionId) return this.schedulerSessionId;
+    if (!this.sessionManager) return null;
+    try {
+      const session = await this.sessionManager.createSession({ source: 'scheduler' });
+      this.schedulerSessionId = session.id;
+      this.logger.debug({ sessionId: session.id }, 'Scheduler session created');
+    } catch (err) {
+      this.logger.warn({ error: (err as Error).message }, 'Failed to create scheduler session — scheduled tasks will be suppressed');
+    }
+    return this.schedulerSessionId;
   }
 
   /**
@@ -161,18 +249,11 @@ export class UnifiedScheduler {
     }
 
     this.isRunning = true;
+    this.isStopping = false;
     this.logger.info({ intervalMs: this.interval }, 'Starting UnifiedScheduler');
 
     // Create a persistent scheduler session for sub-agent parenting
-    if (this.sessionManager) {
-      try {
-        const session = await this.sessionManager.createSession({ source: 'scheduler' });
-        this.schedulerSessionId = session.id;
-        this.logger.debug({ sessionId: session.id }, 'Scheduler session created');
-      } catch (err) {
-        this.logger.warn({ error: (err as Error).message }, 'Failed to create scheduler session — tasks will fall back to nudges');
-      }
-    }
+    await this.ensureSchedulerSession();
 
     // Consolidate duplicate reminders on startup
     try {
@@ -273,98 +354,80 @@ export class UnifiedScheduler {
         }
       }
 
-      // Atomically claim due items (marks them 'processing' so no other tick can grab them)
-      const dueItems = this.db.claimDueScheduledItems();
-      if (dueItems.length === 0) {
-        return;
-      }
+      // Preserve the historical task-before-nudge ordering so a task result can
+      // seed send dedup before a companion proactive nudge is considered.
+      this.boardService.reclaimExpiredLeases();
+      await this.processDueTasks();
 
-      // Quiet hours: defer agent-sourced items between 10 PM and 8 AM user-local time.
-      // User-sourced reminders always fire immediately (the user set the exact time).
-      const tz = this.getTimezone(dueItems[0].userId);
-      const hourNow = parseInt(
-        new Intl.DateTimeFormat('en-US', { timeZone: tz, hour: '2-digit', hour12: false })
-          .formatToParts(new Date())
-          .find(p => p.type === 'hour')?.value ?? '12',
-        10
-      );
-      const isQuietHours = hourNow >= 22 || hourNow < 8;
-
-      if (isQuietHours) {
-        const deferred: ScheduledItem[] = [];
-        const ready: ScheduledItem[] = [];
-        for (const item of dueItems) {
-          if (item.source === 'agent') {
-            // Reset to pending and reschedule to 8 AM in user's timezone.
-            // Compute hours until 8 AM from the user's current hour.
-            this.db.resetScheduledItemToPending(item.id);
-            const hoursUntil8am = hourNow >= 8 ? (24 - hourNow + 8) : (8 - hourNow);
-            const next8amMs = Date.now() + hoursUntil8am * 60 * 60 * 1000;
-            this.db.updateScheduledItemBoard(item.id, { triggerAt: next8amMs });
-            deferred.push(item);
-          } else {
-            ready.push(item);
-          }
-        }
-        if (deferred.length > 0) {
-          this.logger.debug({ count: deferred.length }, 'Deferred agent items to morning (quiet hours)');
-        }
-        if (ready.length === 0) return;
-        // Replace dueItems with only user-sourced ready items
-        dueItems.length = 0;
-        dueItems.push(...ready);
-      }
-
-      this.logger.info({ count: dueItems.length }, 'Found due scheduled items');
-
-      // Dependency check: skip items whose dependencies aren't done/archived
-      const readyItems = dueItems.filter(item => {
-        if (!item.dependsOn || item.dependsOn.length === 0) return true;
-        for (const depId of item.dependsOn) {
-          const dep = this.db.getScheduledItem(depId);
-          if (!dep) continue; // deleted dependency counts as resolved
-          const depBoard = computeBoardStatus(dep);
-          if (depBoard !== 'done' && depBoard !== 'archived') {
-            // Dependency not resolved — reset to pending with a delayed trigger
-            this.db.resetScheduledItemToPending(item.id);
+      // Nudges retain the lightweight atomic claim path. Task-kind items are
+      // deliberately excluded: they are owned by durable board leases below.
+      const dueNudges = this.db.claimDueScheduledItems(Date.now(), 'nudge');
+      if (dueNudges.length > 0) {
+        // Quiet hours are evaluated per user. A mixed-user batch must not use
+        // the first user's timezone for everyone else.
+        const now = new Date();
+        const readyDuringQuietHours: ScheduledItem[] = [];
+        let quietHoursDeferred = 0;
+        for (const item of dueNudges) {
+          const tz = this.getTimezone(item.userId);
+          const { hour } = getLocalTimeParts(now, tz);
+          const isQuietHours = hour >= 22 || hour < 8;
+          if (item.source === 'agent' && isQuietHours) {
             this.db.updateScheduledItemBoard(item.id, {
-              boardStatus: 'waiting',
-              triggerAt: Date.now() + 60 * 60 * 1000, // retry in 1 hour
+              triggerAt: now.getTime() + millisecondsUntilLocalMorning(now, tz),
             });
-            this.logger.debug({ itemId: item.id, blockedBy: depId }, 'Item blocked by dependency');
-            return false;
+            this.db.resetScheduledItemToPending(item.id);
+            quietHoursDeferred++;
+          } else {
+            // User reminders fire at the explicit time the user chose.
+            readyDuringQuietHours.push(item);
           }
         }
-        return true;
-      });
+        if (quietHoursDeferred > 0) {
+          this.logger.debug({ count: quietHoursDeferred }, 'Deferred agent items to morning (quiet hours)');
+        }
 
-      // Sort: tasks before nudges so task results establish dedup priority.
-      // When a task fires first, its description gets recorded in recentSends,
-      // so a companion nudge with similar wording gets suppressed.
-      readyItems.sort((a, b) => {
-        if (a.kind === 'task' && b.kind !== 'task') return -1;
-        if (a.kind !== 'task' && b.kind === 'task') return 1;
-        return 0;
-      });
+        this.logger.info({ count: readyDuringQuietHours.length }, 'Found due nudge items');
 
-      for (const item of readyItems) {
-        try {
-          // Task-kind items with taskConfig: execute via sub-agent
-          if (item.kind === 'task' && item.taskConfig && this.subAgentExecutor && this.schedulerSessionId) {
-            await this.processTask(item);
-          } else {
-            // Nudge-kind items (or tasks without executor): send pre-written message
-            await this.processNudge(item);
+        // Dependency check for nudges. Durable tasks enforce dependencies while claiming.
+        const readyNudges = readyDuringQuietHours.filter(item => {
+          if (!item.dependsOn || item.dependsOn.length === 0) return true;
+          for (const depId of item.dependsOn) {
+            const dep = this.db.getScheduledItem(depId);
+            if (!dep) continue;
+            const depBoard = computeBoardStatus(dep);
+            if (depBoard !== 'done' && depBoard !== 'archived') {
+              this.db.resetScheduledItemToPending(item.id);
+              this.db.updateScheduledItemBoard(item.id, {
+                boardStatus: 'waiting',
+                triggerAt: Date.now() + 60 * 60 * 1000,
+              });
+              this.logger.debug({ itemId: item.id, blockedBy: depId }, 'Nudge blocked by dependency');
+              return false;
+            }
           }
-          this.markItemFiredAndReschedule(item);
-        } catch (err) {
-          this.logger.error(
-            { itemId: item.id, error: (err as Error).message },
-            'Failed to process scheduled item'
-          );
-          this.db.resetScheduledItemToPending(item.id);
+          return true;
+        });
+
+        for (const item of readyNudges) {
+          try {
+            const outcome = await this.processNudge(item);
+            if (outcome === 'sent' || outcome === 'suppressed') {
+              this.markItemFiredAndReschedule(item);
+            } else if (outcome === 'failed') {
+              this.db.updateScheduledItemBoard(item.id, { triggerAt: Date.now() + this.taskRetryDelayMs });
+              this.db.resetScheduledItemToPending(item.id);
+            }
+          } catch (err) {
+            this.logger.error(
+              { itemId: item.id, error: (err as Error).message },
+              'Failed to process scheduled nudge',
+            );
+            this.db.resetScheduledItemToPending(item.id);
+          }
         }
       }
+
     } finally {
       this.evaluating = false;
 
@@ -386,21 +449,151 @@ export class UnifiedScheduler {
   /**
    * Process a nudge item — send pre-written message directly
    */
-  private async processNudge(item: ScheduledItem): Promise<void> {
+  private async processNudge(item: ScheduledItem): Promise<ProcessOutcome> {
     this.logger.debug(
       { itemId: item.id, source: item.source, type: item.type },
       'Processing nudge'
     );
 
-    await this.sendFormattedMessage(item, item.message);
+    return this.sendFormattedMessage(item, item.message);
+  }
+
+  /** Claim and drain the currently due task users through durable worker leases. */
+  private async processDueTasks(): Promise<void> {
+    const dueUsers = new Set(
+      this.db.getDueScheduledItems()
+        .filter(item => item.kind === 'task')
+        .map(item => item.userId),
+    );
+    let processed = 0;
+
+    for (const userId of dueUsers) {
+      while (processed < UnifiedScheduler.MAX_TASKS_PER_EVALUATION) {
+        const claim = this.boardService.claimNextTask(userId, this.workerId, this.taskLeaseMs);
+        if (!claim) break;
+        processed++;
+
+        const item = this.db.getScheduledItem(claim.item.id);
+        if (!item) continue;
+
+        // Agent-created tasks obey quiet hours; explicit user tasks retain the
+        // exact time selected by the user. Releasing this administrative claim
+        // restores the attempt because no model work was performed.
+        const now = new Date();
+        const timezone = this.getTimezone(item.userId);
+        const { hour } = getLocalTimeParts(now, timezone);
+        if (item.source === 'agent' && (hour >= 22 || hour < 8)) {
+          this.boardService.deferLeasedTask(
+            item.id,
+            claim.leaseToken,
+            now.getTime() + millisecondsUntilLocalMorning(now, timezone),
+            { reason: 'Quiet hours', restoreAttempt: true },
+          );
+          continue;
+        }
+
+        await this.processLeasedTask(item, claim.leaseToken);
+      }
+    }
+
+    if (processed >= UnifiedScheduler.MAX_TASKS_PER_EVALUATION) {
+      this.logger.warn({ processed }, 'Scheduled task evaluation cap reached; remaining work will continue next tick');
+    }
+  }
+
+  private async processLeasedTask(item: ScheduledItem, leaseToken: string): Promise<void> {
+    let leaseActive = true;
+    const renew = (): boolean => {
+      if (!leaseActive) return false;
+      leaseActive = this.boardService.heartbeatTask(item.id, leaseToken, this.taskLeaseMs);
+      if (!leaseActive) this.logger.warn({ itemId: item.id }, 'Scheduled task lease was lost');
+      return leaseActive;
+    };
+    const heartbeat = setInterval(renew, this.taskHeartbeatMs);
+
+    try {
+      const processed = await this.processTask(item, {
+        leaseToken,
+        isActive: () => leaseActive,
+        renew,
+      });
+
+      if (!leaseActive) return;
+
+      if (processed.outcome === 'sent' || processed.outcome === 'suppressed') {
+        if (!processed.result || !renew()) return;
+        const finalResult: BoardItemResult = {
+          ...processed.result,
+          notifiedAt: processed.outcome === 'sent' ? Date.now() : processed.result.notifiedAt,
+        };
+        const completed = this.boardService.completeLeasedTask(item.id, leaseToken, finalResult);
+        if (completed) this.markItemFiredAndReschedule(item, true);
+        return;
+      }
+
+      if (processed.outcome === 'deferred' || (processed.outcome === 'failed' && processed.result)) {
+        const delay = processed.outcome === 'deferred'
+          ? Math.max(1_000, this.minAgentProactiveGapMs)
+          : this.taskRetryDelayMs;
+        this.boardService.deferLeasedTask(
+          item.id,
+          leaseToken,
+          Date.now() + delay,
+          { reason: processed.error ?? (processed.outcome === 'deferred' ? 'Proactive delivery gap' : 'Delivery failed') },
+        );
+        return;
+      }
+
+      this.boardService.failLeasedTask(
+        item.id,
+        leaseToken,
+        processed.error ?? 'Scheduled task execution failed',
+        { retryAt: Date.now() + this.taskRetryDelayMs },
+      );
+    } finally {
+      clearInterval(heartbeat);
+    }
   }
 
   /**
    * Process a task item — execute via sub-agent, send result to user.
    * Silently skips if sub-agent fails (no fallback to raw task description).
    */
-  private async processTask(item: ScheduledItem): Promise<void> {
-    const config = item.taskConfig!;
+  private async processTask(item: ScheduledItem, lease: TaskLeaseContext): Promise<TaskProcessResult> {
+    // If the work already completed but delivery failed, retry the stored result
+    // instead of executing the task (and its potentially mutating tools) twice.
+    if (item.result?.response) {
+      const storedResult = sanitizeAgentResponse(item.result.response);
+      if (storedResult) {
+        if (!lease.renew()) return { outcome: 'failed', error: 'Task lease lost before delivery' };
+        const outcome = await this.sendFormattedMessage(item, storedResult, 'task_result', true);
+        return { outcome, result: item.result, error: outcome === 'failed' ? 'Stored result delivery failed' : undefined };
+      }
+    }
+
+    const config = item.taskConfig;
+    const schedulerSessionId = await this.ensureSchedulerSession();
+    const executionParentSessionId = item.sessionId ?? schedulerSessionId;
+    if (!config || !this.subAgentExecutor || !executionParentSessionId) {
+      this.logger.warn({ itemId: item.id }, 'Scheduled task cannot run; suppressing raw task description');
+      this.db.recordProactiveDecision({
+        userId: item.userId,
+        stage: 'deliver',
+        outcome: 'suppressed',
+        reason: 'task_executor_unavailable',
+        detail: { itemId: item.id },
+      });
+      const unavailableResult: BoardItemResult = {
+        response: 'Task could not run because no sub-agent executor was available.',
+        completedAt: Date.now(),
+        taskComplete: false,
+      };
+      if (!lease.renew() || !this.boardService.storeLeasedResult(item.id, lease.leaseToken, unavailableResult)) {
+        return { outcome: 'failed', error: 'Task lease lost while recording unavailable executor' };
+      }
+      return { outcome: 'suppressed', result: unavailableResult };
+    }
+
     this.logger.info(
       { itemId: item.id, goal: config.goal, tools: config.tools },
       'Executing task via sub-agent'
@@ -419,8 +612,11 @@ export class UnifiedScheduler {
         ? `${config.goal}\n\nIMPORTANT: Use your tools (${toolList}) to gather the REAL data this task needs. Do not estimate, extrapolate, or invent any numbers. If the data cannot be retrieved, deliver a short honest report saying what failed instead.`
         : config.goal;
 
-      const result = await this.subAgentExecutor!.spawnAndWait(
-        this.schedulerSessionId!,
+      // Preserve the originating session when available so the executor can
+      // reapply its channel-specific tool policy. The scheduler session is only
+      // a fallback for legacy/task rows without session provenance.
+      const result = await this.subAgentExecutor.spawnAndWait(
+        executionParentSessionId,
         {
           task: groundedTask,
           label: `scheduled:${item.type}`,
@@ -435,26 +631,42 @@ export class UnifiedScheduler {
         },
       );
 
-      // Store result on the item for morning digest / audit
-      this.db.updateScheduledItemResult(item.id, {
+      if (!result.taskComplete) {
+        throw new Error('Scheduled sub-agent stopped before completing its task');
+      }
+
+      const boardResult: BoardItemResult = {
         response: result.response,
         completedAt: Date.now(),
         iterationsUsed: result.iterationsUsed,
-      });
+        costUsd: result.costUsd,
+        taskComplete: result.taskComplete,
+      };
+      if (!lease.renew() || !lease.isActive()) {
+        return { outcome: 'failed', error: 'Task lease lost before result persistence' };
+      }
+      if (!this.boardService.storeLeasedResult(item.id, lease.leaseToken, boardResult)) {
+        return { outcome: 'failed', error: 'Task lease lost while persisting result' };
+      }
 
       // Send sanitized result to user
       const clean = sanitizeAgentResponse(result.response);
       if (clean) {
-        await this.sendFormattedMessage(item, clean, 'task_result');
-        // Record task description & goal for dedup so companion nudges get suppressed
-        this.recordSend(item.userId, item.message, item.source);
-        if (config.goal && config.goal !== item.message) {
-          this.recordSend(item.userId, config.goal, item.source);
+        if (!lease.isActive()) return { outcome: 'failed', result: boardResult, error: 'Task lease lost before delivery' };
+        const outcome = await this.sendFormattedMessage(item, clean, 'task_result', true);
+        if (outcome === 'sent') {
+          // Record task description & goal for dedup so companion nudges get suppressed.
+          this.recordSend(item.userId, item.message, item.source);
+          if (config.goal && config.goal !== item.message) {
+            this.recordSend(item.userId, config.goal, item.source);
+          }
         }
+        return { outcome, result: boardResult, error: outcome === 'failed' ? 'Task result delivery failed' : undefined };
       } else {
         // Sub-agent produced no user-facing output (error, empty, or all-markup response).
         // Don't send the raw task description — it reads like an internal to-do, not a message.
         this.logger.warn({ itemId: item.id }, 'Sub-agent returned no user-facing content, skipping message');
+        return { outcome: 'suppressed', result: boardResult };
       }
     } catch (err) {
       // Infrastructure failure (no provider, session error, etc.) — don't confuse user
@@ -463,6 +675,7 @@ export class UnifiedScheduler {
         { itemId: item.id, error: (err as Error).message },
         'Sub-agent execution failed, skipping message'
       );
+      return { outcome: 'failed', error: (err as Error).message };
     }
   }
 
@@ -474,7 +687,8 @@ export class UnifiedScheduler {
     item: ScheduledItem,
     message: string,
     sourceOverride?: 'task_result' | 'inner_thoughts' | 'gap_scanner',
-  ): Promise<void> {
+    leaseManaged: boolean = false,
+  ): Promise<ProcessOutcome> {
     // Hard min-gap throttle for agent-sourced sends: never two within
     // MIN_AGENT_PROACTIVE_GAP_MS. User-set reminders bypass — they have
     // explicit times the user chose.
@@ -488,32 +702,52 @@ export class UnifiedScheduler {
         detail: { itemId: item.id },
       });
       // Push trigger forward so it can fire after the gap window.
-      try {
-        this.db.updateScheduledItemBoard(item.id, { triggerAt: Date.now() + this.minAgentProactiveGapMs });
-        this.db.resetScheduledItemToPending(item.id);
-      } catch (err) {
-        this.logger.warn({ err: (err as Error).message, itemId: item.id }, 'Failed to defer min-gap-throttled item');
+      if (!leaseManaged) {
+        try {
+          this.db.updateScheduledItemBoard(item.id, { triggerAt: Date.now() + this.minAgentProactiveGapMs });
+          this.db.resetScheduledItemToPending(item.id);
+        } catch (err) {
+          this.logger.warn({ err: (err as Error).message, itemId: item.id }, 'Failed to defer min-gap-throttled item');
+        }
       }
-      return;
+      return 'deferred';
     }
 
-    if (item.source === 'agent') {
-      const safeMessage = sanitizeProactiveMessage(message);
-      if (!safeMessage) {
-        this.logger.warn(
-          { itemId: item.id, userId: item.userId, source: item.source },
-          'Suppressing unsafe agent proactive message'
-        );
-        this.db.recordProactiveDecision({
-          userId: item.userId,
-          stage: 'deliver',
-          outcome: 'suppressed',
-          reason: 'unsafe_message',
-          detail: { itemId: item.id },
-        });
-        return;
-      }
-      message = safeMessage;
+    const originalMessage = message;
+    // `source` identifies who initiated an item, not who authored its text.
+    // Model-invoked reminder/board tools create user-sourced items too, so only
+    // independently proven literal user text may bypass the rendering boundary.
+    const isProvenUserLiteral = item.source === 'user'
+      && item.messageProvenance === 'user_literal'
+      && sourceOverride === undefined;
+    const safeMessage = isProvenUserLiteral
+      ? message.trim()
+      : await renderUserFacingProactiveMessage(message, this.router);
+    if (!safeMessage) {
+      this.logger.warn(
+        { itemId: item.id, userId: item.userId, source: item.source },
+        'Suppressing unsafe proactive message'
+      );
+      this.db.recordProactiveDecision({
+        userId: item.userId,
+        stage: 'deliver',
+        outcome: 'suppressed',
+        reason: 'unsafe_message',
+        detail: { itemId: item.id, source: item.source },
+      });
+      // A generated reminder that cannot yet be rendered must remain pending;
+      // marking it fired would either leak the draft or silently lose it.
+      return isProvenUserLiteral ? 'suppressed' : 'failed';
+    }
+    message = safeMessage;
+    if (message !== originalMessage.trim()) {
+      this.db.recordProactiveDecision({
+        userId: item.userId,
+        stage: 'render',
+        outcome: 'rewritten',
+        reason: 'instruction_draft',
+        detail: { itemId: item.id, source: item.source },
+      });
     }
 
     // Send-time dedup: skip if a similar message was sent recently to this user
@@ -526,9 +760,8 @@ export class UnifiedScheduler {
         reason: 'send_dedup',
         detail: { itemId: item.id },
       });
-      return;
+      return 'suppressed';
     }
-    this.recordSend(item.userId, message, item.source);
     this.db.recordProactiveDecision({
       userId: item.userId,
       stage: 'deliver',
@@ -572,17 +805,41 @@ export class UnifiedScheduler {
         };
 
         const formatted = formatProactiveMessage((channel ?? 'telegram') as 'telegram' | 'api', formatInput);
-        await this.deliverAndRecordConversation(item, formatted, message);
-        return;
+        const sent = await this.deliverAndRecordConversation(item, formatted, message);
+        return this.finishDelivery(item, message, sent);
       }
     }
 
     // User-sourced items or unknown channels: send as-is
-    await this.deliverAndRecordConversation(item, message);
+    const sent = await this.deliverAndRecordConversation(item, message);
+    return this.finishDelivery(item, message, sent);
+  }
+
+  private finishDelivery(item: ScheduledItem, message: string, sent: boolean): ProcessOutcome {
+    if (!sent) {
+      this.db.recordProactiveDecision({
+        userId: item.userId,
+        stage: 'deliver',
+        outcome: 'failed',
+        reason: 'delivery_failed',
+        detail: { itemId: item.id, source: item.source },
+      });
+      return 'failed';
+    }
+
+    this.recordSend(item.userId, message, item.source);
+    this.db.recordProactiveDecision({
+      userId: item.userId,
+      stage: 'deliver',
+      outcome: 'sent',
+      reason: 'sent',
+      detail: { itemId: item.id, source: item.source },
+    });
+    return 'sent';
   }
 
   /**
-   * Keep an agent-initiated message in its source conversation after delivery.
+   * Keep a scheduled message in its source conversation after delivery.
    * A later user reply can then be understood as a reply to the proactive
    * nudge, including after a process restart when the channel rehydrates the
    * same session. This is deliberately conversation state, not a delivery
@@ -592,9 +849,10 @@ export class UnifiedScheduler {
     item: ScheduledItem,
     deliveredMessage: string,
     conversationMessage: string = deliveredMessage,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const sent = await this.onSendMessage(item.userId, deliveredMessage);
-    if (!sent || item.source !== 'agent' || !item.sessionId || !this.sessionManager) return;
+    if (!sent) return false;
+    if (!item.sessionId || !this.sessionManager) return true;
 
     try {
       await this.sessionManager.addMessage(item.sessionId, {
@@ -606,6 +864,7 @@ export class UnifiedScheduler {
       // A missing/deleted source session must not make delivery fail.
       this.logger.warn({ itemId: item.id, sessionId: item.sessionId, error: (err as Error).message }, 'Failed to record proactive message in source conversation');
     }
+    return true;
   }
 
   /**
@@ -673,8 +932,8 @@ export class UnifiedScheduler {
   /**
    * Mark item as fired and reschedule if recurring
    */
-  private markItemFiredAndReschedule(item: ScheduledItem): void {
-    this.db.markScheduledItemFired(item.id);
+  private markItemFiredAndReschedule(item: ScheduledItem, alreadyFired: boolean = false): void {
+    if (!alreadyFired) this.db.markScheduledItemFired(item.id);
     this.logger.info(
       { itemId: item.id, userId: item.userId, source: item.source, type: item.type, kind: item.kind },
       'Scheduled item fired'
@@ -694,6 +953,7 @@ export class UnifiedScheduler {
           userId: item.userId,
           sessionId: item.sessionId,
           source: item.source,
+          messageProvenance: item.messageProvenance,
           kind: item.kind,
           type: item.type,
           message: item.message,
@@ -840,15 +1100,41 @@ export class UnifiedScheduler {
    * For each recently-fired agent item within the engagement window,
    * marks it as 'acted' to close the trust feedback loop.
    */
-  checkEngagement(userId: string): void {
+  checkEngagement(
+    userId: string,
+    userMessage?: string,
+    context: Omit<ProactiveEngagementContext, 'userMessage'> = {},
+  ): void {
     try {
-      const items = this.db.getScheduledItemsByUser(userId);
-      const actedIds = detectProactiveEngagement(userId, items);
-      for (const id of actedIds) {
-        this.db.markScheduledItemActed(id);
+      const seen = new Set<string>();
+      const identityCandidates = proactiveIdentityCandidates(userId, this.canonicalSingleUserIds);
+      const items = identityCandidates
+        .flatMap(identity => this.db.getScheduledItemsByUser(identity))
+        .filter(item => {
+          if (seen.has(item.id)) return false;
+          seen.add(item.id);
+          return true;
+        });
+      const matches = attributeProactiveEngagement(userId, items, {
+        ...context,
+        userMessage,
+        identityCandidates,
+      });
+      for (const match of matches) {
+        this.db.markScheduledItemActed(match.itemId);
+        this.db.recordProactiveDecision({
+          userId,
+          stage: 'feedback',
+          outcome: 'acted',
+          reason: match.reason,
+          detail: { itemId: match.itemId, score: match.score },
+        });
       }
-      if (actedIds.length > 0) {
-        this.logger.debug({ userId, actedCount: actedIds.length }, 'Proactive engagement detected');
+      if (matches.length > 0) {
+        this.logger.debug(
+          { userId, actedCount: matches.length, reason: matches[0].reason, score: matches[0].score },
+          'Proactive engagement attributed',
+        );
       }
     } catch (err) {
       this.logger.warn({ error: (err as Error).message, userId }, 'Engagement detection failed');

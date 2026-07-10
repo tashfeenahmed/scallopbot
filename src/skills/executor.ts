@@ -11,6 +11,7 @@ import { join, extname } from 'path';
 import { constants } from 'fs';
 import type { Logger } from 'pino';
 import type { Skill, SkillExecutionRequest, SkillExecutionResult } from './types.js';
+import { redactSensitiveText } from '../security/redaction.js';
 
 /** Default timeout for script execution (120 seconds for browser/screenshot operations) */
 const DEFAULT_TIMEOUT_MS = 120000;
@@ -22,6 +23,61 @@ const MAX_OUTPUT_BYTES = 1024 * 1024;
 export interface SkillExecutorOptions {
   timeoutMs?: number;
   maxOutputBytes?: number;
+  /** Best-effort telemetry hook used by the skill curator/evolution layer. */
+  onSkillExecuted?: (name: string, success: boolean, durationMs: number) => void | Promise<void>;
+}
+
+/** Non-secret process settings needed to locate runtimes and temporary files. */
+const SAFE_BASE_ENV_KEYS = [
+  'PATH', 'HOME', 'USERPROFILE', 'SHELL', 'TMPDIR', 'TMP', 'TEMP',
+  'LANG', 'LC_ALL', 'LC_CTYPE', 'TZ',
+  // Windows process discovery/runtime keys.
+  'SystemRoot', 'WINDIR', 'COMSPEC', 'PATHEXT',
+] as const;
+
+/** Non-secret Smartbot runtime paths/config used by bundled skills. */
+const SAFE_SMARTBOT_ENV_KEYS = [
+  'AGENT_WORKSPACE', 'MEMORY_DB_PATH', 'SCALLOPBOT_DATA_DIR',
+  'OLLAMA_BASE_URL', 'LOCAL_BASE_URL',
+] as const;
+
+function copyDefinedEnv(target: Record<string, string>, keys: readonly string[]): void {
+  for (const key of keys) {
+    const value = process.env[key];
+    if (typeof value === 'string') target[key] = value;
+  }
+}
+
+/**
+ * Construct a least-privilege environment for a skill process.
+ *
+ * Provider keys, bot tokens and other service secrets are no longer inherited
+ * wholesale. A skill receives a sensitive variable only when its frontmatter
+ * explicitly declares it in `requires.env` or as `primaryEnv`.
+ */
+export function buildSkillSubprocessEnv(
+  skill: Skill,
+  request: SkillExecutionRequest,
+  timezone?: string,
+): Record<string, string> {
+  const env: Record<string, string> = {};
+  copyDefinedEnv(env, SAFE_BASE_ENV_KEYS);
+  copyDefinedEnv(env, SAFE_SMARTBOT_ENV_KEYS);
+
+  const openclaw = skill.frontmatter.metadata?.openclaw;
+  const explicitlyAllowed = new Set(openclaw?.requires?.env ?? []);
+  if (openclaw?.primaryEnv) explicitlyAllowed.add(openclaw.primaryEnv);
+  copyDefinedEnv(env, [...explicitlyAllowed]);
+
+  env.SKILL_NAME = skill.name;
+  env.SKILL_DIR = skill.scriptsDir ? join(skill.scriptsDir, '..') : '';
+  env.SKILL_ARGS = JSON.stringify(request.args || {});
+  env.SKILL_WORKSPACE = process.env.AGENT_WORKSPACE || request.cwd || process.cwd();
+  env.SKILL_CWD = request.cwd || env.SKILL_WORKSPACE;
+  if (request.userId) env.SKILL_USER_ID = request.userId;
+  if (request.sessionId) env.SKILL_SESSION_ID = request.sessionId;
+  if (request.userId && timezone) env.SKILL_USER_TIMEZONE = timezone;
+  return env;
 }
 
 /**
@@ -32,11 +88,13 @@ export class SkillExecutor {
   private scriptPathCache = new Map<string, string | null>();
   private timeoutMs: number;
   private maxOutputBytes: number;
+  private onSkillExecuted?: SkillExecutorOptions['onSkillExecuted'];
 
   constructor(private logger?: Logger, getTimezone?: (userId: string) => string, options?: SkillExecutorOptions) {
     this.getTimezone = getTimezone;
     this.timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.maxOutputBytes = options?.maxOutputBytes ?? MAX_OUTPUT_BYTES;
+    this.onSkillExecuted = options?.onSkillExecuted;
   }
 
   /**
@@ -45,6 +103,33 @@ export class SkillExecutor {
   async execute(
     skill: Skill,
     request: SkillExecutionRequest
+  ): Promise<SkillExecutionResult> {
+    const startedAt = Date.now();
+    let result: SkillExecutionResult;
+    try {
+      result = await this.executeInternal(skill, request);
+    } catch (error) {
+      result = {
+        success: false,
+        error: `Failed to execute skill: ${(error as Error).message}`,
+        exitCode: 1,
+      };
+    }
+
+    try {
+      await this.onSkillExecuted?.(skill.name, result.success, Date.now() - startedAt);
+    } catch (error) {
+      this.logger?.debug(
+        { skill: skill.name, error: (error as Error).message },
+        'Skill telemetry hook failed (non-fatal)',
+      );
+    }
+    return result;
+  }
+
+  private async executeInternal(
+    skill: Skill,
+    request: SkillExecutionRequest,
   ): Promise<SkillExecutionResult> {
     // Verify skill has scripts
     if (!skill.hasScripts || !skill.scriptsDir) {
@@ -209,16 +294,10 @@ export class SkillExecutor {
     }
 
     // Prepare environment variables
-    const env: Record<string, string> = {
-      ...process.env,
-      SKILL_NAME: skill.name,
-      SKILL_DIR: skill.scriptsDir ? join(skill.scriptsDir, '..') : '',
-      SKILL_ARGS: JSON.stringify(request.args || {}),
-      SKILL_WORKSPACE: process.env.AGENT_WORKSPACE || process.cwd(),
-      ...(request.userId ? { SKILL_USER_ID: request.userId } : {}),
-      ...(request.sessionId ? { SKILL_SESSION_ID: request.sessionId } : {}),
-      ...(request.userId && this.getTimezone ? { SKILL_USER_TIMEZONE: this.getTimezone(request.userId) } : {}),
-    };
+    const timezone = request.userId && this.getTimezone
+      ? this.getTimezone(request.userId)
+      : undefined;
+    const env = buildSkillSubprocessEnv(skill, request, timezone);
 
     // Working directory: use request.cwd, or AGENT_WORKSPACE, or process.cwd()
     const cwd = request.cwd || process.env.AGENT_WORKSPACE || process.cwd();
@@ -252,7 +331,7 @@ export class SkillExecutor {
         child.kill('SIGTERM');
         done({
           success: false,
-          output: stdout.join(''),
+          output: redactSensitiveText(stdout.join('')),
           error: `Script timed out after ${this.timeoutMs}ms`,
           exitCode: 124, // Standard timeout exit code
         });
@@ -291,8 +370,8 @@ export class SkillExecutor {
 
         done({
           success,
-          output: stdout.join(''),
-          error: stderr.length > 0 ? stderr.join('') : undefined,
+          output: redactSensitiveText(stdout.join('')),
+          error: stderr.length > 0 ? redactSensitiveText(stderr.join('')) : undefined,
           exitCode,
         });
 

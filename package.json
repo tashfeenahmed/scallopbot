@@ -14,6 +14,8 @@
     "start": "node dist/cli.js start",
     "dev": "tsx watch src/index.ts",
     "test": "vitest",
+    "benchmark:intelligence": "vitest run src/routing/routing-quality.test.ts src/memory/retrieval-quality.test.ts src/memory/semantic-index.test.ts src/proactive/feedback.test.ts src/proactive/message-safety.test.ts src/proactive/scheduler.test.ts src/security/redaction.test.ts src/skills/executor.test.ts src/routing/trace-tap.test.ts src/agent/tool-policy-dispatch.test.ts src/goals/verified-goal.test.ts src/goals/skill.test.ts src/workflow/executor.test.ts src/skills/bundled/mcp/mcp.test.ts src/evolution/fitness.test.ts src/evolution/privacy.test.ts src/evolution/verify.test.ts src/evolution/procedure-skill.test.ts src/evolution/optimizer.e2e.test.ts src/evolution/version-ledger.test.ts src/evolution/units.test.ts src/board/durable-workers.test.ts src/proactive/scheduler-durable-task.test.ts src/e2e/intelligence-scorecard.test.ts src/e2e/intelligence-regression.test.ts --reporter=verbose",
+    "benchmark:memory": "node --expose-gc --import tsx benchmarks/memory-semantic-retrieval.ts",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src/",
     "format": "prettier --write src/"

@@ -343,10 +343,10 @@ export class SkillRegistry {
       if (executableSkills.length > 0) {
         lines.push('');
       }
-      lines.push('# Bash-Based Skills');
+      lines.push('# Procedural Skills (load on demand)');
       lines.push('');
       lines.push(
-        'These skills are invoked via the bash tool. The description shows usage. For advanced options, read the SKILL.md at the path shown.'
+        'These skills provide instructions rather than executable code. Call load_procedure with the exact name before following one when that tool is available; otherwise read its SKILL.md.'
       );
 
       for (const skill of documentationSkills) {

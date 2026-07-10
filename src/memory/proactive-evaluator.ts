@@ -165,11 +165,11 @@ Your working approach:
 - Proactiveness dial: ${input.dial}. ${dialGuidance[input.dial]}
 - User's current mood: ${mood}
 - A nudge is a natural, friendly 1-3 sentence message, as if casually texting a helpful friend.
-- The "message" field is the final text addressed to the user. It must never describe the assistant's reasoning, plan, tools, or a task it needs to perform.
+- The "userFacingMessage" field is the final text addressed to the user. It must never describe the assistant's reasoning, plan, tools, or a task it needs to perform.
 - Return JSON only. Keep all deliberation private.${prefsBlock}
 
 Response format:
-{"items": [{"index": <signal index, 1-based>, "action": "skip" | "nudge", "message": "<message for nudge>", "urgency": "low" | "medium" | "high"}]}
+{"items": [{"index": <signal index, 1-based>, "action": "skip" | "nudge", "userFacingMessage": "<exact recipient-facing text for nudge>", "urgency": "low" | "medium" | "high"}]}
 
 If no signals warrant action, return: {"items": []}`;
 
@@ -232,7 +232,7 @@ Summary: ${s.summary}`);
 interface RawEvalItem {
   index?: number;
   action?: string;
-  message?: string;
+  userFacingMessage?: string;
   urgency?: string;
 }
 
@@ -256,7 +256,11 @@ export function parseEvaluatorResponse(
     if (entry.action === 'skip' || entry.action !== 'nudge') continue;
 
     const signal = signals[index];
-    const message = sanitizeProactiveMessage(typeof entry.message === 'string' ? entry.message : '');
+    // Deliberately reject legacy/free-form `message` output. The dedicated
+    // field is a generation-time contract; regex filtering is defense-in-depth.
+    const message = sanitizeProactiveMessage(
+      typeof entry.userFacingMessage === 'string' ? entry.userFacingMessage : '',
+    );
     if (!message) continue;
     const urgency = typeof entry.urgency === 'string' && validUrgencies.has(entry.urgency)
       ? entry.urgency

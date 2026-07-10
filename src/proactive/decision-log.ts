@@ -78,7 +78,7 @@ function formatDuration(ms: number): string {
   return rem ? `${h}h ${rem}m` : `${h}h`;
 }
 
-function describe(d: ProactiveDecision, now: number): string {
+function describe(d: ProactiveDecision, _now: number): string {
   const base = d.reason ? (REASON_EXPLANATIONS[d.reason] ?? d.reason) : d.outcome;
   let extra = '';
   const detail = d.detail ?? {};

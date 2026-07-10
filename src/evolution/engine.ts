@@ -17,8 +17,13 @@ import type { SkillExecutor } from '../skills/executor.js';
 import { SkillLoader } from '../skills/loader.js';
 import { dirname } from 'path';
 import type { EvolutionConfig } from './config.js';
-import { SkillStore, type SkillFiles } from './skill-store.js';
-import { runEvolutionOptimizer, type OptimizerDb, type OptimizerSummary } from './optimizer.js';
+import { SkillStore, type CuratorSummary, type SkillFiles, type SkillUsageEntry } from './skill-store.js';
+import {
+  runEvolutionOptimizer,
+  type EvolutionSkillTargetState,
+  type OptimizerDb,
+  type OptimizerSummary,
+} from './optimizer.js';
 import { runRollbackWatchdog, type WatchdogDb, type WatchdogSummary } from './watchdog.js';
 
 const OPTIMIZER_INTERVAL_MS = 24 * 60 * 60 * 1000;
@@ -34,10 +39,14 @@ export interface EvolutionEngineDeps {
   };
   /** Resolves the current reflection provider (config.models.evolution). */
   resolveProvider: () => Promise<LLMProvider | undefined>;
+  /** Optional independently-routed judge for holdout fitness evaluation. */
+  resolveEvalProvider?: () => Promise<LLMProvider | undefined>;
   executor: SkillExecutor;
   reloadFromDisk: () => Promise<void>;
   /** Find the on-disk SKILL.md path of a live skill, for patch context. */
   getLiveSkillPath: (name: string) => string | undefined;
+  /** Resolve registry source/executability for collision and patch ownership gates. */
+  getLiveSkillMetadata: (name: string) => Omit<EvolutionSkillTargetState, 'createdBy'>;
   config: EvolutionConfig;
   /** Local skills dir the registry loads from (where promotions land). */
   localSkillsDir?: string;
@@ -64,26 +73,49 @@ export class EvolutionEngine {
     return Object.keys(files).length > 0 ? files : null;
   };
 
+  private resolveSkillTarget = async (name: string): Promise<EvolutionSkillTargetState> => {
+    const registry = this.deps.getLiveSkillMetadata(name);
+    const usage = await this.store.getUsage();
+    const entry = usage[name];
+    return {
+      ...registry,
+      // Archived curator skills are still existing names and must not be
+      // silently recreated while a recoverable copy is retained.
+      exists: registry.exists || !!entry,
+      source: registry.source ?? (entry ? 'local' : undefined),
+      createdBy: entry?.createdBy ?? null,
+    };
+  };
+
   /** Run the reflective optimizer (heavy). Returns null if not due yet (unless forced). */
   async runOptimizer(now: number = Date.now(), force = false): Promise<OptimizerSummary | null> {
     if (!this.deps.config.enabled) return null;
     const last = Number(this.deps.db.getRuntimeKey(OPTIMIZER_TICK_KEY) ?? 0);
     if (!force && now - last < OPTIMIZER_INTERVAL_MS) return null;
-    this.deps.db.setRuntimeKey(OPTIMIZER_TICK_KEY, String(now));
 
     const provider = await this.deps.resolveProvider();
+    const evalProvider = this.deps.config.allowSeparateEvalProvider && this.deps.resolveEvalProvider
+      ? await this.deps.resolveEvalProvider()
+      : provider;
     const summary = await runEvolutionOptimizer({
       db: this.deps.db,
       provider,
+      evalProvider,
       store: this.store,
       loader: this.loader,
       executor: this.deps.executor,
       reloadFromDisk: this.deps.reloadFromDisk,
       config: this.deps.config,
       loadCurrentSkillFiles: this.loadCurrentSkillFiles,
+      resolveSkillTarget: this.resolveSkillTarget,
       logger: this.logger,
       now,
     });
+    // Provider outages must not consume the daily opportunity or the signal
+    // watermark. Retry on the next eligible background tick instead.
+    if (!summary.skipped.includes('no_free_provider')) {
+      this.deps.db.setRuntimeKey(OPTIMIZER_TICK_KEY, String(now));
+    }
     // Housekeeping: drop signals older than the retention window.
     try {
       this.deps.db.pruneEvolutionSignals(now - SIGNAL_RETENTION_MS);
@@ -104,5 +136,38 @@ export class EvolutionEngine {
       logger: this.logger,
       now,
     });
+  }
+
+  /** Usage hook supplied to SkillExecutor; serialized by SkillStore. */
+  async recordSkillUse(name: string, now: number = Date.now()): Promise<void> {
+    await this.store.recordUse(name, now);
+  }
+
+  /** Deterministic, recoverable lifecycle maintenance for agent-created skills. */
+  async runCurator(now: number = Date.now()): Promise<CuratorSummary | null> {
+    if (!this.deps.config.curatorEnabled) return null;
+    const summary = await this.store.curate({
+      now,
+      staleAfterDays: this.deps.config.curatorStaleDays,
+      archiveAfterDays: this.deps.config.curatorArchiveDays,
+      backupKeep: this.deps.config.curatorBackupKeep,
+    });
+    if (summary.archived.length > 0) await this.deps.reloadFromDisk();
+    this.logger?.info({ ...summary }, 'Evolution skill curator run complete');
+    return summary;
+  }
+
+  async getSkillUsage(): Promise<Record<string, SkillUsageEntry>> {
+    return this.store.getUsage();
+  }
+
+  async pinSkill(name: string, pinned = true): Promise<boolean> {
+    return this.store.pin(name, pinned);
+  }
+
+  async restoreSkill(name: string, now: number = Date.now()): Promise<boolean> {
+    const restored = await this.store.restoreArchived(name, now);
+    if (restored) await this.deps.reloadFromDisk();
+    return restored;
   }
 }

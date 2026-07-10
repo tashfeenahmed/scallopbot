@@ -22,19 +22,40 @@ export interface EvolutionConfig {
   maxProposals: number;
   /** Minimum fitness delta a mutation must show to be promoted (non-regression margin). */
   fitnessEpsilon: number;
+  /** Required invariant: autonomous promotion always needs before/after holdout evaluation. */
+  requireFitnessGate: boolean;
+  /** Explicit consent to include redacted conversation excerpts in reflection. */
+  includeSessionContent: boolean;
+  /** Permit holdout evidence to be sent to a provider distinct from evolution. */
+  allowSeparateEvalProvider: boolean;
   /** Post-promotion observations watched before a regressing mutation auto-rolls-back. */
   rollbackWindow: number;
-  /** Opt-in: run an adversarial LLM-judge safety review before promoting (costs one call). */
+  /** Run a fail-closed adversarial LLM safety review before promotion. */
   useLlmJudge: boolean;
+  /** Maintain usage/provenance and archive unused agent-created skills. */
+  curatorEnabled: boolean;
+  /** Days without use before an agent-created skill is marked stale. */
+  curatorStaleDays: number;
+  /** Days without use before an agent-created skill is recoverably archived. */
+  curatorArchiveDays: number;
+  /** Number of pre-curation backups to retain. */
+  curatorBackupKeep: number;
 }
 
 export const DEFAULT_EVOLUTION_CONFIG: EvolutionConfig = {
-  enabled: true,
+  enabled: false,
   minToolCalls: 5,
   reusableScoreBar: 0.8,
   lowQualityThreshold: 0.5,
   maxProposals: 5,
-  fitnessEpsilon: 0.0,
+  fitnessEpsilon: 0.05,
+  requireFitnessGate: true,
+  includeSessionContent: false,
+  allowSeparateEvalProvider: false,
   rollbackWindow: 5,
-  useLlmJudge: false,
+  useLlmJudge: true,
+  curatorEnabled: true,
+  curatorStaleDays: 30,
+  curatorArchiveDays: 90,
+  curatorBackupKeep: 5,
 };

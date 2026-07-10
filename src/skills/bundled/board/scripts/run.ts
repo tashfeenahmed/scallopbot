@@ -29,6 +29,8 @@ interface BoardItemResult {
   completedAt: number;
   subAgentRunId?: string;
   iterationsUsed?: number;
+  costUsd?: number;
+  taskComplete?: boolean;
   notifiedAt?: number | null;
 }
 
@@ -53,6 +55,13 @@ interface ScheduledItemRow {
   result: string | null;
   depends_on: string | null;
   goal_id: string | null;
+  worker_id: string | null;
+  preferred_worker_id: string | null;
+  lease_expires_at: number | null;
+  attempt_count: number | null;
+  max_attempts: number | null;
+  last_error: string | null;
+  handed_off_from: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -74,6 +83,13 @@ interface BoardItem {
   source: string;
   context: string | null;
   sourceMemoryId: string | null;
+  workerId: string | null;
+  preferredWorkerId: string | null;
+  leaseExpiresAt: number | null;
+  attemptCount: number;
+  maxAttempts: number;
+  lastError: string | null;
+  handedOffFrom: string | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -126,6 +142,7 @@ function openDb(): Database.Database {
 
 const USER_TIMEZONE = process.env.SKILL_USER_TIMEZONE || 'UTC';
 const USER_ID = process.env.SKILL_USER_ID || 'default';
+const SESSION_ID = process.env.SKILL_SESSION_ID || null;
 
 function outputResult(result: SkillResult): void {
   console.log(JSON.stringify(result));
@@ -168,6 +185,13 @@ function rowToBoardItem(row: ScheduledItemRow, goalTitle?: string): BoardItem {
     source: row.source,
     context: row.context,
     sourceMemoryId: row.source_memory_id,
+    workerId: row.worker_id ?? null,
+    preferredWorkerId: row.preferred_worker_id ?? null,
+    leaseExpiresAt: row.lease_expires_at ?? null,
+    attemptCount: row.attempt_count ?? 0,
+    maxAttempts: row.max_attempts ?? 3,
+    lastError: row.last_error ?? null,
+    handedOffFrom: row.handed_off_from ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -618,7 +642,7 @@ function addItem(args: BoardArgs): SkillResult {
       created_at, updated_at
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
-    id, USER_ID, null, 'user', kind, type, title, null,
+    id, USER_ID, SESSION_ID, 'user', kind, type, title, null,
     triggerAt,
     recurring ? JSON.stringify(recurring) : null,
     'pending', null, null,
@@ -695,6 +719,9 @@ function updateItem(args: BoardArgs): SkillResult {
 
   if (args.title) {
     sets.push('message = ?'); params.push(args.title);
+    // This title came through a model-invoked tool call. Updating an item that
+    // previously held trusted literal text must revoke that bypass.
+    sets.push("message_provenance = 'generated'");
     changes.push(`title → "${args.title}"`);
   }
   if (args.priority) {
@@ -832,11 +859,18 @@ function showDetail(args: BoardArgs): SkillResult {
   if (item.goalTitle) output += `Goal: ${item.goalTitle}\n`;
   if (item.labels?.length) output += `Labels: ${item.labels.join(', ')}\n`;
   if (item.dependsOn?.length) output += `Depends on: ${item.dependsOn.join(', ')}\n`;
+  if (item.workerId) output += `Worker: ${item.workerId}\n`;
+  if (item.preferredWorkerId) output += `Preferred worker: ${item.preferredWorkerId}\n`;
+  if (item.kind === 'task') output += `Attempts: ${item.attemptCount}/${item.maxAttempts}\n`;
+  if (item.leaseExpiresAt) output += `Lease expires: ${new Date(item.leaseExpiresAt).toISOString()}\n`;
+  if (item.handedOffFrom) output += `Handed off from: ${item.handedOffFrom}\n`;
+  if (item.lastError) output += `Last error: ${item.lastError}\n`;
   if (item.context) output += `Context: ${item.context}\n`;
   if (item.result) {
     output += `\n--- Result ---\n${item.result.response}\n`;
     output += `Completed: ${new Date(item.result.completedAt).toLocaleString('en-US', { timeZone: USER_TIMEZONE })}\n`;
     if (item.result.iterationsUsed) output += `Iterations: ${item.result.iterationsUsed}\n`;
+    if (item.result.costUsd !== undefined) output += `Cost: $${item.result.costUsd.toFixed(6)}\n`;
   }
   output += `\nCreated: ${new Date(item.createdAt).toLocaleString('en-US', { timeZone: USER_TIMEZONE })}`;
   output += ` · Source: ${item.source}`;

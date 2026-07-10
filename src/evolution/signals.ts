@@ -11,6 +11,7 @@ import type { Logger } from 'pino';
 import { scoreResponseHeuristic } from '../agent/critic.js';
 import type { EvolutionConfig } from './config.js';
 import type { EvolutionSignal, EvolutionSignalType } from './types.js';
+import { sanitizeEvolutionEvidence } from './privacy.js';
 
 /** Narrow persistence surface — keeps the recorder testable without the full DB. */
 export interface EvolutionSignalSink {
@@ -48,7 +49,9 @@ export class EvolutionRecorder {
       const at = turn.at ?? Date.now();
       const score =
         turn.criticScore ?? scoreResponseHeuristic(turn.finalResponse, turn.userMessage).score;
-      const preview = turn.userMessage.slice(0, 200);
+      const preview = this.config.includeSessionContent
+        ? sanitizeEvolutionEvidence(turn.userMessage).slice(0, 200)
+        : undefined;
 
       const emit = (
         type: EvolutionSignalType,
@@ -62,7 +65,7 @@ export class EvolutionRecorder {
           criticScore: score,
           toolCallCount: turn.toolCallCount,
           sessionId: turn.sessionId,
-          detail: { preview, ...(fields.detail ?? {}) },
+          detail: { ...(preview ? { preview } : {}), ...(fields.detail ?? {}) },
         });
       };
 

@@ -17,7 +17,7 @@ inputSchema:
       description: "When to trigger (for 'set', one-time only). Examples: '5 minutes', 'at 10am', 'tomorrow at 9am'"
     message:
       type: string
-      description: "The reminder message (for 'set')"
+      description: "The exact user-facing reminder text (for 'set'). Address the user directly; never write internal instructions such as 'ask the user' or 'send a message'."
     recurring:
       type: object
       description: "For recurring reminders (for 'set'). If set, 'time' is ignored."
@@ -79,6 +79,11 @@ The skill accepts JSON arguments via the `SKILL_ARGS` environment variable:
 | `time` | string | For set | When to trigger the reminder |
 | `message` | string | For set | What to remind about |
 | `reminder_id` | string | For cancel | ID of reminder to cancel |
+
+The `message` is delivered verbatim. Write the notification itself, not a plan for another agent:
+
+- BAD: `Ask the user whether the report is finished`
+- GOOD: `Hey, is the report finished?`
 
 ### Time Format Examples
 

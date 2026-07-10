@@ -16,6 +16,9 @@ export interface WsMessage {
   message?: string;
   count?: number;
   action?: string;
+  category?: string;
+  urgency?: 'low' | 'medium' | 'high';
+  source?: 'inner_thoughts' | 'gap_scanner' | 'task_result';
   items?: { type: string; content: string; subject?: string }[];
 }
 

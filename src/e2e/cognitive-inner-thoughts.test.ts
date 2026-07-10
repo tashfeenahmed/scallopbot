@@ -45,7 +45,7 @@ describe('E2E Inner Thoughts & Proactive Feedback', () => {
           items: [{
             index: 1,
             action: 'nudge',
-            message: 'I noticed you were working on async/await patterns earlier. Would you like me to walk through some common pitfalls like error handling in Promise.all?',
+            userFacingMessage: 'I noticed you were working on async/await patterns earlier. Would you like me to walk through some common pitfalls like error handling in Promise.all?',
             urgency: 'medium',
           }],
         }),
@@ -270,6 +270,7 @@ describe('E2E Inner Thoughts & Proactive Feedback', () => {
         [recentItem],
         15 * 60 * 1000,
         now,
+        { userMessage: 'Yes, help me with the async pattern' },
       );
 
       // Assert returned array contains the item ID (engagement detected)
@@ -302,6 +303,7 @@ describe('E2E Inner Thoughts & Proactive Feedback', () => {
         [oldItem],
         15 * 60 * 1000,
         now,
+        { userMessage: 'Yes, help me with the async pattern' },
       );
 
       // Assert the 20-min-old item is NOT in the returned array

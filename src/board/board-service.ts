@@ -5,13 +5,14 @@
  * Called by the board skill script, scheduler, and cognitive layer.
  */
 
-import type { ScallopDatabase, BoardStatus, Priority, BoardItemResult, ScheduledItemKind } from '../memory/db.js';
+import type { ScallopDatabase, BoardStatus, Priority, BoardItemResult, ScheduledItemKind, ScheduledItem } from '../memory/db.js';
 import type {
   BoardView,
   BoardItem,
   BoardItemDetail,
   BoardFilter,
   CreateBoardItemInput,
+  BoardTaskClaim,
 } from './types.js';
 import { computeBoardStatus, toBoardItem, toBoardItemDetail } from './types.js';
 import type { Logger } from 'pino';
@@ -141,9 +142,11 @@ export class BoardService {
       boardStatus,
       priority: input.priority ?? 'medium',
       labels: input.labels ?? null,
-      dependsOn: null,
+      dependsOn: input.dependsOn ?? null,
       goalId: input.goalId ?? null,
       taskConfig: input.taskConfig ?? null,
+      preferredWorkerId: input.preferredWorkerId ?? null,
+      maxAttempts: input.maxAttempts,
     });
 
     this.logger?.debug({ itemId: item.id, boardStatus, kind }, 'Board item created');
@@ -322,6 +325,125 @@ export class BoardService {
   storeResult(itemId: string, result: BoardItemResult): void {
     this.db.updateScheduledItemResult(itemId, result);
     this.logger?.debug({ itemId }, 'Board item result stored');
+  }
+
+  // ─── Durable Task Workers ───────────────────────────────────────────
+
+  /** Atomically lease one dependency-ready task to a named worker. */
+  claimNextTask(
+    userId: string,
+    workerId: string,
+    leaseMs: number = 60_000,
+    now: number = Date.now(),
+  ): BoardTaskClaim | null {
+    const claimed = this.db.claimNextBoardTask(userId, workerId, leaseMs, now);
+    if (!claimed?.leaseToken) return null;
+    this.logger?.info(
+      { itemId: claimed.id, workerId, attempt: claimed.attemptCount, leaseExpiresAt: claimed.leaseExpiresAt },
+      'Board task leased',
+    );
+    return { item: toBoardItem(claimed), leaseToken: claimed.leaseToken };
+  }
+
+  heartbeatTask(
+    itemId: string,
+    leaseToken: string,
+    extendMs: number = 60_000,
+    now: number = Date.now(),
+  ): boolean {
+    return this.db.heartbeatBoardTask(itemId, leaseToken, extendMs, now);
+  }
+
+  storeLeasedResult(
+    itemId: string,
+    leaseToken: string,
+    result: BoardItemResult,
+    now: number = Date.now(),
+  ): boolean {
+    return this.db.storeBoardTaskLeaseResult(itemId, leaseToken, result, now);
+  }
+
+  deferLeasedTask(
+    itemId: string,
+    leaseToken: string,
+    retryAt: number,
+    options: { reason?: string; restoreAttempt?: boolean } = {},
+    now: number = Date.now(),
+  ): boolean {
+    const deferred = this.db.deferBoardTaskLease(itemId, leaseToken, retryAt, options, now);
+    if (deferred) this.logger?.info({ itemId, retryAt, reason: options.reason }, 'Leased board task deferred');
+    return deferred;
+  }
+
+  /** Complete exactly the attempt identified by leaseToken. */
+  completeLeasedTask(
+    itemId: string,
+    leaseToken: string,
+    result: BoardItemResult,
+    now: number = Date.now(),
+  ): BoardItem | null {
+    const before = this.db.getScheduledItem(itemId);
+    if (!before || !this.db.completeBoardTaskLease(itemId, leaseToken, result, now)) return null;
+    this.completeLinkedGoal(before);
+    const completed = this.db.getScheduledItem(itemId);
+    this.logger?.info({ itemId, attempts: completed?.attemptCount }, 'Leased board task completed');
+    return completed ? toBoardItem(completed) : null;
+  }
+
+  failLeasedTask(
+    itemId: string,
+    leaseToken: string,
+    error: string,
+    options: { retryable?: boolean; retryAt?: number } = {},
+    now: number = Date.now(),
+  ): 'retry_scheduled' | 'exhausted' | 'stale_lease' {
+    const outcome = this.db.failBoardTaskLease(itemId, leaseToken, error, options, now);
+    this.logger?.warn({ itemId, outcome, error }, 'Leased board task failed');
+    return outcome;
+  }
+
+  handoffTask(
+    itemId: string,
+    leaseToken: string,
+    targetWorkerId: string,
+    reason?: string,
+    now: number = Date.now(),
+  ): boolean {
+    const handedOff = this.db.handoffBoardTask(itemId, leaseToken, targetWorkerId, reason, now);
+    if (handedOff) {
+      this.logger?.info({ itemId, targetWorkerId, reason }, 'Board task handed off');
+    }
+    return handedOff;
+  }
+
+  reclaimExpiredLeases(now: number = Date.now()): number {
+    const reclaimed = this.db.reclaimExpiredBoardTaskLeases(now);
+    if (reclaimed > 0) this.logger?.warn({ reclaimed }, 'Expired board task leases reclaimed');
+    return reclaimed;
+  }
+
+  /** Keep the existing board→goal completion bridge consistent for leased work. */
+  private completeLinkedGoal(item: ScheduledItem): void {
+    if (!item.goalId) return;
+    try {
+      const goalMem = this.db.getMemory(item.goalId);
+      if (!goalMem) return;
+      const metadata = goalMem.metadata as Record<string, unknown> | null;
+      if (!metadata?.goalType || metadata.status === 'completed') return;
+      const now = Date.now();
+      this.db.updateMemory(item.goalId, {
+        metadata: { ...metadata, status: 'completed', completedAt: now },
+      });
+      const parentId = metadata.parentId as string | undefined;
+      if (parentId) {
+        this.updateGoalProgress(parentId);
+        const parent = this.db.getMemory(parentId);
+        const parentMeta = parent?.metadata as Record<string, unknown> | null;
+        if (parentMeta?.parentId) this.updateGoalProgress(parentMeta.parentId as string);
+      }
+    } catch (error) {
+      this.logger?.warn({ itemId: item.id, error: (error as Error).message }, 'Goal bridge completion failed');
+    }
   }
 
   /**

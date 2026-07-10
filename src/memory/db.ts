@@ -19,6 +19,12 @@ import type {
   ResponseLengthSignal,
 } from './behavioral-signals.js';
 import type { AffectEMAState, SmoothedAffect } from './affect-smoothing.js';
+import {
+  buildSemanticLshProbes,
+  computeSemanticLshBuckets,
+  SEMANTIC_CANDIDATE_LIMIT,
+  SEMANTIC_LSH_VERSION,
+} from './semantic-index.js';
 
 /** Parse a JSON detail blob, returning null on malformed input. */
 function parseDetailJSON(raw: string): Record<string, unknown> | null {
@@ -139,6 +145,24 @@ export interface ScallopMemoryEntry {
 
   createdAt: number;
   updatedAt: number;
+}
+
+/** Filters applied inside the SQLite LSH candidate lookup. */
+export interface SemanticCandidateOptions {
+  userId?: string;
+  category?: MemoryCategory;
+  minProminence?: number;
+  isLatest?: boolean;
+  eventDateRange?: { start: number; end: number };
+  documentDateRange?: { start: number; end: number };
+  maxCandidates: number;
+  /**
+   * IDs already admitted by the caller's light-memory query. Passing this
+   * avoids repeating category/date/prominence joins for every LSH probe.
+   */
+  eligibleIds?: Pick<ReadonlySet<string>, 'has'>;
+  /** Optional tie-break metadata for eligible candidates. */
+  candidatePriorities?: ReadonlyMap<string, { prominence: number; documentDate: number }>;
 }
 
 /**
@@ -275,6 +299,16 @@ export interface CostUsageRow {
 export type ScheduledItemSource = 'user' | 'agent';
 
 /**
+ * Provenance of the text stored in a scheduled item's message field.
+ *
+ * `source` identifies who initiated the item; it does not prove who authored
+ * the stored text. Only trusted ingress that preserves text literally supplied
+ * by the user may set `user_literal`. Model/tool-authored and legacy text must
+ * remain `generated` so it crosses the proactive rendering boundary.
+ */
+export type ScheduledMessageProvenance = 'user_literal' | 'generated';
+
+/**
  * Kind of scheduled item: nudge (pre-written message) or task (sub-agent work)
  */
 export type ScheduledItemKind = 'nudge' | 'task';
@@ -286,6 +320,8 @@ export interface TaskConfig {
   goal: string;
   tools?: string[];
   modelTier?: 'fast' | 'standard' | 'capable';
+  /** Maximum worker attempts before the durable task is archived as failed. */
+  maxAttempts?: number;
 }
 
 /**
@@ -323,6 +359,8 @@ export interface BoardItemResult {
   completedAt: number;
   subAgentRunId?: string;
   iterationsUsed?: number;
+  costUsd?: number;
+  taskComplete?: boolean;
   notifiedAt?: number | null;
 }
 
@@ -351,6 +389,7 @@ export interface ScheduledItem {
 
   // Source distinction
   source: ScheduledItemSource;  // 'user' (explicit) | 'agent' (implicit)
+  messageProvenance: ScheduledMessageProvenance;
 
   // Kind: nudge (pre-written message) or task (sub-agent work)
   kind: ScheduledItemKind;
@@ -385,6 +424,17 @@ export interface ScheduledItem {
   result: BoardItemResult | null;
   dependsOn: string[] | null;        // IDs of items this depends on
   goalId: string | null;             // FK to memories.id (goal/milestone)
+
+  // Durable task-worker ownership. Lease tokens stay internal to workers.
+  workerId: string | null;
+  preferredWorkerId: string | null;
+  leaseToken: string | null;
+  leasedAt: number | null;
+  leaseExpiresAt: number | null;
+  attemptCount: number;
+  maxAttempts: number;
+  lastError: string | null;
+  handedOffFrom: string | null;
 
   createdAt: number;
   updatedAt: number;
@@ -584,6 +634,8 @@ export class ScallopDatabase {
 
         -- Content
         message TEXT NOT NULL,             -- The reminder/trigger message
+        message_provenance TEXT NOT NULL DEFAULT 'generated'
+          CHECK (message_provenance IN ('user_literal', 'generated')),
         context TEXT,                      -- Additional context (for LLM message gen)
 
         -- Scheduling
@@ -632,6 +684,22 @@ export class ScallopDatabase {
       CREATE INDEX IF NOT EXISTS idx_memories_event_date ON memories(event_date);
       CREATE INDEX IF NOT EXISTS idx_memories_is_latest ON memories(is_latest);
       CREATE INDEX IF NOT EXISTS idx_memories_document_date ON memories(document_date);
+
+      -- Dependency-free ANN candidate index. The vector itself remains in the
+      -- memories table; these small integer signatures make semantic lookup
+      -- bounded on low-memory Raspberry Pi deployments.
+      CREATE TABLE IF NOT EXISTS memory_embedding_lsh (
+        memory_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        dimension INTEGER NOT NULL,
+        index_version INTEGER NOT NULL,
+        table_id INTEGER NOT NULL,
+        bucket INTEGER NOT NULL,
+        PRIMARY KEY (memory_id, index_version, table_id),
+        FOREIGN KEY (memory_id) REFERENCES memories(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_memory_lsh_lookup
+        ON memory_embedding_lsh(index_version, dimension, table_id, bucket, user_id);
 
       -- Compound indexes for light queries (getMemoriesByUserLight, getRecentMemoriesLight)
       CREATE INDEX IF NOT EXISTS idx_memories_user_latest_prom ON memories(user_id, is_latest, prominence DESC);
@@ -801,7 +869,7 @@ export class ScallopDatabase {
 
       -- Promoted-mutation ledger: snapshots the prior version of a target before a
       -- mutation goes live, so a regressing change can be auto-rolled-back. status:
-      -- active | rolled_back. snapshot is the prior SKILL.md/scripts (JSON) or null
+      -- active | superseded | rolled_back. snapshot is the prior artifact or null
       -- if the target did not exist before (then rollback = delete).
       CREATE TABLE IF NOT EXISTS evolution_versions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -831,6 +899,10 @@ export class ScallopDatabase {
         ON prompt_overrides(fragment_id, active);
     `);
 
+    // Existing public databases may predate the one-active-version invariant.
+    // Normalize duplicates before creating the partial unique index.
+    this.migrateNormalizeEvolutionVersions();
+
     // Migration: Add source column to existing databases
     this.migrateAddSourceColumn();
 
@@ -853,8 +925,14 @@ export class ScallopDatabase {
     // Migration: Add kind and task_config columns to scheduled_items
     this.migrateAddKindColumn();
 
+    // Migration: Separate item origin from authorship of its outbound text.
+    this.migrateAddScheduledMessageProvenance();
+
     // Migration: Add board (kanban) columns to scheduled_items
     this.migrateAddBoardColumns();
+
+    // Migration: Add durable task lease/retry/handoff columns
+    this.migrateAddBoardExecutionColumns();
 
     // Migration: Backfill board_status for legacy items where it's NULL
     this.migrateBackfillBoardStatus();
@@ -864,6 +942,132 @@ export class ScallopDatabase {
 
     // Migration: Add model/token-limit diagnostics to llm_traces
     this.migrateAddLlmTraceMetadataColumns();
+
+    // Migration: Index embeddings written before the bounded semantic index
+    // existed. This is a one-time startup cost; normal writes stay indexed.
+    this.migrateBackfillEmbeddingLsh();
+  }
+
+  private migrateNormalizeEvolutionVersions(): void {
+    const migrate = this.db.transaction(() => {
+      this.db.prepare(`
+        UPDATE evolution_versions AS current
+        SET status = 'superseded'
+        WHERE current.status = 'active'
+          AND EXISTS (
+            SELECT 1 FROM evolution_versions AS newer
+            WHERE newer.target = current.target AND newer.status = 'active'
+              AND (newer.at > current.at OR (newer.at = current.at AND newer.id > current.id))
+          )
+      `).run();
+      this.db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_evolution_versions_one_active_target
+        ON evolution_versions(target) WHERE status = 'active'
+      `);
+    });
+    migrate();
+  }
+
+  /** Backfill only missing/current-version signatures in small transactions. */
+  private migrateBackfillEmbeddingLsh(): void {
+    try {
+      this.db.prepare('DELETE FROM memory_embedding_lsh WHERE index_version != ?')
+        .run(SEMANTIC_LSH_VERSION);
+
+      const findMissing = this.db.prepare(`
+        SELECT m.id, m.user_id, m.embedding
+        FROM memories m
+        WHERE m.embedding IS NOT NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM memory_embedding_lsh l
+            WHERE l.memory_id = m.id AND l.index_version = ?
+          )
+        LIMIT 250
+      `);
+      const insert = this.db.prepare(`
+        INSERT OR REPLACE INTO memory_embedding_lsh
+          (memory_id, user_id, dimension, index_version, table_id, bucket)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `);
+      const indexBatch = this.db.transaction((rows: Array<{
+        id: string;
+        user_id: string;
+        embedding: string;
+      }>) => {
+        for (const row of rows) {
+          let embedding: number[];
+          try {
+            const parsed = JSON.parse(row.embedding) as unknown;
+            if (!Array.isArray(parsed) || !parsed.every((value) => typeof value === 'number')) {
+              throw new Error('embedding is not a numeric array');
+            }
+            embedding = parsed;
+          } catch {
+            // A sentinel isolates a malformed legacy row instead of allowing it
+            // to block every valid memory later in the one-time backfill.
+            insert.run(row.id, row.user_id, 0, SEMANTIC_LSH_VERSION, -1, 0);
+            continue;
+          }
+          const signatures = computeSemanticLshBuckets(embedding);
+          if (signatures.length === 0) {
+            // Sentinel prevents an empty-but-valid JSON vector from being
+            // rediscovered forever by the migration loop.
+            insert.run(row.id, row.user_id, 0, SEMANTIC_LSH_VERSION, -1, 0);
+          }
+          for (const signature of signatures) {
+            insert.run(
+              row.id,
+              row.user_id,
+              embedding.length,
+              SEMANTIC_LSH_VERSION,
+              signature.tableId,
+              signature.bucket,
+            );
+          }
+        }
+      });
+
+      while (true) {
+        const rows = findMissing.all(SEMANTIC_LSH_VERSION) as Array<{
+          id: string;
+          user_id: string;
+          embedding: string;
+        }>;
+        if (rows.length === 0) break;
+        indexBatch(rows);
+      }
+    } catch (error) {
+      // Retrieval still has lexical candidates if index migration fails.
+      if (error instanceof Error) {
+        console.warn(`[migration] migrateBackfillEmbeddingLsh: ${error.message}`);
+      }
+    }
+  }
+
+  private replaceEmbeddingLsh(memoryId: string, userId: string, embedding: number[]): void {
+    const replace = this.db.transaction(() => {
+      this.db.prepare('DELETE FROM memory_embedding_lsh WHERE memory_id = ?').run(memoryId);
+      const stmt = this.db.prepare(`
+        INSERT INTO memory_embedding_lsh
+          (memory_id, user_id, dimension, index_version, table_id, bucket)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `);
+      const signatures = computeSemanticLshBuckets(embedding);
+      if (signatures.length === 0) {
+        stmt.run(memoryId, userId, 0, SEMANTIC_LSH_VERSION, -1, 0);
+      }
+      for (const signature of signatures) {
+        stmt.run(
+          memoryId,
+          userId,
+          embedding.length,
+          SEMANTIC_LSH_VERSION,
+          signature.tableId,
+          signature.bucket,
+        );
+      }
+    });
+    replace();
   }
 
   /**
@@ -881,7 +1085,6 @@ export class ScallopDatabase {
     } catch (error) {
       // Column might already exist or table might not exist yet — log for visibility
       if (error instanceof Error && !error.message.includes('duplicate column')) {
-        // eslint-disable-next-line no-console
         console.warn(`[migration] migrateAddSourceColumn: ${error.message}`);
       }
     }
@@ -900,7 +1103,6 @@ export class ScallopDatabase {
       }
     } catch (error) {
       if (error instanceof Error && !error.message.includes('duplicate column')) {
-        // eslint-disable-next-line no-console
         console.warn(`[migration] migrateAddTimezoneColumn: ${error.message}`);
       }
     }
@@ -917,6 +1119,10 @@ export class ScallopDatabase {
         "UPDATE memories SET user_id = 'default' WHERE user_id != 'default'"
       ).run();
       if (result.changes > 0) {
+        // Keep denormalized LSH lookup keys aligned with their source rows.
+        this.db.prepare(
+          "UPDATE memory_embedding_lsh SET user_id = 'default' WHERE user_id != 'default'"
+        ).run();
         // Also consolidate user_profiles
         this.db.prepare(
           "DELETE FROM user_profiles WHERE user_id != 'default' AND key IN (SELECT key FROM user_profiles WHERE user_id = 'default')"
@@ -927,7 +1133,6 @@ export class ScallopDatabase {
       }
     } catch (error) {
       if (error instanceof Error) {
-        // eslint-disable-next-line no-console
         console.warn(`[migration] migrateConsolidateMemoryUserIds: ${error.message}`);
       }
     }
@@ -945,7 +1150,6 @@ export class ScallopDatabase {
       ).run();
     } catch (error) {
       if (error instanceof Error) {
-        // eslint-disable-next-line no-console
         console.warn(`[migration] migrateConsolidateSessionSummaryUserIds: ${error.message}`);
       }
     }
@@ -963,7 +1167,6 @@ export class ScallopDatabase {
       ).run();
     } catch (error) {
       if (error instanceof Error) {
-        // eslint-disable-next-line no-console
         console.warn(`[migration] migrateConsolidateScheduledItemUserIds: ${error.message}`);
       }
     }
@@ -988,7 +1191,6 @@ export class ScallopDatabase {
       }
     } catch (error) {
       if (error instanceof Error && !error.message.includes('duplicate column')) {
-        // eslint-disable-next-line no-console
         console.warn(`[migration] migrateAddSourceMemoryColumns: ${error.message}`);
       }
     }
@@ -1049,7 +1251,6 @@ export class ScallopDatabase {
         ).get() as { value: string } | undefined;
         if (tzRow && !tzRow.value.includes('/') && tzRow.value !== 'UTC' && tzRow.value !== 'GMT') {
           this.db.prepare("DELETE FROM user_profiles WHERE user_id = 'default' AND key = 'timezone'").run();
-          // eslint-disable-next-line no-console
           console.log(`[memory-cleanup] Removed invalid timezone: "${tzRow.value}"`);
         }
 
@@ -1059,7 +1260,6 @@ export class ScallopDatabase {
         ).get() as { value: string } | undefined;
         if (moodRow && /\b(assist|help|check|remind|offer|execute|search|follow-up)\b/i.test(moodRow.value)) {
           this.db.prepare("DELETE FROM user_profiles WHERE user_id = 'default' AND key = 'mood'").run();
-          // eslint-disable-next-line no-console
           console.log(`[memory-cleanup] Removed invalid mood: "${moodRow.value}"`);
         }
 
@@ -1072,7 +1272,6 @@ export class ScallopDatabase {
           if (items.length > 5) {
             const trimmed = items.slice(0, 5).join(', ');
             this.db.prepare("UPDATE user_profiles SET value = ? WHERE user_id = 'default' AND key = 'focus'").run(trimmed);
-            // eslint-disable-next-line no-console
             console.log(`[memory-cleanup] Trimmed focus from ${items.length} to 5 items`);
           }
         }
@@ -1083,13 +1282,11 @@ export class ScallopDatabase {
       const { skillResult, assistantResult, proactiveResult, questionResult, longResult } = migrate();
       const total = skillResult.changes + assistantResult.changes + proactiveResult.changes + questionResult.changes + longResult.changes;
       if (total > 0) {
-        // eslint-disable-next-line no-console
         console.log(`[memory-cleanup] Archived ${total} polluted entries: ${skillResult.changes} skill outputs, ${assistantResult.changes} long assistant responses, ${proactiveResult.changes} proactive messages, ${questionResult.changes} questions, ${longResult.changes} oversized entries`);
       }
     } catch (error) {
       // Migration failure is non-fatal but log for debugging
       if (error instanceof Error) {
-        // eslint-disable-next-line no-console
         console.warn(`[migration] migrateCleanPollutedMemories: ${error.message}`);
       }
     }
@@ -1112,8 +1309,29 @@ export class ScallopDatabase {
       }
     } catch (error) {
       if (error instanceof Error) {
-        // eslint-disable-next-line no-console
         console.warn(`[migration] migrateAddKindColumn: ${error.message}`);
+      }
+    }
+  }
+
+  /**
+   * Add fail-closed message authorship provenance. Existing rows cannot prove
+   * they contain text literally supplied by a user, so the default/backfill is
+   * deliberately `generated`.
+   */
+  private migrateAddScheduledMessageProvenance(): void {
+    try {
+      const tableInfo = this.db.prepare("PRAGMA table_info(scheduled_items)").all() as Array<{ name: string }>;
+      if (!tableInfo.some(column => column.name === 'message_provenance')) {
+        this.db.exec(`
+          ALTER TABLE scheduled_items
+          ADD COLUMN message_provenance TEXT NOT NULL DEFAULT 'generated'
+          CHECK (message_provenance IN ('user_literal', 'generated'))
+        `);
+      }
+    } catch (error) {
+      if (error instanceof Error) {
+        console.warn(`[migration] migrateAddScheduledMessageProvenance: ${error.message}`);
       }
     }
   }
@@ -1142,8 +1360,37 @@ export class ScallopDatabase {
       }
     } catch (error) {
       if (error instanceof Error) {
-        // eslint-disable-next-line no-console
         console.warn(`[migration] migrateAddBoardColumns: ${error.message}`);
+      }
+    }
+  }
+
+  /** Add durable worker ownership, lease, retry, and handoff fields. */
+  private migrateAddBoardExecutionColumns(): void {
+    try {
+      const tableInfo = this.db.prepare("PRAGMA table_info(scheduled_items)").all() as Array<{ name: string }>;
+      const existing = new Set(tableInfo.map((column) => column.name));
+      const columns: Array<[string, string]> = [
+        ['worker_id', 'TEXT DEFAULT NULL'],
+        ['preferred_worker_id', 'TEXT DEFAULT NULL'],
+        ['lease_token', 'TEXT DEFAULT NULL'],
+        ['leased_at', 'INTEGER DEFAULT NULL'],
+        ['lease_expires_at', 'INTEGER DEFAULT NULL'],
+        ['attempt_count', 'INTEGER NOT NULL DEFAULT 0'],
+        ['max_attempts', 'INTEGER NOT NULL DEFAULT 3'],
+        ['last_error', 'TEXT DEFAULT NULL'],
+        ['handed_off_from', 'TEXT DEFAULT NULL'],
+      ];
+      for (const [name, definition] of columns) {
+        if (!existing.has(name)) {
+          this.db.exec(`ALTER TABLE scheduled_items ADD COLUMN ${name} ${definition}`);
+        }
+      }
+      this.db.exec('CREATE INDEX IF NOT EXISTS idx_scheduled_task_lease ON scheduled_items(kind, status, lease_expires_at)');
+      this.db.exec('CREATE INDEX IF NOT EXISTS idx_scheduled_preferred_worker ON scheduled_items(preferred_worker_id)');
+    } catch (error) {
+      if (error instanceof Error) {
+        console.warn(`[migration] migrateAddBoardExecutionColumns: ${error.message}`);
       }
     }
   }
@@ -1168,7 +1415,6 @@ export class ScallopDatabase {
       `);
     } catch (error) {
       if (error instanceof Error) {
-        // eslint-disable-next-line no-console
         console.warn(`[migration] migrateBackfillBoardStatus: ${error.message}`);
       }
     }
@@ -1186,7 +1432,6 @@ export class ScallopDatabase {
       `);
     } catch (error) {
       if (error instanceof Error) {
-        // eslint-disable-next-line no-console
         console.warn(`[migration] migrateCreateTranscriptFTS: ${error.message}`);
       }
     }
@@ -1262,6 +1507,10 @@ export class ScallopDatabase {
       now
     );
 
+    if (memory.embedding) {
+      this.replaceEmbeddingLsh(id, memory.userId, memory.embedding);
+    }
+
     return { ...memory, id, createdAt: now, updatedAt: now };
   }
 
@@ -1319,6 +1568,10 @@ export class ScallopDatabase {
       id
     );
 
+    if (updates.embedding) {
+      this.replaceEmbeddingLsh(id, memory.userId, updates.embedding);
+    }
+
     return true;
   }
 
@@ -1326,6 +1579,7 @@ export class ScallopDatabase {
    * Delete a memory
    */
   deleteMemory(id: string): boolean {
+    this.db.prepare('DELETE FROM memory_embedding_lsh WHERE memory_id = ?').run(id);
     const stmt = this.db.prepare('DELETE FROM memories WHERE id = ?');
     const result = stmt.run(id);
     return result.changes > 0;
@@ -1596,19 +1850,156 @@ export class ScallopDatabase {
   getEmbeddingsByIds(ids: string[]): Map<string, number[]> {
     if (ids.length === 0) return new Map();
 
-    const placeholders = ids.map(() => '?').join(',');
-    const stmt = this.db.prepare(
-      `SELECT id, embedding FROM memories WHERE id IN (${placeholders})`
-    );
-    const rows = stmt.all(...ids) as Array<{ id: string; embedding: string | null }>;
-
     const result = new Map<string, number[]>();
-    for (const row of rows) {
-      if (row.embedding) {
-        result.set(row.id, JSON.parse(row.embedding));
+    // Stay below SQLite's variable limit. Hybrid retrieval may scan the full
+    // filtered corpus to form an independent semantic top-K, which can exceed
+    // the old single-query limit on established installations.
+    const SQLITE_ID_BATCH_SIZE = 500;
+    for (let offset = 0; offset < ids.length; offset += SQLITE_ID_BATCH_SIZE) {
+      const batch = ids.slice(offset, offset + SQLITE_ID_BATCH_SIZE);
+      const placeholders = batch.map(() => '?').join(',');
+      const stmt = this.db.prepare(
+        `SELECT id, embedding FROM memories WHERE id IN (${placeholders})`
+      );
+      const rows = stmt.all(...batch) as Array<{ id: string; embedding: string | null }>;
+
+      for (const row of rows) {
+        if (row.embedding) {
+          try {
+            const parsed = JSON.parse(row.embedding) as unknown;
+            if (Array.isArray(parsed) && parsed.every(value => typeof value === 'number' && Number.isFinite(value))) {
+              result.set(row.id, parsed);
+            }
+          } catch {
+            // Isolate a malformed legacy row instead of failing the whole
+            // lexical/semantic union query.
+          }
+        }
       }
     }
     return result;
+  }
+
+  /**
+   * Return a bounded, indexed set of approximate semantic neighbours.
+   * Results with more LSH collisions rank first; exact-bucket collisions have
+   * twice the weight of the bounded Hamming-neighbour probes.
+   */
+  getSemanticCandidateIds(
+    queryEmbedding: number[],
+    options: SemanticCandidateOptions,
+  ): string[] {
+    if (
+      queryEmbedding.length === 0 ||
+      !Number.isFinite(options.maxCandidates) ||
+      options.maxCandidates <= 0
+    ) return [];
+
+    const probes = buildSemanticLshProbes(queryEmbedding);
+
+    const requestedLimit = Math.min(
+      SEMANTIC_CANDIDATE_LIMIT,
+      Math.max(1, Math.floor(options.maxCandidates)),
+    );
+
+    // ScallopMemoryStore already has a filtered light corpus for BM25. Reuse it
+    // when supplied. Direct database callers get the same behavior through one
+    // light metadata query, rather than repeating a memories-table join for all
+    // 48 LSH probes (the source of the prior 10k-corpus latency regression).
+    let eligibleIds = options.eligibleIds;
+    let priorities = options.candidatePriorities;
+    if (!eligibleIds) {
+      let eligibleSql = 'SELECT id, prominence, document_date FROM memories WHERE 1 = 1';
+      const eligibleParams: unknown[] = [];
+      if (options.userId) {
+        eligibleSql += ' AND user_id = ?';
+        eligibleParams.push(options.userId);
+      }
+      if (options.category) {
+        eligibleSql += ' AND category = ?';
+        eligibleParams.push(options.category);
+      }
+      if (options.minProminence !== undefined) {
+        eligibleSql += ' AND prominence >= ?';
+        eligibleParams.push(options.minProminence);
+      }
+      if (options.isLatest !== undefined) {
+        eligibleSql += ' AND is_latest = ?';
+        eligibleParams.push(options.isLatest ? 1 : 0);
+      }
+      if (options.eventDateRange) {
+        eligibleSql += ' AND event_date BETWEEN ? AND ?';
+        eligibleParams.push(options.eventDateRange.start, options.eventDateRange.end);
+      }
+      if (options.documentDateRange) {
+        eligibleSql += ' AND document_date BETWEEN ? AND ?';
+        eligibleParams.push(options.documentDateRange.start, options.documentDateRange.end);
+      }
+      const eligibleRows = this.db.prepare(eligibleSql).all(...eligibleParams) as Array<{
+        id: string;
+        prominence: number;
+        document_date: number;
+      }>;
+      eligibleIds = new Set(eligibleRows.map((row) => row.id));
+      priorities = new Map(eligibleRows.map((row) => [row.id, {
+        prominence: row.prominence,
+        documentDate: row.document_date,
+      }]));
+    }
+
+    // UNION ALL keeps each probe as an explicit integer-index range scan while
+    // crossing the JS/native boundary once. A VALUES CTE looks tidier but SQLite
+    // materializes a slow nested join for this workload.
+    const perProbeLimit = Math.max(64, requestedLimit);
+    const userFilter = options.userId ? ' AND user_id = ?' : '';
+    const probeSql = `
+      SELECT memory_id, ? AS weight
+      FROM memory_embedding_lsh INDEXED BY idx_memory_lsh_lookup
+      WHERE index_version = ? AND dimension = ? AND table_id = ? AND bucket = ?
+        ${userFilter}
+      LIMIT ?
+    `;
+    const lookup = this.db.prepare(
+      probes.map(() => `SELECT * FROM (${probeSql})`).join(' UNION ALL '),
+    );
+    const ranked = new Map<string, {
+      score: number;
+      prominence: number;
+      documentDate: number;
+    }>();
+
+    const rows = lookup.all(
+      ...probes.flatMap((probe) => [
+        probe.weight,
+        SEMANTIC_LSH_VERSION,
+        queryEmbedding.length,
+        probe.tableId,
+        probe.bucket,
+        ...(options.userId ? [options.userId] : []),
+        perProbeLimit,
+      ]),
+    ) as Array<{ memory_id: string; weight: number }>;
+    for (const row of rows) {
+      if (!eligibleIds.has(row.memory_id)) continue;
+      const existing = ranked.get(row.memory_id);
+      if (existing) {
+        existing.score += row.weight;
+      } else {
+        ranked.set(row.memory_id, {
+          score: row.weight,
+          prominence: priorities?.get(row.memory_id)?.prominence ?? 0,
+          documentDate: priorities?.get(row.memory_id)?.documentDate ?? 0,
+        });
+      }
+    }
+
+    return [...ranked]
+      .sort(([, a], [, b]) =>
+        b.score - a.score ||
+        b.prominence - a.prominence ||
+        b.documentDate - a.documentDate)
+      .slice(0, requestedLimit)
+      .map(([id]) => id);
   }
 
   /**
@@ -2286,10 +2677,14 @@ export class ScallopDatabase {
    * Add a scheduled item (trigger or reminder)
    * Status defaults to 'pending' if not specified
    */
-  addScheduledItem(item: Omit<ScheduledItem, 'id' | 'status' | 'createdAt' | 'updatedAt' | 'firedAt' | 'kind' | 'taskConfig' | 'boardStatus' | 'priority' | 'labels' | 'result' | 'dependsOn' | 'goalId'> & { status?: ScheduledItemStatus; kind?: ScheduledItemKind; taskConfig?: TaskConfig | null; boardStatus?: BoardStatus | null; priority?: Priority; labels?: string[] | null; dependsOn?: string[] | null; goalId?: string | null }): ScheduledItem {
+  addScheduledItem(item: Omit<ScheduledItem, 'id' | 'status' | 'createdAt' | 'updatedAt' | 'firedAt' | 'kind' | 'taskConfig' | 'boardStatus' | 'priority' | 'labels' | 'result' | 'dependsOn' | 'goalId' | 'workerId' | 'preferredWorkerId' | 'leaseToken' | 'leasedAt' | 'leaseExpiresAt' | 'attemptCount' | 'maxAttempts' | 'lastError' | 'handedOffFrom' | 'messageProvenance'> & { status?: ScheduledItemStatus; kind?: ScheduledItemKind; taskConfig?: TaskConfig | null; boardStatus?: BoardStatus | null; priority?: Priority; labels?: string[] | null; dependsOn?: string[] | null; goalId?: string | null; preferredWorkerId?: string | null; maxAttempts?: number; messageProvenance?: ScheduledMessageProvenance }): ScheduledItem {
     const id = nanoid();
     const now = Date.now();
     const status = item.status ?? 'pending';
+    const messageProvenance: ScheduledMessageProvenance = item.source === 'user'
+      && item.messageProvenance === 'user_literal'
+      ? 'user_literal'
+      : 'generated';
 
     // Pre-creation dedup gate (agent-source only). Prevents the cognitive
     // layer from inserting near-duplicate items in a single planning burst —
@@ -2304,11 +2699,13 @@ export class ScallopDatabase {
 
     const stmt = this.db.prepare(`
       INSERT INTO scheduled_items (
-        id, user_id, session_id, source, kind, type, message, context,
+        id, user_id, session_id, source, kind, type, message, message_provenance, context,
         trigger_at, recurring, status, source_memory_id, fired_at,
         task_config, board_status, priority, labels, depends_on, goal_id,
+        worker_id, preferred_worker_id, lease_token, leased_at, lease_expires_at,
+        attempt_count, max_attempts, last_error, handed_off_from,
         created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     stmt.run(
@@ -2319,6 +2716,7 @@ export class ScallopDatabase {
       item.kind ?? 'nudge',
       item.type,
       item.message,
+      messageProvenance,
       item.context ?? null,
       item.triggerAt,
       item.recurring ? JSON.stringify(item.recurring) : null,
@@ -2331,6 +2729,15 @@ export class ScallopDatabase {
       item.labels ? JSON.stringify(item.labels) : null,
       item.dependsOn ? JSON.stringify(item.dependsOn) : null,
       item.goalId ?? null,
+      null,
+      item.preferredWorkerId ?? null,
+      null,
+      null,
+      null,
+      0,
+      Math.max(1, Math.floor(item.maxAttempts ?? item.taskConfig?.maxAttempts ?? 3)),
+      null,
+      null,
       now,
       now
     );
@@ -2338,6 +2745,7 @@ export class ScallopDatabase {
     return {
       ...item,
       id,
+      messageProvenance,
       kind: item.kind ?? 'nudge',
       taskConfig: item.taskConfig ?? null,
       boardStatus: item.boardStatus ?? (item.triggerAt > 0 ? 'scheduled' : 'inbox'),
@@ -2346,6 +2754,15 @@ export class ScallopDatabase {
       result: null,
       dependsOn: item.dependsOn ?? null,
       goalId: item.goalId ?? null,
+      workerId: null,
+      preferredWorkerId: item.preferredWorkerId ?? null,
+      leaseToken: null,
+      leasedAt: null,
+      leaseExpiresAt: null,
+      attemptCount: 0,
+      maxAttempts: Math.max(1, Math.floor(item.maxAttempts ?? item.taskConfig?.maxAttempts ?? 3)),
+      lastError: null,
+      handedOffFrom: null,
       status,
       firedAt: null,
       createdAt: now,
@@ -2379,10 +2796,11 @@ export class ScallopDatabase {
    * Atomically claim due items by selecting them AND marking as 'processing'.
    * Uses a transaction to prevent duplicate processing when scheduler ticks overlap.
    */
-  claimDueScheduledItems(now: number = Date.now()): ScheduledItem[] {
+  claimDueScheduledItems(now: number = Date.now(), kind?: ScheduledItemKind): ScheduledItem[] {
     const selectStmt = this.db.prepare(`
       SELECT * FROM scheduled_items
       WHERE status = 'pending' AND trigger_at <= ?
+        AND (? IS NULL OR kind = ?)
       ORDER BY trigger_at ASC
     `);
     const updateStmt = this.db.prepare(`
@@ -2395,7 +2813,7 @@ export class ScallopDatabase {
     // IMMEDIATE acquires a reserved lock upfront, preventing concurrent
     // transactions from interleaving between our SELECT and UPDATE.
     const claimTransaction = this.db.transaction(() => {
-      const rows = selectStmt.all(now) as Record<string, unknown>[];
+      const rows = selectStmt.all(now, kind ?? null, kind ?? null) as Record<string, unknown>[];
       const claimed: ScheduledItem[] = [];
 
       for (const row of rows) {
@@ -2426,6 +2844,265 @@ export class ScallopDatabase {
     `);
     const result = stmt.run(now, id);
     return result.changes > 0;
+  }
+
+  /**
+   * Atomically lease the next dependency-ready board task to a worker.
+   * A lease, unlike status='processing' alone, can be safely reclaimed after
+   * worker failure without allowing two workers to complete the same attempt.
+   */
+  claimNextBoardTask(
+    userId: string,
+    workerId: string,
+    leaseMs: number,
+    now: number = Date.now(),
+  ): ScheduledItem | null {
+    const duration = Math.max(1_000, Math.floor(leaseMs));
+    const transaction = this.db.transaction((): ScheduledItem | null => {
+      // Make expired, retryable leases eligible before selecting work.
+      this.db.prepare(`
+        UPDATE scheduled_items
+        SET status = 'pending', board_status = 'waiting', worker_id = NULL,
+            lease_token = NULL, leased_at = NULL, lease_expires_at = NULL,
+            last_error = COALESCE(last_error, 'Worker lease expired'), updated_at = ?
+        WHERE kind = 'task' AND status = 'processing'
+          AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?
+          AND (result IS NOT NULL OR attempt_count < max_attempts)
+      `).run(now, now);
+      this.db.prepare(`
+        UPDATE scheduled_items
+        SET status = 'expired', board_status = 'archived', worker_id = NULL,
+            lease_token = NULL, leased_at = NULL, lease_expires_at = NULL,
+            last_error = COALESCE(last_error, 'Worker lease expired; retry budget exhausted'), updated_at = ?
+        WHERE kind = 'task' AND status = 'processing'
+          AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?
+          AND result IS NULL AND attempt_count >= max_attempts
+      `).run(now, now);
+
+      const rows = this.db.prepare(`
+        SELECT * FROM scheduled_items
+        WHERE user_id = ? AND kind = 'task' AND status = 'pending'
+          AND board_status IN ('inbox', 'backlog', 'scheduled', 'waiting')
+          AND (trigger_at = 0 OR trigger_at <= ?)
+          AND (result IS NOT NULL OR attempt_count < max_attempts)
+          AND lease_token IS NULL
+          AND (preferred_worker_id IS NULL OR preferred_worker_id = ?)
+        ORDER BY
+          CASE priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 END,
+          created_at ASC
+      `).all(userId, now, workerId) as Record<string, unknown>[];
+
+      for (const row of rows) {
+        const candidate = this.rowToScheduledItem(row);
+        const dependenciesReady = (candidate.dependsOn ?? []).every((dependencyId) => {
+          const dependency = this.getScheduledItem(dependencyId);
+          return dependency?.boardStatus === 'done';
+        });
+        if (!dependenciesReady) continue;
+
+        const leaseToken = nanoid();
+        const claimed = this.db.prepare(`
+          UPDATE scheduled_items
+          SET status = 'processing', board_status = 'in_progress', worker_id = ?,
+              lease_token = ?, leased_at = ?, lease_expires_at = ?,
+              attempt_count = CASE WHEN result IS NULL THEN attempt_count + 1 ELSE attempt_count END,
+              last_error = NULL, updated_at = ?
+          WHERE id = ? AND status = 'pending' AND lease_token IS NULL
+        `).run(workerId, leaseToken, now, now + duration, now, candidate.id);
+        if (claimed.changes > 0) {
+          return this.getScheduledItem(candidate.id);
+        }
+      }
+      return null;
+    });
+    return transaction.immediate();
+  }
+
+  /** Extend a live lease. Stale or incorrect tokens cannot revive work. */
+  heartbeatBoardTask(
+    itemId: string,
+    leaseToken: string,
+    extendMs: number,
+    now: number = Date.now(),
+  ): boolean {
+    const expiresAt = now + Math.max(1_000, Math.floor(extendMs));
+    const result = this.db.prepare(`
+      UPDATE scheduled_items
+      SET lease_expires_at = ?, updated_at = ?
+      WHERE id = ? AND status = 'processing' AND lease_token = ?
+        AND lease_expires_at > ?
+    `).run(expiresAt, now, itemId, leaseToken, now);
+    return result.changes > 0;
+  }
+
+  /** Persist an intermediate result only while this worker still owns the lease. */
+  storeBoardTaskLeaseResult(
+    itemId: string,
+    leaseToken: string,
+    result: BoardItemResult,
+    now: number = Date.now(),
+  ): boolean {
+    const updated = this.db.prepare(`
+      UPDATE scheduled_items
+      SET result = ?, updated_at = ?
+      WHERE id = ? AND status = 'processing' AND lease_token = ?
+        AND lease_expires_at > ?
+    `).run(JSON.stringify(result), now, itemId, leaseToken, now);
+    return updated.changes > 0;
+  }
+
+  /**
+   * Release a live lease back to waiting without discarding a computed result.
+   * Administrative deferrals (for example quiet hours) can restore the attempt
+   * because no worker execution actually occurred.
+   */
+  deferBoardTaskLease(
+    itemId: string,
+    leaseToken: string,
+    retryAt: number,
+    options: { reason?: string; restoreAttempt?: boolean } = {},
+    now: number = Date.now(),
+  ): boolean {
+    const updated = this.db.prepare(`
+      UPDATE scheduled_items
+      SET status = 'pending', board_status = 'waiting', trigger_at = ?,
+          worker_id = NULL, lease_token = NULL, leased_at = NULL,
+          lease_expires_at = NULL, last_error = ?,
+          attempt_count = CASE WHEN ? = 1 THEN MAX(0, attempt_count - 1) ELSE attempt_count END,
+          updated_at = ?
+      WHERE id = ? AND status = 'processing' AND lease_token = ?
+        AND lease_expires_at > ?
+    `).run(
+      Math.max(now, retryAt),
+      options.reason ?? null,
+      options.restoreAttempt ? 1 : 0,
+      now,
+      itemId,
+      leaseToken,
+      now,
+    );
+    return updated.changes > 0;
+  }
+
+  /** Complete a leased task exactly once. */
+  completeBoardTaskLease(
+    itemId: string,
+    leaseToken: string,
+    result: BoardItemResult,
+    now: number = Date.now(),
+  ): boolean {
+    const updated = this.db.prepare(`
+      UPDATE scheduled_items
+      SET status = 'fired', board_status = 'done', result = ?, fired_at = ?,
+          worker_id = NULL, preferred_worker_id = NULL, lease_token = NULL,
+          leased_at = NULL, lease_expires_at = NULL, updated_at = ?
+      WHERE id = ? AND status = 'processing' AND lease_token = ?
+        AND lease_expires_at > ?
+    `).run(JSON.stringify(result), now, now, itemId, leaseToken, now);
+    return updated.changes > 0;
+  }
+
+  /**
+   * Fail a leased attempt. Retryable tasks return to waiting with backoff;
+   * exhausted or non-retryable tasks are archived with their error retained.
+   */
+  failBoardTaskLease(
+    itemId: string,
+    leaseToken: string,
+    error: string,
+    options: { retryable?: boolean; retryAt?: number } = {},
+    now: number = Date.now(),
+  ): 'retry_scheduled' | 'exhausted' | 'stale_lease' {
+    const transaction = this.db.transaction(() => {
+      const row = this.db.prepare(`
+        SELECT * FROM scheduled_items
+        WHERE id = ? AND status = 'processing' AND lease_token = ?
+          AND lease_expires_at > ?
+      `).get(itemId, leaseToken, now) as Record<string, unknown> | undefined;
+      if (!row) return 'stale_lease' as const;
+
+      const item = this.rowToScheduledItem(row);
+      const retryable = options.retryable !== false && item.attemptCount < item.maxAttempts;
+      if (retryable) {
+        const retryAt = Math.max(now, options.retryAt ?? now);
+        this.db.prepare(`
+          UPDATE scheduled_items
+          SET status = 'pending', board_status = 'waiting', trigger_at = ?,
+              worker_id = NULL, lease_token = NULL, leased_at = NULL,
+              lease_expires_at = NULL, last_error = ?, updated_at = ?
+          WHERE id = ? AND lease_token = ?
+        `).run(retryAt, error, now, itemId, leaseToken);
+        return 'retry_scheduled' as const;
+      }
+
+      const failureResult: BoardItemResult = { response: `Error: ${error}`, completedAt: now };
+      this.db.prepare(`
+        UPDATE scheduled_items
+        SET status = 'expired', board_status = 'archived', result = ?,
+            worker_id = NULL, lease_token = NULL, leased_at = NULL,
+            lease_expires_at = NULL, last_error = ?, updated_at = ?
+        WHERE id = ? AND lease_token = ?
+      `).run(JSON.stringify(failureResult), error, now, itemId, leaseToken);
+      return 'exhausted' as const;
+    });
+    return transaction.immediate();
+  }
+
+  /** Release a live task to a named worker while retaining its audit trail. */
+  handoffBoardTask(
+    itemId: string,
+    leaseToken: string,
+    targetWorkerId: string,
+    reason?: string,
+    now: number = Date.now(),
+  ): boolean {
+    const row = this.db.prepare(
+      'SELECT worker_id FROM scheduled_items WHERE id = ? AND status = ? AND lease_token = ? AND lease_expires_at > ?',
+    ).get(itemId, 'processing', leaseToken, now) as { worker_id: string | null } | undefined;
+    if (!row) return false;
+    const updated = this.db.prepare(`
+      UPDATE scheduled_items
+      SET status = 'pending', board_status = 'waiting', preferred_worker_id = ?,
+          handed_off_from = ?, worker_id = NULL, lease_token = NULL,
+          leased_at = NULL, lease_expires_at = NULL, last_error = ?, updated_at = ?
+      WHERE id = ? AND status = 'processing' AND lease_token = ? AND lease_expires_at > ?
+    `).run(targetWorkerId, row.worker_id, reason ?? null, now, itemId, leaseToken, now);
+    return updated.changes > 0;
+  }
+
+  /** Reclaim every expired task lease; returns the number transitioned. */
+  reclaimExpiredBoardTaskLeases(now: number = Date.now()): number {
+    const transaction = this.db.transaction(() => {
+      // Upgrade/restart recovery: the former scheduler marked tasks processing
+      // without a lease token. No live durable worker can own such a row.
+      const legacyUnleased = this.db.prepare(`
+        UPDATE scheduled_items
+        SET status = 'pending', board_status = 'waiting', worker_id = NULL,
+            leased_at = NULL, lease_expires_at = NULL,
+            last_error = COALESCE(last_error, 'Legacy unleased task reclaimed'), updated_at = ?
+        WHERE kind = 'task' AND status = 'processing' AND lease_token IS NULL
+      `).run(now).changes;
+      const retryable = this.db.prepare(`
+        UPDATE scheduled_items
+        SET status = 'pending', board_status = 'waiting', worker_id = NULL,
+            lease_token = NULL, leased_at = NULL, lease_expires_at = NULL,
+            last_error = COALESCE(last_error, 'Worker lease expired'), updated_at = ?
+        WHERE kind = 'task' AND status = 'processing'
+          AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?
+          AND (result IS NOT NULL OR attempt_count < max_attempts)
+      `).run(now, now).changes;
+      const exhausted = this.db.prepare(`
+        UPDATE scheduled_items
+        SET status = 'expired', board_status = 'archived', worker_id = NULL,
+            lease_token = NULL, leased_at = NULL, lease_expires_at = NULL,
+            last_error = COALESCE(last_error, 'Worker lease expired; retry budget exhausted'), updated_at = ?
+        WHERE kind = 'task' AND status = 'processing'
+          AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?
+          AND result IS NULL AND attempt_count >= max_attempts
+      `).run(now, now).changes;
+      return legacyUnleased + retryable + exhausted;
+    });
+    return transaction.immediate();
   }
 
   /**
@@ -2512,7 +3189,7 @@ export class ScallopDatabase {
   /**
    * Update a scheduled item (e.g., reschedule)
    */
-  updateScheduledItem(id: string, updates: Partial<Pick<ScheduledItem, 'triggerAt' | 'message' | 'status'>>): boolean {
+  updateScheduledItem(id: string, updates: Partial<Pick<ScheduledItem, 'triggerAt' | 'message' | 'messageProvenance' | 'status'>>): boolean {
     const now = Date.now();
     const sets: string[] = ['updated_at = ?'];
     const params: unknown[] = [now];
@@ -2524,6 +3201,8 @@ export class ScallopDatabase {
     if (updates.message !== undefined) {
       sets.push('message = ?');
       params.push(updates.message);
+      sets.push("message_provenance = CASE WHEN source = 'user' THEN ? ELSE 'generated' END");
+      params.push(updates.messageProvenance ?? 'generated');
     }
     if (updates.status !== undefined) {
       sets.push('status = ?');
@@ -2546,6 +3225,7 @@ export class ScallopDatabase {
     labels?: string[] | null;
     triggerAt?: number;
     message?: string;
+    messageProvenance?: ScheduledMessageProvenance;
     kind?: ScheduledItemKind;
     goalId?: string | null;
     dependsOn?: string[] | null;
@@ -2574,6 +3254,8 @@ export class ScallopDatabase {
     if (updates.message !== undefined) {
       sets.push('message = ?');
       params.push(updates.message);
+      sets.push("message_provenance = CASE WHEN source = 'user' THEN ? ELSE 'generated' END");
+      params.push(updates.messageProvenance ?? 'generated');
     }
     if (updates.kind !== undefined) {
       sets.push('kind = ?');
@@ -3039,18 +3721,25 @@ export class ScallopDatabase {
     snapshot?: string | null;
     detail?: Record<string, unknown> | null;
   }): number {
-    const result = this.db.prepare(`
-      INSERT INTO evolution_versions (target, kind, at, baseline_fitness, snapshot, status, detail)
-      VALUES (?, ?, ?, ?, ?, 'active', ?)
-    `).run(
-      version.target,
-      version.kind,
-      version.at,
-      version.baselineFitness ?? null,
-      version.snapshot ?? null,
-      version.detail ? JSON.stringify(version.detail) : null,
-    );
-    return Number(result.lastInsertRowid);
+    const record = this.db.transaction(() => {
+      this.db.prepare(`
+        UPDATE evolution_versions SET status = 'superseded'
+        WHERE target = ? AND status = 'active'
+      `).run(version.target);
+      const result = this.db.prepare(`
+        INSERT INTO evolution_versions (target, kind, at, baseline_fitness, snapshot, status, detail)
+        VALUES (?, ?, ?, ?, ?, 'active', ?)
+      `).run(
+        version.target,
+        version.kind,
+        version.at,
+        version.baselineFitness ?? null,
+        version.snapshot ?? null,
+        version.detail ? JSON.stringify(version.detail) : null,
+      );
+      return Number(result.lastInsertRowid);
+    });
+    return record();
   }
 
   /** The currently-active promoted version for a target, if any. */
@@ -3099,21 +3788,104 @@ export class ScallopDatabase {
 
   /** Activate a new version of a fragment, deactivating any prior active one. Returns the new version. */
   upsertPromptOverride(fragmentId: string, content: string, at: number): number {
-    const prior = this.db.prepare(`SELECT MAX(version) as v FROM prompt_overrides WHERE fragment_id = ?`).get(fragmentId) as { v: number | null };
-    const nextVersion = (prior.v ?? 0) + 1;
-    this.db.prepare(`UPDATE prompt_overrides SET active = 0 WHERE fragment_id = ?`).run(fragmentId);
-    this.db.prepare(`
-      INSERT INTO prompt_overrides (fragment_id, content, active, version, at) VALUES (?, ?, 1, ?, ?)
-    `).run(fragmentId, content, nextVersion, at);
-    return nextVersion;
+    const upsert = this.db.transaction(() => {
+      const prior = this.db.prepare(`SELECT MAX(version) as v FROM prompt_overrides WHERE fragment_id = ?`).get(fragmentId) as { v: number | null };
+      const nextVersion = (prior.v ?? 0) + 1;
+      this.db.prepare(`UPDATE prompt_overrides SET active = 0 WHERE fragment_id = ?`).run(fragmentId);
+      this.db.prepare(`
+        INSERT INTO prompt_overrides (fragment_id, content, active, version, at) VALUES (?, ?, 1, ?, ?)
+      `).run(fragmentId, content, nextVersion, at);
+      return nextVersion;
+    });
+    return upsert();
+  }
+
+  /** Atomically activate a prompt mutation and its single active rollback ledger. */
+  promotePromptEvolution(input: {
+    fragmentId: string;
+    content: string;
+    at: number;
+    baselineFitness?: number | null;
+    snapshot?: string | null;
+    detail?: Record<string, unknown> | null;
+  }): { promptVersion: number; evolutionVersionId: number } {
+    const promote = this.db.transaction(() => {
+      const prior = this.db.prepare(`
+        SELECT MAX(version) AS v FROM prompt_overrides WHERE fragment_id = ?
+      `).get(input.fragmentId) as { v: number | null };
+      const promptVersion = (prior.v ?? 0) + 1;
+      this.db.prepare(`UPDATE prompt_overrides SET active = 0 WHERE fragment_id = ?`)
+        .run(input.fragmentId);
+      this.db.prepare(`
+        INSERT INTO prompt_overrides (fragment_id, content, active, version, at)
+        VALUES (?, ?, 1, ?, ?)
+      `).run(input.fragmentId, input.content, promptVersion, input.at);
+
+      const target = `prompt:${input.fragmentId}`;
+      this.db.prepare(`
+        UPDATE evolution_versions SET status = 'superseded'
+        WHERE target = ? AND status = 'active'
+      `).run(target);
+      const ledger = this.db.prepare(`
+        INSERT INTO evolution_versions (target, kind, at, baseline_fitness, snapshot, status, detail)
+        VALUES (?, 'patch_prompt', ?, ?, ?, 'active', ?)
+      `).run(
+        target,
+        input.at,
+        input.baselineFitness ?? null,
+        input.snapshot ?? null,
+        input.detail ? JSON.stringify(input.detail) : null,
+      );
+      return {
+        promptVersion,
+        evolutionVersionId: Number(ledger.lastInsertRowid),
+      };
+    });
+    return promote();
   }
 
   /** Deactivate the active version of a fragment, optionally re-activating a prior content. */
   rollbackPromptOverride(fragmentId: string, restoreContent: string | null, at: number): void {
-    this.db.prepare(`UPDATE prompt_overrides SET active = 0 WHERE fragment_id = ?`).run(fragmentId);
-    if (restoreContent !== null) {
-      this.upsertPromptOverride(fragmentId, restoreContent, at);
-    }
+    const rollback = this.db.transaction(() => {
+      const prior = this.db.prepare(`SELECT MAX(version) as v FROM prompt_overrides WHERE fragment_id = ?`).get(fragmentId) as { v: number | null };
+      this.db.prepare(`UPDATE prompt_overrides SET active = 0 WHERE fragment_id = ?`).run(fragmentId);
+      if (restoreContent !== null) {
+        this.db.prepare(`
+          INSERT INTO prompt_overrides (fragment_id, content, active, version, at)
+          VALUES (?, ?, 1, ?, ?)
+        `).run(fragmentId, restoreContent, (prior.v ?? 0) + 1, at);
+      }
+    });
+    rollback();
+  }
+
+  /** Roll back prompt content and its active ledger in one SQLite transaction. */
+  rollbackPromptEvolutionVersion(
+    versionId: number,
+    fragmentId: string,
+    restoreContent: string | null,
+    at: number,
+  ): void {
+    const rollback = this.db.transaction(() => {
+      const target = `prompt:${fragmentId}`;
+      const active = this.db.prepare(`
+        SELECT id FROM evolution_versions
+        WHERE id = ? AND target = ? AND kind = 'patch_prompt' AND status = 'active'
+      `).get(versionId, target);
+      if (!active) throw new Error(`Prompt evolution version ${versionId} is not active`);
+
+      const prior = this.db.prepare(`SELECT MAX(version) as v FROM prompt_overrides WHERE fragment_id = ?`).get(fragmentId) as { v: number | null };
+      this.db.prepare(`UPDATE prompt_overrides SET active = 0 WHERE fragment_id = ?`).run(fragmentId);
+      if (restoreContent !== null) {
+        this.db.prepare(`
+          INSERT INTO prompt_overrides (fragment_id, content, active, version, at)
+          VALUES (?, ?, 1, ?, ?)
+        `).run(fragmentId, restoreContent, (prior.v ?? 0) + 1, at);
+      }
+      this.db.prepare(`UPDATE evolution_versions SET status = 'rolled_back' WHERE id = ?`)
+        .run(versionId);
+    });
+    rollback();
   }
 
   /**
@@ -3345,6 +4117,7 @@ export class ScallopDatabase {
       userId: row.user_id as string,
       sessionId: row.session_id as string | null,
       source: row.source as ScheduledItemSource,
+      messageProvenance: row.message_provenance === 'user_literal' ? 'user_literal' : 'generated',
       kind: (row.kind as ScheduledItemKind) ?? 'nudge',
       type: row.type as ScheduledItemType,
       taskConfig: row.task_config ? JSON.parse(row.task_config as string) : null,
@@ -3361,6 +4134,15 @@ export class ScallopDatabase {
       result: row.result ? JSON.parse(row.result as string) : null,
       dependsOn: row.depends_on ? JSON.parse(row.depends_on as string) : null,
       goalId: (row.goal_id as string) ?? null,
+      workerId: (row.worker_id as string) ?? null,
+      preferredWorkerId: (row.preferred_worker_id as string) ?? null,
+      leaseToken: (row.lease_token as string) ?? null,
+      leasedAt: (row.leased_at as number) ?? null,
+      leaseExpiresAt: (row.lease_expires_at as number) ?? null,
+      attemptCount: (row.attempt_count as number) ?? 0,
+      maxAttempts: (row.max_attempts as number) ?? 3,
+      lastError: (row.last_error as string) ?? null,
+      handedOffFrom: (row.handed_off_from as string) ?? null,
       createdAt: row.created_at as number,
       updatedAt: row.updated_at as number,
     };

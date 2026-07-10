@@ -72,7 +72,7 @@ export function clearLane(lane: string): void {
  * Reset all lanes. Cancels all pending tasks and invalidates active ones.
  */
 export function resetAllLanes(): void {
-  for (const [lane, state] of lanes) {
+  for (const state of lanes.values()) {
     const pending = state.queue.splice(0);
     for (const entry of pending) {
       entry.reject(new Error(`All lanes reset — task cancelled`));

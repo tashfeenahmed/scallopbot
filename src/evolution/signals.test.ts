@@ -22,7 +22,7 @@ const baseTurn: TurnOutcome = {
 };
 
 function recorder(sink: EvolutionSignalSink, overrides: Partial<EvolutionConfig> = {}) {
-  return new EvolutionRecorder(sink, { ...DEFAULT_EVOLUTION_CONFIG, ...overrides });
+  return new EvolutionRecorder(sink, { ...DEFAULT_EVOLUTION_CONFIG, enabled: true, ...overrides });
 }
 
 describe('EvolutionRecorder', () => {
@@ -32,12 +32,18 @@ describe('EvolutionRecorder', () => {
   });
 
   it('captures a reusable_task on a clean, tool-heavy success', () => {
-    recorder(sink).recordTurn({ ...baseTurn, toolCallCount: 6, criticScore: 0.9 });
+    recorder(sink, { includeSessionContent: true }).recordTurn({ ...baseTurn, toolCallCount: 6, criticScore: 0.9 });
     const types = sink.signals.map(s => s.type);
     expect(types).toContain('reusable_task');
     const sig = sink.signals.find(s => s.type === 'reusable_task')!;
     expect(sig.toolCallCount).toBe(6);
     expect(sig.detail?.preview).toContain('scrape');
+  });
+
+  it('does not persist a conversation preview without explicit content consent', () => {
+    recorder(sink).recordTurn({ ...baseTurn, toolCallCount: 6, criticScore: 0.9 });
+    expect(sink.signals[0].detail).not.toHaveProperty('preview');
+    expect(JSON.stringify(sink.signals)).not.toContain('scrape these 4 sites');
   });
 
   it('does NOT capture reusable_task below the tool-call threshold', () => {

@@ -12,6 +12,7 @@ import type {
   ScheduledItemKind,
   ScheduledItemType,
   RecurringSchedule,
+  TaskConfig,
 } from '../memory/db.js';
 
 // Re-export for convenience
@@ -34,6 +35,13 @@ export interface BoardItem {
   goalTitle?: string;          // enriched from memories table
   dependsOn: string[] | null;
   result: BoardItemResult | null;
+  workerId: string | null;
+  preferredWorkerId: string | null;
+  leaseExpiresAt: number | null;
+  attemptCount: number;
+  maxAttempts: number;
+  lastError: string | null;
+  handedOffFrom: string | null;
   source: 'user' | 'agent';
   createdAt: number;
   updatedAt: number;
@@ -85,10 +93,19 @@ export interface CreateBoardItemInput {
   priority?: Priority;
   labels?: string[];
   goalId?: string;
-  taskConfig?: { goal: string; tools?: string[] };
+  taskConfig?: TaskConfig;
+  dependsOn?: string[];
   source?: 'user' | 'agent';
   context?: string;
   boardStatus?: BoardStatus;     // override default column
+  preferredWorkerId?: string;
+  maxAttempts?: number;
+}
+
+/** Worker-facing claim. The opaque lease token is required for all mutations. */
+export interface BoardTaskClaim {
+  item: BoardItem;
+  leaseToken: string;
 }
 
 /**
@@ -135,6 +152,13 @@ export function toBoardItem(item: ScheduledItem, goalTitle?: string): BoardItem 
     goalTitle,
     dependsOn: item.dependsOn,
     result: item.result,
+    workerId: item.workerId,
+    preferredWorkerId: item.preferredWorkerId,
+    leaseExpiresAt: item.leaseExpiresAt,
+    attemptCount: item.attemptCount,
+    maxAttempts: item.maxAttempts,
+    lastError: item.lastError,
+    handedOffFrom: item.handedOffFrom,
     source: item.source,
     createdAt: item.createdAt,
     updatedAt: item.updatedAt,

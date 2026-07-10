@@ -137,7 +137,11 @@ describe('TelegramChannel', () => {
         sessionManager: mockSessionManager,
         logger: { info: vi.fn(), error: vi.fn(), debug: vi.fn(), child: vi.fn().mockReturnThis() } as any,
         workspacePath: '/tmp/test-workspace',
-        db: { getBotConfig: vi.fn().mockReturnValue(null), upsertBotConfig: vi.fn() } as any,
+        db: {
+          getBotConfig: vi.fn().mockReturnValue(null),
+          upsertBotConfig: vi.fn(),
+          findSessionByUserId: vi.fn().mockReturnValue(null),
+        } as any,
       });
 
       const sessionId = await channel.getOrCreateSession('user123');

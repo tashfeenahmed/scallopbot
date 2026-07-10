@@ -68,7 +68,58 @@ describe('Agent', () => {
       const result = await agent.processMessage(session.id, 'Hello');
 
       expect(result.response).toBe('Hello! How can I help you?');
+      expect(result.completionReason).toBe('natural_end');
       expect(provider.complete).toHaveBeenCalledTimes(1);
+    });
+
+    it('reports explicit completion even though the DONE marker is stripped', async () => {
+      const { Agent } = await import('./agent.js');
+      const { SessionManager } = await import('./session.js');
+      const provider = createMockProvider([{
+        content: [{ type: 'text', text: 'Finished the requested work. [DONE]' }],
+        stopReason: 'end_turn',
+        usage: { inputTokens: 10, outputTokens: 5 },
+        model: 'test-model',
+      }]);
+      const sessionManager = new SessionManager(db);
+      const agent = new Agent({
+        provider,
+        sessionManager,
+        workspace: testDir,
+        logger: pino({ level: 'silent' }),
+        maxIterations: 20,
+      });
+      const session = await sessionManager.createSession();
+
+      const result = await agent.processMessage(session.id, 'Finish it');
+
+      expect(result.response).toBe('Finished the requested work.');
+      expect(result.completionReason).toBe('explicit_done');
+    });
+
+    it('reports a stop request as incomplete without calling the provider', async () => {
+      const { Agent } = await import('./agent.js');
+      const { SessionManager } = await import('./session.js');
+      const provider = createMockProvider([{
+        content: [{ type: 'text', text: 'should not run' }],
+        stopReason: 'end_turn',
+        usage: { inputTokens: 1, outputTokens: 1 },
+        model: 'test-model',
+      }]);
+      const sessionManager = new SessionManager(db);
+      const agent = new Agent({
+        provider,
+        sessionManager,
+        workspace: testDir,
+        logger: pino({ level: 'silent' }),
+        maxIterations: 20,
+      });
+      const session = await sessionManager.createSession();
+
+      const result = await agent.processMessage(session.id, 'Start', undefined, undefined, () => true);
+
+      expect(result.completionReason).toBe('stopped');
+      expect(provider.complete).not.toHaveBeenCalled();
     });
 
     it('should execute tool and continue conversation', async () => {
@@ -222,6 +273,7 @@ describe('Agent', () => {
 
       // Should have stopped due to max iterations
       expect(result.response).toContain('maximum iterations');
+      expect(result.completionReason).toBe('iteration_limit');
       expect(infiniteProvider.complete).toHaveBeenCalledTimes(5);
     });
 

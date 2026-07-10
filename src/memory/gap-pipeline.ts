@@ -141,12 +141,12 @@ Rules:
 - Nudge: A short, friendly message delivered directly. Use for check-ins, reminders, encouragement.
 - Task: Background research the bot does before messaging. Use when info lookup would help (flight status, weather, etc).
 - Write nudge messages that feel natural and warm, like a helpful friend. 1-3 sentences max.
-- The "message" field must be the exact text to send to the user. Do not write instructions like "ask the user..." or "send a message...".
+- The "userFacingMessage" field must be the exact text to send to the user. Do not write instructions like "ask the user..." or "send a message...".
 - If you cannot write a direct user-facing message, choose "skip".
 - For tasks, describe the goal clearly so a sub-agent can execute it.
 
 Response format (JSON only, no other text):
-{"items": [{"index": <signal index (1-based)>, "action": "skip" | "nudge" | "task", "message": "<pre-written message for nudge, or fallback message for task>", "goal": "<what to research/do — only for task>", "tools": ["optional tool names — only for task"]}]}`;
+{"items": [{"index": <signal index (1-based)>, "action": "skip" | "nudge" | "task", "userFacingMessage": "<exact recipient-facing text for nudge, or fallback text for task>", "goal": "<what to research/do — only for task>", "tools": ["optional tool names — only for task"]}]}`;
 
   const signalLines = signals.length > 0
     ? signals
@@ -193,7 +193,9 @@ export function parseGapPipelineResponse(
       if (action === 'skip') continue;
 
       const signal = signals[index];
-      const message = sanitizeProactiveMessage(typeof entry.message === 'string' ? entry.message : '');
+      const message = sanitizeProactiveMessage(
+        typeof entry.userFacingMessage === 'string' ? entry.userFacingMessage : '',
+      );
       if (!message) continue;
 
       if (action === 'task') {

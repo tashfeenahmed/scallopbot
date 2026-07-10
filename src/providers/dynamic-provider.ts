@@ -31,6 +31,12 @@ export interface FallbackLogger {
   warn(obj: unknown, msg: string): void;
 }
 
+/** Shared health sink supplied by Router without coupling this provider to it. */
+export interface ProviderOutcomeReporter {
+  success(provider: string): void;
+  failure(provider: string, error: Error): void;
+}
+
 export class DynamicProvider implements LLMProvider {
   constructor(
     private readonly resolver: () => Promise<LLMProvider | undefined>,
@@ -42,6 +48,7 @@ export class DynamicProvider implements LLMProvider {
      */
     private readonly chain?: () => Promise<LLMProvider[]>,
     private readonly logger?: FallbackLogger,
+    private readonly outcomes?: ProviderOutcomeReporter,
   ) {}
 
   private async require(): Promise<LLMProvider> {
@@ -52,7 +59,15 @@ export class DynamicProvider implements LLMProvider {
 
   async complete(request: CompletionRequest): Promise<CompletionResponse> {
     if (!this.chain) {
-      return (await this.require()).complete(request);
+      const provider = await this.require();
+      try {
+        const response = await provider.complete(request);
+        this.outcomes?.success(provider.name);
+        return response;
+      } catch (error) {
+        this.outcomes?.failure(provider.name, error as Error);
+        throw error;
+      }
     }
 
     const providers = await this.chain();
@@ -64,9 +79,12 @@ export class DynamicProvider implements LLMProvider {
     for (let i = 0; i < providers.length; i++) {
       const provider = providers[i];
       try {
-        return await provider.complete(request);
+        const response = await provider.complete(request);
+        this.outcomes?.success(provider.name);
+        return response;
       } catch (error) {
         lastError = error;
+        this.outcomes?.failure(provider.name, error as Error);
         const next = providers[i + 1];
         if (next) {
           this.logger?.warn(

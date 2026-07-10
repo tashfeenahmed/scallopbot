@@ -287,6 +287,49 @@ describe('SkillExecutor', () => {
       expect(result.output).toContain(`Dir: ${skillDir}`);
     });
 
+    it('does not inherit unrelated service secrets by default', async () => {
+      process.env.UNRELATED_API_KEY = 'do-not-leak-this-secret';
+      try {
+        await fs.writeFile(
+          path.join(scriptsDir, 'run.js'),
+          `console.log(String(process.env.UNRELATED_API_KEY));`,
+        );
+        const result = await executor.execute(createMockSkill({ scriptsDir }), {
+          skillName: 'test-skill',
+          cwd: testDir,
+        });
+        expect(result.success).toBe(true);
+        expect(result.output?.trim()).toBe('undefined');
+        expect(result.output).not.toContain('do-not-leak-this-secret');
+      } finally {
+        delete process.env.UNRELATED_API_KEY;
+      }
+    });
+
+    it('passes only explicitly declared secret env and redacts it from output', async () => {
+      process.env.DECLARED_API_KEY = 'declared-secret-value';
+      try {
+        await fs.writeFile(
+          path.join(scriptsDir, 'run.js'),
+          `console.log(process.env.DECLARED_API_KEY);`,
+        );
+        const skill = createMockSkill({
+          scriptsDir,
+          frontmatter: {
+            name: 'test-skill',
+            description: 'Test',
+            metadata: { openclaw: { primaryEnv: 'DECLARED_API_KEY' } },
+          },
+        });
+        const result = await executor.execute(skill, { skillName: 'test-skill', cwd: testDir });
+        expect(result.success).toBe(true);
+        expect(result.output).toContain('[REDACTED]');
+        expect(result.output).not.toContain('declared-secret-value');
+      } finally {
+        delete process.env.DECLARED_API_KEY;
+      }
+    });
+
     it('should return success=true and output on success', async () => {
       // Arrange
       const script = `console.log("Success output");`;
@@ -528,6 +571,24 @@ describe('SkillExecutor', () => {
 
       // Assert
       expect(exec).toBeInstanceOf(SkillExecutor);
+    });
+
+    it('reports every execution to the optional telemetry hook', async () => {
+      const events: Array<{ name: string; success: boolean; durationMs: number }> = [];
+      const exec = createSkillExecutor(createMockLogger(), undefined, {
+        onSkillExecuted: (name, success, durationMs) => events.push({ name, success, durationMs }),
+      });
+      await fs.writeFile(path.join(scriptsDir, 'run.js'), 'console.log("ok")');
+      const skill = createMockSkill({ scriptsDir, name: 'measured-skill' });
+
+      await exec.execute(skill, { skillName: skill.name, cwd: testDir });
+      await fs.rm(path.join(scriptsDir, 'run.js'));
+      await exec.execute(skill, { skillName: skill.name, cwd: testDir, action: 'missing' });
+
+      expect(events).toHaveLength(2);
+      expect(events.map(event => event.success)).toEqual([true, false]);
+      expect(events.every(event => event.name === 'measured-skill')).toBe(true);
+      expect(events.every(event => event.durationMs >= 0)).toBe(true);
     });
   });
 });

@@ -7,3 +7,4 @@
 
 export * from './types.js';
 export * from './goal-service.js';
+export * from './skill.js';

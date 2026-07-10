@@ -13,6 +13,7 @@ import * as nodePath from 'path';
 import { ScallopDatabase } from './memory/db.js';
 import { explainProactiveDecisions, type ProactiveDecision } from './proactive/decision-log.js';
 import { explainEvolution } from './evolution/decision-log.js';
+import { SkillStore } from './evolution/skill-store.js';
 import type { EvolutionSignal, EvolutionDecision } from './evolution/types.js';
 
 const VERSION = '0.1.0';
@@ -785,6 +786,53 @@ program
     } catch (error) {
       console.error('Failed to read evolution status:', (error as Error).message);
       process.exit(1);
+    }
+  });
+
+// skill-curator - inspect and control machine-authored procedural memory
+program
+  .command('skill-curator')
+  .description('Inspect, curate, pin, or restore agent-created skills')
+  .argument('<action>', 'status | run | pin | unpin | restore')
+  .argument('[name]', 'Skill name for pin, unpin, or restore')
+  .action(async (action: string, name?: string) => {
+    try {
+      const config = loadConfig();
+      const store = new SkillStore();
+      if (action === 'status') {
+        const usage = await store.getUsage();
+        const entries = Object.entries(usage).filter(([, entry]) => entry.createdBy === 'agent');
+        console.log(`Agent-created skills (${entries.length})`);
+        for (const [skill, entry] of entries.sort(([a], [b]) => a.localeCompare(b))) {
+          console.log(`  - ${skill}: ${entry.state}, uses=${entry.useCount}, patches=${entry.patchCount}${entry.pinned ? ', pinned' : ''}`);
+        }
+        return;
+      }
+      if (action === 'run') {
+        const summary = await store.curate({
+          staleAfterDays: config.evolution.curatorStaleDays,
+          archiveAfterDays: config.evolution.curatorArchiveDays,
+          backupKeep: config.evolution.curatorBackupKeep,
+        });
+        console.log(JSON.stringify(summary, null, 2));
+        return;
+      }
+      if (!name) throw new Error(`Action '${action}' requires a skill name`);
+      if (action === 'pin' || action === 'unpin') {
+        const changed = await store.pin(name, action === 'pin');
+        if (!changed) throw new Error(`'${name}' is not an agent-created skill`);
+        console.log(`${action === 'pin' ? 'Pinned' : 'Unpinned'} ${name}`);
+        return;
+      }
+      if (action === 'restore') {
+        if (!(await store.restoreArchived(name))) throw new Error(`No archived agent-created skill named '${name}'`);
+        console.log(`Restored ${name}`);
+        return;
+      }
+      throw new Error(`Unknown curator action '${action}'`);
+    } catch (error) {
+      console.error('Skill curator failed:', (error as Error).message);
+      process.exitCode = 1;
     }
   });
 

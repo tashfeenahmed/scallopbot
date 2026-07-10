@@ -6,7 +6,7 @@ import {
   type ModelsConfig,
 } from './model-routing.js';
 import { ProviderRegistry } from '../providers/registry.js';
-import { Router } from '../routing/router.js';
+import { buildTierMapping, Router } from '../routing/router.js';
 import type { LLMProvider, CompletionResponse } from '../providers/types.js';
 
 function mockProvider(name: string, available = true): LLMProvider {
@@ -39,7 +39,7 @@ function harnessFrom(providers: LLMProvider[]) {
   const registry = new ProviderRegistry();
   const router = new Router({
     providerOrder: order,
-    tierMapping: { fast: order, standard: order, capable: order },
+    tierMapping: buildTierMapping(order),
   });
   for (const p of providers) {
     registry.registerProvider(p);
@@ -53,7 +53,7 @@ function harness(order: string[], available: Record<string, boolean> = {}) {
   const registry = new ProviderRegistry();
   const router = new Router({
     providerOrder: order,
-    tierMapping: { fast: order, standard: order, capable: order },
+    tierMapping: buildTierMapping(order),
   });
   for (const name of order) {
     const p = mockProvider(name, available[name] ?? true);
@@ -213,14 +213,14 @@ describe('PurposeRouter — dynamicProviderFor (live switch, no restart)', () =>
     const pr = new PurposeRouter(DEFAULT_MODELS, registry, router, new Set(), () => runtime);
     const dyn = pr.dynamicProviderFor('cognition');
 
-    // No override → fast tier (first available = moonshot)
+    // No override → fast tier (Groq is the fast primary)
     const first = await dyn.complete({ messages: [{ role: 'user', content: 'hi' }] });
-    expect((first.content[0] as { text: string }).text).toBe('moonshot');
+    expect((first.content[0] as { text: string }).text).toBe('groq');
 
-    // Flip the switch at runtime → the SAME wrapper now routes to groq
-    runtime = 'groq';
+    // Flip the switch at runtime → the SAME wrapper now routes to Anthropic
+    runtime = 'anthropic';
     const second = await dyn.complete({ messages: [{ role: 'user', content: 'hi' }] });
-    expect((second.content[0] as { text: string }).text).toBe('groq');
+    expect((second.content[0] as { text: string }).text).toBe('anthropic');
 
     expect(dyn.isAvailable()).toBe(true);
   });
@@ -242,6 +242,36 @@ describe('PurposeRouter — background cascade fallback (local → cloud)', () =
     const dyn = pr.dynamicProviderFor('cognition'); // non-pinned (proactivity)
     const res = await dyn.complete({ messages: [{ role: 'user', content: 'hi' }] });
     expect((res.content[0] as { text: string }).text).toBe('cloud');
+  });
+
+  it('shares failure health so repeated jobs stop hammering an unhealthy primary', async () => {
+    const local = failingProvider('localp40');
+    const cloud = mockProvider('cloud');
+    const registry = new ProviderRegistry();
+    const router = new Router({
+      providerOrder: ['localp40', 'cloud'],
+      tierMapping: {
+        fast: ['localp40', 'cloud'],
+        standard: ['localp40', 'cloud'],
+        capable: ['localp40', 'cloud'],
+      },
+      unhealthyThreshold: 1,
+    });
+    for (const p of [local, cloud]) {
+      registry.registerProvider(p);
+      router.registerProvider(p);
+    }
+    const pr = new PurposeRouter(DEFAULT_MODELS, registry, router);
+    const dyn = pr.dynamicProviderFor('cognition');
+
+    await dyn.complete({ messages: [{ role: 'user', content: 'first job' }] });
+    await dyn.complete({ messages: [{ role: 'user', content: 'second job' }] });
+
+    // Legacy behavior called the broken local endpoint on every background job.
+    // Shared Router health reduces two outage calls to one, then uses cloud.
+    expect(local.complete).toHaveBeenCalledTimes(1);
+    expect(cloud.complete).toHaveBeenCalledTimes(2);
+    expect(router.getProviderHealth('localp40')?.isHealthy).toBe(false);
   });
 
   it('uses the primary and never touches the fallback when the primary succeeds', async () => {

@@ -16,6 +16,7 @@
 import type { LLMProvider, CompletionRequest, CompletionResponse } from '../providers/types.js';
 import { extractJSON, extractResponseText } from '../proactive/proactive-utils.js';
 import { getModelTokenLimits } from './model-limits.js';
+import { redactSensitiveText } from '../security/redaction.js';
 
 /** Purposes whose responses are expected to be parseable JSON. */
 const JSON_PURPOSES = new Set([
@@ -78,8 +79,11 @@ function computeParsedOk(purpose: string, response: CompletionResponse): number 
   return 1;
 }
 
-function truncate(s: string): string {
-  return s.length > MAX_FIELD_BYTES ? s.slice(0, MAX_FIELD_BYTES) + '…[truncated]' : s;
+function prepareForPersistence(s: string): string {
+  const redacted = redactSensitiveText(s);
+  return redacted.length > MAX_FIELD_BYTES
+    ? redacted.slice(0, MAX_FIELD_BYTES) + '…[truncated]'
+    : redacted;
 }
 
 /** Serialize the request exactly as the model saw it (system + messages + tools). */
@@ -124,8 +128,8 @@ export function wrapProviderWithTraceTap(provider: LLMProvider): LLMProvider {
             purpose,
             model,
             provider: target.name,
-            prompt: truncate(serializePrompt(request)),
-            response: truncate(serializeResponse(response)),
+            prompt: prepareForPersistence(serializePrompt(request)),
+            response: prepareForPersistence(serializeResponse(response)),
             parsedOk: computeParsedOk(purpose, response),
             sessionId: request.traceSessionId ?? null,
             latencyMs: Date.now() - started,

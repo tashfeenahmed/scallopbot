@@ -16,7 +16,6 @@ import * as path from 'node:path';
 import { vi } from 'vitest';
 import dotenv from 'dotenv';
 import { ScallopMemoryStore } from '../memory/scallop-store.js';
-import { ScallopDatabase } from '../memory/db.js';
 import { BackgroundGardener } from '../memory/memory.js';
 import { classifyAffect, type EmotionLabel } from '../memory/affect.js';
 import { createInitialAffectState, updateAffectEMA, getSmoothedAffect } from '../memory/affect-smoothing.js';

@@ -17,7 +17,7 @@ describe('parseEvaluatorResponse', () => {
   it('accepts user-facing nudge messages', () => {
     const result = parseEvaluatorResponse(
       JSON.stringify({
-        items: [{ index: 1, action: 'nudge', message: 'Hey, how did the prototype review go?', urgency: 'low' }],
+        items: [{ index: 1, action: 'nudge', userFacingMessage: 'Hey, how did the prototype review go?', urgency: 'low' }],
       }),
       [makeSignal()],
     );
@@ -29,12 +29,18 @@ describe('parseEvaluatorResponse', () => {
   it('skips instruction-shaped nudge messages', () => {
     const result = parseEvaluatorResponse(
       JSON.stringify({
-        items: [{ index: 1, action: 'nudge', message: 'The assistant should ask the user about the prototype.', urgency: 'low' }],
+        items: [{ index: 1, action: 'nudge', userFacingMessage: 'The assistant should ask the user about the prototype.', urgency: 'low' }],
       }),
       [makeSignal()],
     );
 
     expect(result).toEqual([]);
+  });
+
+  it('rejects legacy message fields instead of treating planner output as recipient text', () => {
+    expect(parseEvaluatorResponse(JSON.stringify({
+      items: [{ index: 1, action: 'nudge', message: 'Hey, this field is ambiguous.' }],
+    }), [makeSignal()])).toEqual([]);
   });
 
   it('grounds evaluation in the recent chat transcript', () => {

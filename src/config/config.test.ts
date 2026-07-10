@@ -1,5 +1,4 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { z } from 'zod';
 
 // We'll import these once implemented
 // import { configSchema, loadConfig, Config } from './config.js';
@@ -61,6 +60,14 @@ describe('Config Schema', () => {
         expect(result.data.agent.maxIterations).toBe(100);
         expect(result.data.logging.level).toBe('info');
         expect(result.data.providers.anthropic.model).toBe('claude-sonnet-4-20250514');
+        expect(result.data.evolution).toMatchObject({
+          enabled: false,
+          requireFitnessGate: true,
+          includeSessionContent: false,
+          allowSeparateEvalProvider: false,
+          useLlmJudge: true,
+          curatorEnabled: true,
+        });
       }
     });
 
@@ -169,6 +176,17 @@ describe('Config Schema', () => {
       const result = configSchema.safeParse(configWithNegativeIterations);
       expect(result.success).toBe(false);
     });
+
+    it('does not accept a configuration that disables autonomous fitness evaluation', async () => {
+      const { configSchema } = await import('./config.js');
+      const result = configSchema.safeParse({
+        providers: { anthropic: { apiKey: 'sk-ant-test-key' } },
+        channels: { telegram: { enabled: false, botToken: '' } },
+        agent: { workspace: '/tmp/workspace' },
+        evolution: { requireFitnessGate: false },
+      });
+      expect(result.success).toBe(false);
+    });
   });
 
   describe('loadConfig', () => {
@@ -198,6 +216,13 @@ describe('Config Schema', () => {
       expect(config.agent.workspace).toBe('/env/workspace');
       expect(config.agent.maxIterations).toBe(15);
       expect(config.logging.level).toBe('debug');
+    });
+
+    it('keeps the fitness gate mandatory even if a legacy environment flag says false', async () => {
+      process.env.ANTHROPIC_API_KEY = 'sk-ant-env-key';
+      process.env.EVOLUTION_REQUIRE_FITNESS_GATE = 'false';
+      const { loadConfig } = await import('./config.js');
+      expect(loadConfig().evolution.requireFitnessGate).toBe(true);
     });
 
     it('should use default workspace if not provided', async () => {
@@ -233,7 +258,7 @@ describe('Config Schema', () => {
       process.env.SCALLOPBOT_EVENT_WEBHOOK_URL = 'https://example.com/scallopbot/events';
       process.env.SCALLOPBOT_EVENT_WEBHOOK_SECRET = 'shared-secret';
       process.env.SCALLOPBOT_EVENT_WEBHOOK_TIMEOUT_MS = '2500';
-      process.env.SCALLOPBOT_AGENT_ID = 'tashbot';
+      process.env.SCALLOPBOT_AGENT_ID = 'example-bot';
 
       const { loadConfig } = await import('./config.js');
       const config = loadConfig();
@@ -242,7 +267,7 @@ describe('Config Schema', () => {
         webhookUrl: 'https://example.com/scallopbot/events',
         webhookSecret: 'shared-secret',
         webhookTimeoutMs: 2500,
-        agentId: 'tashbot',
+        agentId: 'example-bot',
       });
     });
 
@@ -504,6 +529,26 @@ describe('Config Schema', () => {
       expect(config.tuning.critic.bestOfN).toBe(3);
       expect(config.tuning.critic.bestOfNThreshold).toBe(0.7);
       expect(config.tuning.skills.timeoutMs).toBe(30000);
+    });
+
+    it('loads global and per-channel tool policies from validated JSON', async () => {
+      process.env.ANTHROPIC_API_KEY = 'sk-ant-env-key';
+      process.env.AGENT_WORKSPACE = '/env/workspace';
+      process.env.TOOL_POLICY_JSON = JSON.stringify({ deny: ['bash'] });
+      process.env.TOOL_CHANNEL_POLICIES_JSON = JSON.stringify({ telegram: { allow: ['read_file'] } });
+
+      const { loadConfig } = await import('./config.js');
+      const config = loadConfig();
+
+      expect(config.tools.policy).toEqual({ deny: ['bash'] });
+      expect(config.tools.channelPolicies?.telegram).toEqual({ allow: ['read_file'] });
+    });
+
+    it('fails fast on malformed tool-policy JSON', async () => {
+      process.env.ANTHROPIC_API_KEY = 'sk-ant-env-key';
+      process.env.TOOL_POLICY_JSON = '{bad json';
+      const { loadConfig } = await import('./config.js');
+      expect(() => loadConfig()).toThrow(/TOOL_POLICY_JSON/);
     });
   });
 });

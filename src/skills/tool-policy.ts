@@ -90,7 +90,9 @@ export function matchesPolicy(toolName: string, policy: ToolPolicy): boolean {
   }
 
   // If allow list exists, tool must match at least one pattern
-  if (policy.allow && policy.allow.length > 0) {
+  // Presence of an allowlist is restrictive even when it is empty. Treating
+  // `allow: []` as unrestricted is a dangerous configuration fail-open.
+  if (policy.allow) {
     return matchesAnyPattern(toolName, policy.allow);
   }
 

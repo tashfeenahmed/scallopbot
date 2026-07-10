@@ -54,7 +54,7 @@ const INNER_THOUGHTS_PROACT_RESPONSE = JSON.stringify({
   items: [{
     index: 1,
     action: 'nudge',
-    message: 'Hey, I noticed you were asking about TypeScript generics. Would you like me to find some good resources?',
+    userFacingMessage: 'Hey, I noticed you were asking about TypeScript generics. Would you like me to find some good resources?',
     urgency: 'low',
   }],
 });
@@ -70,7 +70,7 @@ function makeGapPipelineResponse() {
     items: [{
       index: 1,
       action: 'nudge',
-      message: 'Check in on the stale goal.',
+      userFacingMessage: 'Would you like to check in on your stale goal?',
     }],
   });
 }
@@ -454,7 +454,7 @@ describe('Inner thoughts integration', () => {
         items: [{
           index: 1,
           action: 'nudge',
-          message: 'Check in on the stale goal.',
+          userFacingMessage: 'Would you like to check in on your stale goal?',
           urgency: 'medium',
         }],
       }),
@@ -550,7 +550,7 @@ describe('Inner thoughts integration', () => {
     expect(firedItem?.status).toBe('fired');
 
     // Call checkEngagement (simulating user sending a message)
-    scheduler.checkEngagement('default');
+    scheduler.checkEngagement('default', 'I finished the TypeScript goal');
 
     // Verify: item is now marked as 'acted'
     const actedItem = db.getScheduledItem(itemId);

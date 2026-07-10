@@ -29,20 +29,20 @@ describe('judgeMutation', () => {
     expect(v.reason).toContain('rm -rf');
   });
 
-  it('fails open when no provider is available', async () => {
+  it('fails closed when no provider is available', async () => {
     const v = await judgeMutation('desc', undefined);
-    expect(v.approved).toBe(true);
-    expect(v.reason).toContain('fail-open');
+    expect(v.approved).toBe(false);
+    expect(v.reason).toContain('fail-closed');
   });
 
-  it('fails open on a provider error', async () => {
+  it('fails closed on a provider error', async () => {
     const v = await judgeMutation('desc', provider('', true));
-    expect(v.approved).toBe(true);
+    expect(v.approved).toBe(false);
   });
 
-  it('fails open on an unparseable response', async () => {
+  it('fails closed on an unparseable response', async () => {
     const v = await judgeMutation('desc', provider('the mutation looks fine to me'));
-    expect(v.approved).toBe(true);
+    expect(v.approved).toBe(false);
   });
 
   it('describeMutationForJudge includes kind, target and payload', () => {
@@ -50,5 +50,14 @@ describe('judgeMutation', () => {
     expect(d).toContain('patch_skill');
     expect(d).toContain('web_search');
     expect(d).toContain('name: web_search');
+  });
+
+  it('reviews the complete capped artifact rather than truncating after 6k', () => {
+    const trailing = 'TRAILING_ADVERSARIAL_INSTRUCTION';
+    const payload = `${'safe procedure\n'.repeat(500)}${trailing}`;
+    const description = describeMutationForJudge('create_skill', 'complete_review', payload);
+    expect(Buffer.byteLength(payload)).toBeGreaterThan(6_000);
+    expect(description).toContain(trailing);
+    expect(description.endsWith(trailing)).toBe(true);
   });
 });

@@ -17,11 +17,10 @@ import { ScallopMemoryStore } from '../memory/scallop-store.js';
 import { BotConfigManager } from '../channels/bot-config.js';
 import { ContextManager } from '../routing/context.js';
 import { Router } from '../routing/router.js';
-import { ProviderRegistry } from '../providers/registry.js';
 import { CostTracker } from '../routing/cost.js';
 import { LLMFactExtractor } from '../memory/fact-extractor.js';
 import { createSkillRegistry, type SkillRegistry } from '../skills/registry.js';
-import { createSkillExecutor, type SkillExecutor } from '../skills/executor.js';
+import { createSkillExecutor } from '../skills/executor.js';
 import type {
   LLMProvider,
   CompletionRequest,
@@ -442,7 +441,7 @@ export function createWsClient(port: number): Promise<WsClient> {
         },
 
         collectUntilResponse(timeout = 15000): Promise<WsResponse[]> {
-          return new Promise((res, rej) => {
+          return new Promise((res) => {
             const messages: WsResponse[] = [];
 
             const timer = setTimeout(() => {
@@ -474,7 +473,7 @@ export function createWsClient(port: number): Promise<WsClient> {
           return new Promise((res) => {
             const messages: WsResponse[] = [];
 
-            const timer = setTimeout(() => {
+            setTimeout(() => {
               ws.removeListener('message', onMessage);
               res(messages);
             }, timeout);

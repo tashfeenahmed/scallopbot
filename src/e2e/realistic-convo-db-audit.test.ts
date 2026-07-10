@@ -307,7 +307,7 @@ describe('E2E Realistic Conversation + DB Audit', () => {
           items: [{
             index: 1,
             action: 'nudge',
-            message: 'Hey! I noticed your Rust learning goal hasn\'t been updated in a while. Want to set some milestones?',
+            userFacingMessage: 'Hey! I noticed your Rust learning goal hasn\'t been updated in a while. Want to set some milestones?',
             urgency: 'medium',
           }],
         }),
@@ -588,7 +588,7 @@ describe('E2E Realistic Conversation + DB Audit', () => {
         sourceId: 'test-id',
       }];
       const items = parseEvaluatorResponse(
-        JSON.stringify({ items: [{ index: 1, action: 'nudge', message: 'Test', urgency: 'low' }] }),
+        JSON.stringify({ items: [{ index: 1, action: 'nudge', userFacingMessage: 'Test', urgency: 'low' }] }),
         testSignals,
       );
       expect(items.length).toBe(1);

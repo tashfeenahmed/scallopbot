@@ -70,7 +70,7 @@ export interface ApiChannelConfig {
   /** Interrupt queue for mid-loop user message injection */
   interruptQueue?: InterruptQueue;
   /** Callback when a WebSocket user sends a message (for engagement tracking) */
-  onUserMessage?: (prefixedUserId: string) => void;
+  onUserMessage?: (prefixedUserId: string, userMessage?: string) => void;
   /** Bot config manager for /settings and /model commands (optional) */
   configManager?: BotConfigManager;
   /** Provider registry for /model command (optional) */
@@ -198,7 +198,7 @@ export class ApiChannel implements Channel, TriggerSource {
   private activeProcessing: Set<string> = new Set();
   private interruptQueue: InterruptQueue | null = null;
   private authService: AuthService | null = null;
-  private onUserMessage?: (prefixedUserId: string) => void;
+  private onUserMessage?: ApiChannelConfig['onUserMessage'];
   private configManager: BotConfigManager | null = null;
   private providerRegistry: ProviderRegistry | null = null;
   private db: ScallopDatabase | null = null;
@@ -1377,7 +1377,7 @@ export class ApiChannel implements Channel, TriggerSource {
         const sessionId = await this.getOrCreateSession(userId);
 
         // Notify engagement tracker (trust feedback loop)
-        this.onUserMessage?.(`api:${userId}`);
+        this.onUserMessage?.(`api:${userId}`, message.message);
 
         // If already processing and no attachments, inject via interrupt queue
         const hasAttachments = message.attachments && message.attachments.length > 0;

@@ -565,7 +565,7 @@ describe('E2E Board System', () => {
         priority: 'medium',
       });
 
-      // Create a task item that's due (no sub-agent → will fall back)
+      // Create a task item that's due (no sub-agent → raw title is suppressed)
       db.addScheduledItem({
         userId: 'default',
         sessionId: null,
@@ -628,18 +628,18 @@ describe('E2E Board System', () => {
       expect(breakItem!.boardStatus).toBe('done');
     });
 
-    it('transitions task items to done after fallback firing', async () => {
-      // Task should have fallen back to nudge (no sub-agent)
+    it('transitions unavailable task items to done without leaking the task title', async () => {
       const weatherMsg = sentMessages.find(m =>
         m.message.toLowerCase().includes('weather') || m.message.toLowerCase().includes('hiking')
       );
-      expect(weatherMsg).toBeDefined();
+      expect(weatherMsg).toBeUndefined();
 
       const db = ctx.scallopStore.getDatabase();
       const items = db.getScheduledItemsByUser('default');
       const weatherItem = items.find(i => i.message.includes('weather'));
       // Should no longer be pending
       expect(weatherItem!.status).not.toBe('pending');
+      expect(weatherItem!.result?.response).toContain('no sub-agent executor');
     });
   });
 

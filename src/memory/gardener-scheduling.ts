@@ -4,7 +4,7 @@
  */
 
 import type { ScallopDatabase, ScheduledItemKind, TaskConfig } from './db.js';
-import { computeDeliveryTime, type TimingContext, type DeliveryTiming } from '../proactive/timing-model.js';
+import { computeDeliveryTime, type DeliveryTiming } from '../proactive/timing-model.js';
 import { getHourInTimezone } from '../proactive/proactive-utils.js';
 
 export interface ScheduleProactiveItemInput {

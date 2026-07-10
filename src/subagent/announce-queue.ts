@@ -17,6 +17,8 @@ export class AnnounceQueue {
   private queues: Map<string, AnnounceEntry[]> = new Map();
   private maxQueueSize: number;
   private logger: Logger;
+  /** Idempotency guard: a run result is announced at most once per process. */
+  private seenRunIds: Map<string, number> = new Map();
 
   constructor(options: AnnounceQueueOptions) {
     this.maxQueueSize = options.maxQueueSize ?? 20;
@@ -29,6 +31,20 @@ export class AnnounceQueue {
    */
   enqueue(entry: AnnounceEntry): void {
     const { parentSessionId } = entry;
+    const dedupeKey = `${parentSessionId}:${entry.runId}`;
+    if (this.seenRunIds.has(dedupeKey)) {
+      this.logger.debug({ parentSessionId, runId: entry.runId }, 'Duplicate sub-agent announcement suppressed');
+      return;
+    }
+    this.seenRunIds.set(dedupeKey, entry.timestamp);
+    // Bound the idempotency journal independently of queue size.
+    if (this.seenRunIds.size > this.maxQueueSize * 50) {
+      const oldest = [...this.seenRunIds.entries()]
+        .sort((a, b) => a[1] - b[1])
+        .slice(0, this.maxQueueSize * 10);
+      for (const [key] of oldest) this.seenRunIds.delete(key);
+    }
+
     if (!this.queues.has(parentSessionId)) {
       this.queues.set(parentSessionId, []);
     }
@@ -88,5 +104,9 @@ export class AnnounceQueue {
    */
   clear(parentSessionId: string): void {
     this.queues.delete(parentSessionId);
+    const prefix = `${parentSessionId}:`;
+    for (const key of this.seenRunIds.keys()) {
+      if (key.startsWith(prefix)) this.seenRunIds.delete(key);
+    }
   }
 }

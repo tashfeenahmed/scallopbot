@@ -114,7 +114,7 @@ describe('parseGapPipelineResponse', () => {
 
   it('parses a nudge response correctly', () => {
     const response = JSON.stringify({
-      items: [{ index: 1, action: 'nudge', message: 'Hey, how is Rust going?' }],
+      items: [{ index: 1, action: 'nudge', userFacingMessage: 'Hey, how is Rust going?' }],
     });
     const result = parseGapPipelineResponse(response, signals);
     expect(result).toHaveLength(1);
@@ -127,7 +127,7 @@ describe('parseGapPipelineResponse', () => {
 
   it('parses a task response correctly', () => {
     const response = JSON.stringify({
-      items: [{ index: 1, action: 'task', message: 'Checking flight status...', goal: 'Look up flight EK204', tools: ['web_search'] }],
+      items: [{ index: 1, action: 'task', userFacingMessage: 'I’ll check the flight status for you.', goal: 'Look up flight EK204', tools: ['web_search'] }],
     });
     const result = parseGapPipelineResponse(response, signals);
     expect(result).toHaveLength(1);
@@ -155,7 +155,7 @@ describe('parseGapPipelineResponse', () => {
 
   it('skips entries with out-of-range index', () => {
     const response = JSON.stringify({
-      items: [{ index: 5, action: 'nudge', message: 'Hello' }],
+      items: [{ index: 5, action: 'nudge', userFacingMessage: 'Hello' }],
     });
     const result = parseGapPipelineResponse(response, signals);
     expect(result).toHaveLength(0);
@@ -169,7 +169,7 @@ describe('parseGapPipelineResponse', () => {
 
   it('extracts JSON from response with surrounding text', () => {
     const response = `Here is my analysis:\n${JSON.stringify({
-      items: [{ index: 1, action: 'nudge', message: 'Check in' }],
+      items: [{ index: 1, action: 'nudge', userFacingMessage: 'How are things going?' }],
     })}\n\nDone.`;
     const result = parseGapPipelineResponse(response, signals);
     expect(result).toHaveLength(1);
@@ -185,7 +185,7 @@ describe('parseGapPipelineResponse', () => {
 
   it('skips nudge entries whose message is an internal instruction', () => {
     const response = JSON.stringify({
-      items: [{ index: 1, action: 'nudge', message: 'Ask the user whether they made progress on Rust.' }],
+      items: [{ index: 1, action: 'nudge', userFacingMessage: 'Ask the user whether they made progress on Rust.' }],
     });
     const result = parseGapPipelineResponse(response, signals);
     expect(result).toEqual([]);
@@ -280,7 +280,7 @@ describe('runGapPipeline', () => {
 
   it('calls provider and returns parsed items', async () => {
     const response = JSON.stringify({
-      items: [{ index: 1, action: 'nudge', message: 'How is Rust going?' }],
+      items: [{ index: 1, action: 'nudge', userFacingMessage: 'How is Rust going?' }],
     });
     const provider = makeMockProvider(response);
     const result = await runGapPipeline({
@@ -298,7 +298,7 @@ describe('runGapPipeline', () => {
 
   it('deduplicates against existing items', async () => {
     const response = JSON.stringify({
-      items: [{ index: 1, action: 'nudge', message: 'How is Rust going?' }],
+      items: [{ index: 1, action: 'nudge', userFacingMessage: 'How is Rust going?' }],
     });
     const provider = makeMockProvider(response);
     const result = await runGapPipeline({
@@ -376,7 +376,7 @@ describe('runGapPipeline', () => {
 
   it('passes task items through with taskConfig', async () => {
     const response = JSON.stringify({
-      items: [{ index: 1, action: 'task', message: 'Checking...', goal: 'Search weather', tools: ['web_search'] }],
+      items: [{ index: 1, action: 'task', userFacingMessage: 'I’ll check the weather for you.', goal: 'Search weather', tools: ['web_search'] }],
     });
     const provider = makeMockProvider(response);
     const result = await runGapPipeline({

@@ -28,7 +28,6 @@ import type {
   SubAgentConfig,
   SubAgentResult,
   SpawnAgentInput,
-  AnnounceEntry,
   SubAgentRun,
 } from './types.js';
 import { DEFAULT_SUBAGENT_CONFIG } from './types.js';
@@ -49,12 +48,7 @@ const NEVER_ALLOWED_SKILLS = new Set([
  * Default skills always available to sub-agents (if they exist in the registry)
  */
 const DEFAULT_SUBAGENT_SKILLS = [
-  'bash',
   'read_file',
-  'write_file',
-  'edit_file',
-  'web_search',
-  'agent_browser',
   'memory_search',
 ];
 
@@ -62,11 +56,15 @@ const DEFAULT_SUBAGENT_SKILLS = [
  * Keyword-based skill auto-selection rules
  */
 const SKILL_KEYWORD_MAP: Array<{ patterns: RegExp; skills: string[] }> = [
-  { patterns: /search|research|find|look up|query/i, skills: ['web_search', 'agent_browser'] },
-  { patterns: /file|read|code|write|edit|script/i, skills: ['read_file', 'edit_file', 'write_file', 'bash'] },
+  { patterns: /file|read|code|write|edit|script/i, skills: ['read_file'] },
   { patterns: /memory|remember|recall|fact/i, skills: ['memory_search'] },
-  { patterns: /browse|web|url|page|site/i, skills: ['agent_browser', 'web_search'] },
 ];
+
+export interface SubAgentSkillPolicyContext {
+  parentSessionId: string;
+  childSessionId: string;
+  runId: string;
+}
 
 export interface SubAgentExecutorOptions {
   registry: SubAgentRegistry;
@@ -81,6 +79,11 @@ export interface SubAgentExecutorOptions {
   workspace: string;
   logger: Logger;
   config?: Partial<SubAgentConfig>;
+  /** Parent-session policy check. Resolver errors deny rather than bypass. */
+  skillPolicyResolver?: (
+    skillName: string,
+    context: SubAgentSkillPolicyContext,
+  ) => boolean | Promise<boolean>;
 }
 
 export class SubAgentExecutor {
@@ -96,6 +99,7 @@ export class SubAgentExecutor {
   private workspace: string;
   private logger: Logger;
   private config: SubAgentConfig;
+  private skillPolicyResolver: SubAgentExecutorOptions['skillPolicyResolver'];
   private activeAbortControllers: Map<string, AbortController> = new Map();
 
   constructor(options: SubAgentExecutorOptions) {
@@ -111,6 +115,7 @@ export class SubAgentExecutor {
     this.workspace = options.workspace;
     this.logger = options.logger.child({ module: 'subagent-executor' });
     this.config = { ...DEFAULT_SUBAGENT_CONFIG, ...options.config };
+    this.skillPolicyResolver = options.skillPolicyResolver;
   }
 
   /**
@@ -138,7 +143,7 @@ export class SubAgentExecutor {
     const run = this.registry.createRun(parentSessionId, input, session.id);
 
     // Fire and forget — result will be enqueued via lane serialization
-    enqueueInLane(`subagent:${run.id}`, () => this.executeSubAgent(run, parentOnProgress)).catch((err) => {
+    enqueueInLane(`subagent:${run.id}`, () => this.executeSubAgent(run, parentOnProgress, true)).catch((err) => {
       this.logger.error({ runId: run.id, error: (err as Error).message }, 'Sub-agent execution failed unexpectedly');
     });
 
@@ -160,7 +165,7 @@ export class SubAgentExecutor {
     });
 
     const run = this.registry.createRun(parentSessionId, input, session.id);
-    return this.executeSubAgent(run, parentOnProgress);
+    return this.executeSubAgent(run, parentOnProgress, false);
   }
 
   /**
@@ -198,6 +203,7 @@ export class SubAgentExecutor {
   private async executeSubAgent(
     run: SubAgentRun,
     parentOnProgress?: ProgressCallback,
+    announceResult: boolean = true,
   ): Promise<SubAgentResult> {
     this.registry.updateStatus(run.id, 'running');
 
@@ -206,7 +212,7 @@ export class SubAgentExecutor {
     if (!provider) {
       const error = `No provider available for tier "${run.modelTier}"`;
       this.registry.updateStatus(run.id, 'failed', undefined, error);
-      this.announceFailure(run, error);
+      if (announceResult) this.announceFailure(run, error);
       throw new Error(error);
     }
 
@@ -219,11 +225,12 @@ export class SubAgentExecutor {
     // 3. Wrap provider with token budget enforcement
     activeProvider = this.createTokenBudgetProvider(activeProvider, run.id);
 
-    // 4. Build enriched system prompt (async — fetches profile + memories)
-    const systemPrompt = await this.buildSubAgentPrompt(run.task, run.recentChatContext);
+    // 4. Resolve parent policy before exposing either schemas or prompt docs.
+    const allowedSkills = await this.resolveAllowedSkills(run.allowedSkills, run.task, run);
 
-    // 5. Create filtered skill registry
-    const filteredRegistry = this.createFilteredSkillRegistry(run.allowedSkills, run.task);
+    // 5. Build enriched prompt and filtered registry from the same allowlist.
+    const systemPrompt = await this.buildSubAgentPrompt(run.task, run.recentChatContext, allowedSkills);
+    const filteredRegistry = this.createFilteredSkillRegistry(allowedSkills);
 
     // 6. Create dedicated ContextManager with tight limits for sub-agents
     const subAgentContextManager = new ContextManager({
@@ -257,6 +264,7 @@ export class SubAgentExecutor {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), run.timeoutMs);
     this.activeAbortControllers.set(run.id, controller);
+    const initialCostUsd = this.costTracker?.getSessionSpend(run.childSessionId) ?? 0;
 
     const shouldStop = () => controller.signal.aborted;
 
@@ -281,13 +289,20 @@ export class SubAgentExecutor {
         controller.signal // abortSignal — terminates in-flight LLM HTTP call on timeout/cancel
       );
 
-      // Determine if task was completed based on response content
-      const taskComplete = result.response.includes('[DONE]') || result.iterationsUsed < this.config.maxIterations;
+      // Completion is explicit loop state. Agent strips [DONE] from response text,
+      // so inspecting the cleaned response here silently misclassified outcomes.
+      const taskComplete = result.completionReason === 'explicit_done'
+        || result.completionReason === 'natural_end';
+      const costUsd = Math.max(
+        0,
+        (this.costTracker?.getSessionSpend(run.childSessionId) ?? initialCostUsd) - initialCostUsd,
+      );
 
       const subAgentResult: SubAgentResult = {
         response: result.response.replace(/\[DONE\]\s*$/, '').trim(),
         iterationsUsed: result.iterationsUsed,
         taskComplete,
+        costUsd,
       };
 
       // Update registry
@@ -295,14 +310,16 @@ export class SubAgentExecutor {
       this.registry.updateTokenUsage(run.id, result.tokenUsage);
 
       // Enqueue result for parent (async spawn only — for spawnAndWait, caller gets result directly)
-      this.announceQueue.enqueue({
-        runId: run.id,
-        parentSessionId: run.parentSessionId,
-        label: run.label,
-        result: subAgentResult,
-        tokenUsage: result.tokenUsage,
-        timestamp: Date.now(),
-      });
+      if (announceResult) {
+        this.announceQueue.enqueue({
+          runId: run.id,
+          parentSessionId: run.parentSessionId,
+          label: run.label,
+          result: subAgentResult,
+          tokenUsage: result.tokenUsage,
+          timestamp: Date.now(),
+        });
+      }
 
       this.logger.info(
         {
@@ -310,6 +327,8 @@ export class SubAgentExecutor {
           label: run.label,
           iterations: result.iterationsUsed,
           tokens: result.tokenUsage.inputTokens + result.tokenUsage.outputTokens,
+          costUsd,
+          completionReason: result.completionReason,
           taskComplete,
         },
         'Sub-agent completed'
@@ -324,7 +343,7 @@ export class SubAgentExecutor {
         : (error as Error).message;
 
       this.registry.updateStatus(run.id, status, undefined, errorMsg);
-      this.announceFailure(run, errorMsg);
+      if (announceResult) this.announceFailure(run, errorMsg);
 
       this.logger.warn({ runId: run.id, label: run.label, status, error: errorMsg }, 'Sub-agent failed');
 
@@ -332,6 +351,10 @@ export class SubAgentExecutor {
         response: `Error: ${errorMsg}`,
         iterationsUsed: 0,
         taskComplete: false,
+        costUsd: Math.max(
+          0,
+          (this.costTracker?.getSessionSpend(run.childSessionId) ?? initialCostUsd) - initialCostUsd,
+        ),
       };
     } finally {
       clearTimeout(timeout);
@@ -342,7 +365,11 @@ export class SubAgentExecutor {
   /**
    * Build an enriched system prompt for sub-agents with user context and memory.
    */
-  private async buildSubAgentPrompt(task: string, recentChatContext?: string): Promise<string> {
+  private async buildSubAgentPrompt(
+    task: string,
+    recentChatContext?: string,
+    allowedSkills: ReadonlySet<string> = new Set(),
+  ): Promise<string> {
     const lines = [
       'You are a focused sub-agent assigned a specific task.',
       '',
@@ -407,9 +434,13 @@ export class SubAgentExecutor {
     lines.push('');
     lines.push('## RESEARCH WORKFLOW');
     lines.push('1. Check the RELEVANT MEMORIES above first — avoid re-researching known facts.');
-    lines.push('2. Use **memory_search** to find additional stored knowledge before going to the web.');
-    lines.push('3. Use **web_search** (via bash) for fresh information not found in memory.');
-    lines.push('4. Use **agent_browser** only when you need to read a specific page in detail.');
+    if (allowedSkills.has('memory_search')) {
+      lines.push('2. Use **memory_search** to find additional stored knowledge.');
+    }
+    if (allowedSkills.has('agent_browser')) {
+      lines.push('3. Use **agent_browser** when fresh web information or a specific page is required.');
+    }
+    lines.push('4. Use only the tools exposed to this sub-agent; unavailable tools are intentionally restricted.');
     lines.push('5. Synthesize findings concisely.');
     lines.push('');
     lines.push('## RULES');
@@ -430,9 +461,7 @@ export class SubAgentExecutor {
    * Create a filtered view of the SkillRegistry for sub-agents.
    * Returns a proxy that only exposes allowed skills.
    */
-  private createFilteredSkillRegistry(requestedSkills: string[], task: string): SkillRegistry {
-    const allowedNames = this.resolveAllowedSkills(requestedSkills, task);
-
+  private createFilteredSkillRegistry(allowedNames: Set<string>): SkillRegistry {
     // Build a proxy that delegates to the real registry but filters results
     const realRegistry = this.skillRegistry;
 
@@ -451,7 +480,7 @@ export class SubAgentExecutor {
           };
         }
         if (prop === 'generateSkillPrompt') {
-          return (options?: Record<string, unknown>) => {
+          return (_options?: Record<string, unknown>) => {
             // Generate prompt for allowed executable skills
             const allSkills = target.getExecutableSkills();
             const filtered = allSkills.filter((s: Skill) => allowedNames.has(s.name));
@@ -508,7 +537,11 @@ export class SubAgentExecutor {
   /**
    * Resolve which skills a sub-agent is allowed to use
    */
-  private resolveAllowedSkills(requestedSkills: string[], task: string): Set<string> {
+  private async resolveAllowedSkills(
+    requestedSkills: string[],
+    task: string,
+    run: SubAgentRun,
+  ): Promise<Set<string>> {
     let skillNames: string[];
 
     if (requestedSkills.length > 0) {
@@ -531,7 +564,29 @@ export class SubAgentExecutor {
     const executableNames = this.skillRegistry.getExecutableSkills().map((s) => s.name);
     const docNames = this.skillRegistry.getDocumentationSkills().map((s) => s.name);
     const existing = new Set([...executableNames, ...docNames]);
-    return new Set(skillNames.filter((s) => existing.has(s)));
+    const candidates = [...new Set(skillNames.filter((s) => existing.has(s)))];
+    if (!this.skillPolicyResolver) return new Set(candidates);
+
+    const allowed = new Set<string>();
+    for (const skillName of candidates) {
+      try {
+        if (await this.skillPolicyResolver(skillName, {
+          parentSessionId: run.parentSessionId,
+          childSessionId: run.childSessionId,
+          runId: run.id,
+        })) {
+          allowed.add(skillName);
+        } else {
+          this.logger.warn({ runId: run.id, skillName }, 'Sub-agent skill denied by parent policy');
+        }
+      } catch (error) {
+        this.logger.warn(
+          { runId: run.id, skillName, error: (error as Error).message },
+          'Sub-agent skill policy check failed closed',
+        );
+      }
+    }
+    return allowed;
   }
 
   /**
@@ -608,6 +663,7 @@ export class SubAgentExecutor {
         response: `Error: ${errorMsg}`,
         iterationsUsed: 0,
         taskComplete: false,
+        costUsd: this.costTracker?.getSessionSpend(run.childSessionId) ?? 0,
       },
       tokenUsage: run.tokenUsage,
       timestamp: Date.now(),

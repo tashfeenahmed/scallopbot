@@ -8,6 +8,7 @@ scripts:
 metadata:
   openclaw:
     emoji: "\U0001F9E0"
+    primaryEnv: GROQ_API_KEY
     requires:
       bins: []
 ---

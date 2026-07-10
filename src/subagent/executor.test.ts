@@ -11,10 +11,10 @@
  * Uses real ScallopMemoryStore + SessionManager (SQLite) with mock LLM/embedder.
  */
 
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import * as fs from 'fs';
 import pino from 'pino';
-import { SubAgentExecutor } from './executor.js';
+import { SubAgentExecutor, type SubAgentExecutorOptions } from './executor.js';
 import { SubAgentRegistry } from './registry.js';
 import { AnnounceQueue } from './announce-queue.js';
 import { SessionManager } from '../agent/session.js';
@@ -30,6 +30,7 @@ import type {
 } from '../providers/types.js';
 import { flattenSystem } from '../providers/types.js';
 import type { EmbeddingProvider } from '../memory/embeddings.js';
+import { CostTracker } from '../routing/cost.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -158,7 +159,9 @@ afterAll(() => {
 /** Helper: build a SubAgentExecutor with a given LLM provider + optional config overrides. */
 async function buildExecutor(
   provider: LLMProvider,
-  configOverrides: Record<string, unknown> = {}
+  configOverrides: Record<string, unknown> = {},
+  costTracker?: CostTracker,
+  skillPolicyResolver?: SubAgentExecutorOptions['skillPolicyResolver'],
 ) {
   const skillRegistry = createSkillRegistry('/tmp', logger);
   await skillRegistry.initialize();
@@ -178,6 +181,8 @@ async function buildExecutor(
     skillRegistry,
     skillExecutor,
     router,
+    costTracker,
+    skillPolicyResolver,
     scallopStore: ctx.scallopStore,
     workspace: '/tmp',
     logger,
@@ -228,7 +233,7 @@ describe('SubAgentExecutor integration', () => {
     // Research workflow guidance
     expect(systemPrompt).toContain('RESEARCH WORKFLOW');
     expect(systemPrompt).toContain('memory_search');
-    expect(systemPrompt).toContain('web_search');
+    expect(systemPrompt).not.toContain('via bash');
   }, 30_000);
 
   // -----------------------------------------------------------------------
@@ -238,7 +243,7 @@ describe('SubAgentExecutor integration', () => {
     const provider = createTrackingProvider([
       'Based on existing memories, Alex is in Austin, TX, timezone America/Chicago. [DONE]',
     ]);
-    const { executor } = await buildExecutor(provider);
+    const { executor, announceQueue } = await buildExecutor(provider);
 
     const parentSession = await ctx.sessionManager.createSession({ label: 'parent' });
 
@@ -252,6 +257,30 @@ describe('SubAgentExecutor integration', () => {
     expect(result.iterationsUsed).toBeLessThanOrEqual(10);
     expect(result.response).toContain('Austin');
     expect(result.response).not.toContain('[DONE]'); // [DONE] should be stripped
+    // Synchronous results are returned inline and must not be announced again
+    // on the parent's next turn.
+    expect(announceQueue.pendingCount(parentSession.id)).toBe(0);
+  }, 30_000);
+
+  it('returns the actual tracked dollar cost for the isolated child session', async () => {
+    const provider = createTrackingProvider(['Costed result. [DONE]']);
+    const tracker = new CostTracker({
+      customPricing: {
+        'mock-model': { inputPerMillion: 2, outputPerMillion: 4 },
+      },
+    });
+    const { executor } = await buildExecutor(provider, {}, tracker);
+    const parentSession = await ctx.sessionManager.createSession({ label: 'parent' });
+
+    const result = await executor.spawnAndWait(parentSession.id, {
+      task: 'Return a costed result',
+      label: 'cost-test',
+    });
+
+    // 500 input @ $2/M + 100 output @ $4/M = $0.0014.
+    expect(result.costUsd).toBeCloseTo(0.0014, 8);
+    expect(tracker.getUsageHistory()).toHaveLength(1);
+    expect(tracker.getUsageHistory()[0].sessionId).not.toBe(parentSession.id);
   }, 30_000);
 
   // -----------------------------------------------------------------------
@@ -312,6 +341,47 @@ describe('SubAgentExecutor integration', () => {
     expect(toolNames).not.toContain('send_message');
     expect(toolNames).not.toContain('send_file');
     expect(toolNames).not.toContain('voice_reply');
+  }, 30_000);
+
+  it('applies parent policy to explicitly requested sub-agent tools', async () => {
+    const provider = createTrackingProvider(['Policy check complete. [DONE]']);
+    const policy = vi.fn(async (skillName: string) => skillName !== 'bash');
+    const { executor } = await buildExecutor(provider, {}, undefined, policy);
+    const parentSession = await ctx.sessionManager.createSession({
+      label: 'parent',
+      channelId: 'api',
+    });
+
+    await executor.spawnAndWait(parentSession.id, {
+      task: 'Read a file and run a shell command',
+      label: 'policy-test',
+      skills: ['read_file', 'bash'],
+    });
+
+    const toolNames = (provider.allRequests[0].tools ?? []).map(tool => tool.name);
+    const systemPrompt = provider.allRequests[0].system ? flattenSystem(provider.allRequests[0].system) : '';
+    expect(policy).toHaveBeenCalledWith('bash', expect.objectContaining({ parentSessionId: parentSession.id }));
+    expect(toolNames).toContain('read_file');
+    expect(toolNames).not.toContain('bash');
+    expect(systemPrompt).not.toContain('**bash**');
+  }, 30_000);
+
+  it('keeps implicit sub-agent tools read-only', async () => {
+    const provider = createTrackingProvider(['Read-only defaults confirmed. [DONE]']);
+    const { executor } = await buildExecutor(provider);
+    const parentSession = await ctx.sessionManager.createSession({ label: 'parent' });
+
+    await executor.spawnAndWait(parentSession.id, {
+      task: 'Read the project file and summarize it',
+      label: 'readonly-defaults',
+    });
+
+    const toolNames = (provider.allRequests[0].tools ?? []).map(tool => tool.name);
+    expect(toolNames).toContain('read_file');
+    expect(toolNames).not.toContain('bash');
+    expect(toolNames).not.toContain('write_file');
+    expect(toolNames).not.toContain('edit_file');
+    expect(toolNames).not.toContain('agent_browser');
   }, 30_000);
 
   // -----------------------------------------------------------------------

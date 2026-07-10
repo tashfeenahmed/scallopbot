@@ -18,12 +18,14 @@ import { SessionManager } from '../agent/session.js';
 import { Agent } from '../agent/agent.js';
 import { EvolutionRecorder } from '../evolution/signals.js';
 import { EvolutionEngine } from '../evolution/engine.js';
+import { createLoadProcedureSkill } from '../evolution/procedure-skill.js';
+import { SkillStore } from '../evolution/skill-store.js';
 import { TelegramChannel } from '../channels/telegram.js';
 import { TelegramGateway } from '../channels/telegram-gateway.js';
 import { ApiChannel } from '../channels/api.js';
 import { createSkillRegistry, type SkillRegistry } from '../skills/registry.js';
 import { createSkillExecutor, type SkillExecutor } from '../skills/executor.js';
-import { Router } from '../routing/router.js';
+import { Router, buildTierMapping } from '../routing/router.js';
 import { CostTracker } from '../routing/cost.js';
 import {
   BackgroundGardener,
@@ -40,13 +42,15 @@ import { type TriggerSource, type TriggerSourceRegistry, parseUserIdPrefix } fro
 import { UnifiedScheduler } from '../proactive/index.js';
 import { OutboundQueue } from '../proactive/outbound-queue.js';
 import { BotConfigManager } from '../channels/bot-config.js';
-import { GoalService } from '../goals/index.js';
+import { GoalService, createVerifiedGoalSkill } from '../goals/index.js';
 import { BoardService } from '../board/board-service.js';
 import { SubAgentRegistry, SubAgentExecutor, AnnounceQueue } from '../subagent/index.js';
 import { InterruptQueue } from '../agent/interrupt-queue.js';
 import { setTraceSink } from '../routing/trace-tap.js';
 import { setHookLogger } from '../hooks/hooks.js';
 import { registerWebhookEventRelay } from '../hooks/webhook-relay.js';
+import { SafeWorkflowExecutor, createExecuteWorkflowSkill } from '../workflow/index.js';
+import { matchesPolicy } from '../skills/tool-policy.js';
 
 export interface GatewayOptions {
   config: Config;
@@ -135,11 +139,7 @@ export class Gateway {
     const routerOrder = this.config.routing.providerOrder;
     this.router = new Router({
       providerOrder: routerOrder,
-      tierMapping: {
-        fast: routerOrder,
-        standard: routerOrder,
-        capable: routerOrder,
-      },
+      tierMapping: buildTierMapping(routerOrder),
     });
     this.registerProvidersWithRouter();
 
@@ -190,6 +190,8 @@ export class Gateway {
       embedder,
       rerankProvider,
       relationsProvider: rerankProvider,
+      mmrEnabled: this.config.memory.mmrEnabled,
+      mmrLambda: this.config.memory.mmrLambda,
     });
     this.logger.info({ dbPath, count: this.scallopMemoryStore.getCount() }, 'ScallopMemory initialized');
 
@@ -313,6 +315,7 @@ export class Gateway {
       },
       onSleepTick: async () => {
         await this.evolutionEngine?.runOptimizer();
+        await this.evolutionEngine?.runCurator();
       },
     });
 
@@ -335,6 +338,11 @@ export class Gateway {
       'Media processor initialized'
     );
 
+    // Resolve any interrupted old/new skill-directory swap before the registry
+    // scans local skills. Lazy recovery at the next nightly optimizer would
+    // leave a promoted or restored procedure missing for the whole process run.
+    await new SkillStore({ logger: this.logger }).recoverPendingPromotions();
+
     // Initialize skill registry
     this.skillRegistry = createSkillRegistry(this.config.agent.workspace, this.logger);
     await this.skillRegistry.initialize();
@@ -350,6 +358,9 @@ export class Gateway {
       {
         timeoutMs: this.config.tuning?.skills?.timeoutMs,
         maxOutputBytes: this.config.tuning?.skills?.maxOutputBytes,
+        onSkillExecuted: async (name: string, success: boolean) => {
+          if (success) await this.evolutionEngine?.recordSkillUse(name);
+        },
       }
     );
     this.logger.debug('Skill executor created');
@@ -364,9 +375,16 @@ export class Gateway {
       this.evolutionEngine = new EvolutionEngine({
         db: evoDb,
         resolveProvider: () => purposeRouter.providerFor('evolution'),
+        resolveEvalProvider: () => purposeRouter.providerFor('eval'),
         executor,
         reloadFromDisk: () => registry.reloadFromDisk(),
         getLiveSkillPath: (name: string) => registry.getSkill(name)?.path,
+        getLiveSkillMetadata: (name: string) => {
+          const skill = registry.getSkill(name);
+          return skill
+            ? { exists: true, source: skill.source, hasScripts: skill.hasScripts }
+            : { exists: false };
+        },
         config: this.config.evolution,
         logger: this.logger,
       });
@@ -384,7 +402,7 @@ export class Gateway {
     // Register native skills (comms + memory_get) that need runtime access
     this.registerNativeSkills(voiceStatus.tts);
     this.logger.debug(
-      { nativeSkills: ['send_message', 'send_file', 'voice_reply', 'memory_get'].filter(n => this.skillRegistry!.hasSkill(n)) },
+      { nativeSkills: ['send_message', 'send_file', 'voice_reply', 'memory_get', 'load_procedure'].filter(n => this.skillRegistry!.hasSkill(n)) },
       'Native skills registered'
     );
 
@@ -396,7 +414,11 @@ export class Gateway {
     const subagentConfig = this.config.subagent;
     this.announceQueue = new AnnounceQueue({ maxQueueSize: 20, logger: this.logger });
     this.interruptQueue = new InterruptQueue({ maxQueueSize: 10, logger: this.logger });
-    this.subAgentRegistry = new SubAgentRegistry({ config: subagentConfig, logger: this.logger });
+    this.subAgentRegistry = new SubAgentRegistry({
+      config: subagentConfig,
+      logger: this.logger,
+      persistence: this.scallopMemoryStore!.getDatabase(),
+    });
 
     // Recover orphaned sub-agent runs from SQLite on startup
     if (this.scallopMemoryStore) {
@@ -420,10 +442,6 @@ export class Gateway {
             completedAt: row.completedAt ?? undefined,
           }))
         );
-        // Mark orphaned runs as failed in SQLite too
-        for (const row of activeRows) {
-          db.updateSubAgentRun(row.id, { status: 'failed', error: 'Process restarted', completedAt: Date.now() });
-        }
         this.logger.info({ orphaned, total: activeRows.length }, 'Recovered orphaned sub-agent runs');
       }
     }
@@ -448,10 +466,35 @@ export class Gateway {
       workspace: this.config.agent.workspace,
       logger: this.logger,
       config: subagentConfig,
+      skillPolicyResolver: async (skillName, context) => {
+        if (this.config.tools?.policy && !matchesPolicy(skillName, this.config.tools.policy)) return false;
+        const parent = await this.sessionManager!.getSession(context.parentSessionId);
+        if (!parent) return false;
+        const channelId = parent?.metadata?.channelId as string | undefined;
+        const channelPolicy = channelId ? this.config.tools?.channelPolicies?.[channelId] : undefined;
+        return !channelPolicy || matchesPolicy(skillName, channelPolicy);
+      },
     });
 
     // Register spawn_agent and check_agents skills
     this.registerSubAgentSkills();
+    const workflowExecutor = new SafeWorkflowExecutor({
+      skillRegistry: this.skillRegistry!,
+      skillExecutor: this.skillExecutor!,
+      logger: this.logger,
+      isToolAllowed: async (toolName, context) => {
+        if (this.config.tools?.policy && !matchesPolicy(toolName, this.config.tools.policy)) return false;
+        const session = await this.sessionManager!.getSession(context.sessionId);
+        if (!session) return false;
+        const channelId = session?.metadata?.channelId as string | undefined;
+        const channelPolicy = channelId ? this.config.tools?.channelPolicies?.[channelId] : undefined;
+        return !channelPolicy || matchesPolicy(toolName, channelPolicy);
+      },
+    });
+    this.skillRegistry!.registerSkill(createExecuteWorkflowSkill(workflowExecutor));
+    if (this.goalService) {
+      this.skillRegistry!.registerSkill(createVerifiedGoalSkill(this.goalService, this.subAgentExecutor, this.router!));
+    }
     this.logger.debug('Sub-agent system initialized');
 
     // Register manage_skills skill for ClawHub integration
@@ -485,8 +528,11 @@ export class Gateway {
       logger: this.logger,
       maxIterations: this.config.agent.maxIterations,
       enableThinking: this.config.providers.moonshot.enableThinking,
+      toolPolicy: this.config.tools?.policy,
+      channelToolPolicies: this.config.tools?.channelPolicies,
       bestOfN: this.config.tuning?.critic?.bestOfN,
       bestOfNThreshold: this.config.tuning?.critic?.bestOfNThreshold,
+      enableComplexityAnalysis: this.config.routing.enableComplexityAnalysis,
       evolutionRecorder,
       announceQueue: this.announceQueue,
       subAgentExecutor: this.subAgentExecutor,
@@ -509,9 +555,16 @@ export class Gateway {
         goalService: this.goalService || undefined,
         sessionManager: this.sessionManager || undefined,
         subAgentExecutor: this.subAgentExecutor || undefined,
+        router: this.router || undefined,
         interval: 30 * 1000, // Check every 30 seconds
         onSendMessage: this.outboundQueue.createHandler(),
         getTimezone: (userId: string) => this.configManager!.getUserTimezone(userId),
+        canonicalSingleUserIds: (this.config.channels.telegram.allowedUsers?.length ?? 0) === 1
+          ? [
+              this.config.channels.telegram.allowedUsers![0],
+              `telegram:${this.config.channels.telegram.allowedUsers![0]}`,
+            ]
+          : [],
       });
       this.logger.debug('Unified scheduler initialized');
     }
@@ -689,8 +742,8 @@ export class Gateway {
         voiceManager: this.voiceManager || undefined, // Share voice manager
         providerRegistry: this.providerRegistry || undefined,
         interruptQueue: this.interruptQueue || undefined,
-        onUserMessage: (prefixedUserId: string) => {
-          this.unifiedScheduler?.checkEngagement(prefixedUserId);
+        onUserMessage: (prefixedUserId: string, userMessage?: string, context?) => {
+          this.unifiedScheduler?.checkEngagement(prefixedUserId, userMessage, context);
         },
       });
       await this.telegramChannel.start();
@@ -716,8 +769,8 @@ export class Gateway {
         memoryStore: this.scallopMemoryStore || undefined,
         db: this.scallopMemoryStore?.getDatabase(),
         interruptQueue: this.interruptQueue || undefined,
-        onUserMessage: (prefixedUserId: string) => {
-          this.unifiedScheduler?.checkEngagement(prefixedUserId);
+        onUserMessage: (prefixedUserId: string, userMessage?: string) => {
+          this.unifiedScheduler?.checkEngagement(prefixedUserId, userMessage);
         },
         configManager: this.configManager || undefined,
         providerRegistry: this.providerRegistry || undefined,
@@ -1004,8 +1057,6 @@ export class Gateway {
             const { tmpdir } = await import('os');
             const { writeFile } = await import('fs/promises');
             const { nanoid } = await import('nanoid');
-            const { getPendingVoiceAttachments: getAttachments } = await import('../voice/attachments.js');
-
             const result = await voiceManager.synthesize(truncatedText, { voice: 'am_adam', format: 'opus' });
             const tempFile = join(tmpdir(), `voice-reply-${nanoid()}.ogg`);
             await writeFile(tempFile, result.audio);
@@ -1095,6 +1146,13 @@ export class Gateway {
       })
       .build();
     this.skillRegistry.registerSkill(memoryGetSkill.skill);
+
+    // Safe on-demand access to documentation-only (including learned) skills.
+    // Explicit selection is the usage signal that drives curator decisions.
+    this.skillRegistry.registerSkill(createLoadProcedureSkill(
+      this.skillRegistry,
+      name => this.evolutionEngine?.recordSkillUse(name),
+    ));
   }
 
   /**
@@ -1118,7 +1176,7 @@ export class Gateway {
         properties: {
           task: { type: 'string', description: 'Clear description of what the sub-agent should accomplish' },
           label: { type: 'string', description: 'Short label for tracking (e.g., "weather-check")' },
-          skills: { type: 'string', description: 'Comma-separated skill names to allow (empty = auto-select)' },
+          skills: { type: 'string', description: 'Comma-separated skill names to request. Empty uses read-only defaults (read_file, memory_search); every request is still filtered by parent tool policy.' },
           model_tier: { type: 'string', description: 'fast (default/cheapest), standard, or capable' },
           timeout_seconds: { type: 'number', description: 'Timeout in seconds (default: 120, max: 300)' },
           wait: { type: 'boolean', description: 'Wait for result inline (default: false = async)' },
@@ -1163,7 +1221,7 @@ export class Gateway {
             };
           } else {
             // Asynchronous: return immediately
-            const { runId, childSessionId } = await executor.spawn(ctx.sessionId, input);
+            const { runId } = await executor.spawn(ctx.sessionId, input);
             return {
               success: true,
               output: `Sub-agent "${input.label || runId.slice(0, 8)}" spawned (run: ${runId}). Results will appear when complete.`,
