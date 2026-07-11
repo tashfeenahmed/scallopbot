@@ -10,6 +10,8 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { OpenAIProvider } from '../src/providers/openai.js';
+import { MoonshotProvider } from '../src/providers/moonshot.js';
+import { OpenRouterProvider } from '../src/providers/openrouter.js';
 import { Router } from '../src/routing/router.js';
 import { ScallopDatabase } from '../src/memory/db.js';
 import { evaluateProactive, type ProactiveEvalInput } from '../src/memory/proactive-evaluator.js';
@@ -23,15 +25,58 @@ import { ScallopMemoryStore } from '../src/memory/scallop-store.js';
 import { LLMFactExtractor } from '../src/memory/fact-extractor.js';
 import { SessionManager } from '../src/agent/session.js';
 import { Agent } from '../src/agent/agent.js';
+import type { LLMProvider } from '../src/providers/types.js';
 
-const apiKey = process.env.OPENAI_API_KEY;
-if (!apiKey) throw new Error('OPENAI_API_KEY is required for the live proactive benchmark');
-
-const model = process.env.PROACTIVE_LIVE_MODEL ?? 'gpt-4.1-mini';
-const provider = new OpenAIProvider({ apiKey, model, timeout: 45_000, maxRetries: 1 });
-const router = new Router({ providerOrder: ['openai'] });
-router.registerProvider(provider);
 const logger = pino({ level: 'silent' });
+const providerName = (process.env.PROACTIVE_LIVE_PROVIDER ?? process.env.MODEL ?? 'openai')
+  .trim()
+  .toLowerCase();
+let provider: LLMProvider;
+if (providerName === 'openai') {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) throw new Error('OPENAI_API_KEY is required for the live proactive benchmark');
+  provider = new OpenAIProvider({
+    apiKey,
+    model: process.env.PROACTIVE_LIVE_MODEL ?? 'gpt-4.1-mini',
+    timeout: 45_000,
+    maxRetries: 1,
+  });
+} else if (providerName === 'moonshot') {
+  const apiKey = process.env.MOONSHOT_API_KEY;
+  if (!apiKey) throw new Error('MOONSHOT_API_KEY is required for the live proactive benchmark');
+  provider = new MoonshotProvider({
+    apiKey,
+    model: process.env.PROACTIVE_LIVE_MODEL ?? process.env.MOONSHOT_MODEL ?? 'kimi-k2.5',
+    timeout: 45_000,
+    maxRetries: 1,
+  }, logger);
+} else if (providerName === 'openrouter') {
+  const apiKey = process.env.OPENROUTER_API_KEY;
+  if (!apiKey) throw new Error('OPENROUTER_API_KEY is required for the live proactive benchmark');
+  provider = new OpenRouterProvider({
+    apiKey,
+    model: process.env.PROACTIVE_LIVE_MODEL ?? process.env.OPENROUTER_MODEL ?? 'openai/gpt-4.1-mini',
+    timeout: 45_000,
+    maxRetries: 1,
+  });
+} else {
+  const key = `CUSTOM_PROVIDER_${providerName.toUpperCase()}`;
+  const raw = process.env[key];
+  if (!raw) throw new Error(`${key} is required for the live proactive benchmark`);
+  const [baseUrl, configuredModel, apiKey] = raw.split('|').map(value => value.trim());
+  if (!baseUrl || !configuredModel) throw new Error(`${key} must be baseUrl|model[|apiKey]`);
+  provider = new OpenAIProvider({
+    name: providerName,
+    apiKey: apiKey || 'sk-local',
+    baseUrl,
+    model: process.env.PROACTIVE_LIVE_MODEL ?? configuredModel,
+    timeout: 45_000,
+    maxRetries: 1,
+  });
+}
+const model = provider.model ?? provider.name;
+const router = new Router({ providerOrder: [provider.name] });
+router.registerProvider(provider);
 
 const renderFixtures = [
   {
@@ -262,6 +307,7 @@ await scheduler.evaluate();
 const allMessages = [...rendered, ...delivered];
 const qualities = allMessages.map(assessProactiveMessage);
 const metrics = {
+  provider: provider.name,
   model,
   rendererTrials: rendered.length,
   rendererSuppressions,
