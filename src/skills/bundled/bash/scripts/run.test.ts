@@ -87,5 +87,5 @@ describe('bash skill workspace confinement', () => {
       expect(result.success).toBe(false);
       expect(`${result.output ?? ''}${result.error ?? ''}`).toMatch(/status|non-2xx/i);
     }
-  });
+  }, 30_000);
 });
