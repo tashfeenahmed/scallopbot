@@ -144,6 +144,59 @@ function signalTopicTokens(signal: GapSignal): Set<string> {
     .filter(token => !FINGERPRINT_STOP_WORDS.has(token)));
 }
 
+const SENSITIVE_OPEN_LOOP_RE = /\b(?:health|medical|medication|doctor|therapy|diagnos|salary|bank|legal|pregnan|mental health)\b/i;
+
+/**
+ * A fresh direct statement such as "I still need to run the release test" is
+ * stronger evidence than an LLM's willingness to send a follow-up. Realize
+ * only when it overlaps a current deterministic gap signal; vague pronouns,
+ * sensitive topics and unrelated chat remain model-gated or suppressed.
+ */
+function explicitRecentOpenLoop(
+  signals: GapSignal[],
+  recentChatContext?: string,
+): GapScheduledItem | null {
+  if (!recentChatContext) return null;
+  const userLines = recentChatContext.split('\n')
+    .filter(line => line.startsWith('User:'))
+    .map(line => line.slice('User:'.length).trim())
+    .reverse();
+  for (const line of userLines) {
+    const match = line.match(/\bI\s+(?:still\s+)?(?:need|have)\s+to\s+([^.!?\n]{3,160})/i);
+    const action = match?.[1]?.trim().replace(/^(?:just\s+)?/, '').replace(/\s+/g, ' ');
+    if (!action || /^(?:it|that|this|something|anything)$/i.test(action)
+      || SENSITIVE_OPEN_LOOP_RE.test(action)) continue;
+    const actionTokens = new Set((action.toLowerCase().match(/[\p{L}\p{N}]{4,}/gu) ?? [])
+      .filter(token => !FINGERPRINT_STOP_WORDS.has(token)));
+    const signal = signals.find(candidate => {
+      const tokens = signalTopicTokens(candidate);
+      return [...actionTokens].some(token => tokens.has(token));
+    });
+    if (!signal) continue;
+    const message = `Did you get a chance to ${action.replace(/[.!?]+$/, '')}?`;
+    if (!assessProactiveMessage(message).acceptable) continue;
+    return {
+      kind: 'nudge',
+      message,
+      context: JSON.stringify({
+        gapType: signal.type,
+        sourceId: signal.sourceId,
+        sourceSessionId: typeof signal.context.sessionId === 'string'
+          ? signal.context.sessionId
+          : undefined,
+        evidence: signal.description,
+        urgency: signal.severity,
+        source: 'explicit_recent_open_loop',
+      }),
+      taskConfig: null,
+      gapType: signal.type,
+      sourceId: signal.sourceId,
+      severity: signal.severity,
+    };
+  }
+  return null;
+}
+
 /** Suppress an old signal when a newer direct user message explicitly resolves its topic. */
 export function recentChatResolvesSignal(signal: GapSignal, recentChatContext?: string): boolean {
   if (!recentChatContext) return false;
@@ -747,6 +800,21 @@ export async function evaluateProactive(
     return {
       items: [], signalsFound: allSignals.length, llmCalled: false,
       skipReason: priorCreated ? 'unchanged_after_create' : 'unchanged_signals',
+      signalFingerprint,
+    };
+  }
+
+  const explicitOpenLoop = explicitRecentOpenLoop(allSignals, input.recentChatContext);
+  const availableBudget = Math.max(0, DIAL_BUDGETS[input.dial] - (input.todayItemCount ?? 0));
+  if (
+    explicitOpenLoop
+    && availableBudget > 0
+    && !isDuplicate(explicitOpenLoop.message, explicitOpenLoop.sourceId, input.existingItems)
+  ) {
+    return {
+      items: [explicitOpenLoop],
+      signalsFound: allSignals.length,
+      llmCalled: false,
       signalFingerprint,
     };
   }

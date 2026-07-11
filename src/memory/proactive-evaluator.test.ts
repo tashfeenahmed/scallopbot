@@ -310,6 +310,32 @@ describe('change-driven proactive evaluation', () => {
     expect(provider.complete).toHaveBeenCalledTimes(1);
   });
 
+  it('realizes a direct recent unfinished-work statement without an LLM call', async () => {
+    const now = 1_705_320_000_000;
+    const provider: LLMProvider = {
+      name: 'must-not-run',
+      isAvailable: () => true,
+      complete: vi.fn().mockRejectedValue(new Error('must not run')),
+    };
+    const result = await evaluateProactive({
+      ...makeEvalInput(),
+      now,
+      allSessionSummaries: [{
+        id: 'pending-summary', sessionId: 'pending-session', userId: 'telegram:42',
+        summary: 'The user will follow up and confirm whether the synthetic deployment test passed.',
+        topics: ['synthetic deployment test'], messageCount: 4, durationMs: 60_000,
+        embedding: null, createdAt: now - 3 * 24 * 60 * 60 * 1000,
+      }],
+      recentChatContext: 'User: I still need to run the synthetic deployment test.\nAssistant: Okay.',
+    }, provider);
+
+    expect(result).toMatchObject({
+      llmCalled: false,
+      items: [{ message: 'Did you get a chance to run the synthetic deployment test?' }],
+    });
+    expect(provider.complete).not.toHaveBeenCalled();
+  });
+
   it('persists malformed-output backoff and skips the unchanged provider route', async () => {
     const now = 1_705_320_000_000;
     let circuit: { nextRetryAt: number } | null = null;
