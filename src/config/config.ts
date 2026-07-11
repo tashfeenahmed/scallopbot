@@ -132,7 +132,9 @@ const channelsSchema = z.object({
 const agentSchema = z.object({
   workspace: z.string().min(1, 'Workspace path is required'),
   maxIterations: z.number().int().positive().default(100),
-  foregroundCallTimeoutMs: z.number().int().min(1_000).max(300_000).default(25_000),
+  // Disabled by default. Long reasoning/model calls must not kill an otherwise
+  // progressing turn merely because they cross an arbitrary latency target.
+  foregroundCallTimeoutMs: z.number().int().min(0).max(300_000).default(0),
   // Disabled by default. A positive value is retained only as an explicit
   // operator-configured hard cap; normal turns are governed by per-call and
   // progress-aware safeguards instead of a cumulative wall-clock deadline.
@@ -458,7 +460,7 @@ export function loadConfig(): Config {
     : 100;
   const foregroundCallTimeoutMs = process.env.AGENT_FOREGROUND_CALL_TIMEOUT_MS
     ? parseInt(process.env.AGENT_FOREGROUND_CALL_TIMEOUT_MS, 10)
-    : 25_000;
+    : 0;
   const turnTimeoutMs = process.env.AGENT_TURN_TIMEOUT_MS
     ? parseInt(process.env.AGENT_TURN_TIMEOUT_MS, 10)
     : 0;

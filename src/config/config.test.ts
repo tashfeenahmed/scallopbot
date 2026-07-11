@@ -58,7 +58,7 @@ describe('Config Schema', () => {
       expect(result.success).toBe(true);
       if (result.success) {
         expect(result.data.agent.maxIterations).toBe(100);
-        expect(result.data.agent.foregroundCallTimeoutMs).toBe(25_000);
+        expect(result.data.agent.foregroundCallTimeoutMs).toBe(0);
         expect(result.data.agent.turnTimeoutMs).toBe(0);
         expect(result.data.tools.loopDetection).toEqual({
           maxCallsPerResponse: 64,

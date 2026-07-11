@@ -686,8 +686,8 @@ describe('Agent improvements integration', () => {
         workspace: testDir,
         logger: pino({ level: 'silent' }),
         maxIterations: 3,
-        foregroundCallTimeoutMs: 100,
-        // No turnTimeoutMs: whole-turn deadlines must be disabled by default.
+        // No timeout options: neither individual model calls nor the complete
+        // progressing turn may inherit a hidden default wall-clock cutoff.
       });
 
       const started = Date.now();
@@ -727,7 +727,7 @@ describe('Agent improvements integration', () => {
       const result = await agent.processMessage(session.id, 'Please answer');
       expect(Date.now() - started).toBeLessThan(500);
       expect(signal?.aborted).toBe(true);
-      expect(result.response).toMatch(/deadline/i);
+      expect(result.response).toMatch(/configured per-call limit/i);
       const stored = await sessions.getSession(session.id);
       expect(JSON.stringify(stored?.messages.at(-1))).toContain(result.response);
     });
@@ -771,7 +771,7 @@ describe('Agent improvements integration', () => {
       const result = await agent.processMessage(session.id, 'Send this email');
       expect(Date.now() - started).toBeLessThan(500);
       expect(handlerSignal?.aborted).toBe(true);
-      expect(result.response).toMatch(/deadline/i);
+      expect(result.response).toMatch(/whole-turn limit/i);
       expect(db.getToolOperation(idempotencyKey)?.status).toBe('uncertain');
       const stored = await sessions.getSession(session.id);
       expect(JSON.stringify(stored?.messages.at(-1))).toContain(result.response);

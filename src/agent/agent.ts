@@ -122,7 +122,7 @@ export interface AgentOptions {
   enableComplexityAnalysis?: boolean;
   /** Explicit aliases for this deployment's single canonical state owner. */
   canonicalSingleUserIds?: readonly string[];
-  /** Maximum wall time for one foreground model attempt, including recovery. */
+  /** Optional model-call hard cap. Zero/undefined disables it. */
   foregroundCallTimeoutMs?: number;
   /** Optional whole-turn hard cap. Zero/undefined disables it. */
   turnTimeoutMs?: number;
@@ -314,7 +314,10 @@ export class Agent {
     this.evidenceExecutionContext = options.evidenceExecutionContext;
     this.enableComplexityAnalysis = options.enableComplexityAnalysis ?? true;
     this.canonicalSingleUserIds = [...(options.canonicalSingleUserIds ?? [])];
-    this.foregroundCallTimeoutMs = Math.max(50, options.foregroundCallTimeoutMs ?? 25_000);
+    const configuredForegroundCallTimeoutMs = options.foregroundCallTimeoutMs ?? 0;
+    this.foregroundCallTimeoutMs = configuredForegroundCallTimeoutMs > 0
+      ? Math.max(50, configuredForegroundCallTimeoutMs)
+      : 0;
     const configuredTurnTimeoutMs = options.turnTimeoutMs ?? 0;
     this.turnTimeoutMs = configuredTurnTimeoutMs > 0
       ? Math.max(this.foregroundCallTimeoutMs, configuredTurnTimeoutMs)
@@ -643,7 +646,7 @@ export class Agent {
     // Agent loop
     while (iterations < this.maxIterations) {
       if (turnDeadline !== undefined && Date.now() >= turnDeadline) {
-        finalResponse = 'I reached the response deadline before every step completed. I stopped safely and have not marked any unverified action as done.';
+        finalResponse = 'I stopped because the explicitly configured whole-turn limit expired before every step completed. I have not marked any unverified action as done.';
         completionReason = 'budget_exhausted';
         break;
       }
@@ -833,29 +836,36 @@ export class Agent {
       let response;
       const callAbortController = new AbortController();
       const remainingTurnMs = turnDeadline === undefined
-        ? this.foregroundCallTimeoutMs
+        ? undefined
         : Math.max(1, turnDeadline - Date.now());
-      const callTimeoutMs = Math.min(this.foregroundCallTimeoutMs, remainingTurnMs);
+      const callTimeoutMs = this.foregroundCallTimeoutMs > 0
+        ? (remainingTurnMs === undefined
+            ? this.foregroundCallTimeoutMs
+            : Math.min(this.foregroundCallTimeoutMs, remainingTurnMs))
+        : remainingTurnMs;
       const callSignal = abortSignal
         ? AbortSignal.any([abortSignal, callAbortController.signal])
         : callAbortController.signal;
       const timedRequest: CompletionRequest = { ...request, signal: callSignal };
       let callTimeout: ReturnType<typeof setTimeout> | undefined;
       try {
-        response = await Promise.race([
-          this.executeWithRecovery(
-            activeProvider,
-            timedRequest,
-            sessionId,
-            complexity.suggestedModelTier
-          ),
-          new Promise<never>((_resolve, reject) => {
-            callTimeout = setTimeout(() => {
-              callAbortController.abort();
-              reject(new Error(`Foreground model call exceeded ${callTimeoutMs}ms`));
-            }, callTimeoutMs);
-          }),
-        ]);
+        const modelCall = this.executeWithRecovery(
+          activeProvider,
+          timedRequest,
+          sessionId,
+          complexity.suggestedModelTier
+        );
+        response = callTimeoutMs === undefined
+          ? await modelCall
+          : await Promise.race([
+              modelCall,
+              new Promise<never>((_resolve, reject) => {
+                callTimeout = setTimeout(() => {
+                  callAbortController.abort();
+                  reject(new Error(`Foreground model call exceeded ${callTimeoutMs}ms`));
+                }, callTimeoutMs);
+              }),
+            ]);
       } catch (error) {
         this.logger.error({
           iteration: iterations,
@@ -864,7 +874,7 @@ export class Agent {
         }, 'LLM call failed after recovery attempts');
         const failureMessage = (error as Error).message;
         finalResponse = failureMessage.startsWith('Foreground model call exceeded')
-          ? 'I hit the response deadline while working on that. I stopped safely instead of leaving you waiting, and I have not marked any unverified action as complete.'
+          ? 'The model provider did not respond within the explicitly configured per-call limit. The task is incomplete and no unverified action has been marked complete.'
           : /token budget/i.test(failureMessage)
             ? 'I stopped because the token budget was exhausted. The task is incomplete and no unverified action has been marked complete.'
             : 'I could not get a reliable model response after trying the available recovery path. No unverified action has been marked complete.';
@@ -1033,8 +1043,11 @@ export class Agent {
         ) {
           const firstScore = scoreResponseHeuristic(finalResponse, userMessage).score;
           if (firstScore < this.bestOfNThreshold) {
-            const remainingMs = turnDeadline === undefined
+            const qualitySamplingTimeoutMs = this.foregroundCallTimeoutMs > 0
               ? this.foregroundCallTimeoutMs
+              : 120_000;
+            const remainingMs = turnDeadline === undefined
+              ? qualitySamplingTimeoutMs
               : turnDeadline - Date.now();
             // Quality sampling gets its own bounded model-call window. When an
             // operator explicitly configures a whole-turn cap, retain a small
@@ -1043,10 +1056,10 @@ export class Agent {
               ? 0
               : Math.min(250, Math.max(10, Math.floor(remainingMs * 0.05)));
             const samplingDeadline = turnDeadline === undefined
-              ? Date.now() + this.foregroundCallTimeoutMs
+              ? Date.now() + qualitySamplingTimeoutMs
               : Math.min(
                   turnDeadline - finalizationReserveMs,
-                  Date.now() + this.foregroundCallTimeoutMs,
+                  Date.now() + qualitySamplingTimeoutMs,
                 );
             if (samplingDeadline - Date.now() >= 25) {
               this.logger.info(
