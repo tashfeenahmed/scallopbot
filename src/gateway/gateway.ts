@@ -58,6 +58,7 @@ import { registerWebhookEventRelay } from '../hooks/webhook-relay.js';
 import { SafeWorkflowExecutor, createExecuteWorkflowSkill } from '../workflow/index.js';
 import { matchesPolicy } from '../skills/tool-policy.js';
 import { resolveStateUserId } from '../utils/state-user-id.js';
+import { inspectArtifact, validateArtifactForDelivery } from '../artifacts/delivery.js';
 
 export interface GatewayOptions {
   config: Config;
@@ -426,7 +427,7 @@ export class Gateway {
     // Register native skills (comms + memory_get) that need runtime access
     this.registerNativeSkills(voiceStatus.tts);
     this.logger.debug(
-      { nativeSkills: ['send_message', 'send_file', 'voice_reply', 'memory_get', 'load_procedure'].filter(n => this.skillRegistry!.hasSkill(n)) },
+      { nativeSkills: ['send_message', 'send_file', 'inspect_artifact', 'voice_reply', 'memory_get', 'load_procedure'].filter(n => this.skillRegistry!.hasSkill(n)) },
       'Native skills registered'
     );
 
@@ -1034,6 +1035,40 @@ export class Gateway {
       .build();
     this.skillRegistry.registerSkill(sendMessageSkill.skill);
 
+    const inspectArtifactSkill = defineSkill('inspect_artifact', 'Read-only verification of a generated file under output/: exact path, bytes, modification time, type, and PDF page count.')
+      .userInvocable(false)
+      .safety({ readOnly: true })
+      .inputSchema({
+        type: 'object',
+        properties: {
+          file_path: { type: 'string', description: 'Path under output/' },
+        },
+        required: ['file_path'],
+      })
+      .onNativeExecute(async (ctx) => {
+        const filePath = String(ctx.args.file_path ?? '');
+        try {
+          const inspected = await inspectArtifact(path.resolve(ctx.workspace, 'output'), filePath);
+          return {
+            success: true,
+            output: JSON.stringify({
+              path: inspected.relativePath,
+              fileName: inspected.fileName,
+              sizeBytes: inspected.sizeBytes,
+              modifiedAt: new Date(inspected.modifiedAt).toISOString(),
+              extension: inspected.extension,
+              sha256: inspected.sha256,
+              ...(inspected.pdfPageCount !== undefined && { pdfPageCount: inspected.pdfPageCount }),
+              ...(inspected.pdfProducer && { pdfProducer: inspected.pdfProducer }),
+            }),
+          };
+        } catch (error) {
+          return { success: false, output: '', error: `[TOOL_ERROR code=ARTIFACT_INSPECTION_FAILED] ${(error as Error).message}` };
+        }
+      })
+      .build();
+    this.skillRegistry.registerSkill(inspectArtifactSkill.skill);
+
     // send_file skill
     const sendFileSkill = defineSkill('send_file', 'Send a file to the user via chat. Use this to send PDFs, images, documents, or any file the user requests.')
       .userInvocable(false)
@@ -1095,11 +1130,34 @@ export class Gateway {
           return { success: false, output: `File too large: ${(stats.size / 1024 / 1024).toFixed(2)}MB (max 50MB)` };
         }
 
+        const validation = await validateArtifactForDelivery({
+          outputRoot: realOutputRoot,
+          requestedPath: realFilePath,
+          userMessage: ctx.userMessage,
+          previousAssistantMessage: ctx.previousAssistantMessage,
+          caption,
+          turnStartedAt: ctx.turnStartedAt,
+        });
+        if (!validation.passed) {
+          const suggestion = validation.suggestedPath
+            ? ` Suggested current artifact: ${validation.suggestedPath}.`
+            : '';
+          return {
+            success: false,
+            output: '',
+            error: `[TOOL_ERROR code=${validation.code ?? 'ARTIFACT_VALIDATION_FAILED'}] ${validation.reason ?? 'Artifact validation failed.'}${suggestion}`,
+          };
+        }
+
         const ok = await this.handleFileSend(ctx.userId, realFilePath, caption);
         if (ok) {
           const fileName = pathMod.basename(realFilePath);
           const sizeKB = (stats.size / 1024).toFixed(1);
-          return { success: true, output: `File sent successfully: ${fileName} (${sizeKB}KB)` };
+          const receipt = validation.inspection;
+          return {
+            success: true,
+            output: `File sent successfully: ${fileName} (${sizeKB}KB, sha256:${receipt?.sha256 ?? 'unknown'}${receipt?.pdfPageCount !== undefined ? `, pages:${receipt.pdfPageCount}` : ''})`,
+          };
         }
         return { success: false, output: 'Failed to send file - check logs for details' };
       })

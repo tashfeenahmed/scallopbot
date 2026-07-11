@@ -38,7 +38,7 @@ import {
   type ProactiveFeedbackResult,
   type ProactiveEngagementContext,
 } from './feedback.js';
-import { getRecentChatContext } from './chat-context.js';
+import { getRecentChatContext, hasUnresolvedArtifactWork } from './chat-context.js';
 import { wordOverlap } from '../utils/text-similarity.js';
 import { resolveStateUserId } from '../utils/state-user-id.js';
 import {
@@ -1428,6 +1428,17 @@ export class UnifiedScheduler {
           identityCandidates: [...this.ownedIdentityCandidates(item.userId)],
         })
       : null;
+    if (gapApplies && hasUnresolvedArtifactWork(recentChat?.formattedContext)) {
+      this.logger.info({ itemId: item.id, userId: item.userId }, 'Suppressing generic proactive while artifact work is unresolved');
+      this.db.recordProactiveDecision({
+        userId: item.userId,
+        stage: 'deliver',
+        outcome: 'suppressed',
+        reason: 'unresolved_artifact_work',
+        detail: { itemId: item.id },
+      });
+      return 'cancelled';
+    }
     const renderResult = isProvenUserLiteral
       ? { outcome: 'ready' as const, message: message.trim() }
       : await prepareUserFacingProactiveMessage(message, this.router, {

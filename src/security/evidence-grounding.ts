@@ -103,6 +103,7 @@ const METRIC_ALIASES: Array<{ canonical: string; pattern: string }> = [
   { canonical: 'user', pattern: 'users?' },
   { canonical: 'sale', pattern: 'sales?' },
   { canonical: 'order', pattern: 'orders?' },
+  { canonical: 'page', pattern: 'pages?' },
   { canonical: 'revenue', pattern: 'revenue' },
   { canonical: 'balance', pattern: 'balance' },
   { canonical: 'price', pattern: 'prices?' },
@@ -416,4 +417,35 @@ export function verifyResponseEvidenceClaims(
         missingCount,
         reason: `${missingCount} of ${claims.length} factual claim(s) were not grounded in verified tool output`,
       };
+}
+
+/**
+ * Remove public lines containing factual claims absent from verified receipts.
+ * This is a last-mile quarantine for foreground research/reporting: useful
+ * sourced prose survives, while invented figures never become fluent output.
+ */
+export function quarantineUngroundedResponseClaims(
+  response: string,
+  receipts: readonly EvidenceClaimReceipt[],
+): { response: string; removedLines: number; claimCount: number; missingCount: number } {
+  const available = new Set(receipts.flatMap(receipt => receipt.claimDigests ?? []));
+  let removedLines = 0;
+  let claimCount = 0;
+  let missingCount = 0;
+  const kept = response.split('\n').filter(line => {
+    const claims = extractNormalizedEvidenceClaims(line);
+    if (claims.length === 0) return true;
+    claimCount += claims.length;
+    const missing = claims.map(digestEvidenceClaim).filter(digest => !available.has(digest));
+    missingCount += missing.length;
+    if (missing.length === 0) return true;
+    removedLines++;
+    return false;
+  });
+  let sanitized = kept.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  if (removedLines > 0) {
+    const note = 'I omitted factual figures that were not supported by the retrieved sources.';
+    sanitized = sanitized ? `${sanitized}\n\n${note}` : note;
+  }
+  return { response: sanitized, removedLines, claimCount, missingCount };
 }

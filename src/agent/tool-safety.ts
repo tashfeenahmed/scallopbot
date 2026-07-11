@@ -62,7 +62,7 @@ const DIRECT_WRITE_REQUEST = new RegExp(
 const ANY_WRITE_ACTION = new RegExp(`\\b(${WRITE_ACTIONS})\\b`, 'i');
 const CONFIRMATION_REQUEST =
   /\b(?:(?:shall|should|may|can)\s+i|(?:do|would)\s+you\s+(?:want|like)\s+me\s+to|confirm(?:ation)?|permission|okay\s+to|ok\s+to)\b/i;
-const LOCAL_ACTIONS = `${WRITE_ACTIONS}|append|change|commit|copy|deploy|execute|fix|format|generate|implement|install|make|mkdir|modify|move|patch|push|refactor|rename|restore|run|test|touch|upload|work`;
+const LOCAL_ACTIONS = `${WRITE_ACTIONS}|append|build|change|commit|compile|copy|deploy|execute|export|fix|format|generate|implement|install|make|mkdir|modify|move|patch|push|refactor|render|rename|restore|run|test|touch|upload|work`;
 const DIRECT_LOCAL_REQUEST = new RegExp(
   `(?:^\\s*(?:(?:please\\s+)?|(?:(?:can|could|would|will)\\s+(?:you|u)\\s+(?:please\\s+)?)|(?:i\\s+(?:want|need|would like)\\s+you\\s+to\\s+))(${LOCAL_ACTIONS})\\b)`
   + `|(?:\\b(?:and|then)\\s+(?:please\\s+)?(${LOCAL_ACTIONS})\\b)`
@@ -207,9 +207,10 @@ export function isLikelyMutation(toolUse: ToolUseContent, skill?: Skill | null):
   if (action && MUTATING_ACTION.test(action)) return true;
   if (toolUse.name === 'bash') {
     const command = bashCommand(toolUse);
+    const commandWithoutNullRedirection = command.replace(/(?:\d?>|&>)\s*\/dev\/null\b/g, '');
     return isExternalBashMutation(command)
       || /(?:^|[;&|]\s*)(?:rm|mv|cp|mkdir|touch|git\s+(?:commit|push)|npm\s+install)\b/i.test(command)
-      || /(?:^|[^>])>{1,2}\s*[^&]/.test(command);
+      || /(?:^|[^>])>{1,2}\s*[^&]/.test(commandWithoutNullRedirection);
   }
   if (KNOWN_LOCAL_MUTATING_TOOLS.has(toolUse.name.toLowerCase())) return true;
   return /(?:write|edit|create|delete|remove|send|post|publish|schedule|board|goal)/i.test(toolUse.name);
@@ -326,6 +327,23 @@ function hasExplicitLocalMutationIntent(message: string): boolean {
   return DIRECT_LOCAL_REQUEST.test(message);
 }
 
+/** Telegram/API reply wrappers are context, not the current instruction. */
+export function currentInstruction(message: string): string {
+  const trimmed = message.trim();
+  if (!trimmed.startsWith('[Replying to ')) return trimmed;
+  const closingQuote = trimmed.lastIndexOf('"]');
+  if (closingQuote < 0) return trimmed;
+  const tail = trimmed.slice(closingQuote + 2).trim();
+  return tail || trimmed;
+}
+
+function isCorrectiveFollowUp(message: string, previousAssistantMessage?: string): boolean {
+  if (!previousAssistantMessage) return false;
+  const correction = /\b(?:incorrect|wrong|old|broken|failed|not the|didn['’]?t|doesn['’]?t|you (?:sent|made|created|used))\b/i.test(message);
+  const priorArtifactAction = /\b(?:built|created|generated|made|saved|sent|file|pdf|report|document|artifact)\b/i.test(previousAssistantMessage);
+  return correction && priorArtifactAction;
+}
+
 function isBoundTargetedConfirmation(
   message: string,
   previousAssistantMessage: string | undefined,
@@ -334,7 +352,11 @@ function isBoundTargetedConfirmation(
   if (!EXPLICIT_CONFIRMATION.test(message) || !previousAssistantMessage) return false;
   if (!CONFIRMATION_REQUEST.test(previousAssistantMessage)) return false;
   if (!toolTargetMentioned(previousAssistantMessage, toolUse)) return false;
-  const priorAction = previousAssistantMessage.match(ANY_WRITE_ACTION)?.[1]?.toLowerCase();
+  // Prefer a direct target-specific request ("Confirm: send the PDF") over
+  // incidental safety prose such as "external write" earlier in the message.
+  const priorAction = directRequestedAction(previousAssistantMessage)
+    ?? [...previousAssistantMessage.matchAll(new RegExp(ANY_WRITE_ACTION.source, 'ig'))]
+      .at(-1)?.[1]?.toLowerCase();
   return !!priorAction && actionsCompatible(priorAction, toolMutationAction(toolUse));
 }
 
@@ -381,10 +403,11 @@ export function assessToolCallForTurn(
   const signature = toolCallSignature(toolUse);
   if (!isMutation) return { allowed: true, isMutation, isExternalMutation, signature };
 
-  const message = context.userMessage.trim();
+  const message = currentInstruction(context.userMessage);
   const declared = skill?.frontmatter.metadata?.openclaw?.safety;
   if (!isExternalMutation) {
-    if (hasExplicitLocalMutationIntent(message)) {
+    if (hasExplicitLocalMutationIntent(message)
+      || isCorrectiveFollowUp(message, context.previousAssistantMessage)) {
       return { allowed: true, isMutation, isExternalMutation, signature };
     }
     return {

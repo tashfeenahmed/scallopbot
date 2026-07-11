@@ -16,6 +16,8 @@ export interface ToolCallRecord {
   toolName: string;
   argsHash: string;       // SHA-256 of sorted JSON args
   resultHash?: string;    // SHA-256 of tool output (set after execution)
+  /** Stable machine-readable failure family, independent of changing args. */
+  failureFamily?: string;
   toolCallId?: string;
   timestamp: number;
 }
@@ -31,7 +33,7 @@ export interface ToolLoopDetectorConfig {
   circuitBreakerThreshold: number;
 }
 
-export type LoopDetectionKind = 'generic_repeat' | 'ping_pong' | 'no_progress' | 'circuit_breaker';
+export type LoopDetectionKind = 'generic_repeat' | 'ping_pong' | 'no_progress' | 'repeated_failure' | 'circuit_breaker';
 
 export interface LoopDetection {
   kind: LoopDetectionKind;
@@ -75,6 +77,7 @@ export class ToolLoopDetector {
   private config: ToolLoopDetectorConfig;
   private history: Map<string, ToolCallRecord[]> = new Map();
   private noProgressCount: Map<string, number> = new Map();
+  private repeatedFailure: Map<string, { family: string; count: number }> = new Map();
 
   constructor(config?: Partial<ToolLoopDetectorConfig>) {
     const merged = { ...DEFAULT_CONFIG, ...config };
@@ -124,16 +127,25 @@ export class ToolLoopDetector {
     if (!records) return;
 
     const resultHash = stableHash(result);
+    const typed = result.match(/\[TOOL_ERROR\s+code=([A-Z0-9_:-]+)\]/i)?.[1]?.toUpperCase();
+    const plainError = result.match(/^Error:\s*([^\n.]{1,120})/i)?.[1]
+      ?.toLowerCase()
+      .replace(/\d+/g, '#')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const failureFamily = typed ?? (plainError ? `PLAIN:${plainError}` : undefined);
 
     // Find the most recent matching record
     for (let i = records.length - 1; i >= 0; i--) {
       if (toolCallId && records[i].toolCallId === toolCallId) {
         records[i].resultHash = resultHash;
+        records[i].failureFamily = failureFamily;
         break;
       }
       // Fallback: match the most recent record without a result hash
       if (!toolCallId && !records[i].resultHash) {
         records[i].resultHash = resultHash;
+        records[i].failureFamily = failureFamily;
         break;
       }
     }
@@ -149,6 +161,16 @@ export class ToolLoopDetector {
       this.noProgressCount.set(sessionId, (this.noProgressCount.get(sessionId) || 0) + 1);
     } else {
       this.noProgressCount.set(sessionId, 0);
+    }
+
+    if (failureFamily) {
+      const prior = this.repeatedFailure.get(sessionId);
+      this.repeatedFailure.set(sessionId, {
+        family: failureFamily,
+        count: prior?.family === failureFamily ? prior.count + 1 : 1,
+      });
+    } else {
+      this.repeatedFailure.delete(sessionId);
     }
   }
 
@@ -169,6 +191,28 @@ export class ToolLoopDetector {
         message: `Circuit breaker: ${noProgress} no-progress tool calls detected. The agent appears stuck. Try a different approach or ask the user for help.`,
         toolName: records[records.length - 1].toolName,
         count: noProgress,
+      };
+    }
+
+    // A model changing commands does not constitute progress when the
+    // execution boundary rejects every attempt for the same reason.
+    const repeatedFailure = this.repeatedFailure.get(sessionId);
+    if (repeatedFailure && repeatedFailure.count >= 6) {
+      return {
+        kind: 'repeated_failure',
+        severity: 'block',
+        message: `Repeated failure circuit breaker: ${repeatedFailure.count} consecutive tool calls failed with ${repeatedFailure.family}. Stop retrying, explain the blocker, and ask only for the missing authorization or input.`,
+        toolName: records.at(-1)!.toolName,
+        count: repeatedFailure.count,
+      };
+    }
+    if (repeatedFailure && repeatedFailure.count >= 3) {
+      return {
+        kind: 'repeated_failure',
+        severity: 'warning',
+        message: `The last ${repeatedFailure.count} tool calls failed with the same ${repeatedFailure.family} error. Do not reinterpret this as cached or empty output; change the blocking condition before retrying.`,
+        toolName: records.at(-1)!.toolName,
+        count: repeatedFailure.count,
       };
     }
 
@@ -193,6 +237,7 @@ export class ToolLoopDetector {
   clearSession(sessionId: string): void {
     this.history.delete(sessionId);
     this.noProgressCount.delete(sessionId);
+    this.repeatedFailure.delete(sessionId);
   }
 
   private detectPingPong(records: ToolCallRecord[]): LoopDetection | null {

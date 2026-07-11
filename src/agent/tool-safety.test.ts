@@ -129,6 +129,52 @@ describe('turn-scoped tool safety', () => {
     expect(requested.allowed).toBe(true);
   });
 
+  it.each(['Build the PDF', 'Render the report', 'Compile the document', 'Export the analysis']) (
+    'recognizes explicit artifact mutation intent: %s',
+    (userMessage) => {
+      const verdict = assessToolCallForTurn(
+        { type: 'tool_use', id: 'build-1', name: 'run_code', input: { language: 'python', code: 'write_pdf()' } },
+        { userMessage, timezone: 'Europe/Dublin' },
+      );
+      expect(verdict.allowed).toBe(true);
+    },
+  );
+
+  it('allows a local correction when the user says the delivered artifact was wrong', () => {
+    const verdict = assessToolCallForTurn(
+      { type: 'tool_use', id: 'fix-artifact', name: 'run_code', input: { language: 'python', code: 'write_pdf()' } },
+      {
+        userMessage: 'This is the old one, not the typist one!',
+        previousAssistantMessage: 'Sent! The new PDF is in Telegram.',
+        timezone: 'Europe/Dublin',
+      },
+    );
+    expect(verdict.allowed).toBe(true);
+  });
+
+  it('extracts a direct send request after a Telegram reply wrapper', () => {
+    const verdict = assessToolCallForTurn(
+      { type: 'tool_use', id: 'send-reply', name: 'send_file', input: { file_path: 'output/report.pdf' } },
+      {
+        userMessage: '[Replying to You (assistant): "The PDF is ready."]\n\nSend it to me',
+        timezone: 'Europe/Dublin',
+      },
+    );
+    expect(verdict.allowed).toBe(true);
+  });
+
+  it('binds bare confirmation to the requested send action, not incidental “external write” prose', () => {
+    const verdict = assessToolCallForTurn(
+      { type: 'tool_use', id: 'send-confirmed', name: 'send_file', input: { file_path: 'output/report.pdf' } },
+      {
+        userMessage: 'Yes',
+        previousAssistantMessage: 'The system needs confirmation for this external write. Confirm: Send the PDF now?',
+        timezone: 'Europe/Dublin',
+      },
+    );
+    expect(verdict.allowed).toBe(true);
+  });
+
   it('blocks ambiguous shorthand before structured external writes', () => {
     const verdict = assessToolCallForTurn(
       notionWrite({ action: 'create', sets: 4, reps: 3 }),

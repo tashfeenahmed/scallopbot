@@ -3,6 +3,7 @@
  *
  * Fetches a URL and extracts text content from HTML.
  */
+import { unusableWebContentReason } from './content-quality.js';
 
 export {};
 
@@ -176,6 +177,20 @@ async function main(): Promise<void> {
       text = htmlToText(body);
     } else {
       text = body;
+    }
+
+    // Some sites return an HTTP 200 shell containing a soft 404, bot
+    // challenge, or dead storage bucket. Transport success is not usable
+    // research evidence.
+    const invalidContent = unusableWebContentReason(text);
+    if (invalidContent) {
+      outputResult({
+        success: false,
+        output: '',
+        error: `Fetched page is not usable source content: ${invalidContent}`,
+        exitCode: 1,
+      });
+      return;
     }
 
     // Truncate if needed

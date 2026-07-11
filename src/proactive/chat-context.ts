@@ -26,6 +26,17 @@ export interface RecentChatContextOptions {
   identityCandidates?: readonly string[];
 }
 
+/** Do not inject a generic check-in while an artifact awaits correction or delivery. */
+export function hasUnresolvedArtifactWork(formattedContext: string | null | undefined): boolean {
+  if (!formattedContext) return false;
+  const lines = formattedContext.split('\n').filter(Boolean);
+  const tail = lines.slice(-3).join('\n');
+  const artifact = /\b(?:pdf|report|document|file|artifact|output\/[^\s]+)\b/i.test(tail);
+  const unresolved = /\b(?:ready|created|generated|saved|confirm|send it|send the|old one|wrong (?:file|one)|not the|failed|could not|couldn't|awaiting)\b/i.test(tail);
+  const conclusivelySent = /Assistant:\s.*\b(?:sent successfully|file (?:was )?sent|check your telegram)\b/i.test(lines.at(-1) ?? '');
+  return artifact && unresolved && !conclusivelySent;
+}
+
 const DEFAULT_MAX_MESSAGES = 10;
 const DEFAULT_MAX_CHARS = 300;
 const DEFAULT_STALENESS_MS = 48 * 60 * 60 * 1000; // 48 hours

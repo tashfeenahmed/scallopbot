@@ -777,4 +777,140 @@ describe('Agent improvements integration', () => {
       expect(JSON.stringify(stored?.messages.at(-1))).toContain(result.response);
     });
   });
+
+  describe('Kimi stress regressions', () => {
+    it('blocks user-facing success progress before any mutation receipt exists', async () => {
+      const { Agent } = await import('./agent.js');
+      const { SessionManager } = await import('./session.js');
+      const send = vi.fn(async () => ({ success: true, output: 'Message sent' }));
+      const skill = {
+        name: 'send_message', description: 'send', path: '/tmp/send/SKILL.md', source: 'sdk' as const,
+        frontmatter: { name: 'send_message', description: 'send', metadata: { openclaw: { safety: { externalWrite: true } } } },
+        content: '', available: true, hasScripts: true, handler: send,
+      };
+      const registry = {
+        getSkill: vi.fn((name: string) => name === 'send_message' ? skill : null),
+        getToolDefinitions: vi.fn(() => [{ name: 'send_message', description: 'send', input_schema: { type: 'object', properties: {} } }]),
+        generateSkillPrompt: vi.fn(() => ''),
+      };
+      const provider = seqProvider([
+        {
+          content: [{ type: 'tool_use', id: 'progress', name: 'send_message', input: { message: 'Done — the 8 page PDF was created successfully.' } }],
+          stopReason: 'tool_use', usage: { inputTokens: 5, outputTokens: 5 }, model: 'kimi-mock',
+        },
+        endTurn('I have not created the PDF yet.'),
+      ]);
+      const sessions = new SessionManager(db);
+      const session = await sessions.createSession();
+      const agent = new Agent({ provider, sessionManager: sessions, skillRegistry: registry as any, workspace: testDir, logger: pino({ level: 'silent' }), maxIterations: 3 });
+      const result = await agent.processMessage(session.id, 'Build a competitor report PDF');
+      expect(send).not.toHaveBeenCalled();
+      expect(result.response).toMatch(/not created/i);
+      expect(JSON.stringify((await sessions.getSession(session.id))?.messages)).toContain('UNVERIFIED_PROGRESS_CLAIM');
+    });
+
+    it('quarantines invented competitor figures while retaining sourced figures', async () => {
+      const { Agent } = await import('./agent.js');
+      const { SessionManager } = await import('./session.js');
+      const webfetch = {
+        name: 'webfetch', description: 'fetch', path: '/tmp/webfetch/SKILL.md', source: 'bundled' as const,
+        frontmatter: { name: 'webfetch', description: 'fetch', metadata: { openclaw: { safety: { readOnly: true } } } },
+        content: '', available: true, hasScripts: true,
+        handler: vi.fn(async () => ({ success: true, output: 'LandTech says it is trusted by 5,000 UK developers.' })),
+      };
+      const registry = {
+        getSkill: vi.fn((name: string) => name === 'webfetch' ? webfetch : null),
+        getToolDefinitions: vi.fn(() => [{ name: 'webfetch', description: 'fetch', input_schema: { type: 'object', properties: {} } }]),
+        generateSkillPrompt: vi.fn(() => ''),
+      };
+      const provider = seqProvider([
+        {
+          content: [{ type: 'tool_use', id: 'source', name: 'webfetch', input: { url: 'https://land.tech' } }],
+          stopReason: 'tool_use', usage: { inputTokens: 5, outputTokens: 5 }, model: 'kimi-mock',
+        },
+        endTurn('LandTech is trusted by 5,000 UK developers.\nIt has £30M in funding and could enter Ireland with €1M.'),
+      ]);
+      const sessions = new SessionManager(db);
+      const session = await sessions.createSession();
+      const agent = new Agent({ provider, sessionManager: sessions, skillRegistry: registry as any, workspace: testDir, logger: pino({ level: 'silent' }), maxIterations: 3 });
+      const result = await agent.processMessage(session.id, 'Research and analyze the competitor market');
+      expect(result.response).toContain('5,000 UK developers');
+      expect(result.response).not.toContain('£30M');
+      expect(result.response).not.toContain('€1M');
+      expect(result.response).toContain('omitted factual figures');
+    });
+
+    it('stops changing tools after six identical safety failures', async () => {
+      const { Agent } = await import('./agent.js');
+      const { SessionManager } = await import('./session.js');
+      let calls = 0;
+      const provider: LLMProvider = {
+        name: 'kimi-stress-mock', isAvailable: () => true,
+        complete: vi.fn(async () => ({
+          content: [{ type: 'tool_use', id: `write-${calls}`, name: 'run_code', input: { language: 'python', code: `open("file-${calls++}","w").write("x")` } }],
+          stopReason: 'tool_use', usage: { inputTokens: 100, outputTokens: 10 }, model: 'kimi-mock',
+        })),
+      };
+      const runCode = {
+        name: 'run_code', description: 'run', path: '/tmp/run/SKILL.md', source: 'bundled' as const,
+        frontmatter: { name: 'run_code', description: 'run', metadata: { openclaw: { safety: { localWrite: true } } } },
+        content: '', available: true, hasScripts: true,
+        handler: vi.fn(async () => ({ success: true, output: 'should never run' })),
+      };
+      const registry = {
+        getSkill: vi.fn((name: string) => name === 'run_code' ? runCode : null),
+        getToolDefinitions: vi.fn(() => [{ name: 'run_code', description: 'run', input_schema: { type: 'object', properties: {} } }]),
+        generateSkillPrompt: vi.fn(() => ''),
+      };
+      const sessions = new SessionManager(db);
+      const session = await sessions.createSession();
+      const agent = new Agent({ provider, sessionManager: sessions, skillRegistry: registry as any, workspace: testDir, logger: pino({ level: 'silent' }), maxIterations: 20 });
+      const result = await agent.processMessage(session.id, 'Explain why PDF creation failed; do not change files');
+      expect(result.completionReason).toBe('tool_loop');
+      expect(provider.complete).toHaveBeenCalledTimes(6);
+      expect(runCode.handler).not.toHaveBeenCalled();
+      expect(result.response).toMatch(/Repeated failure circuit breaker/i);
+    });
+
+    it('bounds the active-turn working set instead of replaying every large result', async () => {
+      const { Agent } = await import('./agent.js');
+      const { SessionManager } = await import('./session.js');
+      const requestSizes: number[] = [];
+      let modelCall = 0;
+      const provider: LLMProvider = {
+        name: 'kimi-context-stress', isAvailable: () => true,
+        complete: vi.fn(async request => {
+          requestSizes.push(JSON.stringify(request.messages).length);
+          modelCall++;
+          if (modelCall === 10) return endTurn('Finished with a bounded working set.');
+          return {
+            content: [{ type: 'tool_use', id: `large-${modelCall}`, name: 'large_read', input: { page: modelCall } }],
+            stopReason: 'tool_use', usage: { inputTokens: 100, outputTokens: 10 }, model: 'kimi-mock',
+          };
+        }),
+      };
+      const largeRead = {
+        name: 'large_read', description: 'large read', path: '/tmp/large/SKILL.md', source: 'sdk' as const,
+        frontmatter: { name: 'large_read', description: 'large read', metadata: { openclaw: { safety: { readOnly: true } } } },
+        content: '', available: true, hasScripts: true,
+        handler: vi.fn(async ({ args }: { args: Record<string, unknown> }) => ({
+          success: true,
+          output: `page:${args.page}\n${String(args.page).repeat(22_000)}`,
+        })),
+      };
+      const registry = {
+        getSkill: vi.fn((name: string) => name === 'large_read' ? largeRead : null),
+        getToolDefinitions: vi.fn(() => [{ name: 'large_read', description: 'large read', input_schema: { type: 'object', properties: {} } }]),
+        generateSkillPrompt: vi.fn(() => ''),
+      };
+      const sessions = new SessionManager(db);
+      const session = await sessions.createSession();
+      const agent = new Agent({ provider, sessionManager: sessions, skillRegistry: registry as any, workspace: testDir, logger: pino({ level: 'silent' }), maxIterations: 12 });
+      const result = await agent.processMessage(session.id, 'Inspect these large pages and summarize');
+      expect(result.response).toContain('bounded working set');
+      expect(requestSizes).toHaveLength(10);
+      expect(requestSizes[7]).toBeLessThan(requestSizes[6]);
+      expect(Math.max(...requestSizes.slice(7))).toBeLessThan(requestSizes[6] * 1.4);
+    });
+  });
 });

@@ -160,6 +160,25 @@ describe('SessionManager', () => {
       expect(loaded?.messages).toHaveLength(1);
       expect(loaded?.messages[0].content).toBe('Before restart');
     });
+
+    it('never stores provider thinking inside an assistant_final row', async () => {
+      const { SessionManager } = await import('./session.js');
+      const manager = new SessionManager(db);
+      const session = await manager.createSession();
+      await manager.addMessage(session.id, {
+        role: 'assistant',
+        content: [
+          { type: 'thinking', thinking: 'private reasoning' },
+          { type: 'text', text: 'Public answer' },
+        ],
+      });
+
+      const row = db.getSessionMessages(session.id).at(-1)!;
+      expect(row.messageKind).toBe('assistant_final');
+      expect(row.content).toContain('Public answer');
+      expect(row.content).not.toContain('private reasoning');
+      expect(JSON.stringify((await manager.getSession(session.id))?.messages.at(-1))).not.toContain('private reasoning');
+    });
   });
 
   describe('deleteSession', () => {

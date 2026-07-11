@@ -106,7 +106,10 @@ describe('Agent', () => {
       });
 
       const stored = await sessionManager.getSession(session.id);
-      expect(stored?.messages.at(-1)).toEqual({ role: 'assistant', content: providerContent });
+      expect(stored?.messages.at(-1)).toEqual({
+        role: 'assistant',
+        content: [{ type: 'text', text: 'Visible answer.' }],
+      });
     });
 
     it('retries a think-only visible response instead of returning reasoning or silence', async () => {

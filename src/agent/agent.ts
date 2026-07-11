@@ -53,6 +53,9 @@ import {
 import {
   buildEvidenceClaimLedger,
   buildRuntimeEvidenceProvenance,
+  quarantineUngroundedResponseClaims,
+  verifyResponseEvidenceClaims,
+  type EvidenceClaimReceipt,
   type EvidenceExecutionContext,
   type EvidenceProvenanceReceipt,
 } from '../security/evidence-grounding.js';
@@ -60,6 +63,10 @@ import {
 /** A single giant model-authored burst is malformed; useful work may continue in later iterations. */
 const DEFAULT_MAX_TOOL_CALLS_PER_RESPONSE = 64;
 const MAX_PARALLEL_TOOL_CALLS = 4;
+
+function typedToolError(code: string, message: string): string {
+  return `[TOOL_ERROR code=${code}] ${message}`;
+}
 
 export interface AgentOptions {
   provider: LLMProvider;
@@ -181,9 +188,9 @@ const DEFAULT_SYSTEM_PROMPT = `You are a personal AI assistant with direct syste
 
 ## HOW TO WORK
 1. Act immediately - use skills, don't ask permission
-2. Fix blockers yourself - missing deps? Install them (npm/pip/brew)
+2. Fix blockers yourself, but never uninstall or replace global/system packages. Reuse the project environment or create an isolated temporary environment.
 3. Try alternatives - if one approach fails, try another before asking
-4. When in doubt, search the web for latest ways to achieve things using bash.
+4. For current information, call the typed web_search tool directly; never run web-search through bash.
 5. Loop until done. After each action: "Is this complete?" YES → [DONE]. NO → continue.
 6. Never [DONE] mid-response. Only at the very end.
 7. Never fabricate API keys or credentials.
@@ -195,22 +202,27 @@ GOOD: *npm install -D prettier* "Installed. Formatting now..."
 ## RESEARCH & LONG TASKS
 - **You have a LIMITED number of iterations** (see ITERATION BUDGET below). Plan your research wisely — don't waste iterations on repeated or low-value searches.
 - **"Good enough" wins.** If you find results that partially answer the question, present them. Don't keep searching for perfection — note caveats instead.
-- **Never repeat searches.** Before each web-search, check if you already searched something similar. Rephrase or skip.
-- **Browser failures = move on.** If agent-browser gets blocked or returns empty content twice in a row, stop browsing and work with what web-search gave you.
+- **Never repeat searches.** Before each web_search call, check if you already searched something similar. Rephrase or skip.
+- **Browser failures = move on.** If browser automation gets blocked or returns empty content twice, stop browsing and use web_search plus primary-page webfetch results.
 - **Synthesize, don't hoard.** Your job is to deliver answers, not collect data. Once you have enough info to give a useful response, wrap it up with [DONE].
+- **Typed failures are definitive.** A result beginning with [TOOL_ERROR code=...] did not run. It is never cached output or silent success. Fix that named condition before retrying.
+- **Source discipline.** Numeric market claims, funding, forecasts, probabilities, and competitor assertions must appear in retrieved primary-source output. If not verified, omit or label them as assumptions.
 
 ## CAPABILITIES
-You have skills for: **web search** (via bash), **web browsing** (via bash), **file operations**, **memory**, **communication**, **scheduling**, and **goal tracking**. See the full skill list at the end of this prompt.
+You have skills for: **web search** (typed web_search tool), **web browsing**, **file operations**, **memory**, **communication**, **scheduling**, and **goal tracking**. See the full skill list at the end of this prompt.
 
 ## SYSTEM ACCESS
 - Use the Workspace path shown in this prompt as the project root. Do not guess deployment paths such as /root/...; resolve files relative to the workspace unless a tool gives an absolute path.
 - For SQLite work, use the installed Node.js SQLite package (better-sqlite3) when the sqlite3 CLI is unavailable.
+- Use load_procedure to read an installed skill guide. Do not read deployment paths such as /opt/... through file or shell tools.
+- For generated artifacts, verify the exact output path, file type, size, and page count before delivery. Never substitute an older similarly named file.
+- “Typist” in a document-rendering request may mean the Typst renderer. Clarify that ambiguity before building; do not silently interpret it as “use a serif font.”
 
 ## MEMORY
 - USER PROFILE (location, name, timezone) is always available — use it automatically
 - Facts shown in "MEMORIES FROM THE PAST" section
 - Personal refs ("my flatmate", "my project") → memory_search first
-- Current info (news, weather, sports) → bash with web-search, then browse pages for detail
+- Current info (news, weather, sports) → web_search, then webfetch primary pages for detail
 
 ## COMMUNICATION
 Text like messaging a friend. Short, punchy, 1-3 sentences. **Bold** and bullet lists, no markdown headings.
@@ -279,6 +291,8 @@ export class Agent {
   private turnTimeoutMs: number;
   private subAgentMode: boolean;
   private maxToolCallsPerResponse: number;
+  private foregroundEvidence = new Map<string, EvidenceClaimReceipt[]>();
+  private foregroundSuccessfulTools = new Map<string, Set<string>>();
 
   /** Enhanced tool loop detector */
   private toolLoopDetector: ToolLoopDetector;
@@ -642,6 +656,11 @@ export class Agent {
     let failedExternalMutations = 0;
     const successfulMutationSignatures = new Set<string>();
     const failedSkills: string[] = [];
+    const successfulToolNames = new Set<string>();
+    const failedToolNames = new Set<string>();
+    const turnEvidenceReceipts: EvidenceClaimReceipt[] = [];
+    this.foregroundEvidence.set(sessionId, turnEvidenceReceipts);
+    this.foregroundSuccessfulTools.set(sessionId, successfulToolNames);
 
     // Agent loop
     while (iterations < this.maxIterations) {
@@ -768,10 +787,29 @@ export class Agent {
       // Keep the newest genuine human turn and its active tool chain verbatim,
       // but never resend old reasoning/tool payloads just because provider roles
       // happened to label tool results as `user`.
-      const replayMessages = compactCompletedConversationHistory(sanitizedMessages, {
+      let replayMessages = compactCompletedConversationHistory(sanitizedMessages, {
         maxCompletedTurns: 8,
         maxVisibleCharsPerMessage: 2_000,
       });
+
+      // Long active turns otherwise resend every large research page and code
+      // block on every iteration. Compact the completed portion of the active
+      // tool chain once it crosses a bounded working-set target, independent
+      // of the provider's much larger context window.
+      const activeTurnTokens = estimateMessagesTokens(replayMessages);
+      if (iterations >= 8 && activeTurnTokens > 24_000) {
+        const compacted = compactSync(replayMessages, {
+          targetTokens: 20_000,
+          preserveLastN: 8,
+        });
+        replayMessages = compacted.messages;
+        this.logger.info({
+          iteration: iterations,
+          before: compacted.estimatedTokensBefore,
+          after: compacted.estimatedTokensAfter,
+          stages: compacted.stagesApplied,
+        }, 'Active-turn working set compacted');
+      }
 
       // Process messages through context manager (compression, deduplication)
       let messages = this.contextManager
@@ -1033,9 +1071,10 @@ export class Agent {
         // Persist the exact public final text. This removes the internal [DONE]
         // control marker and prevents the final-response watchdog from adding a
         // duplicate cleaned message.
-        let persistContent: ContentBlock[] = taskComplete
-          ? [{ type: 'text', text: finalResponse }]
-          : responseContent;
+        // A final row is a public answer, never a provider trace container.
+        // Persist only the exact visible text; thinking blocks belong solely in
+        // short-lived protocol rows and must not survive in assistant_final.
+        let persistContent: ContentBlock[] = [{ type: 'text', text: finalResponse }];
         if (
           this.bestOfN > 1 &&
           complexity.suggestedModelTier === 'capable' &&
@@ -1093,6 +1132,21 @@ export class Agent {
           }
         }
 
+        const activeUserMessage = turnToolSafety.userMessage;
+        if (/\b(?:research|analysis|analytics|competitor|market|report|forecast)\b/i.test(activeUserMessage)) {
+          const grounded = quarantineUngroundedResponseClaims(finalResponse, turnEvidenceReceipts);
+          if (grounded.removedLines > 0) {
+            this.logger.warn({
+              sessionId,
+              removedLines: grounded.removedLines,
+              claimCount: grounded.claimCount,
+              missingCount: grounded.missingCount,
+            }, 'Quarantined unsupported foreground research claims');
+            finalResponse = grounded.response;
+            persistContent = [{ type: 'text', text: finalResponse }];
+          }
+        }
+
         // Never let fluent prose convert a failed external write into a false
         // success confirmation. Tool evidence, not the model's wording, is the
         // source of truth.
@@ -1102,6 +1156,19 @@ export class Agent {
           hasUnverifiedSuccessClaim(finalResponse)
         ) {
           finalResponse = 'I could not verify that external action, so I have not marked it complete. The tool reported a failure or required clarification.';
+          persistContent = [{ type: 'text', text: finalResponse }];
+          completionReason = 'tool_loop';
+        }
+
+        const artifactActionRequested = /\b(?:build|create|generate|render|compile|export|send|share|attach)\b[^.!?\n]{0,80}\b(?:pdf|report|document|artifact)\b/i.test(activeUserMessage)
+          || /\b(?:pdf|report|document|artifact)\b[^.!?\n]{0,80}\b(?:build|create|generate|render|compile|export|send|share|attach)\b/i.test(activeUserMessage)
+          || (/\b(?:wrong|old one|not the|broken|failed)\b/i.test(activeUserMessage)
+            && /\b(?:pdf|report|document|file|artifact|sent|created|generated)\b/i.test(turnToolSafety.previousAssistantMessage ?? ''));
+        const artifactReceipt = successfulToolNames.has('inspect_artifact') || successfulToolNames.has('send_file');
+        if (artifactActionRequested && hasUnverifiedSuccessClaim(finalResponse) && !artifactReceipt) {
+          finalResponse = failedToolNames.size > 0
+            ? 'I could not verify the requested artifact, so I have not marked it complete. The build or delivery path reported a failure.'
+            : 'I do not have an artifact verification receipt, so I cannot honestly mark this complete.';
           persistContent = [{ type: 'text', text: finalResponse }];
           completionReason = 'tool_loop';
         }
@@ -1209,8 +1276,22 @@ export class Agent {
           .map((result) => [result.tool_use_id, result]),
       );
       for (const toolUse of toolUses) {
+        const result = resultById.get(toolUse.id);
+        if (!result || result.is_error) failedToolNames.add(toolUse.name);
+        else successfulToolNames.add(toolUse.name);
+      }
+      for (const toolUse of toolUses) {
+        if (!/^(?:web_search|webfetch|inspect_artifact|send_file)$/i.test(toolUse.name)) continue;
+        const result = resultById.get(toolUse.id);
+        if (!result || result.is_error) continue;
+        turnEvidenceReceipts.push(buildEvidenceClaimLedger(result.content));
+      }
+      for (const toolUse of toolUses) {
         const skill = this.skillRegistry?.getSkill(toolUse.name) || null;
         if (!isLikelyExternalMutation(toolUse, skill)) continue;
+        // A conversational progress update is not evidence that the requested
+        // external action or artifact delivery succeeded.
+        if (toolUse.name === 'send_message') continue;
         const result = resultById.get(toolUse.id);
         if (!result || result.is_error) failedExternalMutations++;
         else successfulExternalMutations++;
@@ -1300,6 +1381,8 @@ export class Agent {
 
     // Clean up tool loop detector for this session
     this.toolLoopDetector.clearSession(sessionId);
+    this.foregroundEvidence.delete(sessionId);
+    this.foregroundSuccessfulTools.delete(sessionId);
 
     // Emit agent:complete hook
     triggerHook({
@@ -2237,7 +2320,7 @@ The current user request is quoted below. Execute tools only when they directly 
   /** Read-only tools that can safely run in parallel */
   private static readonly PARALLEL_SAFE_TOOLS = new Set([
     'read_file', 'ls', 'glob', 'grep', 'codesearch', 'web_search',
-    'memory_search', 'question', 'webfetch',
+    'memory_search', 'question', 'webfetch', 'inspect_artifact',
   ]);
 
   /**
@@ -2266,14 +2349,28 @@ The current user request is quoted below. Execute tools only when they directly 
       timestamp: new Date(),
     }).catch(() => {});
 
+    if (toolUse.name === 'bash'
+      && typeof toolUse.input.command === 'string'
+      && /(?:^|[;&|]\s*)web-search\b/i.test(toolUse.input.command)) {
+      return {
+        type: 'tool_result',
+        tool_use_id: toolUse.id,
+        content: typedToolError(
+          'USE_TYPED_WEB_SEARCH',
+          'Do not invoke web-search through bash; call the web_search tool directly so its scoped credential is available.',
+        ),
+        is_error: true,
+      };
+    }
+
     // Resolve skill — with auto-repair for hallucinated names
     let skill = this.skillRegistry?.getSkill(toolUse.name) || null;
 
     // Tool call repair: try case-insensitive match
     if (!skill && this.skillRegistry) {
       const allNames = this.skillRegistry.getToolDefinitions().map(t => t.name);
-      const lowerName = toolUse.name.toLowerCase();
-      const match = allNames.find(n => n.toLowerCase() === lowerName);
+      const normalizedName = toolUse.name.toLowerCase().replace(/[-\s]+/g, '_');
+      const match = allNames.find(n => n.toLowerCase().replace(/[-\s]+/g, '_') === normalizedName);
       if (match) {
         this.logger.info({ requested: toolUse.name, resolved: match }, 'Tool name auto-repaired');
         skill = this.skillRegistry.getSkill(match) || null;
@@ -2287,7 +2384,7 @@ The current user request is quoted below. Execute tools only when they directly 
       return {
         type: 'tool_result',
         tool_use_id: toolUse.id,
-        content: 'Error: External mutations require an explicit current-turn user intent context.',
+        content: typedToolError('SAFETY_TURN_CONTEXT_REQUIRED', 'External mutations require an explicit current-turn user intent context.'),
         is_error: true,
       };
     }
@@ -2299,9 +2396,68 @@ The current user request is quoted below. Execute tools only when they directly 
       return {
         type: 'tool_result',
         tool_use_id: toolUse.id,
-        content: `Error: ${safety.reason}`,
+        content: typedToolError(
+          safety.isExternalMutation
+            ? 'SAFETY_EXTERNAL_INTENT_REQUIRED'
+            : 'SAFETY_LOCAL_INTENT_REQUIRED',
+          safety.reason ?? 'Tool call was not authorized for the active turn.',
+        ),
         is_error: true,
       };
+    }
+    if (
+      toolUse.name === 'send_message'
+      && typeof toolUse.input.message === 'string'
+      && hasUnverifiedSuccessClaim(toolUse.input.message)
+      && (successfulMutationSignatures?.size ?? 0) === 0
+    ) {
+      return {
+        type: 'tool_result',
+        tool_use_id: toolUse.id,
+        content: typedToolError(
+          'UNVERIFIED_PROGRESS_CLAIM',
+          'This progress message claims work succeeded, but no mutating tool has produced a successful receipt in the current turn. Report what is still in progress instead.',
+        ),
+        is_error: true,
+      };
+    }
+    if (
+      toolUse.name === 'send_message'
+      && typeof toolUse.input.message === 'string'
+      && hasUnverifiedSuccessClaim(toolUse.input.message)
+      && /\b(?:pdf|report|document|artifact)\b/i.test(toolUse.input.message)
+      && !['inspect_artifact', 'send_file'].some(name => this.foregroundSuccessfulTools.get(sessionId)?.has(name))
+    ) {
+      return {
+        type: 'tool_result',
+        tool_use_id: toolUse.id,
+        content: typedToolError(
+          'ARTIFACT_RECEIPT_REQUIRED',
+          'Do not announce artifact completion until inspect_artifact or send_file has verified the exact generated bytes.',
+        ),
+        is_error: true,
+      };
+    }
+    if (
+      toolUse.name === 'send_message'
+      && typeof toolUse.input.message === 'string'
+      && /\b(?:research|analysis|analytics|competitor|market|funding|forecast)\b/i.test(toolUse.input.message)
+    ) {
+      const grounding = verifyResponseEvidenceClaims(
+        toolUse.input.message,
+        this.foregroundEvidence.get(sessionId) ?? [],
+      );
+      if (!grounding.passed) {
+        return {
+          type: 'tool_result',
+          tool_use_id: toolUse.id,
+          content: typedToolError(
+            'EVIDENCE_UNGROUNDED_PROGRESS',
+            `${grounding.reason}. Remove unsupported figures or retrieve a source before messaging the user.`,
+          ),
+          is_error: true,
+        };
+      }
     }
     if (
       safety?.isMutation &&
@@ -2340,7 +2496,10 @@ The current user request is quoted below. Execute tools only when they directly 
       return {
         type: 'tool_result',
         tool_use_id: toolUse.id,
-        content: `Error: "${toolUse.name}" is a documentation-only skill and cannot be invoked as a tool. Use the bash skill to run CLI commands instead. Refer to the skill guide in your instructions for available commands.`,
+        content: typedToolError(
+          'DOCUMENTATION_SKILL_NOT_EXECUTABLE',
+          `"${toolUse.name}" is documentation-only. Use load_procedure to read its guide, then invoke the documented executable tool directly.`,
+        ),
         is_error: true,
       };
     }
@@ -2412,6 +2571,9 @@ The current user request is quoted below. Execute tools only when they directly 
             idempotencyKey: operationId,
             signal: toolSignal,
             deadlineAt: toolDeadlineAt,
+            userMessage: turnSafety?.userMessage,
+            previousAssistantMessage: turnSafety?.previousAssistantMessage,
+            turnStartedAt: turnSafety?.now?.getTime(),
           });
           resultSuccess = result.success;
           evidenceContent = result.output ?? '';

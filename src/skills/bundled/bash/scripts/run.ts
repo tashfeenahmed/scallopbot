@@ -70,6 +70,30 @@ function validateCommand(command: string): ValidationResult {
     }
   }
 
+  // Shared/global Python environments are deployment infrastructure. Artifact
+  // work must not uninstall or replace packages used by other bots; an
+  // explicit virtualenv executable remains allowed.
+  if (/\b(?:python\d*(?:\.\d+)?\s+-m\s+pip|pip\d*(?:\.\d+)?)\s+uninstall\b/i.test(command)) {
+    return {
+      valid: false,
+      reason: 'Global/shared pip uninstall is blocked; create an isolated virtual environment instead',
+    };
+  }
+  const pipInstall = command.match(/(?:^|[;&|]\s*)([^\n;&|]*\bpip\d*(?:\.\d+)?\s+install\b)/i)?.[1] ?? '';
+  if (pipInstall && !/(?:^|\s)(?:\.\/|\/)[^\s]*venv[^\s]*\/bin\/pip\b/i.test(pipInstall)) {
+    return {
+      valid: false,
+      reason: 'Shared pip install is blocked; use <venv>/bin/pip inside an isolated virtual environment',
+    };
+  }
+  const pythonPipInstall = command.match(/(?:^|[;&|]\s*)([^\n;&|]*\bpython\d*(?:\.\d+)?\s+-m\s+pip\s+install\b)/i)?.[1] ?? '';
+  if (pythonPipInstall && !/(?:^|\s)(?:\.\/|\/)[^\s]*venv[^\s]*\/bin\/python\b/i.test(pythonPipInstall)) {
+    return {
+      valid: false,
+      reason: 'Shared python -m pip install is blocked; use <venv>/bin/python -m pip inside an isolated virtual environment',
+    };
+  }
+
   // curl exits zero for HTTP 4xx/5xx unless fail mode is enabled. For writes,
   // that turns rejected API requests into false success receipts upstream.
   // Require a machine-verifiable exit status instead of trying to interpret

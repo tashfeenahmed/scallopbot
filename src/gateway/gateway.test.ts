@@ -222,7 +222,7 @@ describe('Gateway', () => {
       const outputDir = path.join(testDir, 'output');
       await fs.mkdir(outputDir, { recursive: true });
       const filePath = path.join(outputDir, 'report.pdf');
-      await fs.writeFile(filePath, 'fake pdf content');
+      await fs.writeFile(filePath, `%PDF-1.4\n1 0 obj << /Type /Page >> endobj\n2 0 obj << /Type /Page >> endobj\n${'x'.repeat(5_000)}\n%%EOF`);
 
       const sendSpy = spyOnFileSend(gateway);
 
@@ -233,8 +233,36 @@ describe('Gateway', () => {
         userId: 'telegram:123',
       });
 
-      expect(result.success).toBe(true);
+      expect(result.success, JSON.stringify(result)).toBe(true);
       expect(sendSpy).toHaveBeenCalledWith('telegram:123', await fs.realpath(filePath), 'Report');
+    });
+
+    it('refuses to substitute an older PDF when a newer generated sibling exists', async () => {
+      const { gateway, handler } = await createGatewayWithSendFile();
+      const outputDir = path.join(testDir, 'output');
+      await fs.mkdir(outputDir, { recursive: true });
+      const oldPath = path.join(outputDir, 'competitor_analysis.pdf');
+      const newPath = path.join(outputDir, 'competitor_analysis_typst.pdf');
+      const pdf = (producer: string) => `%PDF-1.4\n/Producer (${producer})\n1 0 obj << /Type /Page >> endobj\n2 0 obj << /Type /Page >> endobj\n${'x'.repeat(5_000)}\n%%EOF`;
+      await fs.writeFile(oldPath, pdf('ReportLab'));
+      const oldDate = new Date(Date.now() - 60_000);
+      await fs.utimes(oldPath, oldDate, oldDate);
+      await fs.writeFile(newPath, pdf('Typst 0.13'));
+      const sendSpy = spyOnFileSend(gateway);
+
+      const result = await handler({
+        args: { file_path: 'output/competitor_analysis.pdf', caption: 'Competitor analysis' },
+        workspace: testDir,
+        sessionId: 'session-1',
+        userId: 'telegram:123',
+        userMessage: 'Send the competitor analysis PDF file to me now',
+        turnStartedAt: Date.now(),
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('ARTIFACT_STALE_TARGET');
+      expect(result.error).toContain('competitor_analysis_typst.pdf');
+      expect(sendSpy).not.toHaveBeenCalled();
     });
 
     it('rejects files outside the workspace output directory', async () => {

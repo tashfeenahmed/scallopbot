@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { getRecentChatContext } from './chat-context.js';
+import { getRecentChatContext, hasUnresolvedArtifactWork } from './chat-context.js';
 import type { ScallopDatabase, SessionMessageRow } from '../memory/db.js';
 import { inferSessionMessageKind } from '../memory/session-message-kinds.js';
 
@@ -204,5 +204,14 @@ describe('getRecentChatContext', () => {
       id: 'sess-1', metadata: { userId: 'telegram:123' }, archivedAt: NOW,
     } as never);
     expect(getRecentChatContext(db)).toBeNull();
+  });
+
+  it('detects an unresolved generated artifact but not a verified delivery', () => {
+    expect(hasUnresolvedArtifactWork(
+      'User: Build the report\nAssistant: The PDF is ready at output/report.pdf',
+    )).toBe(true);
+    expect(hasUnresolvedArtifactWork(
+      'User: Send the report\nAssistant: File sent successfully to Telegram',
+    )).toBe(false);
   });
 });

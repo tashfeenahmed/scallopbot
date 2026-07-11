@@ -19,7 +19,7 @@ export interface ToolPolicy {
  * Patterns starting with "group:" are expanded to their member tools.
  */
 export const TOOL_GROUPS: Record<string, string[]> = {
-  'group:read':     ['read_file', 'ls', 'glob', 'grep', 'codesearch'],
+  'group:read':     ['read_file', 'ls', 'glob', 'grep', 'codesearch', 'inspect_artifact'],
   'group:write':    ['write_file', 'edit_file', 'multi_edit'],
   'group:exec':     ['bash'],
   'group:web':      ['web_search', 'webfetch'],

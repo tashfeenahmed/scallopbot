@@ -150,6 +150,44 @@ describe('ToolLoopDetector', () => {
     });
   });
 
+  describe('repeated failure family detection', () => {
+    it('warns and then blocks changing tools that hit the same typed boundary error', () => {
+      for (let i = 0; i < 3; i++) {
+        detector.recordToolCall(SESSION, `tool_${i}`, { attempt: i }, `typed-${i}`);
+        detector.recordToolOutcome(
+          SESSION,
+          `typed-${i}`,
+          '[TOOL_ERROR code=SAFETY_LOCAL_INTENT_REQUIRED] Explicit change request required.',
+        );
+      }
+      expect(detector.detect(SESSION)).toMatchObject({
+        kind: 'repeated_failure', severity: 'warning', count: 3,
+      });
+
+      for (let i = 3; i < 6; i++) {
+        detector.recordToolCall(SESSION, `different_${i}`, { attempt: i }, `typed-${i}`);
+        detector.recordToolOutcome(
+          SESSION,
+          `typed-${i}`,
+          '[TOOL_ERROR code=SAFETY_LOCAL_INTENT_REQUIRED] Explicit change request required.',
+        );
+      }
+      expect(detector.detect(SESSION)).toMatchObject({
+        kind: 'repeated_failure', severity: 'block', count: 6,
+      });
+    });
+
+    it('resets after a successful result', () => {
+      for (let i = 0; i < 3; i++) {
+        detector.recordToolCall(SESSION, 'run_code', { attempt: i }, `failure-${i}`);
+        detector.recordToolOutcome(SESSION, `failure-${i}`, '[TOOL_ERROR code=POLICY] denied');
+      }
+      detector.recordToolCall(SESSION, 'read_file', { path: 'ok' }, 'success');
+      detector.recordToolOutcome(SESSION, 'success', 'verified output');
+      expect(detector.detect(SESSION)?.kind).not.toBe('repeated_failure');
+    });
+  });
+
   describe('clearSession', () => {
     it('removes all state for a session', () => {
       for (let i = 0; i < 5; i++) {

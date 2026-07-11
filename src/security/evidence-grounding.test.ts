@@ -6,6 +6,7 @@ import {
   extractNormalizedEvidenceClaims,
   isAuthoritativeEvidenceReceipt,
   verifyResponseEvidenceClaims,
+  quarantineUngroundedResponseClaims,
 } from './evidence-grounding.js';
 
 describe('privacy-safe factual claim grounding', () => {
@@ -64,6 +65,19 @@ describe('privacy-safe factual claim grounding', () => {
       .toMatchObject({ passed: true });
     expect(verifyResponseEvidenceClaims('The top traffic source is YouTube Search.', [ledger]))
       .toMatchObject({ passed: false, missingCount: 1 });
+  });
+
+  it('quarantines unsupported research figures while retaining sourced lines', () => {
+    const ledger = buildEvidenceClaimLedger('LandTech says it is trusted by 5,000 UK developers.');
+    const result = quarantineUngroundedResponseClaims([
+      'LandTech is trusted by 5,000 UK developers.',
+      'It has £30M in funding and could enter with €1M.',
+      'Its product overlaps with planning research.',
+    ].join('\n'), [ledger]);
+    expect(result.response).toContain('5,000 UK developers');
+    expect(result.response).not.toContain('£30M');
+    expect(result.response).not.toContain('€1M');
+    expect(result.response).toContain('omitted factual figures');
   });
 
   it('mints authoritative provenance only for explicitly declared source skills', () => {

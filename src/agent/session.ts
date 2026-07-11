@@ -127,32 +127,38 @@ export class SessionManager {
       throw new Error(`Session not found: ${sessionId}`);
     }
 
-    // Serialize content: store as JSON string for ContentBlock[]
-    const content = typeof message.content === 'string'
-      ? message.content
-      : JSON.stringify(message.content);
     const inferredKind = inferSessionMessageKind(
       message.role,
       message.content,
       session.metadata as Record<string, unknown> | undefined,
     );
+    const durableMessage: Message = message.role === 'assistant'
+      && inferredKind === 'assistant_final'
+      && Array.isArray(message.content)
+      ? { ...message, content: message.content.filter(block => block.type !== 'thinking') }
+      : message;
+    // Serialize content: store as JSON string for ContentBlock[]. Final rows
+    // are stripped of private reasoning above even if a caller forgets.
+    const content = typeof durableMessage.content === 'string'
+      ? durableMessage.content
+      : JSON.stringify(durableMessage.content);
     // This trusted boundary still knows whether JSON-looking input was a
     // literal human string or a structured provider ContentBlock[] value.
     // Known injected control prefixes and worker sessions remain internal.
     const messageKind = message.role === 'user'
-      && typeof message.content === 'string'
+      && typeof durableMessage.content === 'string'
       && inferredKind !== 'system_internal'
       && inferredKind !== 'worker_internal'
       ? 'human_user'
       : message.role === 'assistant'
-        && typeof message.content === 'string'
+        && typeof durableMessage.content === 'string'
         && inferredKind === 'assistant_final'
         ? 'assistant_final'
         : inferredKind;
 
     this.db.addSessionMessage(sessionId, message.role, content, messageKind);
 
-    session.messages.push(message);
+    session.messages.push(durableMessage);
     session.updatedAt = new Date();
     this.cache.set(sessionId, session);
   }

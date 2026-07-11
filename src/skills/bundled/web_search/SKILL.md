@@ -1,48 +1,49 @@
 ---
 name: web_search
-description: "Search the web for current info. Use bash: web-search 'query'. Options: -n 10 (more results), --fresh pd (past day). Use for news, sports, research, fact-checking."
+description: "Search the web through the scoped Brave integration. Call this tool directly; never invoke web-search through bash."
 user-invocable: false
-disable-model-invocation: true
 triggers: [search, web, google, lookup, find information, research]
+scripts:
+  run: scripts/run.ts
+inputSchema:
+  type: object
+  properties:
+    query:
+      type: string
+      description: Search query
+    count:
+      type: number
+      description: Number of results from 1 to 20
+    freshness:
+      type: string
+      description: Optional recency filter; pd, pw, pm, or py
+  required: [query]
 metadata:
   openclaw:
     emoji: "\U0001F50D"
     requires:
-      bins: [web-search]
       env: [BRAVE_SEARCH_API_KEY]
+    safety:
+      readOnly: true
 ---
 
-# Web Search Skill (web-search CLI)
+# Web Search Skill
 
-Use the `web-search` CLI via the `bash` tool for all web searches. Fast, reliable results from Brave Search API.
+Call `web_search` directly. Its scoped subprocess receives the Brave credential;
+generic bash intentionally does not.
 
-Example: `bash("web-search 'TypeScript tutorial'")`
+Example: `{ "query": "TypeScript tutorial", "count": 10 }`
 
 ## Quick Reference
 
-```bash
-# Basic search
-web-search "your query here"
-
-# Get more results (default: 5, max: 20)
-web-search -n 10 "React hooks tutorial"
-
-# Filter by recency
-web-search --fresh pd "AI news"     # pd=past day
-web-search --fresh pw "tech news"   # pw=past week
-web-search --fresh pm "releases"    # pm=past month
-web-search --fresh py "annual"      # py=past year
-
-# Raw JSON output (for parsing)
-web-search --json "query"
-
-# Combine options
-web-search -n 10 --fresh pd "breaking news"
+```json
+{"query":"React hooks tutorial","count":10}
+{"query":"AI news","count":10,"freshness":"pd"}
 ```
 
 ## When to Use
 
-Use web-search for:
+Use `web_search` for:
 - **Current events**: News, sports scores, recent developments
 - **Research**: Looking up people, companies, products, technologies
 - **Documentation**: Finding tutorials, API docs, code examples
@@ -66,40 +67,12 @@ Search results for "query":
 
 News results are prefixed with `[NEWS]` in the title.
 
-## Examples
-
-### Research a topic
-```bash
-web-search "how to implement OAuth 2.0"
-```
-
-### Get recent news
-```bash
-web-search --fresh pd -n 10 "technology news today"
-```
-
-### Find documentation
-```bash
-web-search "Prisma schema relations documentation"
-```
-
-### Fact check something
-```bash
-web-search "population of Tokyo 2024"
-```
-
-### Get raw data for processing
-```bash
-web-search --json "weather API providers" | jq '.web.results[0]'
-```
-
 ## Tips
 
-1. **Use quotes** around multi-word queries
-2. **Use --fresh pd** for breaking news or recent events
-3. **Increase count** with -n for research tasks
-4. **Use --json** when you need to parse results programmatically
-5. **Be specific** in queries for better results
+1. Use `freshness: "pd"` for breaking news.
+2. Increase `count` for research tasks, up to 20.
+3. Be specific in queries for better results.
+4. Open primary result pages with `webfetch` before making factual claims.
 
 ## Environment
 

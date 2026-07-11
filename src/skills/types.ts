@@ -129,6 +129,12 @@ export interface SkillHandlerContext {
   signal?: AbortSignal;
   /** Absolute epoch-ms deadline for this tool invocation. */
   deadlineAt?: number;
+  /** Exact active-turn instruction for target/artifact validation. */
+  userMessage?: string;
+  /** Immediately preceding public assistant reply, when available. */
+  previousAssistantMessage?: string;
+  /** Epoch-ms start of the active turn. */
+  turnStartedAt?: number;
 }
 
 /**

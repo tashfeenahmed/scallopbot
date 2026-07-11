@@ -88,4 +88,20 @@ describe('bash skill workspace confinement', () => {
       expect(`${result.output ?? ''}${result.error ?? ''}`).toMatch(/status|non-2xx/i);
     }
   }, 30_000);
+
+  it('blocks shared Python package replacement but allows an isolated venv pip', async () => {
+    const run = (command: string) => new SkillExecutor().execute(skill, {
+      skillName: 'bash', cwd: workspace, args: { command },
+    });
+    const uninstall = await run('pip uninstall -y fpdf pypdf');
+    expect(uninstall.success).toBe(false);
+    expect(`${uninstall.output ?? ''}${uninstall.error ?? ''}`).toMatch(/virtual environment/i);
+
+    const globalInstall = await run('pip install fpdf2');
+    expect(globalInstall.success).toBe(false);
+    expect(`${globalInstall.output ?? ''}${globalInstall.error ?? ''}`).toMatch(/venv/i);
+
+    const isolated = await run('/tmp/pdfvenv/bin/pip install --help >/dev/null');
+    expect(`${isolated.output ?? ''}${isolated.error ?? ''}`).not.toMatch(/Shared pip install is blocked/i);
+  });
 });
