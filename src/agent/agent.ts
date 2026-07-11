@@ -28,7 +28,7 @@ import type { BoardService } from '../board/board-service.js';
 import type { InterruptQueue } from './interrupt-queue.js';
 import { type ThinkLevel, booleanToThinkLevel, mapThinkLevelToProvider } from './thinking.js';
 import { primaryChatProvider, modelIdentityPrompt } from './identity.js';
-import { ToolLoopDetector } from './tool-loop-detector.js';
+import { ToolLoopDetector, type ToolLoopDetectorConfig } from './tool-loop-detector.js';
 import { triggerHook } from '../hooks/hooks.js';
 import { applyToolPolicyPipeline, matchesPolicy, type ToolPolicy } from '../skills/tool-policy.js';
 import { enqueueInLane } from './command-queue.js';
@@ -41,7 +41,7 @@ import { resolveStateUserId } from '../utils/state-user-id.js';
 import { compactCompletedConversationHistory } from '../memory/session-message-view.js';
 import {
   assessToolCallForTurn,
-  boundToolCalls,
+  boundResponseToolCalls,
   digestToolOutput,
   hasUnverifiedSuccessClaim,
   isLikelyExternalMutation,
@@ -57,9 +57,8 @@ import {
   type EvidenceProvenanceReceipt,
 } from '../security/evidence-grounding.js';
 
-/** Hard safety budgets for a single user turn. */
-const MAX_TOOL_CALLS_PER_RESPONSE = 8;
-const MAX_TOOL_CALLS_PER_TURN = 20;
+/** A single giant model-authored burst is malformed; useful work may continue in later iterations. */
+const DEFAULT_MAX_TOOL_CALLS_PER_RESPONSE = 64;
 const MAX_PARALLEL_TOOL_CALLS = 4;
 
 export interface AgentOptions {
@@ -78,6 +77,10 @@ export interface AgentOptions {
   workspace: string;
   logger: Logger;
   maxIterations: number;
+  /** Anomaly guard for one model response, not a cumulative turn budget. */
+  maxToolCallsPerResponse?: number;
+  /** Progress-aware repeated-call thresholds. */
+  toolLoopDetection?: Partial<ToolLoopDetectorConfig>;
   systemPrompt?: string;
   /** Enable extended thinking for supported providers (e.g., Kimi K2.5) */
   enableThinking?: boolean;
@@ -272,9 +275,10 @@ export class Agent {
   private canonicalSingleUserIds: readonly string[];
   private foregroundCallTimeoutMs: number;
   private turnTimeoutMs: number;
+  private maxToolCallsPerResponse: number;
 
   /** Enhanced tool loop detector */
-  private toolLoopDetector = new ToolLoopDetector();
+  private toolLoopDetector: ToolLoopDetector;
 
   constructor(options: AgentOptions) {
     this.provider = options.provider;
@@ -309,6 +313,11 @@ export class Agent {
     this.canonicalSingleUserIds = [...(options.canonicalSingleUserIds ?? [])];
     this.foregroundCallTimeoutMs = Math.max(50, options.foregroundCallTimeoutMs ?? 25_000);
     this.turnTimeoutMs = Math.max(this.foregroundCallTimeoutMs, options.turnTimeoutMs ?? 55_000);
+    this.maxToolCallsPerResponse = Math.min(
+      512,
+      Math.max(4, Math.floor(options.maxToolCallsPerResponse ?? DEFAULT_MAX_TOOL_CALLS_PER_RESPONSE)),
+    );
+    this.toolLoopDetector = new ToolLoopDetector(options.toolLoopDetection);
 
     this.logger.info({ enableThinking: this.enableThinking, bestOfN: this.bestOfN, bestOfNThreshold: this.bestOfNThreshold }, 'Agent thinking mode configured');
   }
@@ -616,7 +625,7 @@ export class Agent {
     let completionReason: AgentCompletionReason | null = null;
     // Self-evolution signal accounting (best-effort, captured at turn end).
     let totalToolCalls = 0;
-    let toolCallBudgetUsed = 0;
+    let consecutiveRejectedToolBatches = 0;
     let successfulExternalMutations = 0;
     let failedExternalMutations = 0;
     const successfulMutationSignatures = new Set<string>();
@@ -862,11 +871,11 @@ export class Agent {
       // Process response content
       const textContent = this.extractTextContent(response.content);
       const emittedToolUses = this.extractToolUses(response.content);
-      const remainingToolBudget = Math.max(0, MAX_TOOL_CALLS_PER_TURN - toolCallBudgetUsed);
-      const boundedTools = boundToolCalls(
+      const boundedTools = boundResponseToolCalls(
         emittedToolUses,
-        Math.min(MAX_TOOL_CALLS_PER_RESPONSE, remainingToolBudget),
+        this.maxToolCallsPerResponse,
       );
+      const anomalousToolBurst = boundedTools.anomalousBurst;
       const toolUses = boundedTools.accepted;
       const acceptedToolIds = new Set(toolUses.map((toolUse) => toolUse.id));
       const responseContent = boundedTools.dropped.length > 0
@@ -878,8 +887,14 @@ export class Agent {
           return counts;
         }, {});
         this.logger.warn(
-          { emitted: emittedToolUses.length, accepted: toolUses.length, reasons, remainingToolBudget },
-          'Rejected unsafe or over-budget tool-call batch',
+          {
+            emitted: emittedToolUses.length,
+            accepted: toolUses.length,
+            reasons,
+            anomalousToolBurst,
+            maxToolCallsPerResponse: this.maxToolCallsPerResponse,
+          },
+          'Rejected malformed or anomalous tool-call batch',
         );
       }
 
@@ -1085,21 +1100,22 @@ export class Agent {
       // Add assistant message with tool use
       await this.persistAssistantMessage(sessionId, responseContent);
 
-      // A malformed response may contain only duplicate/over-budget calls. Do
+      // A malformed response may contain only duplicate or anomalous-burst calls. Do
       // not persist an empty tool-result message or execute anything else.
       if (emittedToolUses.length > 0 && toolUses.length === 0) {
-        const exhausted = remainingToolBudget === 0;
-        const note = exhausted
-          ? `[System: The per-turn tool budget of ${MAX_TOOL_CALLS_PER_TURN} is exhausted. Do not call more tools; give the user a concise, honest final status.]`
-          : '[System: Every proposed tool call was rejected because the batch was duplicated or malformed. Re-plan once with only the minimum distinct calls needed.]';
+        consecutiveRejectedToolBatches++;
+        const note = anomalousToolBurst
+          ? `[System: You proposed ${emittedToolUses.length} tool calls in one response, above the anomalous-burst guard of ${this.maxToolCallsPerResponse}. None ran. Re-plan into smaller progressive batches and use each result before deciding the next calls.]`
+          : '[System: Every proposed tool call was rejected because the batch was duplicated or malformed. Re-plan with distinct calls and use each result before continuing.]';
         await this.sessionManager.addMessage(sessionId, { role: 'user', content: note });
-        if (exhausted) {
-          finalResponse = `I stopped after reaching the safe tool-call limit (${MAX_TOOL_CALLS_PER_TURN}). I have not claimed any unverified remaining actions as complete.`;
+        if (consecutiveRejectedToolBatches >= 2) {
+          finalResponse = 'I stopped because the model repeatedly produced malformed tool-call batches. No rejected call was executed and no unverified action was marked complete.';
           completionReason = 'tool_loop';
           break;
         }
         continue;
       }
+      consecutiveRejectedToolBatches = 0;
 
       // A user correction that arrived while the model was planning
       // supersedes every tool call produced from the older intent. Pair the
@@ -1113,7 +1129,6 @@ export class Agent {
           is_error: true,
         }));
         await this.sessionManager.addMessage(sessionId, { role: 'user', content: supersededResults });
-        toolCallBudgetUsed += toolUses.length;
         this.logger.info(
           { sessionId, cancelledToolCount: toolUses.length },
           'Cancelled stale tool plan because a newer user interrupt is pending',
@@ -1135,7 +1150,6 @@ export class Agent {
         turnDeadline,
         abortSignal,
       );
-      toolCallBudgetUsed += toolUses.length;
       this.logger.info({
         resultCount: toolResults.length,
         results: toolResults.map(r => ({

@@ -49,15 +49,24 @@ describe('ToolLoopDetector', () => {
       expect(result!.count).toBe(4);
     });
 
-    it('escalates to block after critical threshold to force-exit the loop', () => {
+    it('does not block repeated arguments without evidence that results stopped changing', () => {
       for (let i = 0; i < 7; i++) {
-        detector.recordToolCall(SESSION, 'web_search', { q: 'weather' });
+        detector.recordToolCall(SESSION, 'web_search', { q: 'weather' }, `changing-${i}`);
+        detector.recordToolOutcome(SESSION, `changing-${i}`, `result-${i}`);
       }
 
       const result = detector.detect(SESSION);
       expect(result).not.toBeNull();
       expect(result!.kind).toBe('generic_repeat');
-      expect(result!.severity).toBe('block');
+      expect(result!.severity).toBe('warning');
+    });
+
+    it('does not confuse different tools that happen to use the same arguments', () => {
+      for (let i = 0; i < 8; i++) {
+        detector.recordToolCall(SESSION, `tool-${i}`, { id: 'same' });
+      }
+
+      expect(detector.detect(SESSION)).toBeNull();
     });
   });
 
@@ -87,6 +96,16 @@ describe('ToolLoopDetector', () => {
         expect(result.kind).not.toBe('no_progress');
       }
     });
+
+    it('blocks identical arguments and outcomes at the critical threshold', () => {
+      for (let i = 0; i < 7; i++) {
+        detector.recordToolCall(SESSION, 'web_search', { q: 'weather' }, `blocked-${i}`);
+        detector.recordToolOutcome(SESSION, `blocked-${i}`, 'unchanged');
+      }
+
+      const result = detector.detect(SESSION);
+      expect(result).toMatchObject({ kind: 'no_progress', severity: 'block', count: 7 });
+    });
   });
 
   describe('ping_pong detection', () => {
@@ -98,10 +117,22 @@ describe('ToolLoopDetector', () => {
       }
 
       const result = detector.detect(SESSION);
-      // With 10 calls alternating, cycles=5, count=10 which is >= criticalThreshold
-      if (result && result.kind === 'ping_pong') {
-        expect(result.severity).toBe('critical');
+      expect(result).toMatchObject({ kind: 'ping_pong', severity: 'warning', count: 10 });
+    });
+
+    it('blocks an alternating loop only when both calls return stable outcomes', () => {
+      for (let i = 0; i < 4; i++) {
+        detector.recordToolCall(SESSION, 'read_file', { path: '/a.txt' }, `read-${i}`);
+        detector.recordToolOutcome(SESSION, `read-${i}`, 'same read result');
+        detector.recordToolCall(SESSION, 'web_search', { q: 'docs' }, `search-${i}`);
+        detector.recordToolOutcome(SESSION, `search-${i}`, 'same search result');
       }
+
+      expect(detector.detect(SESSION)).toMatchObject({
+        kind: 'ping_pong',
+        severity: 'block',
+        count: 8,
+      });
     });
   });
 

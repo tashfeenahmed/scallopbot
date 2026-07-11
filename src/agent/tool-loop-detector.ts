@@ -21,13 +21,13 @@ export interface ToolCallRecord {
 }
 
 export interface ToolLoopDetectorConfig {
-  /** Maximum history entries to track per session. Default: 20 */
+  /** Maximum history entries to track per session. Default: 30 */
   historySize: number;
-  /** Number of repetitions before issuing a warning. Default: 8 */
+  /** Number of repetitions before issuing a warning. Default: 10 */
   warningThreshold: number;
-  /** Number of repetitions before critical alert. Default: 15 */
+  /** Identical no-progress repetitions before blocking. Default: 20 */
   criticalThreshold: number;
-  /** Total no-progress calls before hard block. Default: 20 */
+  /** Last-resort no-progress circuit breaker. Default: 30 */
   circuitBreakerThreshold: number;
 }
 
@@ -41,14 +41,11 @@ export interface LoopDetection {
   count: number;
 }
 
-// Thresholds: 3 identical calls → warning (injects a system message so the LLM
-// sees it's stuck), 4 identical calls → block (force-exits the loop). Previously
-// critical=6 let the bot grind through 5-6 identical calls before stopping.
 const DEFAULT_CONFIG: ToolLoopDetectorConfig = {
-  historySize: 20,
-  warningThreshold: 3,
-  criticalThreshold: 4,
-  circuitBreakerThreshold: 15,
+  historySize: 30,
+  warningThreshold: 10,
+  criticalThreshold: 20,
+  circuitBreakerThreshold: 30,
 };
 
 /**
@@ -80,7 +77,18 @@ export class ToolLoopDetector {
   private noProgressCount: Map<string, number> = new Map();
 
   constructor(config?: Partial<ToolLoopDetectorConfig>) {
-    this.config = { ...DEFAULT_CONFIG, ...config };
+    const merged = { ...DEFAULT_CONFIG, ...config };
+    const warningThreshold = Math.max(1, Math.floor(merged.warningThreshold));
+    const criticalThreshold = Math.max(warningThreshold + 1, Math.floor(merged.criticalThreshold));
+    this.config = {
+      historySize: Math.max(criticalThreshold, Math.floor(merged.historySize)),
+      warningThreshold,
+      criticalThreshold,
+      circuitBreakerThreshold: Math.max(
+        criticalThreshold + 1,
+        Math.floor(merged.circuitBreakerThreshold),
+      ),
+    };
   }
 
   /**
@@ -130,13 +138,17 @@ export class ToolLoopDetector {
       }
     }
 
-    // Track no-progress: same args + same result as previous call of same tool
+    // Track a consecutive no-progress streak. A changed call or result proves
+    // progress and resets the global breaker instead of permanently poisoning
+    // the rest of a long, useful turn.
     const lastTwo = records.filter(r => r.resultHash).slice(-2);
     if (lastTwo.length === 2 &&
         lastTwo[0].toolName === lastTwo[1].toolName &&
         lastTwo[0].argsHash === lastTwo[1].argsHash &&
         lastTwo[0].resultHash === lastTwo[1].resultHash) {
       this.noProgressCount.set(sessionId, (this.noProgressCount.get(sessionId) || 0) + 1);
+    } else {
+      this.noProgressCount.set(sessionId, 0);
     }
   }
 
@@ -186,45 +198,53 @@ export class ToolLoopDetector {
   private detectPingPong(records: ToolCallRecord[]): LoopDetection | null {
     if (records.length < 4) return null;
 
-    // Look for A-B-A-B pattern in the most recent records
-    let alternationCount = 0;
-    for (let i = records.length - 1; i >= 3; i--) {
-      const a1 = records[i];
-      const b1 = records[i - 1];
-      const a2 = records[i - 2];
-      const b2 = records[i - 3];
+    const signature = (record: ToolCallRecord) => `${record.toolName}:${record.argsHash}`;
+    const current = signature(records.at(-1)!);
+    const previous = signature(records.at(-2)!);
+    if (current === previous) return null;
 
-      if (a1.toolName === a2.toolName && b1.toolName === b2.toolName &&
-          a1.toolName !== b1.toolName &&
-          a1.argsHash === a2.argsHash && b1.argsHash === b2.argsHash) {
-        alternationCount++;
-      } else {
-        break;
-      }
+    const tail: ToolCallRecord[] = [];
+    for (let i = records.length - 1; i >= 0; i--) {
+      const expected = tail.length % 2 === 0 ? current : previous;
+      if (signature(records[i]) !== expected) break;
+      tail.push(records[i]);
     }
+    if (tail.length < 4) return null;
 
-    // Each alternation pair represents 2 cycles, and we checked from the end
-    const cycles = alternationCount + 1; // +1 because the first 4 entries = 1 check
-    const toolA = records[records.length - 1].toolName;
-    const toolB = records[records.length - 2].toolName;
+    const outcomesBySignature = new Map<string, Set<string>>();
+    let allOutcomesKnown = true;
+    for (const record of tail) {
+      if (!record.resultHash) {
+        allOutcomesKnown = false;
+        continue;
+      }
+      const outcomes = outcomesBySignature.get(signature(record)) ?? new Set<string>();
+      outcomes.add(record.resultHash);
+      outcomesBySignature.set(signature(record), outcomes);
+    }
+    const noProgressEvidence = allOutcomesKnown
+      && outcomesBySignature.size === 2
+      && [...outcomesBySignature.values()].every((outcomes) => outcomes.size === 1);
+    const toolA = records.at(-1)!.toolName;
+    const toolB = records.at(-2)!.toolName;
 
-    if (cycles * 2 >= this.config.criticalThreshold) {
+    if (tail.length >= this.config.criticalThreshold && noProgressEvidence) {
       return {
         kind: 'ping_pong',
-        severity: 'critical',
-        message: `Ping-pong loop detected: ${toolA} and ${toolB} alternating ${cycles * 2} times. Break the cycle — try a completely different approach.`,
+        severity: 'block',
+        message: `No-progress ping-pong loop: ${toolA} and ${toolB} returned the same outcomes across ${tail.length} alternating calls. Stop and report the blockage.`,
         toolName: toolA,
-        count: cycles * 2,
+        count: tail.length,
       };
     }
 
-    if (cycles * 2 >= this.config.warningThreshold) {
+    if (tail.length >= this.config.warningThreshold) {
       return {
         kind: 'ping_pong',
         severity: 'warning',
-        message: `Ping-pong pattern: ${toolA} and ${toolB} alternating ${cycles * 2} times. Consider changing your approach.`,
+        message: `Ping-pong pattern: ${toolA} and ${toolB} alternated ${tail.length} times. Continue only if the results are changing and the task is progressing.`,
         toolName: toolA,
-        count: cycles * 2,
+        count: tail.length,
       };
     }
 
@@ -250,8 +270,8 @@ export class ToolLoopDetector {
     if (count >= this.config.criticalThreshold) {
       return {
         kind: 'no_progress',
-        severity: 'critical',
-        message: `No-progress loop: ${last.toolName} called ${count} times with identical args and results. The tool is returning the same output. Stop repeating and try something else.`,
+        severity: 'block',
+        message: `No-progress loop: ${last.toolName} returned the same result for the same arguments ${count} times. Stop and report the blockage.`,
         toolName: last.toolName,
         count,
       };
@@ -274,29 +294,18 @@ export class ToolLoopDetector {
     const last = records[records.length - 1];
     let count = 0;
     for (let i = records.length - 1; i >= 0; i--) {
-      if (records[i].argsHash === last.argsHash) {
+      if (records[i].toolName === last.toolName && records[i].argsHash === last.argsHash) {
         count++;
       } else {
         break;
       }
     }
 
-    if (count >= this.config.criticalThreshold) {
-      return {
-        kind: 'generic_repeat',
-        // 'block' so the agent force-exits instead of just logging and continuing
-        severity: 'block',
-        message: `Repetitive tool loop detected: ${last.toolName} called ${count} times with the same arguments. Stopping to avoid wasting iterations on a failing approach.`,
-        toolName: last.toolName,
-        count,
-      };
-    }
-
     if (count >= this.config.warningThreshold) {
       return {
         kind: 'generic_repeat',
         severity: 'warning',
-        message: `Repetitive tool call detected: ${last.toolName} called ${count} times with the same arguments. Consider varying your approach.`,
+        message: `Repetitive tool call: ${last.toolName} used the same arguments ${count} times. Continue only if its results are changing; otherwise change approach.`,
         toolName: last.toolName,
         count,
       };

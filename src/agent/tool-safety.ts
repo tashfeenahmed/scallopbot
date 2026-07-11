@@ -29,6 +29,10 @@ export interface BoundedToolCalls {
   dropped: Array<{ toolUse: ToolUseContent; reason: 'duplicate_id' | 'duplicate_call' | 'limit' }>;
 }
 
+export interface BoundedResponseToolCalls extends BoundedToolCalls {
+  anomalousBurst: boolean;
+}
+
 const READ_ONLY_TOOLS = new Set([
   'read', 'read_file', 'ls', 'glob', 'grep', 'codesearch', 'web_search',
   'webfetch', 'memory_search', 'get', 'list', 'search', 'find', 'status',
@@ -136,6 +140,23 @@ export function boundToolCalls(toolUses: ToolUseContent[], limit: number): Bound
     accepted.push(toolUse);
   }
   return { accepted, dropped };
+}
+
+/**
+ * Reject an anomalously large model-authored response as a whole. This avoids
+ * executing an arbitrary prefix while allowing unlimited progressive batches
+ * across later agent iterations.
+ */
+export function boundResponseToolCalls(
+  toolUses: ToolUseContent[],
+  maxCallsPerResponse: number,
+): BoundedResponseToolCalls {
+  const safeMax = Math.max(0, Math.floor(maxCallsPerResponse));
+  const anomalousBurst = toolUses.length > safeMax;
+  return {
+    ...boundToolCalls(toolUses, anomalousBurst ? 0 : safeMax),
+    anomalousBurst,
+  };
 }
 
 function actionFromInput(input: Record<string, unknown>): string | null {

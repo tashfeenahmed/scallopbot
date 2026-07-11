@@ -60,6 +60,13 @@ describe('Config Schema', () => {
         expect(result.data.agent.maxIterations).toBe(100);
         expect(result.data.agent.foregroundCallTimeoutMs).toBe(25_000);
         expect(result.data.agent.turnTimeoutMs).toBe(55_000);
+        expect(result.data.tools.loopDetection).toEqual({
+          maxCallsPerResponse: 64,
+          historySize: 30,
+          warningThreshold: 10,
+          criticalThreshold: 20,
+          circuitBreakerThreshold: 30,
+        });
         expect(result.data.logging.level).toBe('info');
         expect(result.data.providers.anthropic.model).toBe('claude-sonnet-4-20250514');
         expect(result.data.evolution).toMatchObject({
@@ -581,6 +588,27 @@ describe('Config Schema', () => {
 
       expect(config.tools.policy).toEqual({ deny: ['bash'] });
       expect(config.tools.channelPolicies?.telegram).toEqual({ allow: ['read_file'] });
+    });
+
+    it('loads configurable progress-aware tool-loop thresholds', async () => {
+      process.env.ANTHROPIC_API_KEY = 'sk-ant-env-key';
+      process.env.AGENT_WORKSPACE = '/env/workspace';
+      process.env.TOOL_MAX_CALLS_PER_RESPONSE = '96';
+      process.env.TOOL_LOOP_HISTORY_SIZE = '60';
+      process.env.TOOL_LOOP_WARNING_THRESHOLD = '12';
+      process.env.TOOL_LOOP_CRITICAL_THRESHOLD = '24';
+      process.env.TOOL_LOOP_CIRCUIT_BREAKER_THRESHOLD = '36';
+
+      const { loadConfig } = await import('./config.js');
+      const config = loadConfig();
+
+      expect(config.tools.loopDetection).toEqual({
+        maxCallsPerResponse: 96,
+        historySize: 60,
+        warningThreshold: 12,
+        criticalThreshold: 24,
+        circuitBreakerThreshold: 36,
+      });
     });
 
     it('fails fast on malformed tool-policy JSON', async () => {

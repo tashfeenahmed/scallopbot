@@ -257,10 +257,10 @@ describe('Agent improvements integration', () => {
       expect(progress.join('\n')).not.toContain('secret payload');
     });
 
-    it('executes at most eight distinct calls from one malformed response', async () => {
+    it('rejects an anomalous 186-call response without executing a partial batch', async () => {
       const { Agent } = await import('./agent.js');
       const { SessionManager } = await import('./session.js');
-      const calls = Array.from({ length: 30 }, (_, index) => ({
+      const calls = Array.from({ length: 186 }, (_, index) => ({
         type: 'tool_use' as const,
         id: `tool-${index}`,
         name: 'read_file',
@@ -293,8 +293,58 @@ describe('Agent improvements integration', () => {
           ? message.content.filter((block) => block.type === 'tool_use')
           : [],
       ) ?? [];
-      expect(persistedCalls).toHaveLength(8);
-      expect(JSON.stringify(stored?.messages)).toContain('22 duplicate or over-budget');
+      expect(persistedCalls).toHaveLength(0);
+      expect(JSON.stringify(stored?.messages)).toContain('above the anomalous-burst guard of 64');
+    });
+
+    it('allows more than twenty useful calls when each call makes progress', async () => {
+      const { Agent } = await import('./agent.js');
+      const { SessionManager } = await import('./session.js');
+      const handler = vi.fn(async ({ args }: { args: Record<string, unknown> }) => ({
+        success: true,
+        output: `contents:${String(args.path)}`,
+      }));
+      const skill = {
+        name: 'read_file', description: 'Read a file', path: '/tmp/read-file/SKILL.md', source: 'workspace' as const,
+        frontmatter: { name: 'read_file', description: 'Read a file' }, content: '', available: true,
+        hasScripts: true, handler,
+      };
+      const registry = {
+        getSkill: vi.fn((name: string) => name === 'read_file' ? skill : null),
+        getToolDefinitions: vi.fn(() => [{ name: 'read_file', description: 'Read a file', input_schema: { type: 'object', properties: {} } }]),
+        generateSkillPrompt: vi.fn(() => ''),
+      };
+      const calls = Array.from({ length: 24 }, (_, index) => ({
+        type: 'tool_use' as const,
+        id: `read-${index}`,
+        name: 'read_file',
+        input: { path: `file-${index}.txt` },
+      }));
+      const provider = seqProvider([
+        {
+          content: calls,
+          stopReason: 'tool_use',
+          usage: { inputTokens: 10, outputTokens: 10 },
+          model: 'mock',
+        },
+        endTurn('All 24 files were inspected.'),
+      ]);
+      const sessionManager = new SessionManager(db);
+      const agent = new Agent({
+        provider,
+        sessionManager,
+        skillRegistry: registry as any,
+        workspace: testDir,
+        logger: pino({ level: 'silent' }),
+        maxIterations: 3,
+      });
+      const session = await sessionManager.createSession();
+
+      const result = await agent.processMessage(session.id, 'Read all 24 files');
+
+      expect(handler).toHaveBeenCalledTimes(24);
+      expect(result.response).toBe('All 24 files were inspected.');
+      expect(result.completionReason).toBe('natural_end');
     });
 
     it('does not treat DONE beside a pending tool call as completion', async () => {

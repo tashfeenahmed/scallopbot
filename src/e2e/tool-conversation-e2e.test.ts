@@ -750,7 +750,16 @@ describe('E2E Tool Conversation', () => {
         },
       ];
 
-      ctx = await createE2EGateway({ scenarioResponses, maxIterations: 10 });
+      ctx = await createE2EGateway({
+        scenarioResponses,
+        maxIterations: 10,
+        toolLoopDetection: {
+          historySize: 10,
+          warningThreshold: 3,
+          criticalThreshold: 4,
+          circuitBreakerThreshold: 6,
+        },
+      });
     }, 30000);
 
     afterAll(async () => {

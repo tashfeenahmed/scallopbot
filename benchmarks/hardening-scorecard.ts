@@ -1,5 +1,5 @@
 import { compactCompletedConversationHistory } from '../src/memory/session-message-view.js';
-import { boundToolCalls } from '../src/agent/tool-safety.js';
+import { boundResponseToolCalls } from '../src/agent/tool-safety.js';
 import { rerankResults } from '../src/memory/reranker.js';
 import {
   buildEvidenceClaimLedger,
@@ -39,7 +39,7 @@ async function main(): Promise<void> {
   const malformedCalls: ToolUseContent[] = Array.from({ length: 186 }, (_, index) => ({
     type: 'tool_use', id: `call-${index}`, name: 'read_file', input: { path: `file-${index}` },
   }));
-  const bounded = boundToolCalls(malformedCalls, 8);
+  const bounded = boundResponseToolCalls(malformedCalls, 64);
 
   const stalledProvider: LLMProvider = {
     name: 'benchmark-stalled',
@@ -68,7 +68,8 @@ async function main(): Promise<void> {
   const replayReductionPercent = Number(((1 - replayBytes / rawBytes) * 100).toFixed(1));
   const toolReductionPercent = Number((bounded.dropped.length / malformedCalls.length * 100).toFixed(1));
   const passed = replayReductionPercent >= 90
-    && bounded.accepted.length <= 8
+    && bounded.anomalousBurst
+    && bounded.accepted.length === 0
     && rerankFallbackMs <= 500
     && matchingClaim.passed
     && !fabricatedClaim.passed;

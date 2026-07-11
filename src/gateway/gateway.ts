@@ -551,6 +551,13 @@ export class Gateway {
       workspace: this.config.agent.workspace,
       logger: this.logger,
       maxIterations: this.config.agent.maxIterations,
+      maxToolCallsPerResponse: this.config.tools?.loopDetection?.maxCallsPerResponse ?? 64,
+      toolLoopDetection: {
+        historySize: this.config.tools?.loopDetection?.historySize ?? 30,
+        warningThreshold: this.config.tools?.loopDetection?.warningThreshold ?? 10,
+        criticalThreshold: this.config.tools?.loopDetection?.criticalThreshold ?? 20,
+        circuitBreakerThreshold: this.config.tools?.loopDetection?.circuitBreakerThreshold ?? 30,
+      },
       foregroundCallTimeoutMs: this.config.agent.foregroundCallTimeoutMs,
       turnTimeoutMs: this.config.agent.turnTimeoutMs,
       enableThinking: this.config.providers.moonshot.enableThinking,

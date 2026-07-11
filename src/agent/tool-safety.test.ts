@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { ToolUseContent } from '../providers/types.js';
 import {
   assessToolCallForTurn,
+  boundResponseToolCalls,
   boundToolCalls,
   digestToolOutput,
   isExternalBashMutation,
@@ -197,5 +198,17 @@ describe('turn-scoped tool safety', () => {
     expect(bounded.dropped.map((entry) => entry.reason)).toEqual([
       'duplicate_id', 'duplicate_call', 'limit',
     ]);
+  });
+
+  it('rejects an anomalous response as a whole instead of executing an arbitrary prefix', () => {
+    const calls: ToolUseContent[] = Array.from({ length: 65 }, (_, index) => ({
+      type: 'tool_use', id: `call-${index}`, name: 'read_file', input: { path: `${index}` },
+    }));
+
+    const bounded = boundResponseToolCalls(calls, 64);
+
+    expect(bounded.anomalousBurst).toBe(true);
+    expect(bounded.accepted).toHaveLength(0);
+    expect(bounded.dropped).toHaveLength(65);
   });
 });

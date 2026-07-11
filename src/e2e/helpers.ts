@@ -12,6 +12,7 @@ import pino from 'pino';
 import WebSocket from 'ws';
 import { ApiChannel } from '../channels/api.js';
 import { Agent } from '../agent/agent.js';
+import type { ToolLoopDetectorConfig } from '../agent/tool-loop-detector.js';
 import { SessionManager } from '../agent/session.js';
 import { ScallopMemoryStore } from '../memory/scallop-store.js';
 import { BotConfigManager } from '../channels/bot-config.js';
@@ -220,6 +221,8 @@ export interface CreateE2EGatewayOptions {
   scenarioResponses?: MockCompletionResponse[];
   /** Maximum agent iterations (default: 10) */
   maxIterations?: number;
+  /** Optional lower thresholds for deterministic loop-detection fixtures. */
+  toolLoopDetection?: Partial<ToolLoopDetectorConfig>;
   /** Pre-configured LLM responses for the fact extractor provider.
    *  If provided, a LLMFactExtractor is wired into the agent.
    *  Each response should be JSON with a "facts" array. */
@@ -329,6 +332,7 @@ export async function createE2EGateway(
     workspace: '/tmp',
     logger: testLogger,
     maxIterations: options.maxIterations ?? 10,
+    toolLoopDetection: options.toolLoopDetection,
     enableThinking: false,
   });
 

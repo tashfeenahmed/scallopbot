@@ -190,11 +190,28 @@ const toolPolicyEntrySchema = z.object({
   deny: z.array(z.string()).optional(),
 });
 
+const toolLoopDetectionSchema = z.object({
+  /** Reject one anomalously large model-authored burst; this is not a per-turn limit. */
+  maxCallsPerResponse: z.number().int().min(4).max(512).default(64),
+  historySize: z.number().int().min(4).max(1_000).default(30),
+  warningThreshold: z.number().int().min(2).max(500).default(10),
+  criticalThreshold: z.number().int().min(3).max(750).default(20),
+  circuitBreakerThreshold: z.number().int().min(4).max(1_000).default(30),
+});
+
 const toolPolicySchema = z.object({
   /** Global tool policy — owner-controlled defaults */
   policy: toolPolicyEntrySchema.optional(),
   /** Per-channel tool policies */
   channelPolicies: z.record(z.string(), toolPolicyEntrySchema).optional(),
+  /** Progress-aware tool-loop protection, modelled after OpenClaw. */
+  loopDetection: toolLoopDetectionSchema.default({
+    maxCallsPerResponse: 64,
+    historySize: 30,
+    warningThreshold: 10,
+    criticalThreshold: 20,
+    circuitBreakerThreshold: 30,
+  }),
 });
 
 // Gateway configuration schema
@@ -360,7 +377,15 @@ export const configSchema = z.object({
   eventRelay: eventRelaySchema.default({ webhookTimeoutMs: 5000, agentId: 'scallopbot' }),
   context: contextSchema.default({ hotWindowSize: 200, maxContextTokens: 128000, compressionThreshold: 0.7, maxToolOutputBytes: 30000 }),
   memory: memorySchema.default({ filePath: 'memories.jsonl', persist: true, dbPath: 'memories.db', mmrEnabled: false, mmrLambda: 0.7 }),
-  tools: toolPolicySchema.default({}),
+  tools: toolPolicySchema.default({
+    loopDetection: {
+      maxCallsPerResponse: 64,
+      historySize: 30,
+      warningThreshold: 10,
+      criticalThreshold: 20,
+      circuitBreakerThreshold: 30,
+    },
+  }),
   gateway: gatewaySchema.default({ port: DEFAULT_API_PORT, host: DEFAULT_HOST }),
   tailscale: tailscaleSchema.default({ mode: 'off', resetOnExit: true }),
   subagent: subagentSchema.default({
@@ -642,6 +667,13 @@ export function loadConfig(): Config {
     tools: {
       policy: parsePolicyJson('TOOL_POLICY_JSON'),
       channelPolicies: parsePolicyJson('TOOL_CHANNEL_POLICIES_JSON'),
+      loopDetection: {
+        maxCallsPerResponse: envInt('TOOL_MAX_CALLS_PER_RESPONSE', 64),
+        historySize: envInt('TOOL_LOOP_HISTORY_SIZE', 30),
+        warningThreshold: envInt('TOOL_LOOP_WARNING_THRESHOLD', 10),
+        criticalThreshold: envInt('TOOL_LOOP_CRITICAL_THRESHOLD', 20),
+        circuitBreakerThreshold: envInt('TOOL_LOOP_CIRCUIT_BREAKER_THRESHOLD', 30),
+      },
     },
     gateway: {
       port: process.env.GATEWAY_PORT ? parseInt(process.env.GATEWAY_PORT, 10) : DEFAULT_API_PORT,
