@@ -28,6 +28,17 @@ const JUDGE_SYSTEM =
   'clearly net-negative/nonsensical. Otherwise APPROVE. Respond with STRICT JSON only: ' +
   '{"approved":true|false,"reason":"<short>"}';
 
+/** Provider-enforced shape for the fail-closed safety verdict. */
+export const JUDGE_VERDICT_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['approved', 'reason'],
+  properties: {
+    approved: { type: 'boolean' },
+    reason: { type: 'string' },
+  },
+};
+
 function extractText(content: ContentBlock[]): string {
   return content.filter((b): b is { type: 'text'; text: string } => b.type === 'text').map(b => b.text).join('\n');
 }
@@ -52,6 +63,13 @@ export async function judgeMutation(
       messages: [{ role: 'user', content: description }],
       maxTokens: 256,
       temperature: 0,
+      enableThinking: false,
+      structuredOutput: {
+        name: 'evolution_safety_verdict',
+        schema: JUDGE_VERDICT_SCHEMA,
+        strict: true,
+      },
+      purpose: 'evolution_judge',
       signal: opts.signal,
     });
     const json = extractJsonObject(extractText(response.content));

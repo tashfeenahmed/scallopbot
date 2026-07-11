@@ -42,10 +42,13 @@ describe('durable board task workers', () => {
     const completed = board.completeLeasedTask(prerequisite.id, first!.leaseToken, {
       response: 'data ready',
       completedAt: 1_200,
+      taskComplete: true,
+      outcome: 'succeeded',
+      completionSource: 'worker',
     }, 1_200);
     expect(completed?.boardStatus).toBe('done');
     expect(board.completeLeasedTask(prerequisite.id, first!.leaseToken, {
-      response: 'duplicate', completedAt: 1_300,
+      response: 'duplicate', completedAt: 1_300, taskComplete: true, outcome: 'succeeded',
     }, 1_300)).toBeNull();
 
     const second = board.claimNextTask('default', 'worker-b', 5_000, 1_301);

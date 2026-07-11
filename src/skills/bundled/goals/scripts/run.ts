@@ -128,8 +128,56 @@ function outputResult(result: SkillResult): void {
 
 // Get goal by ID
 function getGoal(db: Database.Database, id: string): GoalItem | null {
-  const row = db.prepare('SELECT * FROM memories WHERE id = ? AND user_id = ?')
+  let row = db.prepare('SELECT * FROM memories WHERE id = ? AND user_id = ?')
     .get(id, USER_ID) as Record<string, unknown> | undefined;
+  if (!row) {
+    // Goal identities live independently of ordinary memory retention. Rebuild
+    // a missing searchable projection before applying an update, while never
+    // resurrecting an explicit deletion tombstone.
+    const registry = db.prepare(`
+      SELECT * FROM goal_registry
+      WHERE id = ? AND user_id = ? AND deleted_at IS NULL
+    `).get(id, USER_ID) as Record<string, unknown> | undefined;
+    if (registry) {
+      const metadata = JSON.parse(String(registry.metadata ?? '{}')) as GoalMetadata;
+      const parentId = typeof registry.parent_id === 'string' ? registry.parent_id : null;
+      if (parentId) getGoal(db, parentId);
+      const importance = registry.goal_type === 'goal' ? 8 : registry.goal_type === 'milestone' ? 7 : 6;
+      const eventDate = typeof metadata.dueDate === 'number' ? metadata.dueDate : null;
+      db.prepare(`
+        INSERT OR IGNORE INTO memories (
+          id, user_id, content, category, memory_type, importance, confidence,
+          is_latest, source, document_date, event_date, prominence, access_count,
+          metadata, created_at, updated_at
+        ) VALUES (?, ?, ?, 'insight', 'static_profile', ?, 1.0, 1, 'user',
+          ?, ?, 1.0, 0, ?, ?, ?)
+      `).run(
+        id,
+        USER_ID,
+        String(registry.title),
+        importance,
+        Number(registry.created_at),
+        eventDate,
+        JSON.stringify(metadata),
+        Number(registry.created_at),
+        Date.now(),
+      );
+      if (parentId) {
+        db.prepare(`
+          INSERT OR IGNORE INTO memory_relations (
+            id, source_id, target_id, relation_type, confidence, created_at
+          ) SELECT ?, ?, ?, 'EXTENDS', 1.0, ?
+          WHERE EXISTS (SELECT 1 FROM memories WHERE id = ?)
+        `).run(nanoid(), id, parentId, Date.now(), parentId);
+      }
+      db.prepare(`
+        INSERT INTO goal_registry_events (goal_id, action, detail, created_at)
+        VALUES (?, 'restored_projection', 'Rebuilt by goals skill', ?)
+      `).run(id, Date.now());
+      row = db.prepare('SELECT * FROM memories WHERE id = ? AND user_id = ?')
+        .get(id, USER_ID) as Record<string, unknown> | undefined;
+    }
+  }
   if (!row) return null;
 
   const metadata = row.metadata ? JSON.parse(row.metadata as string) : {};
@@ -398,6 +446,13 @@ function createItem(db: Database.Database, args: GoalArgs): SkillResult {
 function listItems(db: Database.Database, args: GoalArgs): SkillResult {
   const userId = USER_ID;
 
+  // Ensure the list is driven by durable identities, not by whether ordinary
+  // memory cleanup happened to leave the projection visible.
+  const durableIds = db.prepare(`
+    SELECT id FROM goal_registry WHERE user_id = ? AND deleted_at IS NULL
+  `).all(userId) as Array<{ id: string }>;
+  for (const { id } of durableIds) getGoal(db, id);
+
   const rows = db.prepare(`
     SELECT * FROM memories
     WHERE user_id = ? AND category = 'insight' AND is_latest = 1
@@ -629,6 +684,33 @@ function deleteItem(db: Database.Database, args: GoalArgs): SkillResult {
 
   // Delete relations
   db.prepare('DELETE FROM memory_relations WHERE source_id = ? OR target_id = ?').run(args.id, args.id);
+
+  // Preserve durable identity/status as an explicit tombstone and unlink
+  // board projections before deleting the searchable memory row. The public
+  // database migration creates this registry and fail-closed link triggers.
+  const now = Date.now();
+  const registryTable = db.prepare(`
+    SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'goal_registry'
+  `).get();
+  if (registryTable) {
+    const tombstoned = db.prepare(`
+      UPDATE goal_registry SET deleted_at = ?, updated_at = ?
+      WHERE id = ? AND user_id = ? AND deleted_at IS NULL
+    `).run(now, now, args.id, USER_ID);
+    if (tombstoned.changes > 0) {
+      db.prepare(`
+        INSERT INTO goal_registry_events (goal_id, action, detail, created_at)
+        VALUES (?, 'deleted', 'Explicit goal deletion through goals skill', ?)
+      `).run(args.id, now);
+    }
+    db.prepare(`
+      UPDATE scheduled_items
+      SET goal_id = NULL,
+          source_memory_id = CASE WHEN source_memory_id = ? THEN NULL ELSE source_memory_id END,
+          updated_at = ?
+      WHERE goal_id = ? OR source_memory_id = ?
+    `).run(args.id, now, args.id, args.id);
+  }
 
   // Delete the item
   db.prepare('DELETE FROM memories WHERE id = ? AND user_id = ?').run(args.id, USER_ID);

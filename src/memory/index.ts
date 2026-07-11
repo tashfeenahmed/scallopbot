@@ -52,6 +52,7 @@ export {
 // Session Summarizer
 export {
   SessionSummarizer,
+  SESSION_SUMMARY_SCHEMA,
   type SessionSummarizerOptions,
   type SessionSummaryResult,
 } from './session-summary.js';
@@ -68,7 +69,12 @@ export {
   type UserProfileEntry,
   type DynamicProfile,
   type BehavioralPatterns,
+  type SessionMessageRow,
+  type SessionSummaryInput,
   type SessionSummaryRow,
+  type SessionSummaryRevisionRow,
+  type SessionSummaryVerificationRequest,
+  type SessionSummaryVerificationEventRow,
 } from './db.js';
 
 // Decay Engine
@@ -282,3 +288,24 @@ export {
 export { type GardenerContext, safeBehavioralPatterns } from './gardener-context.js';
 export { scheduleProactiveItem, getLastProactiveAt } from './gardener-scheduling.js';
 export { storeFusedMemory } from './gardener-fusion-storage.js';
+
+// Canonical persisted/provider transcript view
+export {
+  classifySessionMessage,
+  compactCompletedConversationHistory,
+  filterHumanVisibleTranscript,
+  getHumanVisibleText,
+  isInternalSessionMetadata,
+  type ClassifiedSessionMessage,
+  type CompactConversationOptions,
+  type SessionMessageKind,
+  type SessionMessageLike,
+  type SessionMessageViewOptions,
+} from './session-message-view.js';
+
+export {
+  inferSessionMessageKind,
+  isPersistedSessionMessageKind,
+  PERSISTED_SESSION_MESSAGE_KINDS,
+  type PersistedSessionMessageKind,
+} from './session-message-kinds.js';

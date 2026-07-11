@@ -167,7 +167,8 @@ function createGroqRerankProvider(): LLMProvider | undefined {
 async function searchMemories(
   memories: ScallopMemoryEntry[],
   query: string,
-  limit: number
+  limit: number,
+  circuitStore?: ScallopDatabase,
 ): Promise<{ memory: ScallopMemoryEntry; score: number }[]> {
   if (memories.length === 0) return [];
 
@@ -267,7 +268,10 @@ async function searchMemories(
         originalScore: r.score,
       }));
 
-      const reranked = await rerankResults(query, candidates, rerankProvider, { maxCandidates: 20 });
+      const reranked = await rerankResults(query, candidates, rerankProvider, {
+        maxCandidates: 20,
+        circuitStore,
+      });
 
       const rerankedMap = new Map(reranked.map(r => [r.id, r.finalScore]));
       topResults = topResults
@@ -362,7 +366,7 @@ async function executeSearch(args: MemorySearchArgs): Promise<void> {
     }
 
     const limit = Math.min(args.limit || 10, 50);
-    const results = await searchMemories(candidates, args.query, limit);
+    const results = await searchMemories(candidates, args.query, limit, db);
 
     outputResult({
       success: true,

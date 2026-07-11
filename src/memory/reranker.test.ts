@@ -237,6 +237,62 @@ describe('rerankResults', () => {
 
     const callArgs = (provider.complete as ReturnType<typeof vi.fn>).mock.calls[0][0] as CompletionRequest;
     expect(callArgs.temperature).toBe(0.1);
+    expect(callArgs.enableThinking).toBe(false);
+  });
+
+  it('falls back within a configured latency budget and aborts the structured call', async () => {
+    let observedSignal: AbortSignal | undefined;
+    const provider: LLMProvider = {
+      name: 'slow-reranker',
+      isAvailable: () => true,
+      complete: vi.fn((request: CompletionRequest) => {
+        observedSignal = request.signal;
+        return new Promise(() => {});
+      }),
+    };
+    const candidates = [{ id: 'm1', content: 'Memory', originalScore: 0.7 }];
+    const started = Date.now();
+    const results = await rerankResults('query', candidates, provider, { timeoutMs: 30 });
+    expect(Date.now() - started).toBeLessThan(500);
+    expect(observedSignal?.aborted).toBe(true);
+    expect(results[0].finalScore).toBe(0.7);
+  });
+
+  it('opens a provider circuit after repeated parse failures', async () => {
+    const provider = createMockProvider('not-json');
+    const candidates = [{ id: 'm1', content: 'Memory', originalScore: 0.7 }];
+    await rerankResults('first', candidates, provider);
+    await rerankResults('second', candidates, provider);
+    await rerankResults('third', candidates, provider);
+    expect(provider.complete).toHaveBeenCalledTimes(2);
+  });
+
+  it('uses a durable route circuit across provider/process instances', async () => {
+    let state: { nextRetryAt: number } | null = null;
+    const circuitStore = {
+      getStructuredRouteCircuit: vi.fn(() => state),
+      recordStructuredRouteFailure: vi.fn((_route: string, _code: string, now = 0) => {
+        state = { nextRetryAt: now + 60_000 };
+      }),
+      clearStructuredRouteCircuit: vi.fn(() => { state = null; }),
+    };
+    const candidates = [{ id: 'm1', content: 'Memory', originalScore: 0.7 }];
+    const firstProcess = createMockProvider('not-json');
+    await rerankResults('first', candidates, firstProcess, {
+      circuitStore,
+      now: () => 1_000,
+    });
+
+    const restartedProcess = createMockProvider('[{"index":0,"score":1}]');
+    await rerankResults('second', candidates, restartedProcess, {
+      circuitStore,
+      now: () => 2_000,
+    });
+    expect(firstProcess.complete).toHaveBeenCalledOnce();
+    expect(restartedProcess.complete).not.toHaveBeenCalled();
+    expect(circuitStore.recordStructuredRouteFailure).toHaveBeenCalledWith(
+      'rerank:mock', 'invalid_json', 1_000,
+    );
   });
 
   it('sends system prompt instructing scoring on 0.0-1.0 scale', async () => {
@@ -253,6 +309,7 @@ describe('rerankResults', () => {
     expect(callArgs.system).toBeDefined();
     expect(callArgs.system).toContain('0.0');
     expect(callArgs.system).toContain('1.0');
+    expect(callArgs.structuredOutput?.name).toBe('memory_rerank_scores');
   });
 
   it('respects custom maxCandidates option', async () => {

@@ -4,6 +4,7 @@ import * as os from 'os';
 import * as fs from 'fs';
 import type { Message } from '../providers/types.js';
 import { ScallopDatabase } from '../memory/db.js';
+import { classifySessionMessage } from '../memory/session-message-view.js';
 
 describe('SessionManager', () => {
   let dbPath: string;
@@ -86,6 +87,30 @@ describe('SessionManager', () => {
       expect(rows[1].content).toBe('Second');
     });
 
+    it('keeps human JSON-shaped text visible while classifying structured tool results', async () => {
+      const { SessionManager } = await import('./session.js');
+      const manager = new SessionManager(db);
+      const session = await manager.createSession({ userId: 'api:user1', channelId: 'api' });
+      const literal = JSON.stringify([
+        { type: 'tool_result', tool_use_id: 'not-a-real-call', content: 'literal user text' },
+      ]);
+
+      await manager.addMessage(session.id, { role: 'user', content: literal });
+      await manager.addMessage(session.id, {
+        role: 'user',
+        content: [{ type: 'tool_result', tool_use_id: 'real-call', content: 'private result' }],
+      });
+
+      const rows = db.getSessionMessages(session.id);
+      expect(rows.map(row => row.messageKind)).toEqual(['human_user', 'tool_result']);
+      expect(classifySessionMessage(rows[0])).toMatchObject({
+        isHumanTurn: true,
+        isHumanVisible: true,
+        visibleText: literal,
+      });
+      expect(classifySessionMessage(rows[1]).isHumanVisible).toBe(false);
+    });
+
     it('should throw error for non-existent session', async () => {
       const { SessionManager } = await import('./session.js');
       const manager = new SessionManager(db);
@@ -138,15 +163,20 @@ describe('SessionManager', () => {
   });
 
   describe('deleteSession', () => {
-    it('should delete session from SQLite', async () => {
+    it('should hide a confirmed-forgotten session but retain its tombstone', async () => {
       const { SessionManager } = await import('./session.js');
       const manager = new SessionManager(db);
 
       const session = await manager.createSession();
-      await manager.deleteSession(session.id);
+      await manager.addMessage(session.id, { role: 'user', content: 'private' });
+      await manager.deleteSession(session.id, { confirmed: true });
 
       const row = db.getSession(session.id);
-      expect(row).toBeNull();
+      expect(row?.transcriptDeletedAt).not.toBeNull();
+      expect(db.getSessionMessages(session.id)).toEqual([]);
+      expect(db.getSessionLifecycleEvents(session.id)).toMatchObject([
+        { action: 'forgotten', messageCount: 1 },
+      ]);
     });
 
     it('should return true when session is deleted', async () => {
@@ -154,7 +184,7 @@ describe('SessionManager', () => {
       const manager = new SessionManager(db);
 
       const session = await manager.createSession();
-      const result = await manager.deleteSession(session.id);
+      const result = await manager.deleteSession(session.id, { confirmed: true });
 
       expect(result).toBe(true);
     });
@@ -163,9 +193,128 @@ describe('SessionManager', () => {
       const { SessionManager } = await import('./session.js');
       const manager = new SessionManager(db);
 
-      const result = await manager.deleteSession('nonexistent');
+      const result = await manager.deleteSession('nonexistent', { confirmed: true });
 
       expect(result).toBe(false);
+    });
+
+    it('should reject destructive deletion without explicit confirmation', async () => {
+      const { SessionManager } = await import('./session.js');
+      const manager = new SessionManager(db);
+      const session = await manager.createSession();
+
+      await expect(manager.deleteSession(session.id)).rejects.toThrow('explicit confirmation');
+      expect(await manager.getSession(session.id)).toBeDefined();
+    });
+
+    it('should retain a durable summary after confirmed transcript deletion', async () => {
+      const { SessionManager } = await import('./session.js');
+      const manager = new SessionManager(db);
+      const session = await manager.createSession({ userId: 'user123' });
+      await manager.addMessage(session.id, { role: 'user', content: 'Please remember this outcome' });
+      db.addSessionSummary({
+        sessionId: session.id,
+        userId: 'user123',
+        summary: 'The user asked to remember an outcome.',
+        topics: ['outcome'],
+        messageCount: 1,
+        durationMs: 0,
+        embedding: null,
+      });
+
+      await manager.deleteSession(session.id, { confirmed: true });
+
+      expect(db.getSessionSummary(session.id)?.summary).toContain('remember an outcome');
+    });
+
+    it('idempotently forgets both hot and cold transcript copies after retention pruning', async () => {
+      const { SessionManager } = await import('./session.js');
+      const manager = new SessionManager(db);
+      const session = await manager.createSession({ userId: 'user123' });
+      await manager.addMessage(session.id, { role: 'user', content: 'Remove every transcript copy' });
+      await manager.addMessage(session.id, { role: 'assistant', content: 'I will remove it after confirmation.' });
+      db.addSessionSummary({
+        sessionId: session.id,
+        userId: 'user123',
+        summary: 'A durable summary that must survive forgetting.',
+        topics: ['retention'],
+        messageCount: 2,
+        durationMs: 0,
+        embedding: null,
+      }, {
+        verifier: 'session_summarizer',
+        verificationVersion: 1,
+      });
+      await manager.archiveSession(session.id, 'closed', 'test');
+      db.raw('UPDATE sessions SET updated_at = ? WHERE id = ? RETURNING id', [
+        Date.now() - 31 * 24 * 60 * 60 * 1000,
+        session.id,
+      ]);
+      expect(db.pruneOldSessions(30)).toBe(1);
+      expect(db.getSessionMessages(session.id)).toEqual([]);
+      expect(db.getArchivedSessionMessages(session.id)).toHaveLength(2);
+
+      await expect(manager.deleteSession(session.id, { confirmed: true })).resolves.toBe(true);
+      await expect(manager.deleteSession(session.id, { confirmed: true })).resolves.toBe(true);
+
+      expect(db.getSessionMessages(session.id)).toEqual([]);
+      expect(db.getArchivedSessionMessages(session.id)).toEqual([]);
+      expect(db.getSessionSummary(session.id)?.summary).toContain('must survive');
+      expect(db.getSessionLifecycleEvents(session.id).map(event => event.action)).toEqual([
+        'archived',
+        'transcript_pruned',
+        'forgotten',
+      ]);
+      expect(db.getSessionLifecycleEvents(session.id).at(-1)?.messageCount).toBe(2);
+    });
+  });
+
+  describe('startNewSession', () => {
+    it('archives history and force-creates a different active session', async () => {
+      const { SessionManager } = await import('./session.js');
+      const manager = new SessionManager(db);
+      const old = await manager.createSession({ userId: 'telegram:user123', channelId: 'telegram' });
+      await manager.addMessage(old.id, { role: 'user', content: 'Keep this history' });
+      const worker = await manager.createSession({
+        userId: 'telegram:user123',
+        channelId: 'telegram',
+        isSubAgent: true,
+        parentSessionId: old.id,
+      });
+
+      const fresh = await manager.startNewSession({
+        userId: 'telegram:user123',
+        channelId: 'telegram',
+        id: old.id,
+      }, old.id);
+
+      expect(fresh.id).not.toBe(old.id);
+      expect(await manager.getSession(old.id)).toBeUndefined();
+      expect(db.getSessionMessages(old.id).map(message => message.content)).toEqual(['Keep this history']);
+      expect(db.getSession(old.id)?.archiveReason).toBe('new_conversation');
+      expect(await manager.getSession(worker.id)).toBeDefined();
+      await manager.addMessage(worker.id, { role: 'assistant', content: 'Worker finished after reset' });
+      expect(db.findSessionByUserId('telegram:user123', 'telegram')?.id).toBe(fresh.id);
+      expect(db.getSessionLifecycleEvents(old.id)).toMatchObject([
+        { action: 'archived', actor: 'user_command', messageCount: 1 },
+      ]);
+    });
+
+    it('does not resume an older session when /new arrives after restart', async () => {
+      const { SessionManager } = await import('./session.js');
+      const firstManager = new SessionManager(db);
+      const old = await firstManager.createSession({ userId: 'telegram:user123', channelId: 'telegram' });
+      await firstManager.addMessage(old.id, { role: 'user', content: 'Old turn' });
+
+      const restartedManager = new SessionManager(db);
+      const fresh = await restartedManager.startNewSession({
+        userId: 'telegram:user123',
+        channelId: 'telegram',
+      });
+
+      expect(fresh.id).not.toBe(old.id);
+      expect(db.findSessionByUserId('telegram:user123')?.id).toBe(fresh.id);
+      expect(db.getSessionMessages(old.id)).toHaveLength(1);
     });
   });
 

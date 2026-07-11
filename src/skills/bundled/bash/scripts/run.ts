@@ -69,6 +69,44 @@ function validateCommand(command: string): ValidationResult {
       return { valid: false, reason };
     }
   }
+
+  // curl exits zero for HTTP 4xx/5xx unless fail mode is enabled. For writes,
+  // that turns rejected API requests into false success receipts upstream.
+  // Require a machine-verifiable exit status instead of trying to interpret
+  // every service's error JSON after the fact.
+  const mutatingCurl = /\bcurl\b[\s\S]*(?:(?:-X|--request)\s*['"]?(?:POST|PUT|PATCH|DELETE)\b|(?:--data(?:-raw|-binary|-urlencode)?|-d)\s)/i.test(command);
+  const curlFailMode = /(?:^|\s)--fail(?:-with-body)?(?:\s|$)/i.test(command)
+    || /(?:^|\s)-[A-Za-z]*f[A-Za-z]*(?:\s|$)/.test(command);
+  if (mutatingCurl && !curlFailMode) {
+    return {
+      valid: false,
+      reason: 'Mutating curl requests must use --fail-with-body (or -f) so HTTP errors cannot be reported as success',
+    };
+  }
+
+  const mutatingHttpie = /(?:^|[;&|\n]\s*)(?:http|https)\b[^\n;&|]*\b(?:POST|PUT|PATCH|DELETE)\b/i.test(command);
+  if (mutatingHttpie && !/\B--check-status\b/i.test(command)) {
+    return {
+      valid: false,
+      reason: 'Mutating HTTPie requests must use --check-status so HTTP errors cannot be reported as success',
+    };
+  }
+
+  const mutatingPythonHttp = /\b(?:requests|httpx)\s*\.\s*(?:post|put|patch|delete)\s*\(/i.test(command);
+  if (mutatingPythonHttp && !/\.raise_for_status\s*\(/i.test(command)) {
+    return {
+      valid: false,
+      reason: 'Mutating Python HTTP requests must call raise_for_status() so HTTP errors cannot be reported as success',
+    };
+  }
+
+  const mutatingNodeFetch = /\bfetch\s*\([\s\S]{0,2000}?\bmethod\s*:\s*['"](?:POST|PUT|PATCH|DELETE)['"]/i.test(command);
+  if (mutatingNodeFetch && !/(?:\.ok\b|\.status\b|status\s*[<>=])/i.test(command)) {
+    return {
+      valid: false,
+      reason: 'Mutating fetch requests must validate response.ok/status and fail on non-2xx responses',
+    };
+  }
   return { valid: true };
 }
 

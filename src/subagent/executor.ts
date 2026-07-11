@@ -32,6 +32,7 @@ import type {
   SubAgentRun,
 } from './types.js';
 import { DEFAULT_SUBAGENT_CONFIG } from './types.js';
+import type { ToolEvidenceReceipt } from '../memory/db.js';
 
 /**
  * Skills that sub-agents are never allowed to use
@@ -52,6 +53,9 @@ const DEFAULT_SUBAGENT_SKILLS = [
   'read_file',
   'memory_search',
 ];
+
+/** Honest failure prose must never cross the task-completion boundary. */
+const FINAL_FAILURE_SIGNAL = /\b(?:could not|couldn't|cannot|can't|was unable|unable to|failed to|failure|unavailable|not available|did not complete|not completed|access denied|permission denied|timed out|blocked by|error:)\b/i;
 
 /**
  * Keyword-based skill auto-selection rules
@@ -128,6 +132,38 @@ export class SubAgentExecutor {
    */
   getConfig(): SubAgentConfig {
     return this.config;
+  }
+
+  /**
+   * Deterministic capability preflight for unattended work. Documentation-only
+   * skills require bash to be explicitly granted too; otherwise they cannot be
+   * executed by the filtered child registry.
+   */
+  preflightSkills(requestedSkills: readonly string[]): {
+    available: string[];
+    missing: string[];
+    documentationOnly: string[];
+  } {
+    const requested = [...new Set(requestedSkills.filter(Boolean))]
+      .filter(name => !NEVER_ALLOWED_SKILLS.has(name));
+    const executable = new Set(this.skillRegistry.getExecutableSkills().map(skill => skill.name));
+    const documentation = new Set(this.skillRegistry.getDocumentationSkills().map(skill => skill.name));
+    const available: string[] = [];
+    const missing: string[] = [];
+    const documentationOnly: string[] = [];
+
+    for (const name of requested) {
+      if (executable.has(name)) {
+        available.push(name);
+      } else if (documentation.has(name)) {
+        documentationOnly.push(name);
+        if (requested.includes('bash') && executable.has('bash')) available.push(name);
+        else missing.push(`${name} (requires bash)`);
+      } else {
+        missing.push(name);
+      }
+    }
+    return { available, missing, documentationOnly };
   }
 
   /**
@@ -280,6 +316,7 @@ export class SubAgentExecutor {
       maxIterations: this.config.maxIterations,
       systemPrompt,
       canonicalSingleUserIds: this.canonicalSingleUserIds,
+      evidenceExecutionContext: run.evidenceExecutionContext,
     });
 
     // 8. Set up timeout via AbortController
@@ -291,14 +328,31 @@ export class SubAgentExecutor {
     const shouldStop = () => controller.signal.aborted;
 
     // 9. Progress forwarding
-    const subProgress: ProgressCallback | undefined = parentOnProgress
-      ? async (update) => {
-          await parentOnProgress({
-            ...update,
-            message: `[${run.label}] ${update.message}`,
-          });
-        }
-      : undefined;
+    const evidenceReceipts: ToolEvidenceReceipt[] = [];
+    const subProgress: ProgressCallback = async (update) => {
+      if ((update.type === 'tool_complete' || update.type === 'tool_error') && update.toolName && update.evidence) {
+        evidenceReceipts.push({
+          toolName: update.toolName,
+          success: update.evidence.verified,
+          completedAt: Date.now(),
+          outputDigest: update.evidence.outputDigest,
+          outputBytes: update.evidence.outputBytes,
+          claimDigests: update.evidence.claimDigests,
+          claimLedgerTruncated: update.evidence.claimLedgerTruncated,
+          authority: update.evidence.authority,
+          sourceDigest: update.evidence.sourceDigest,
+          toolRequestDigest: update.evidence.toolRequestDigest,
+          taskRequestDigest: update.evidence.taskRequestDigest,
+          accountScopeDigest: update.evidence.accountScopeDigest,
+        });
+      }
+      if (parentOnProgress) {
+        await parentOnProgress({
+          ...update,
+          message: `[${run.label}] ${update.message}`,
+        });
+      }
+    };
 
     try {
       const result = await agent.processMessage(
@@ -311,20 +365,36 @@ export class SubAgentExecutor {
         controller.signal // abortSignal — terminates in-flight LLM HTTP call on timeout/cancel
       );
 
-      // Completion is explicit loop state. Agent strips [DONE] from response text,
-      // so inspecting the cleaned response here silently misclassified outcomes.
-      const taskComplete = result.completionReason === 'explicit_done'
-        || result.completionReason === 'natural_end';
+      const cleanedResponse = result.response.replace(/\[DONE\]\s*$/, '').trim();
+      const hasFailureSignal = FINAL_FAILURE_SIGNAL.test(cleanedResponse);
+      const finalToolReceipt = evidenceReceipts.at(-1);
+      const hasVerifiedToolCompletion = Boolean(
+        finalToolReceipt?.success && finalToolReceipt.outputBytes > 0,
+      );
+      // A natural end only means the model stopped talking. It does not prove
+      // the assigned work succeeded. Completion requires the explicit loop
+      // contract, or a non-empty runtime tool result, and never failure prose.
+      const toolBoundaryVerified = evidenceReceipts.length === 0 || hasVerifiedToolCompletion;
+      const completionSource = !hasFailureSignal
+        && toolBoundaryVerified
+        && result.completionReason === 'explicit_done'
+        ? 'explicit_done' as const
+        : !hasFailureSignal && result.completionReason === 'natural_end' && hasVerifiedToolCompletion
+          ? 'verified_tool_evidence' as const
+          : undefined;
+      const taskComplete = completionSource !== undefined;
       const costUsd = Math.max(
         0,
         (this.costTracker?.getSessionSpend(run.childSessionId) ?? initialCostUsd) - initialCostUsd,
       );
 
       const subAgentResult: SubAgentResult = {
-        response: result.response.replace(/\[DONE\]\s*$/, '').trim(),
+        response: cleanedResponse,
         iterationsUsed: result.iterationsUsed,
         taskComplete,
+        completionSource,
         costUsd,
+        evidenceReceipts,
       };
 
       // Update registry
@@ -373,6 +443,7 @@ export class SubAgentExecutor {
         response: `Error: ${errorMsg}`,
         iterationsUsed: 0,
         taskComplete: false,
+        evidenceReceipts,
         costUsd: Math.max(
           0,
           (this.costTracker?.getSessionSpend(run.childSessionId) ?? initialCostUsd) - initialCostUsd,

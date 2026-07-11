@@ -100,6 +100,8 @@ export function buildSkillSubprocessEnv(
     env.SKILL_STATE_USER_ID = resolveSkillStateUserId(request.userId, canonicalSingleUserIds);
   }
   if (request.sessionId) env.SKILL_SESSION_ID = request.sessionId;
+  if (request.idempotencyKey) env.SKILL_IDEMPOTENCY_KEY = request.idempotencyKey;
+  if (request.deadlineAt !== undefined) env.SKILL_DEADLINE_AT = String(request.deadlineAt);
   if (request.userId && timezone) env.SKILL_USER_TIMEZONE = timezone;
   return env;
 }
@@ -293,6 +295,10 @@ export class SkillExecutor {
     skill: Skill,
     request: SkillExecutionRequest
   ): Promise<SkillExecutionResult> {
+    if (request.signal?.aborted) {
+      return { success: false, error: 'Script execution aborted before dispatch', exitCode: 124 };
+    }
+
     const ext = extname(scriptPath);
     let command: string;
     let args: string[];
@@ -339,10 +345,23 @@ export class SkillExecutor {
       let resolved = false;
       let outputBytes = 0;
       let outputTruncated = false;
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+
+      const abortHandler = () => {
+        child.kill('SIGTERM');
+        done({
+          success: false,
+          output: redactSensitiveText(stdout.join('')),
+          error: 'Script execution aborted at the foreground turn deadline',
+          exitCode: 124,
+        });
+      };
 
       const done = (result: SkillExecutionResult) => {
         if (resolved) return;
         resolved = true;
+        if (timeout) clearTimeout(timeout);
+        request.signal?.removeEventListener('abort', abortHandler);
         resolve(result);
       };
 
@@ -352,16 +371,25 @@ export class SkillExecutor {
         stdio: ['ignore', 'pipe', 'pipe'],
       });
 
-      // Set timeout
-      const timeout = setTimeout(() => {
-        child.kill('SIGTERM');
-        done({
-          success: false,
-          output: redactSensitiveText(stdout.join('')),
-          error: `Script timed out after ${this.timeoutMs}ms`,
-          exitCode: 124, // Standard timeout exit code
-        });
-      }, this.timeoutMs);
+      request.signal?.addEventListener('abort', abortHandler, { once: true });
+      if (request.signal?.aborted) abortHandler();
+
+      // The script's own cap can only shorten the enclosing turn deadline.
+      const remainingMs = request.deadlineAt === undefined
+        ? this.timeoutMs
+        : Math.max(1, request.deadlineAt - Date.now());
+      const effectiveTimeoutMs = Math.min(this.timeoutMs, remainingMs);
+      if (!resolved) {
+        timeout = setTimeout(() => {
+          child.kill('SIGTERM');
+          done({
+            success: false,
+            output: redactSensitiveText(stdout.join('')),
+            error: `Script timed out after ${effectiveTimeoutMs}ms`,
+            exitCode: 124, // Standard timeout exit code
+          });
+        }, effectiveTimeoutMs);
+      }
 
       child.stdout?.on('data', (data: Buffer) => {
         if (outputTruncated) return;
@@ -381,7 +409,6 @@ export class SkillExecutor {
       });
 
       child.on('error', (error) => {
-        clearTimeout(timeout);
         done({
           success: false,
           error: `Failed to execute script: ${error.message}`,
@@ -390,7 +417,6 @@ export class SkillExecutor {
       });
 
       child.on('close', (code) => {
-        clearTimeout(timeout);
         const exitCode = code ?? 0;
         const success = exitCode === 0;
 

@@ -90,7 +90,23 @@ export class OllamaProvider implements LLMProvider {
       model: this.model,
       messages,
       stream: false,
+      ...(request.enableThinking !== undefined && { think: request.enableThinking }),
+      ...(request.structuredOutput && { format: request.structuredOutput.schema }),
     };
+
+    // GPT-OSS accepts thinking levels but cannot disable its reasoning trace.
+    // A strict no-thinking route must fail here so a router can choose another
+    // provider instead of spending its JSON budget on hidden reasoning.
+    if (request.structuredOutput && request.enableThinking === false
+      && /(?:^|[/:])gpt-oss(?:$|[:/-])/i.test(this.model)) {
+      throw new Error(`Ollama model ${this.model} cannot disable thinking for structured output`);
+    }
+
+    const runtimeOptions: Record<string, unknown> = {};
+    if (request.temperature !== undefined) runtimeOptions.temperature = request.temperature;
+    if (request.maxTokens !== undefined) runtimeOptions.num_predict = request.maxTokens;
+    if (request.stopSequences) runtimeOptions.stop = request.stopSequences;
+    if (Object.keys(runtimeOptions).length > 0) body.options = runtimeOptions;
 
     if (request.tools && request.tools.length > 0) {
       body.tools = request.tools.map((tool) => ({

@@ -61,18 +61,35 @@ function outputResult(result: SkillResult): void {
 function getGoal(db: Database.Database, id: string): GoalItem | null {
   const row = db.prepare('SELECT * FROM memories WHERE id = ? AND user_id = ?')
     .get(id, USER_ID) as Record<string, unknown> | undefined;
-  if (!row) return null;
+  if (row) {
+    const metadata = row.metadata ? JSON.parse(row.metadata as string) : {};
+    if (metadata.goalType) {
+      return {
+        id: row.id as string,
+        userId: row.user_id as string,
+        content: row.content as string,
+        metadata,
+        createdAt: row.created_at as number,
+        updatedAt: row.updated_at as number,
+      };
+    }
+  }
 
-  const metadata = row.metadata ? JSON.parse(row.metadata as string) : {};
-  if (!metadata.goalType) return null;
-
+  // Progress is a read model, so it can consume the durable registry directly
+  // even when the searchable memory projection was cleaned up or corrupted.
+  const registry = db.prepare(`
+    SELECT * FROM goal_registry
+    WHERE id = ? AND user_id = ? AND deleted_at IS NULL
+  `).get(id, USER_ID) as Record<string, unknown> | undefined;
+  if (!registry) return null;
+  const metadata = JSON.parse(String(registry.metadata ?? '{}')) as GoalMetadata;
   return {
-    id: row.id as string,
-    userId: row.user_id as string,
-    content: row.content as string,
+    id: String(registry.id),
+    userId: String(registry.user_id),
+    content: String(registry.title),
     metadata,
-    createdAt: row.created_at as number,
-    updatedAt: row.updated_at as number,
+    createdAt: Number(registry.created_at),
+    updatedAt: Number(registry.updated_at),
   };
 }
 
@@ -95,26 +112,13 @@ function getChildren(db: Database.Database, parentId: string): GoalItem[] {
 // Get all active goals for user
 function getActiveGoals(db: Database.Database, userId: string): GoalItem[] {
   const rows = db.prepare(`
-    SELECT * FROM memories
-    WHERE user_id = ? AND category = 'insight' AND is_latest = 1
-    ORDER BY prominence DESC, document_date DESC
-  `).all(userId) as Record<string, unknown>[];
+    SELECT id FROM goal_registry
+    WHERE user_id = ? AND goal_type = 'goal' AND status = 'active' AND deleted_at IS NULL
+    ORDER BY updated_at DESC
+  `).all(userId) as Array<{ id: string }>;
 
   return rows
-    .map(row => {
-      const metadata = row.metadata ? JSON.parse(row.metadata as string) : {};
-      if (!metadata.goalType || metadata.goalType !== 'goal' || metadata.status !== 'active') {
-        return null;
-      }
-      return {
-        id: row.id as string,
-        userId: row.user_id as string,
-        content: row.content as string,
-        metadata,
-        createdAt: row.created_at as number,
-        updatedAt: row.updated_at as number,
-      } as GoalItem;
-    })
+    .map(row => getGoal(db, row.id))
     .filter((item): item is GoalItem => item !== null);
 }
 

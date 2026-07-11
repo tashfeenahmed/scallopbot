@@ -12,7 +12,7 @@ jobs:
 
     strategy:
       matrix:
-        node-version: [22.x]
+        node-version: [24.x]
 
     steps:
       - uses: actions/checkout@v4
@@ -26,8 +26,17 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Check for committed secrets
+        run: npm run check:secrets
+
       - name: Type check
         run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Hardening scorecard
+        run: npm run benchmark:hardening
 
       - name: Build
         run: npm run build

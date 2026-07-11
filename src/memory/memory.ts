@@ -62,6 +62,10 @@ export interface BackgroundGardenerOptions {
   getTimezone?: (userId: string) => string;
   /** Explicit aliases for this deployment's single canonical state owner. */
   canonicalSingleUserIds?: readonly string[];
+  /** Seconds before sub-agent protocol payloads/sessions are removed. */
+  subAgentCleanupAfterSeconds?: number;
+  /** Seconds to retain compact redacted sub-agent run diagnostics. */
+  subAgentDiagnosticRetentionSeconds?: number;
   /** Callback fired once when transitioning out of quiet hours (morning digest) */
   onMorningDigest?: (userId: string) => Promise<void>;
   /** Optional hook fired at the end of each deep tick (e.g. evolution rollback watchdog). */
@@ -101,6 +105,8 @@ export class BackgroundGardener {
   private disableArchival: boolean;
   private getTimezone: (userId: string) => string;
   private canonicalSingleUserIds: readonly string[];
+  private subAgentCleanupAfterSeconds: number;
+  private subAgentDiagnosticRetentionSeconds: number;
   private onMorningDigest?: (userId: string) => Promise<void>;
   private onDeepTick?: () => Promise<void>;
   private onSleepTick?: () => Promise<void>;
@@ -129,6 +135,9 @@ export class BackgroundGardener {
     this.disableArchival = options.disableArchival ?? false;
     this.getTimezone = options.getTimezone ?? (() => Intl.DateTimeFormat().resolvedOptions().timeZone);
     this.canonicalSingleUserIds = [...(options.canonicalSingleUserIds ?? [])];
+    this.subAgentCleanupAfterSeconds = options.subAgentCleanupAfterSeconds ?? 3600;
+    this.subAgentDiagnosticRetentionSeconds = options.subAgentDiagnosticRetentionSeconds
+      ?? 30 * 24 * 60 * 60;
     this.onMorningDigest = options.onMorningDigest;
     this.onDeepTick = options.onDeepTick;
     this.onSleepTick = options.onSleepTick;
@@ -269,6 +278,8 @@ export class BackgroundGardener {
       disableArchival: this.disableArchival,
       getTimezone: this.getTimezone,
       canonicalSingleUserIds: this.canonicalSingleUserIds,
+      subAgentCleanupAfterSeconds: this.subAgentCleanupAfterSeconds,
+      subAgentDiagnosticRetentionSeconds: this.subAgentDiagnosticRetentionSeconds,
     };
   }
 

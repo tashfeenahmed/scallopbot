@@ -11,6 +11,7 @@
 import Database from 'better-sqlite3';
 import * as path from 'path';
 import * as fs from 'fs';
+import { createHash } from 'node:crypto';
 import { nanoid } from 'nanoid';
 import type {
   MessageFrequencySignal,
@@ -25,6 +26,21 @@ import {
   SEMANTIC_CANDIDATE_LIMIT,
   SEMANTIC_LSH_VERSION,
 } from './semantic-index.js';
+import {
+  inferSessionMessageKind,
+  isPersistedSessionMessageKind,
+  PERSISTED_SESSION_MESSAGE_KINDS,
+  type PersistedSessionMessageKind,
+} from './session-message-kinds.js';
+import {
+  isAuthoritativeEvidenceReceipt,
+  NEVER_AUTHORITATIVE_EVIDENCE_TOOLS,
+  verifyResponseEvidenceClaims,
+} from '../security/evidence-grounding.js';
+
+const PERSISTED_MESSAGE_KIND_SQL = PERSISTED_SESSION_MESSAGE_KINDS
+  .map(kind => `'${kind}'`)
+  .join(', ');
 
 /** Parse a JSON detail blob, returning null on malformed input. */
 function parseDetailJSON(raw: string): Record<string, unknown> | null {
@@ -34,6 +50,65 @@ function parseDetailJSON(raw: string): Record<string, unknown> | null {
   } catch {
     return null;
   }
+}
+
+/** Exponential retry delay; three failures open a day-long provider circuit. */
+function summaryFailureBackoffMs(failureCount: number): number {
+  if (failureCount < 3) return 60_000 * (2 ** Math.max(0, failureCount - 1));
+  return Math.min(7 * 24 * 60 * 60 * 1000, 24 * 60 * 60 * 1000 * (2 ** (failureCount - 3)));
+}
+
+/**
+ * Strong signals that a legacy task claimed fresh, externally verifiable
+ * facts. Deliberately avoid generic words such as "report" and "current":
+ * those appeared in ordinary workflow tasks and caused an earlier migration
+ * to quarantine valid history merely because a tool happened to be declared.
+ */
+const LEGACY_FACTUAL_TASK_RE = /\b(?:analytics?|metrics?|statistics?|stats?|subscribers?|followers?|views?|revenue|traffic|conversions?|sales|balances?|prices?|exchange rates?|weather|flight status|stock prices?|account data|real data|source data|look ?up|research|fetch|retrieve|query|measure|counts?)\b/i;
+const NON_EVIDENCE_SOURCE_TOOLS = new Set([
+  'board', 'goals', 'reminder', 'triggers', 'progress', 'question', 'telegram_send',
+]);
+
+function isValidRuntimeEvidenceReceipt(value: unknown): value is ToolEvidenceReceipt {
+  if (!value || typeof value !== 'object') return false;
+  const receipt = value as Partial<ToolEvidenceReceipt>;
+  return typeof receipt.toolName === 'string'
+    && receipt.toolName.trim().length > 0
+    && receipt.success === true
+    && typeof receipt.completedAt === 'number'
+    && Number.isFinite(receipt.completedAt)
+    && receipt.completedAt > 0
+    && typeof receipt.outputBytes === 'number'
+    && Number.isFinite(receipt.outputBytes)
+    && receipt.outputBytes > 0
+    && typeof receipt.outputDigest === 'string'
+    && /^[a-f0-9]{64}$/i.test(receipt.outputDigest)
+    && isAuthoritativeEvidenceReceipt(receipt as ToolEvidenceReceipt);
+}
+
+function recurringTaskSeriesKey(item: Pick<ScheduledItem, 'userId' | 'recurring' | 'taskConfig'>): string {
+  const canonical = JSON.stringify({
+    userId: item.userId,
+    recurring: item.recurring ? {
+      type: item.recurring.type,
+      hour: item.recurring.hour,
+      minute: item.recurring.minute,
+      dayOfWeek: item.recurring.dayOfWeek ?? null,
+      dayOfMonth: item.recurring.dayOfMonth ?? null,
+    } : null,
+    goal: item.taskConfig?.goal.trim().replace(/\s+/g, ' ').toLowerCase() ?? '',
+  });
+  return createHash('sha256').update(canonical).digest('hex');
+}
+
+function recurringFailureFingerprint(error: string, failureCode?: string): string {
+  const normalized = `${failureCode ?? 'task_execution_failed'}:${error}`
+    .toLowerCase()
+    .replace(/[0-9a-f]{8}-[0-9a-f-]{27,}/gi, '<id>')
+    .replace(/\b\d+(?:\.\d+)?\b/g, '<n>')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return createHash('sha256').update(normalized).digest('hex');
 }
 
 /**
@@ -233,6 +308,24 @@ export interface SessionRow {
   outputTokens: number;
   createdAt: number;
   updatedAt: number;
+  /** When the conversation was closed to new messages (for example by /new). */
+  archivedAt: number | null;
+  /** Machine-readable reason for closing the conversation. */
+  archiveReason: string | null;
+  /** When the raw transcript was deliberately removed after archival. */
+  transcriptDeletedAt: number | null;
+}
+
+/** Append-only record of every session archive or transcript deletion. */
+export interface SessionLifecycleEventRow {
+  id: number;
+  sessionId: string;
+  userId: string | null;
+  action: 'archived' | 'transcript_pruned' | 'forgotten';
+  reason: string;
+  actor: string;
+  messageCount: number;
+  createdAt: number;
 }
 
 /**
@@ -243,6 +336,8 @@ export interface SessionMessageRow {
   sessionId: string;
   role: string;
   content: string;
+  /** Explicit authorship/protocol semantics; never infer from role alone. */
+  messageKind: PersistedSessionMessageKind;
   createdAt: number;
 }
 
@@ -259,6 +354,50 @@ export interface SessionSummaryRow {
   durationMs: number;
   embedding: number[] | null;
   createdAt: number;
+  /** Null/false means this summary must never authorize transcript pruning. */
+  verifiedAt?: number | null;
+  verifier?: string | null;
+  verificationVersion?: number | null;
+  schemaValid?: boolean;
+}
+
+export type SessionSummaryInput = Omit<
+  SessionSummaryRow,
+  'id' | 'createdAt' | 'verifiedAt' | 'verifier' | 'verificationVersion' | 'schemaValid'
+>;
+
+export interface SessionSummaryVerificationRequest {
+  verifier: string;
+  verificationVersion: number;
+  verifiedAt?: number;
+}
+
+export interface SessionSummaryVerificationEventRow {
+  id: number;
+  summaryId: string;
+  sessionId: string;
+  outcome: 'verified' | 'rejected';
+  verifier: string;
+  verificationVersion: number;
+  reason: string;
+  checkedAt: number;
+}
+
+export interface SessionSummaryRevisionRow extends SessionSummaryRow {
+  revisionId: string;
+  summaryId: string;
+  revisionNumber: number;
+  revisionReason: string;
+  archivedAt: number;
+}
+
+/** Durable retry/circuit state for the structured session-summary route. */
+export interface SessionSummaryFailureState {
+  key: string;
+  failureCount: number;
+  lastFailureAt: number;
+  nextRetryAt: number;
+  lastErrorCode: string;
 }
 
 /**
@@ -322,6 +461,22 @@ export interface TaskConfig {
   modelTier?: 'fast' | 'standard' | 'capable';
   /** Maximum worker attempts before the durable task is archived as failed. */
   maxAttempts?: number;
+  /**
+   * Evidence policy for unattended factual work. `tool_receipts` requires at
+   * least one successful, runtime-issued tool receipt before a result can be
+   * treated as success. When omitted, tasks that declare tools use this safer
+   * policy automatically.
+   */
+  evidencePolicy?: 'none' | 'tool_receipts';
+  /** Optional tool names that must each have a successful runtime receipt. */
+  requiredEvidenceTools?: string[];
+  /**
+   * Missed-run policy. The safe default is `expire`: stale work is recorded
+   * but never replayed unexpectedly. `run_once` is an explicit catch-up opt-in.
+   */
+  stalePolicy?: 'expire' | 'run_once';
+  /** Maximum permitted lateness before `expire` applies (default: 24 hours). */
+  maxLatenessMs?: number;
 }
 
 /**
@@ -337,7 +492,15 @@ export type ScheduledItemType =
 /**
  * Status of scheduled item
  */
-export type ScheduledItemStatus = 'pending' | 'processing' | 'fired' | 'dismissed' | 'expired' | 'acted';
+export type ScheduledItemStatus =
+  | 'pending'
+  | 'processing'
+  | 'fired'
+  | 'dismissed'
+  | 'expired'
+  | 'acted'
+  | 'blocked'
+  | 'failed';
 
 export type ProactiveSourceReplyAction = 'archive' | 'done' | 'snooze';
 
@@ -378,9 +541,40 @@ export type BoardStatus = 'inbox' | 'backlog' | 'scheduled' | 'in_progress' | 'w
  */
 export type Priority = 'urgent' | 'high' | 'medium' | 'low';
 
-/**
- * Result stored when a board item completes
- */
+export type BoardTaskOutcome = 'succeeded' | 'failed' | 'blocked';
+
+/** Privacy-preserving proof that a real tool ran during an isolated worker. */
+export interface ToolEvidenceReceipt {
+  toolName: string;
+  success: boolean;
+  completedAt: number;
+  outputDigest: string;
+  outputBytes: number;
+  /** Bounded content-redacted hashes of normalized factual source claims. */
+  claimDigests?: string[];
+  claimLedgerTruncated?: boolean;
+  /** Fail-closed runtime trust decision based on installed skill metadata. */
+  authority?: 'authoritative' | 'untrusted';
+  /** Privacy-safe installed source identity. */
+  sourceDigest?: string;
+  /** Privacy-safe digest of the exact tool request. */
+  toolRequestDigest?: string;
+  /** Privacy-safe scheduler request binding. */
+  taskRequestDigest?: string;
+  /** Privacy-safe durable owner/account binding. */
+  accountScopeDigest?: string;
+}
+
+export interface RecurringTaskFailureCircuitResult {
+  seriesKey: string;
+  fingerprint: string;
+  failureCount: number;
+  opened: boolean;
+  /** True exactly once, when this transaction reserves the user notification. */
+  shouldNotify: boolean;
+}
+
+/** Result stored for any terminal or blocked board-task attempt. */
 export interface BoardItemResult {
   response: string;
   completedAt: number;
@@ -389,12 +583,20 @@ export interface BoardItemResult {
   costUsd?: number;
   taskComplete?: boolean;
   notifiedAt?: number | null;
+  /** Explicit outcome; legacy rows without this field are unverified. */
+  outcome?: BoardTaskOutcome;
+  /** Runtime-issued evidence only. Model-authored source claims are not proof. */
+  evidenceReceipts?: ToolEvidenceReceipt[];
+  /** Stable machine-readable reason for failed/blocked outcomes. */
+  failureCode?: string;
+  /** Whether completion was asserted by a user or a verified worker. */
+  completionSource?: 'user' | 'worker';
 }
 
 /**
  * Recurring schedule types
  */
-export type RecurringType = 'daily' | 'weekly' | 'weekdays' | 'weekends';
+export type RecurringType = 'daily' | 'weekly' | 'monthly' | 'weekdays' | 'weekends';
 
 /**
  * Recurring schedule configuration
@@ -404,6 +606,32 @@ export interface RecurringSchedule {
   hour: number;       // 0-23
   minute: number;     // 0-59
   dayOfWeek?: number; // 0-6 (Sunday=0) for weekly
+  dayOfMonth?: number; // 1-31 for monthly (short months clamp to their final day)
+}
+
+/** Validate persisted recurrence semantics before they become durable work. */
+export function validateRecurringSchedule(schedule: RecurringSchedule, title?: string): void {
+  if (!Number.isInteger(schedule.hour) || schedule.hour < 0 || schedule.hour > 23) {
+    throw new Error('Recurring schedule hour must be an integer from 0 to 23');
+  }
+  if (!Number.isInteger(schedule.minute) || schedule.minute < 0 || schedule.minute > 59) {
+    throw new Error('Recurring schedule minute must be an integer from 0 to 59');
+  }
+  if (schedule.type === 'weekly'
+    && (!Number.isInteger(schedule.dayOfWeek) || schedule.dayOfWeek! < 0 || schedule.dayOfWeek! > 6)) {
+    throw new Error('Weekly recurrence requires dayOfWeek from 0 to 6');
+  }
+  if (schedule.type === 'monthly'
+    && (!Number.isInteger(schedule.dayOfMonth) || schedule.dayOfMonth! < 1 || schedule.dayOfMonth! > 31)) {
+    throw new Error('Monthly recurrence requires dayOfMonth from 1 to 31');
+  }
+
+  // A clear cadence prefix is a durable contract, not decorative text. Fail
+  // closed instead of silently storing "Monthly ..." as weekly work.
+  const cadence = title?.trim().match(/^(daily|weekly|monthly)\b/i)?.[1]?.toLowerCase();
+  if (cadence && cadence !== schedule.type) {
+    throw new Error(`Recurring title says ${cadence} but schedule type is ${schedule.type}`);
+  }
 }
 
 /**
@@ -495,6 +723,39 @@ export interface SubAgentRunRow {
   completedAt: number | null;
 }
 
+/** Durable state for one externally-mutating tool dispatch. */
+export type ToolOperationStatus = 'prepared' | 'succeeded' | 'failed' | 'uncertain';
+
+export interface ToolOperationReservation {
+  reserved: boolean;
+  /** Existing durable state when the operation was not reserved. */
+  existingStatus?: Exclude<ToolOperationStatus, 'failed'>;
+}
+
+/**
+ * Durable identity/status record for a goal hierarchy item.
+ *
+ * Goal rows historically lived only in `memories`, where ordinary memory
+ * supersession and cleanup could make them disappear.  The registry is the
+ * non-decaying source of identity; the memory row remains the searchable
+ * projection and can be rebuilt from this record.
+ */
+export interface GoalRegistryEntry {
+  id: string;
+  userId: string;
+  title: string;
+  goalType: 'goal' | 'milestone' | 'task';
+  status: 'backlog' | 'active' | 'completed';
+  parentId: string | null;
+  metadata: Record<string, unknown>;
+  isPlaceholder: boolean;
+  origin: 'memory' | 'scheduled_reference' | 'parent_reference';
+  createdAt: number;
+  updatedAt: number;
+  completedAt: number | null;
+  deletedAt: number | null;
+}
+
 interface SqliteTableColumn {
   name: string;
   type: string;
@@ -508,8 +769,12 @@ interface SqliteTableColumn {
 export class ScallopDatabase {
   private db: Database.Database;
   private dbPath: string;
+  private lastRetentionMaintenanceAt = 0;
 
-  constructor(dbPath: string) {
+  constructor(
+    dbPath: string,
+    options: { runRetentionMaintenance?: boolean } = {},
+  ) {
     this.dbPath = dbPath;
 
     // Ensure directory exists
@@ -529,6 +794,7 @@ export class ScallopDatabase {
     // the startup error is reported to the caller.
     try {
       this.initializeSchema();
+      if (options.runRetentionMaintenance !== false) this.runRetentionMaintenance();
     } catch (error) {
       this.db.close();
       throw error;
@@ -575,6 +841,46 @@ export class ScallopDatabase {
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
       );
+
+      -- Durable goal identity/status registry. Goals retain their identity
+      -- here even if their searchable memory projection is superseded,
+      -- accidentally removed, or explicitly deleted. deleted_at is a
+      -- tombstone; registry rows themselves are never deleted by application
+      -- code. There is intentionally no FK to memories.
+      CREATE TABLE IF NOT EXISTS goal_registry (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        goal_type TEXT NOT NULL CHECK (goal_type IN ('goal', 'milestone', 'task')),
+        status TEXT NOT NULL CHECK (status IN ('backlog', 'active', 'completed')),
+        parent_id TEXT,
+        metadata TEXT NOT NULL,
+        is_placeholder INTEGER NOT NULL DEFAULT 0 CHECK (is_placeholder IN (0, 1)),
+        origin TEXT NOT NULL DEFAULT 'memory'
+          CHECK (origin IN ('memory', 'scheduled_reference', 'parent_reference')),
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        completed_at INTEGER,
+        deleted_at INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS idx_goal_registry_user_status
+        ON goal_registry(user_id, deleted_at, status, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_goal_registry_parent
+        ON goal_registry(parent_id) WHERE parent_id IS NOT NULL;
+
+      -- Append-only lifecycle receipts make migration repair and explicit
+      -- deletion auditable without storing additional conversation content.
+      CREATE TABLE IF NOT EXISTS goal_registry_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        goal_id TEXT NOT NULL,
+        action TEXT NOT NULL CHECK (action IN (
+          'backfilled', 'placeholder_created', 'restored_projection', 'deleted'
+        )),
+        detail TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_goal_registry_events_goal
+        ON goal_registry_events(goal_id, created_at DESC);
 
       -- Relationships between memories
       CREATE TABLE IF NOT EXISTS memory_relations (
@@ -624,7 +930,10 @@ export class ScallopDatabase {
         input_tokens INTEGER DEFAULT 0,
         output_tokens INTEGER DEFAULT 0,
         created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL
+        updated_at INTEGER NOT NULL,
+        archived_at INTEGER,
+        archive_reason TEXT,
+        transcript_deleted_at INTEGER
       );
 
       -- Session messages
@@ -633,9 +942,67 @@ export class ScallopDatabase {
         session_id TEXT NOT NULL,
         role TEXT NOT NULL,
         content TEXT NOT NULL,
+        message_kind TEXT NOT NULL CHECK (message_kind IN (
+          'human_user', 'assistant_final', 'assistant_internal',
+          'assistant_protocol', 'tool_result', 'worker_internal', 'system_internal'
+        )),
         created_at INTEGER NOT NULL,
         FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
       );
+
+      -- Cold archive for lossless transcript retention. Raw rows move here
+      -- before the hot session_messages copy is pruned; there is deliberately
+      -- no cascading foreign key so the archive survives source lifecycle.
+      CREATE TABLE IF NOT EXISTS session_message_archive (
+        original_message_id INTEGER PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        role TEXT NOT NULL,
+        content TEXT NOT NULL,
+        message_kind TEXT NOT NULL CHECK (message_kind IN (
+          'human_user', 'assistant_final', 'assistant_internal',
+          'assistant_protocol', 'tool_result', 'worker_internal', 'system_internal'
+        )),
+        created_at INTEGER NOT NULL,
+        archived_at INTEGER NOT NULL,
+        archive_reason TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_session_message_archive_session
+        ON session_message_archive(session_id, original_message_id);
+
+      -- Append-only lifecycle audit. It intentionally has no foreign key: a
+      -- deletion audit must outlive the data whose deletion it records.
+      CREATE TABLE IF NOT EXISTS session_lifecycle_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        user_id TEXT,
+        action TEXT NOT NULL CHECK (action IN ('archived', 'transcript_pruned', 'forgotten')),
+        reason TEXT NOT NULL,
+        actor TEXT NOT NULL,
+        message_count INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_session_lifecycle_events_session
+        ON session_lifecycle_events(session_id, created_at DESC);
+
+      -- Durable write-ahead ledger for external tool mutations. It contains
+      -- hashes and routing metadata only: no user text, tool input, or output.
+      -- A prepared/uncertain row deliberately survives restarts so a crash
+      -- after dispatch cannot silently repeat an external side effect.
+      CREATE TABLE IF NOT EXISTS tool_operation_ledger (
+        operation_id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        tool_name TEXT NOT NULL,
+        call_signature TEXT NOT NULL,
+        user_intent_digest TEXT NOT NULL,
+        status TEXT NOT NULL
+          CHECK (status IN ('prepared', 'succeeded', 'failed', 'uncertain')),
+        result_digest TEXT,
+        attempt_count INTEGER NOT NULL DEFAULT 1,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_tool_operation_session
+        ON tool_operation_ledger(session_id, updated_at DESC);
 
       -- Bot configuration (replaces bot-config.json)
       CREATE TABLE IF NOT EXISTS bot_config (
@@ -699,6 +1066,22 @@ export class ScallopDatabase {
         updated_at INTEGER NOT NULL
       );
 
+      -- Durable circuit state for recurring task executions. A series key is
+      -- a one-way digest of owner + cadence + normalized goal; raw failures are
+      -- not retained here. notification_reserved_at makes the pause notice
+      -- at-most-once even when multiple schedulers race after a restart.
+      CREATE TABLE IF NOT EXISTS recurring_task_failure_circuits (
+        series_key TEXT PRIMARY KEY,
+        failure_fingerprint TEXT NOT NULL,
+        failure_count INTEGER NOT NULL DEFAULT 0,
+        opened_at INTEGER,
+        notification_reserved_at INTEGER,
+        last_failure_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_recurring_task_failure_circuits_updated
+        ON recurring_task_failure_circuits(updated_at DESC);
+
       -- Session summaries (LLM-generated summaries of past sessions)
       CREATE TABLE IF NOT EXISTS session_summaries (
         id TEXT PRIMARY KEY,
@@ -710,7 +1093,69 @@ export class ScallopDatabase {
         duration_ms INTEGER DEFAULT 0,
         embedding TEXT,       -- JSON array (embedding vector)
         created_at INTEGER NOT NULL,
-        FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+        verified_at INTEGER,
+        verifier TEXT,
+        verification_version INTEGER,
+        schema_valid INTEGER NOT NULL DEFAULT 0 CHECK (schema_valid IN (0, 1))
+      );
+
+      -- Append-only verification receipts. Rejected/interim summaries remain
+      -- preserved but cannot become a retention authorization.
+      CREATE TABLE IF NOT EXISTS session_summary_verification_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        summary_id TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        outcome TEXT NOT NULL CHECK (outcome IN ('verified', 'rejected')),
+        verifier TEXT NOT NULL,
+        verification_version INTEGER NOT NULL,
+        reason TEXT NOT NULL,
+        checked_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_summary_verification_receipt
+        ON session_summary_verification_events(summary_id, verifier, verification_version);
+
+      -- Lossless history for rejected summaries that are later regenerated.
+      -- The current row keeps its stable ID; every prior value (and every
+      -- rejected replacement candidate) is snapshotted here first.
+      CREATE TABLE IF NOT EXISTS session_summary_revisions (
+        id TEXT PRIMARY KEY,
+        summary_id TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        revision_number INTEGER NOT NULL,
+        summary TEXT NOT NULL,
+        topics TEXT,
+        message_count INTEGER NOT NULL,
+        duration_ms INTEGER NOT NULL,
+        embedding TEXT,
+        original_created_at INTEGER NOT NULL,
+        verified_at INTEGER,
+        verifier TEXT,
+        verification_version INTEGER,
+        schema_valid INTEGER NOT NULL DEFAULT 0 CHECK (schema_valid IN (0, 1)),
+        revision_reason TEXT NOT NULL,
+        archived_at INTEGER NOT NULL,
+        UNIQUE(summary_id, revision_number)
+      );
+      CREATE INDEX IF NOT EXISTS idx_session_summary_revisions_session
+        ON session_summary_revisions(session_id, revision_number);
+
+      -- Summary generation failures are durable so a restart cannot reset a
+      -- hot retry loop. Neither table cascades with sessions: these rows are
+      -- part of the retention audit and provider-health circuit.
+      CREATE TABLE IF NOT EXISTS session_summary_failures (
+        session_id TEXT PRIMARY KEY,
+        failure_count INTEGER NOT NULL,
+        last_failure_at INTEGER NOT NULL,
+        next_retry_at INTEGER NOT NULL,
+        last_error_code TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS structured_route_circuits (
+        route TEXT PRIMARY KEY,
+        failure_count INTEGER NOT NULL,
+        last_failure_at INTEGER NOT NULL,
+        next_retry_at INTEGER NOT NULL,
+        last_error_code TEXT NOT NULL
       );
 
       -- Indexes for performance
@@ -990,6 +1435,13 @@ export class ScallopDatabase {
         ON prompt_overrides(fragment_id, active);
     `);
 
+    // Old public databases declared session_summaries as a cascading child of
+    // sessions. Rebuild the small durable table in-place without the FK before
+    // any retention logic can run.
+    this.migrateDecoupleSessionSummaries();
+    this.migrateAddSessionMessageKinds();
+    this.migrateAddSessionSummaryVerification();
+
     // Existing public databases may predate the one-active-version invariant.
     // Normalize duplicates before creating the partial unique index.
     this.migrateNormalizeEvolutionVersions();
@@ -1005,6 +1457,7 @@ export class ScallopDatabase {
 
     // Migration: Clean polluted memory entries (skill outputs, assistant responses stored as facts)
     this.migrateCleanPollutedMemories();
+    this.migrateReclassifySelfReflectionMemories();
 
     // Migration: Add kind and task_config columns to scheduled_items
     this.migrateAddKindColumn();
@@ -1025,15 +1478,278 @@ export class ScallopDatabase {
     // columns disagree, then enforce the invariant for every future writer.
     this.migrateReconcileScheduledItemStates();
 
+    // Goals are durable application state, not ordinary memories. Backfill a
+    // dedicated registry (including dangling legacy board references) before
+    // installing fail-closed reference triggers for new scheduled work.
+    this.migrateDurableGoalRegistry();
+
+    // Quarantine provably inconsistent or unverified historical task rows
+    // losslessly, then restore active goal records to durable storage semantics.
+    this.migrateQuarantineRecurringCadenceMismatches();
+    this.migrateQuarantineUnverifiedTaskResults();
+    this.migrateDurableGoalMemories();
+
     // Migration: Create FTS5 virtual table for transcript chunk search
     this.migrateCreateTranscriptFTS();
 
     // Migration: Add model/token-limit diagnostics to llm_traces
     this.migrateAddLlmTraceMetadataColumns();
 
+    // Migration: make conversation resets and retention lossless/auditable.
+    this.migrateAddSessionLifecycleColumns();
+
     // Migration: Index embeddings written before the bounded semantic index
     // existed. This is a one-time startup cost; normal writes stay indexed.
     this.migrateBackfillEmbeddingLsh();
+  }
+
+  /**
+   * Additive session lifecycle migration. Existing conversations remain active
+   * and all existing messages/summaries stay untouched.
+   */
+  private migrateAddSessionLifecycleColumns(): void {
+    const migrate = this.db.transaction(() => {
+      const columns = new Set(
+        (this.db.prepare('PRAGMA table_info(sessions)').all() as SqliteTableColumn[])
+          .map(column => column.name),
+      );
+      if (!columns.has('archived_at')) {
+        this.db.exec('ALTER TABLE sessions ADD COLUMN archived_at INTEGER');
+      }
+      if (!columns.has('archive_reason')) {
+        this.db.exec('ALTER TABLE sessions ADD COLUMN archive_reason TEXT');
+      }
+      if (!columns.has('transcript_deleted_at')) {
+        this.db.exec('ALTER TABLE sessions ADD COLUMN transcript_deleted_at INTEGER');
+      }
+      this.db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_sessions_active_updated
+          ON sessions(updated_at DESC)
+          WHERE archived_at IS NULL AND transcript_deleted_at IS NULL
+      `);
+    });
+
+    try {
+      migrate();
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(`[migration] migrateAddSessionLifecycleColumns failed: ${detail}`, { cause: error });
+    }
+  }
+
+  /** Preserve every summary while removing the legacy ON DELETE CASCADE FK. */
+  private migrateDecoupleSessionSummaries(): void {
+    const foreignKeys = this.db.prepare('PRAGMA foreign_key_list(session_summaries)').all() as Array<{
+      table: string;
+    }>;
+    if (!foreignKeys.some(key => key.table === 'sessions')) return;
+    const existingColumns = new Set(
+      (this.db.prepare('PRAGMA table_info(session_summaries)').all() as SqliteTableColumn[])
+        .map(column => column.name),
+    );
+    const verifiedAt = existingColumns.has('verified_at') ? 'verified_at' : 'NULL';
+    const verifier = existingColumns.has('verifier') ? 'verifier' : 'NULL';
+    const verificationVersion = existingColumns.has('verification_version')
+      ? 'verification_version'
+      : 'NULL';
+    const schemaValid = existingColumns.has('schema_valid') ? 'schema_valid' : '0';
+
+    const migrate = this.db.transaction(() => {
+      this.db.exec(`
+        CREATE TABLE session_summaries_without_session_fk (
+          id TEXT PRIMARY KEY,
+          session_id TEXT NOT NULL,
+          user_id TEXT NOT NULL DEFAULT 'default',
+          summary TEXT NOT NULL,
+          topics TEXT,
+          message_count INTEGER DEFAULT 0,
+          duration_ms INTEGER DEFAULT 0,
+          embedding TEXT,
+          created_at INTEGER NOT NULL,
+          verified_at INTEGER,
+          verifier TEXT,
+          verification_version INTEGER,
+          schema_valid INTEGER NOT NULL DEFAULT 0
+        );
+        INSERT INTO session_summaries_without_session_fk
+          (id, session_id, user_id, summary, topics, message_count, duration_ms,
+           embedding, created_at, verified_at, verifier, verification_version, schema_valid)
+        SELECT id, session_id, user_id, summary, topics, message_count, duration_ms,
+          embedding, created_at, ${verifiedAt}, ${verifier}, ${verificationVersion}, ${schemaValid}
+        FROM session_summaries;
+        DROP TABLE session_summaries;
+        ALTER TABLE session_summaries_without_session_fk RENAME TO session_summaries;
+        CREATE INDEX idx_session_summaries_user ON session_summaries(user_id);
+        CREATE INDEX idx_session_summaries_session ON session_summaries(session_id);
+        CREATE INDEX idx_session_summaries_created ON session_summaries(created_at DESC);
+      `);
+    });
+
+    try {
+      migrate();
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(`[migration] migrateDecoupleSessionSummaries failed: ${detail}`, { cause: error });
+    }
+  }
+
+  /** Add and backfill durable message semantics for hot and cold transcripts. */
+  private migrateAddSessionMessageKinds(): void {
+    const migrate = this.db.transaction(() => {
+      const hotColumns = new Set(
+        (this.db.prepare('PRAGMA table_info(session_messages)').all() as SqliteTableColumn[])
+          .map(column => column.name),
+      );
+      if (!hotColumns.has('message_kind')) {
+        this.db.exec('ALTER TABLE session_messages ADD COLUMN message_kind TEXT');
+      }
+      const coldColumns = new Set(
+        (this.db.prepare('PRAGMA table_info(session_message_archive)').all() as SqliteTableColumn[])
+          .map(column => column.name),
+      );
+      if (!coldColumns.has('message_kind')) {
+        this.db.exec('ALTER TABLE session_message_archive ADD COLUMN message_kind TEXT');
+      }
+
+      const validKinds = PERSISTED_MESSAGE_KIND_SQL;
+      const hotSelect = this.db.prepare(`
+        SELECT sm.id, sm.role, sm.content, s.metadata
+        FROM session_messages sm
+        LEFT JOIN sessions s ON s.id = sm.session_id
+        WHERE sm.message_kind IS NULL OR sm.message_kind NOT IN (${validKinds})
+        LIMIT 500
+      `);
+      const coldSelect = this.db.prepare(`
+        SELECT archive.original_message_id AS id, archive.role, archive.content, s.metadata
+        FROM session_message_archive archive
+        LEFT JOIN sessions s ON s.id = archive.session_id
+        WHERE archive.message_kind IS NULL OR archive.message_kind NOT IN (${validKinds})
+        LIMIT 500
+      `);
+      const updateHot = this.db.prepare('UPDATE session_messages SET message_kind = ? WHERE id = ?');
+      const updateCold = this.db.prepare(`
+        UPDATE session_message_archive SET message_kind = ? WHERE original_message_id = ?
+      `);
+
+      const backfill = (
+        select: Database.Statement,
+        update: Database.Statement,
+      ): void => {
+        while (true) {
+          const rows = select.all() as Array<{
+            id: number;
+            role: string;
+            content: string;
+            metadata: string | null;
+          }>;
+          if (rows.length === 0) return;
+          for (const row of rows) {
+            const metadata = row.metadata ? parseDetailJSON(row.metadata) : null;
+            update.run(inferSessionMessageKind(row.role, row.content, metadata), row.id);
+          }
+        }
+      };
+      backfill(hotSelect, updateHot);
+      backfill(coldSelect, updateCold);
+    });
+
+    try {
+      migrate();
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(`[migration] migrateAddSessionMessageKinds failed: ${detail}`, { cause: error });
+    }
+  }
+
+  /**
+   * Add explicit verification state and conservatively audit only summaries
+   * that existed before this migration. A sentinel prevents a later restart
+   * from silently promoting newly-created unverified/interim summaries.
+   */
+  private migrateAddSessionSummaryVerification(): void {
+    const migrate = this.db.transaction(() => {
+      const columns = new Set(
+        (this.db.prepare('PRAGMA table_info(session_summaries)').all() as SqliteTableColumn[])
+          .map(column => column.name),
+      );
+      if (!columns.has('verified_at')) {
+        this.db.exec('ALTER TABLE session_summaries ADD COLUMN verified_at INTEGER');
+      }
+      if (!columns.has('verifier')) {
+        this.db.exec('ALTER TABLE session_summaries ADD COLUMN verifier TEXT');
+      }
+      if (!columns.has('verification_version')) {
+        this.db.exec('ALTER TABLE session_summaries ADD COLUMN verification_version INTEGER');
+      }
+      if (!columns.has('schema_valid')) {
+        this.db.exec('ALTER TABLE session_summaries ADD COLUMN schema_valid INTEGER NOT NULL DEFAULT 0');
+      }
+
+      const marker = this.db.prepare(`
+        SELECT value FROM runtime_keys WHERE key = 'migration:session_summary_verification_v1'
+      `).get();
+      if (marker) return;
+
+      const rows = this.db.prepare(
+        'SELECT * FROM session_summaries ORDER BY created_at, id',
+      ).all() as Record<string, unknown>[];
+      const checkedAt = Date.now();
+      let verified = 0;
+      for (const row of rows) {
+        const hasExplicitVerification = Number(row.schema_valid ?? 0) === 1
+          && row.verified_at != null
+          && typeof row.verifier === 'string'
+          && row.verifier.length > 0
+          && Number(row.verification_version ?? 0) > 0;
+        const evaluation = this.evaluateSessionSummaryVerification({
+          sessionId: String(row.session_id),
+          summary: String(row.summary ?? ''),
+          topics: this.parseSummaryTopics(row.topics),
+          messageCount: Number(row.message_count ?? 0),
+          durationMs: Number(row.duration_ms ?? 0),
+        }, !hasExplicitVerification);
+        if (evaluation.valid) verified++;
+        const receiptVerifier = hasExplicitVerification
+          ? String(row.verifier)
+          : 'legacy_structural_audit';
+        const receiptVersion = hasExplicitVerification
+          ? Number(row.verification_version)
+          : 1;
+        this.db.prepare(`
+          UPDATE session_summaries
+          SET verified_at = ?, verifier = ?, verification_version = ?, schema_valid = ?
+          WHERE id = ?
+        `).run(
+          evaluation.valid ? (hasExplicitVerification ? Number(row.verified_at) : checkedAt) : null,
+          receiptVerifier,
+          receiptVersion,
+          evaluation.valid ? 1 : 0,
+          row.id,
+        );
+        this.insertSessionSummaryVerificationEvent({
+          summaryId: String(row.id),
+          sessionId: String(row.session_id),
+          outcome: evaluation.valid ? 'verified' : 'rejected',
+          verifier: receiptVerifier,
+          verificationVersion: receiptVersion,
+          reason: evaluation.reason,
+          checkedAt,
+        });
+      }
+
+      const markerValue = JSON.stringify({ checked: rows.length, verified, checkedAt });
+      this.db.prepare(`
+        INSERT INTO runtime_keys (key, value, created_at, updated_at)
+        VALUES ('migration:session_summary_verification_v1', ?, ?, ?)
+      `).run(markerValue, checkedAt, checkedAt);
+    });
+
+    try {
+      migrate();
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(`[migration] migrateAddSessionSummaryVerification failed: ${detail}`, { cause: error });
+    }
   }
 
   private migrateNormalizeEvolutionVersions(): void {
@@ -1220,6 +1936,22 @@ export class ScallopDatabase {
     }
   }
 
+  /** Assistant self-reflection is derived coaching, never user-authored memory. */
+  private migrateReclassifySelfReflectionMemories(): void {
+    try {
+      this.db.prepare(`
+        UPDATE memories
+        SET source = 'assistant', memory_type = 'derived', updated_at = ?
+        WHERE learned_from = 'self_reflection'
+          AND (source != 'assistant' OR memory_type != 'derived')
+      `).run(Date.now());
+    } catch (error) {
+      if (error instanceof Error) {
+        console.warn(`[migration] migrateReclassifySelfReflectionMemories: ${error.message}`);
+      }
+    }
+  }
+
   /**
    * Clean polluted memory entries: skill execution outputs, assistant responses,
    * and user questions that were incorrectly stored as facts.
@@ -1401,11 +2133,12 @@ export class ScallopDatabase {
             WHEN status = 'pending' AND trigger_at > 0 THEN 'scheduled'
             WHEN status = 'pending' THEN 'inbox'
             WHEN status = 'processing' THEN 'in_progress'
+            WHEN status = 'blocked' THEN 'waiting'
             -- A row old enough to lack a board projection is historical. Keep
             -- its delivered lifecycle, but do not surface it as newly done or
             -- include it in a post-upgrade completion digest.
             WHEN status IN ('fired', 'acted') THEN 'archived'
-            WHEN status IN ('dismissed', 'expired') THEN 'archived'
+            WHEN status IN ('dismissed', 'expired', 'failed') THEN 'archived'
             ELSE 'inbox'
           END
           WHERE board_status IS NULL
@@ -1529,8 +2262,9 @@ export class ScallopDatabase {
         WHERE NOT (
           (status = 'pending' AND board_status IN ('inbox', 'backlog', 'scheduled', 'waiting'))
           OR (status = 'processing' AND board_status = 'in_progress')
+          OR (status = 'blocked' AND board_status = 'waiting')
           OR (status IN ('fired', 'acted') AND board_status IN ('done', 'archived'))
-          OR (status IN ('dismissed', 'expired') AND board_status = 'archived')
+          OR (status IN ('dismissed', 'expired', 'failed') AND board_status = 'archived')
         )
       `).all() as Record<string, unknown>[];
 
@@ -1585,6 +2319,10 @@ export class ScallopDatabase {
           reconciledStatus = 'processing';
           reconciledBoardStatus = 'in_progress';
           reason = 'repaired_processing_board_projection';
+        } else if (status === 'blocked') {
+          reconciledStatus = 'blocked';
+          reconciledBoardStatus = 'waiting';
+          reason = 'repaired_blocked_board_projection';
         } else if (status === 'fired' || status === 'acted') {
           reconciledStatus = status;
           // A legacy completed row in an active-looking column is historical,
@@ -1595,7 +2333,11 @@ export class ScallopDatabase {
         } else {
           // Includes the real-world expired+in_progress ghost. Preserve its
           // lifecycle meaning and archive only its misleading board projection.
-          reconciledStatus = status === 'dismissed' ? 'dismissed' : 'expired';
+          reconciledStatus = status === 'dismissed'
+            ? 'dismissed'
+            : status === 'failed'
+              ? 'failed'
+              : 'expired';
           reconciledBoardStatus = 'archived';
           reason = 'repaired_terminal_board_projection';
         }
@@ -1625,10 +2367,12 @@ export class ScallopDatabase {
         WHEN CASE NEW.status
           WHEN 'pending' THEN COALESCE(NEW.board_status, '') NOT IN ('inbox', 'backlog', 'scheduled', 'waiting')
           WHEN 'processing' THEN COALESCE(NEW.board_status, '') != 'in_progress'
+          WHEN 'blocked' THEN COALESCE(NEW.board_status, '') != 'waiting'
           WHEN 'fired' THEN COALESCE(NEW.board_status, '') NOT IN ('done', 'archived')
           WHEN 'acted' THEN COALESCE(NEW.board_status, '') NOT IN ('done', 'archived')
           WHEN 'dismissed' THEN COALESCE(NEW.board_status, '') != 'archived'
           WHEN 'expired' THEN COALESCE(NEW.board_status, '') != 'archived'
+          WHEN 'failed' THEN COALESCE(NEW.board_status, '') != 'archived'
           ELSE 1
         END
         BEGIN
@@ -1640,10 +2384,12 @@ export class ScallopDatabase {
         WHEN CASE NEW.status
           WHEN 'pending' THEN COALESCE(NEW.board_status, '') NOT IN ('inbox', 'backlog', 'scheduled', 'waiting')
           WHEN 'processing' THEN COALESCE(NEW.board_status, '') != 'in_progress'
+          WHEN 'blocked' THEN COALESCE(NEW.board_status, '') != 'waiting'
           WHEN 'fired' THEN COALESCE(NEW.board_status, '') NOT IN ('done', 'archived')
           WHEN 'acted' THEN COALESCE(NEW.board_status, '') NOT IN ('done', 'archived')
           WHEN 'dismissed' THEN COALESCE(NEW.board_status, '') != 'archived'
           WHEN 'expired' THEN COALESCE(NEW.board_status, '') != 'archived'
+          WHEN 'failed' THEN COALESCE(NEW.board_status, '') != 'archived'
           ELSE 1
         END
         BEGIN
@@ -1653,6 +2399,594 @@ export class ScallopDatabase {
     });
 
     migrate.immediate();
+  }
+
+  /**
+   * Pause legacy recurring work whose explicit cadence label disagrees with
+   * its machine schedule. The original row is retained in an append-only audit.
+   */
+  private migrateQuarantineRecurringCadenceMismatches(): void {
+    const migrate = this.db.transaction(() => {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS scheduled_cadence_quarantine (
+          item_id TEXT PRIMARY KEY,
+          item_snapshot TEXT NOT NULL,
+          reason TEXT NOT NULL,
+          quarantined_at INTEGER NOT NULL
+        )
+      `);
+      const rows = this.db.prepare(`
+        SELECT * FROM scheduled_items
+        WHERE status = 'pending' AND recurring IS NOT NULL AND json_valid(recurring)
+          AND (
+            (lower(ltrim(message)) LIKE 'daily %' AND json_extract(recurring, '$.type') != 'daily')
+            OR (lower(ltrim(message)) LIKE 'weekly %' AND json_extract(recurring, '$.type') != 'weekly')
+            OR (lower(ltrim(message)) LIKE 'monthly %' AND json_extract(recurring, '$.type') != 'monthly')
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM scheduled_cadence_quarantine q WHERE q.item_id = scheduled_items.id
+          )
+      `).all() as Record<string, unknown>[];
+      const audit = this.db.prepare(`
+        INSERT INTO scheduled_cadence_quarantine
+          (item_id, item_snapshot, reason, quarantined_at)
+        VALUES (?, ?, 'recurrence_label_mismatch', ?)
+      `);
+      const pause = this.db.prepare(`
+        UPDATE scheduled_items
+        SET status = 'blocked', board_status = 'waiting',
+            result = ?, last_error = 'Paused: recurrence label does not match stored cadence',
+            updated_at = ?
+        WHERE id = ? AND status = 'pending'
+      `);
+      const now = Date.now();
+      for (const row of rows) {
+        audit.run(String(row.id), JSON.stringify(row), now);
+        pause.run(JSON.stringify({
+          response: 'Paused because the recurrence label and stored schedule disagree.',
+          completedAt: now,
+          taskComplete: false,
+          outcome: 'blocked',
+          failureCode: 'schedule_cadence_mismatch',
+        } satisfies BoardItemResult), now, row.id);
+      }
+    });
+    migrate.immediate();
+  }
+
+  /**
+   * Historical factual task results without runtime-issued evidence cannot be
+   * trusted as completed. Preserve the full original row, quarantine only
+   * demonstrably factual or explicitly evidence-gated work, and reopen any
+   * goal it incorrectly completed. Ambiguous tool-using tasks are audited but
+   * deliberately left untouched; declaring a tool is not proof that a task
+   * made a factual claim.
+   */
+  private migrateQuarantineUnverifiedTaskResults(): void {
+    const migrate = this.db.transaction(() => {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS scheduled_task_evidence_quarantine (
+          item_id TEXT PRIMARY KEY,
+          item_snapshot TEXT NOT NULL,
+          reason TEXT NOT NULL,
+          quarantined_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS scheduled_task_evidence_audit (
+          item_id TEXT PRIMARY KEY,
+          item_snapshot TEXT NOT NULL,
+          classification TEXT NOT NULL,
+          decision TEXT NOT NULL,
+          reason TEXT NOT NULL,
+          audited_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_scheduled_task_evidence_audit_decision
+          ON scheduled_task_evidence_audit(decision, audited_at DESC)
+      `);
+      const rows = this.db.prepare(`
+        SELECT * FROM scheduled_items
+        WHERE kind = 'task' AND status IN ('fired', 'acted')
+          AND task_config IS NOT NULL AND json_valid(task_config)
+          AND result IS NOT NULL AND json_valid(result)
+          AND NOT EXISTS (
+            SELECT 1 FROM scheduled_task_evidence_quarantine q WHERE q.item_id = scheduled_items.id
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM scheduled_task_evidence_audit a WHERE a.item_id = scheduled_items.id
+          )
+      `).all() as Record<string, unknown>[];
+      const quarantineAudit = this.db.prepare(`
+        INSERT INTO scheduled_task_evidence_quarantine
+          (item_id, item_snapshot, reason, quarantined_at)
+        VALUES (?, ?, 'missing_runtime_evidence', ?)
+      `);
+      const evidenceAudit = this.db.prepare(`
+        INSERT INTO scheduled_task_evidence_audit
+          (item_id, item_snapshot, classification, decision, reason, audited_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `);
+      const quarantine = this.db.prepare(`
+        UPDATE scheduled_items
+        SET status = 'failed', board_status = 'archived',
+            result = json_set(result,
+              '$.outcome', 'failed',
+              '$.taskComplete', json('false'),
+              '$.failureCode', 'missing_runtime_evidence'
+            ),
+            last_error = 'Quarantined: historical factual result has no runtime evidence',
+            updated_at = ?
+        WHERE id = ?
+      `);
+      const reopenGoal = this.db.prepare(`
+        UPDATE memories
+        SET metadata = json_remove(
+              json_set(metadata, '$.status', 'active', '$.progress', 0),
+              '$.completedAt'
+            ),
+            is_latest = 1, memory_type = 'static_profile', prominence = 1.0,
+            updated_at = ?
+        WHERE id = ? AND metadata IS NOT NULL AND json_valid(metadata)
+          AND json_extract(metadata, '$.goalType') IN ('goal', 'milestone', 'task')
+          AND json_extract(metadata, '$.status') = 'completed'
+      `);
+      const now = Date.now();
+      const affectedGoalIds = new Set<string>();
+      for (const row of rows) {
+        let config: TaskConfig;
+        let result: BoardItemResult;
+        try {
+          config = JSON.parse(String(row.task_config)) as TaskConfig;
+          result = JSON.parse(String(row.result)) as BoardItemResult;
+        } catch {
+          continue;
+        }
+        if (result.outcome === 'failed' || result.outcome === 'blocked' || result.taskComplete === false) {
+          continue;
+        }
+
+        const configuredTools = Array.isArray(config.tools)
+          ? [...new Set(config.tools.filter(tool => typeof tool === 'string' && tool.trim()))]
+          : [];
+        const explicitlyRequired = Array.isArray(config.requiredEvidenceTools)
+          ? [...new Set(config.requiredEvidenceTools.filter(tool => typeof tool === 'string' && tool.trim()))]
+          : [];
+        const taskText = `${config.goal ?? ''} ${String(row.message ?? '')}`;
+        const explicitPolicy = config.evidencePolicy === 'tool_receipts';
+        const factual = LEGACY_FACTUAL_TASK_RE.test(taskText);
+        const configuredSources = factual
+          ? configuredTools.filter(tool => (
+              !NON_EVIDENCE_SOURCE_TOOLS.has(tool)
+              && !NEVER_AUTHORITATIVE_EVIDENCE_TOOLS.has(tool.toLowerCase())
+            ))
+          : configuredTools.filter(tool => !NEVER_AUTHORITATIVE_EVIDENCE_TOOLS.has(tool.toLowerCase()));
+        const receipts = Array.isArray(result.evidenceReceipts)
+          ? result.evidenceReceipts.filter(isValidRuntimeEvidenceReceipt)
+          : [];
+        const relevantReceipts = explicitlyRequired.length > 0
+          ? receipts.filter(receipt => explicitlyRequired.includes(receipt.toolName))
+          : receipts.filter(receipt => configuredSources.includes(receipt.toolName));
+        const hasVerifiedEvidence = explicitlyRequired.length > 0
+          ? explicitlyRequired.every(tool => receipts.some(receipt => receipt.toolName === tool))
+          : configuredSources.some(tool => receipts.some(receipt => receipt.toolName === tool));
+        const responseGrounding = hasVerifiedEvidence
+          ? verifyResponseEvidenceClaims(result.response ?? '', relevantReceipts)
+          : { passed: false, reason: 'Missing configured-source receipt' };
+        if (hasVerifiedEvidence && responseGrounding.passed) continue;
+
+        const ambiguousToolTask = configuredTools.length > 0 && !explicitPolicy && !factual;
+        if (!explicitPolicy && !factual && !ambiguousToolTask) continue;
+
+        const snapshot = JSON.stringify(row);
+        const classification = explicitPolicy
+          ? 'explicit_evidence_policy'
+          : factual
+            ? 'factual_task'
+            : 'ambiguous_tool_task';
+        if (ambiguousToolTask) {
+          evidenceAudit.run(
+            String(row.id),
+            snapshot,
+            classification,
+            'audit_only',
+            'Missing configured-source receipts; factuality is ambiguous, so state was preserved',
+            now,
+          );
+          continue;
+        }
+
+        evidenceAudit.run(
+          String(row.id),
+          snapshot,
+          classification,
+          'quarantined',
+          configuredSources.length === 0 && explicitlyRequired.length === 0
+            ? 'Factual result had no configured evidence source'
+            : hasVerifiedEvidence && !responseGrounding.passed
+              ? 'Factual result contained claims absent from its evidence ledger'
+            : `Missing runtime receipt(s) from configured source(s): ${(
+              explicitlyRequired.length > 0 ? explicitlyRequired : configuredSources
+            ).join(', ')}`,
+          now,
+        );
+        quarantineAudit.run(String(row.id), snapshot, now);
+        quarantine.run(now, row.id);
+        if (row.goal_id) {
+          reopenGoal.run(now, row.goal_id);
+          affectedGoalIds.add(String(row.goal_id));
+        }
+      }
+
+      // Repair persisted progress and reopen ancestors that can no longer be
+      // 100% complete after quarantining a child result. Scope the repair to
+      // those exact hierarchies; ambiguous audit-only rows must cause no state
+      // mutation anywhere else in the goal graph.
+      if (affectedGoalIds.size === 0) return;
+      const affectedJson = JSON.stringify([...affectedGoalIds]);
+      this.db.prepare(`
+        WITH RECURSIVE affected(id) AS (
+          SELECT CAST(value AS TEXT) FROM json_each(?)
+          UNION
+          SELECT rel.target_id
+          FROM memory_relations rel
+          JOIN affected child ON child.id = rel.source_id
+          WHERE rel.relation_type = 'EXTENDS'
+        )
+        UPDATE memories AS parent
+        SET metadata = json_set(
+          parent.metadata,
+          '$.progress', COALESCE((
+            SELECT ROUND(100.0 * SUM(
+              CASE WHEN json_extract(child.metadata, '$.status') = 'completed' THEN 1 ELSE 0 END
+            ) / NULLIF(COUNT(*), 0))
+            FROM memory_relations rel
+            JOIN memories child ON child.id = rel.source_id
+            WHERE rel.target_id = parent.id AND rel.relation_type = 'EXTENDS'
+          ), json_extract(parent.metadata, '$.progress'), 0)
+        )
+        WHERE parent.id IN (SELECT id FROM affected)
+          AND parent.metadata IS NOT NULL AND json_valid(parent.metadata)
+          AND json_extract(parent.metadata, '$.goalType') IN ('goal', 'milestone')
+      `).run(affectedJson);
+      this.db.prepare(`
+        WITH RECURSIVE affected(id) AS (
+          SELECT CAST(value AS TEXT) FROM json_each(?)
+          UNION
+          SELECT rel.target_id
+          FROM memory_relations rel
+          JOIN affected child ON child.id = rel.source_id
+          WHERE rel.relation_type = 'EXTENDS'
+        )
+        UPDATE memories
+        SET metadata = json_remove(json_set(metadata, '$.status', 'active'), '$.completedAt'),
+            updated_at = ?
+        WHERE id IN (SELECT id FROM affected)
+          AND metadata IS NOT NULL AND json_valid(metadata)
+          AND json_extract(metadata, '$.goalType') IN ('goal', 'milestone')
+          AND json_extract(metadata, '$.status') = 'completed'
+          AND COALESCE(json_extract(metadata, '$.progress'), 0) < 100
+      `).run(affectedJson, now);
+    });
+    migrate.immediate();
+  }
+
+  /** Make active goal hierarchy records non-decaying and self-healing. */
+  private migrateDurableGoalMemories(): void {
+    const migrate = this.db.transaction(() => {
+      this.db.prepare(`
+        UPDATE memories
+        SET is_latest = 1, memory_type = 'static_profile', prominence = 1.0,
+            updated_at = CASE
+              WHEN is_latest != 1 OR memory_type != 'static_profile' OR prominence != 1.0
+                THEN ? ELSE updated_at END
+        WHERE metadata IS NOT NULL AND json_valid(metadata)
+          AND json_extract(metadata, '$.goalType') IN ('goal', 'milestone', 'task')
+          AND COALESCE(json_extract(metadata, '$.status'), 'backlog') != 'completed'
+      `).run(Date.now());
+      this.db.exec(`
+        CREATE TRIGGER IF NOT EXISTS trg_active_goal_memory_durability
+        AFTER UPDATE OF is_latest, memory_type, prominence, metadata ON memories
+        WHEN NEW.metadata IS NOT NULL AND json_valid(NEW.metadata)
+          AND json_extract(NEW.metadata, '$.goalType') IN ('goal', 'milestone', 'task')
+          AND COALESCE(json_extract(NEW.metadata, '$.status'), 'backlog') != 'completed'
+          AND (NEW.is_latest != 1 OR NEW.memory_type != 'static_profile' OR NEW.prominence != 1.0)
+        BEGIN
+          UPDATE memories
+          SET is_latest = 1, memory_type = 'static_profile', prominence = 1.0
+          WHERE id = NEW.id;
+        END
+      `);
+    });
+    migrate.immediate();
+  }
+
+  /**
+   * Backfill and enforce the dedicated durable goal registry.
+   *
+   * This migration is deliberately additive. Existing goal memories remain
+   * untouched and searchable, while legacy scheduled references that no
+   * longer have a memory row receive clearly-labelled placeholder identities
+   * instead of being nulled or discarded.
+   */
+  private migrateDurableGoalRegistry(): void {
+    const now = Date.now();
+    const migrate = this.db.transaction(() => {
+      // Audit identities that are about to be recovered from legacy memory
+      // rows. INSERT OR IGNORE below makes this migration idempotent.
+      this.db.prepare(`
+        INSERT INTO goal_registry_events (goal_id, action, detail, created_at)
+        SELECT m.id, 'backfilled', 'Recovered durable identity from goal memory', ?
+        FROM memories m
+        WHERE m.metadata IS NOT NULL AND json_valid(m.metadata)
+          AND json_extract(m.metadata, '$.goalType') IN ('goal', 'milestone', 'task')
+          AND NOT EXISTS (SELECT 1 FROM goal_registry g WHERE g.id = m.id)
+      `).run(now);
+
+      this.db.exec(`
+        INSERT INTO goal_registry (
+          id, user_id, title, goal_type, status, parent_id, metadata,
+          is_placeholder, origin, created_at, updated_at, completed_at, deleted_at
+        )
+        SELECT
+          m.id,
+          m.user_id,
+          m.content,
+          json_extract(m.metadata, '$.goalType'),
+          CASE json_extract(m.metadata, '$.status')
+            WHEN 'active' THEN 'active'
+            WHEN 'completed' THEN 'completed'
+            ELSE 'backlog'
+          END,
+          CASE
+            WHEN typeof(json_extract(m.metadata, '$.parentId')) = 'text'
+              THEN json_extract(m.metadata, '$.parentId')
+            ELSE NULL
+          END,
+          m.metadata,
+          0,
+          'memory',
+          m.created_at,
+          m.updated_at,
+          CASE
+            WHEN json_extract(m.metadata, '$.status') = 'completed'
+              AND typeof(json_extract(m.metadata, '$.completedAt')) IN ('integer', 'real')
+              THEN json_extract(m.metadata, '$.completedAt')
+            ELSE NULL
+          END,
+          NULL
+        FROM memories m
+        WHERE m.metadata IS NOT NULL AND json_valid(m.metadata)
+          AND json_extract(m.metadata, '$.goalType') IN ('goal', 'milestone', 'task')
+        ON CONFLICT(id) DO UPDATE SET
+          user_id = excluded.user_id,
+          title = excluded.title,
+          goal_type = excluded.goal_type,
+          status = excluded.status,
+          parent_id = excluded.parent_id,
+          metadata = excluded.metadata,
+          is_placeholder = 0,
+          origin = 'memory',
+          updated_at = MAX(goal_registry.updated_at, excluded.updated_at),
+          completed_at = excluded.completed_at
+      `);
+
+      // A child can outlive a parent memory in legacy databases. Preserve the
+      // referenced parent ID first so the hierarchy is recoverable and can be
+      // repaired later without inventing a replacement ID.
+      this.db.prepare(`
+        INSERT INTO goal_registry (
+          id, user_id, title, goal_type, status, parent_id, metadata,
+          is_placeholder, origin, created_at, updated_at, completed_at, deleted_at
+        )
+        SELECT
+          json_extract(child.metadata, '$.parentId'),
+          child.user_id,
+          '[Recovered goal ' || json_extract(child.metadata, '$.parentId') || ']',
+          CASE json_extract(child.metadata, '$.goalType')
+            WHEN 'task' THEN 'milestone' ELSE 'goal' END,
+          'active',
+          NULL,
+          json_object(
+            'goalType', CASE json_extract(child.metadata, '$.goalType')
+              WHEN 'task' THEN 'milestone' ELSE 'goal' END,
+            'status', 'active',
+            'registryRecovered', 1,
+            'recoveredFrom', 'parent_reference'
+          ),
+          1,
+          'parent_reference',
+          ?, ?, NULL, NULL
+        FROM memories child
+        WHERE child.metadata IS NOT NULL AND json_valid(child.metadata)
+          AND json_extract(child.metadata, '$.goalType') IN ('milestone', 'task')
+          AND typeof(json_extract(child.metadata, '$.parentId')) = 'text'
+          AND length(trim(json_extract(child.metadata, '$.parentId'))) > 0
+        GROUP BY json_extract(child.metadata, '$.parentId')
+        ON CONFLICT(id) DO NOTHING
+      `).run(now, now);
+
+      // Preserve board references whose memory identity was already missing.
+      // The board title is the only surviving human-readable label; flag the
+      // row as a placeholder so callers never mistake it for reconstructed
+      // user-authored goal metadata.
+      this.db.prepare(`
+        INSERT INTO goal_registry (
+          id, user_id, title, goal_type, status, parent_id, metadata,
+          is_placeholder, origin, created_at, updated_at, completed_at, deleted_at
+        )
+        SELECT
+          item.goal_id,
+          item.user_id,
+          CASE WHEN length(trim(item.message)) > 0 THEN item.message
+            ELSE '[Recovered goal ' || item.goal_id || ']' END,
+          CASE WHEN item.kind = 'task' THEN 'task' ELSE 'goal' END,
+          'backlog',
+          NULL,
+          json_object(
+            'goalType', CASE WHEN item.kind = 'task' THEN 'task' ELSE 'goal' END,
+            'status', 'backlog',
+            'registryRecovered', 1,
+            'recoveredFrom', 'scheduled_item_reference'
+          ),
+          1,
+          'scheduled_reference',
+          MIN(item.created_at),
+          MAX(item.updated_at),
+          NULL,
+          NULL
+        FROM scheduled_items item
+        WHERE item.goal_id IS NOT NULL AND length(trim(item.goal_id)) > 0
+        GROUP BY item.goal_id
+        ON CONFLICT(id) DO NOTHING
+      `).run();
+
+      this.db.prepare(`
+        INSERT INTO goal_registry_events (goal_id, action, detail, created_at)
+        SELECT g.id, 'placeholder_created',
+          CASE g.origin
+            WHEN 'parent_reference' THEN 'Recovered missing parent identity'
+            ELSE 'Recovered dangling scheduled-item goal reference' END,
+          ?
+        FROM goal_registry g
+        WHERE g.is_placeholder = 1
+          AND NOT EXISTS (
+            SELECT 1 FROM goal_registry_events e
+            WHERE e.goal_id = g.id AND e.action = 'placeholder_created'
+          )
+      `).run(now);
+
+      // Recreate triggers on every startup so public databases converge to
+      // the current invariant even if an older release installed a weaker
+      // version.
+      this.db.exec(`
+        DROP TRIGGER IF EXISTS trg_goal_registry_memory_insert;
+        DROP TRIGGER IF EXISTS trg_goal_registry_memory_update;
+        DROP TRIGGER IF EXISTS trg_goal_memory_insert_durability;
+        DROP TRIGGER IF EXISTS trg_scheduled_goal_reference_insert;
+        DROP TRIGGER IF EXISTS trg_scheduled_goal_reference_update;
+
+        CREATE TRIGGER trg_goal_registry_memory_insert
+        AFTER INSERT ON memories
+        WHEN NEW.metadata IS NOT NULL AND json_valid(NEW.metadata)
+          AND json_extract(NEW.metadata, '$.goalType') IN ('goal', 'milestone', 'task')
+        BEGIN
+          INSERT INTO goal_registry (
+            id, user_id, title, goal_type, status, parent_id, metadata,
+            is_placeholder, origin, created_at, updated_at, completed_at, deleted_at
+          ) VALUES (
+            NEW.id,
+            NEW.user_id,
+            NEW.content,
+            json_extract(NEW.metadata, '$.goalType'),
+            CASE json_extract(NEW.metadata, '$.status')
+              WHEN 'active' THEN 'active'
+              WHEN 'completed' THEN 'completed'
+              ELSE 'backlog' END,
+            CASE WHEN typeof(json_extract(NEW.metadata, '$.parentId')) = 'text'
+              THEN json_extract(NEW.metadata, '$.parentId') ELSE NULL END,
+            NEW.metadata,
+            0,
+            'memory',
+            NEW.created_at,
+            NEW.updated_at,
+            CASE WHEN json_extract(NEW.metadata, '$.status') = 'completed'
+              AND typeof(json_extract(NEW.metadata, '$.completedAt')) IN ('integer', 'real')
+              THEN json_extract(NEW.metadata, '$.completedAt') ELSE NULL END,
+            NULL
+          )
+          ON CONFLICT(id) DO UPDATE SET
+            user_id = excluded.user_id,
+            title = excluded.title,
+            goal_type = excluded.goal_type,
+            status = excluded.status,
+            parent_id = excluded.parent_id,
+            metadata = excluded.metadata,
+            is_placeholder = 0,
+            origin = 'memory',
+            updated_at = excluded.updated_at,
+            completed_at = excluded.completed_at;
+        END;
+
+        CREATE TRIGGER trg_goal_registry_memory_update
+        AFTER UPDATE OF user_id, content, metadata ON memories
+        WHEN NEW.metadata IS NOT NULL AND json_valid(NEW.metadata)
+          AND json_extract(NEW.metadata, '$.goalType') IN ('goal', 'milestone', 'task')
+        BEGIN
+          INSERT INTO goal_registry (
+            id, user_id, title, goal_type, status, parent_id, metadata,
+            is_placeholder, origin, created_at, updated_at, completed_at, deleted_at
+          ) VALUES (
+            NEW.id,
+            NEW.user_id,
+            NEW.content,
+            json_extract(NEW.metadata, '$.goalType'),
+            CASE json_extract(NEW.metadata, '$.status')
+              WHEN 'active' THEN 'active'
+              WHEN 'completed' THEN 'completed'
+              ELSE 'backlog' END,
+            CASE WHEN typeof(json_extract(NEW.metadata, '$.parentId')) = 'text'
+              THEN json_extract(NEW.metadata, '$.parentId') ELSE NULL END,
+            NEW.metadata,
+            0,
+            'memory',
+            NEW.created_at,
+            NEW.updated_at,
+            CASE WHEN json_extract(NEW.metadata, '$.status') = 'completed'
+              AND typeof(json_extract(NEW.metadata, '$.completedAt')) IN ('integer', 'real')
+              THEN json_extract(NEW.metadata, '$.completedAt') ELSE NULL END,
+            NULL
+          )
+          ON CONFLICT(id) DO UPDATE SET
+            user_id = excluded.user_id,
+            title = excluded.title,
+            goal_type = excluded.goal_type,
+            status = excluded.status,
+            parent_id = excluded.parent_id,
+            metadata = excluded.metadata,
+            is_placeholder = 0,
+            origin = 'memory',
+            updated_at = excluded.updated_at,
+            completed_at = excluded.completed_at;
+        END;
+
+        CREATE TRIGGER trg_goal_memory_insert_durability
+        AFTER INSERT ON memories
+        WHEN NEW.metadata IS NOT NULL AND json_valid(NEW.metadata)
+          AND json_extract(NEW.metadata, '$.goalType') IN ('goal', 'milestone', 'task')
+          AND COALESCE(json_extract(NEW.metadata, '$.status'), 'backlog') != 'completed'
+          AND (NEW.is_latest != 1 OR NEW.memory_type != 'static_profile' OR NEW.prominence != 1.0)
+        BEGIN
+          UPDATE memories
+          SET is_latest = 1, memory_type = 'static_profile', prominence = 1.0
+          WHERE id = NEW.id;
+        END;
+
+        CREATE TRIGGER trg_scheduled_goal_reference_insert
+        BEFORE INSERT ON scheduled_items
+        WHEN NEW.goal_id IS NOT NULL
+        BEGIN
+          SELECT CASE WHEN NOT EXISTS (
+            SELECT 1 FROM goal_registry g
+            WHERE g.id = NEW.goal_id AND g.user_id = NEW.user_id AND g.deleted_at IS NULL
+          ) THEN RAISE(ABORT, 'scheduled_items.goal_id must reference a live same-owner goal registry row') END;
+        END;
+
+        CREATE TRIGGER trg_scheduled_goal_reference_update
+        BEFORE UPDATE OF goal_id, user_id ON scheduled_items
+        WHEN NEW.goal_id IS NOT NULL
+        BEGIN
+          SELECT CASE WHEN NOT EXISTS (
+            SELECT 1 FROM goal_registry g
+            WHERE g.id = NEW.goal_id AND g.user_id = NEW.user_id AND g.deleted_at IS NULL
+          ) THEN RAISE(ABORT, 'scheduled_items.goal_id must reference a live same-owner goal registry row') END;
+        END;
+      `);
+    });
+
+    try {
+      migrate.immediate();
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(`[migration] migrateDurableGoalRegistry failed: ${detail}`, { cause: error });
+    }
   }
 
   /**
@@ -1800,6 +3134,277 @@ export class ScallopDatabase {
     const stmt = this.db.prepare('SELECT * FROM memories WHERE id = ?');
     const row = stmt.get(id) as Record<string, unknown> | undefined;
     return row ? this.rowToMemory(row) : null;
+  }
+
+  /** Read a durable goal identity, including an explicit deletion tombstone. */
+  getGoalRegistryEntry(id: string): GoalRegistryEntry | null {
+    const row = this.db.prepare('SELECT * FROM goal_registry WHERE id = ?').get(id) as
+      | Record<string, unknown>
+      | undefined;
+    if (!row) return null;
+    let metadata: Record<string, unknown> = {};
+    try {
+      const parsed = JSON.parse(String(row.metadata ?? '{}')) as unknown;
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        metadata = parsed as Record<string, unknown>;
+      }
+    } catch {
+      // Schema constraints guarantee a text value, but fail safely if a legacy
+      // process wrote malformed JSON before the registry triggers existed.
+    }
+    return {
+      id: String(row.id),
+      userId: String(row.user_id),
+      title: String(row.title),
+      goalType: row.goal_type as GoalRegistryEntry['goalType'],
+      status: row.status as GoalRegistryEntry['status'],
+      parentId: row.parent_id === null ? null : String(row.parent_id),
+      metadata,
+      isPlaceholder: row.is_placeholder === 1,
+      origin: row.origin as GoalRegistryEntry['origin'],
+      createdAt: Number(row.created_at),
+      updatedAt: Number(row.updated_at),
+      completedAt: row.completed_at === null ? null : Number(row.completed_at),
+      deletedAt: row.deleted_at === null ? null : Number(row.deleted_at),
+    };
+  }
+
+  /** Registry identities remain queryable after completion or deletion. */
+  getGoalRegistryEntriesByUser(
+    userId: string,
+    options: { includeDeleted?: boolean } = {},
+  ): GoalRegistryEntry[] {
+    const rows = this.db.prepare(`
+      SELECT id FROM goal_registry
+      WHERE user_id = ? ${options.includeDeleted ? '' : 'AND deleted_at IS NULL'}
+      ORDER BY updated_at DESC, id
+    `).all(userId) as Array<{ id: string }>;
+    return rows
+      .map(row => this.getGoalRegistryEntry(row.id))
+      .filter((entry): entry is GoalRegistryEntry => entry !== null);
+  }
+
+  /**
+   * Rebuild a missing searchable memory projection from the durable registry.
+   * Returns null for an explicitly-deleted identity or an unrecoverable ID
+   * collision. Parent projections/relations are restored first when possible.
+   */
+  restoreGoalMemoryFromRegistry(id: string, restoring: Set<string> = new Set()): ScallopMemoryEntry | null {
+    const existing = this.getMemory(id);
+    const registry = this.getGoalRegistryEntry(id);
+    if (!registry || registry.deletedAt !== null || restoring.has(id)) return null;
+    const existingGoalType = existing?.metadata?.goalType;
+    if (existing && (
+      existingGoalType === 'goal' || existingGoalType === 'milestone' || existingGoalType === 'task'
+    )) return existing;
+
+    restoring.add(id);
+    try {
+      if (registry.parentId) {
+        this.restoreGoalMemoryFromRegistry(registry.parentId, restoring);
+      }
+
+      const metadata: Record<string, unknown> = {
+        ...registry.metadata,
+        goalType: registry.goalType,
+        status: registry.status,
+        ...(registry.parentId ? { parentId: registry.parentId } : {}),
+        ...(registry.completedAt !== null ? { completedAt: registry.completedAt } : {}),
+      };
+      const dueDate = typeof metadata.dueDate === 'number' && Number.isFinite(metadata.dueDate)
+        ? metadata.dueDate
+        : null;
+      const importance = registry.goalType === 'goal' ? 8 : registry.goalType === 'milestone' ? 7 : 6;
+
+      if (existing) {
+        // A generic-memory writer may have overwritten goal metadata while
+        // retaining the row ID. Registry identity wins, but the row itself is
+        // repaired in place so relations and timestamps are not discarded.
+        this.db.prepare(`
+          UPDATE memories
+          SET user_id = ?, content = ?, category = 'insight',
+              memory_type = 'static_profile', importance = ?, confidence = 1.0,
+              is_latest = 1, event_date = ?, prominence = 1.0,
+              metadata = ?, updated_at = ?
+          WHERE id = ?
+        `).run(
+          registry.userId,
+          registry.title,
+          importance,
+          dueDate,
+          JSON.stringify(metadata),
+          Date.now(),
+          registry.id,
+        );
+      } else {
+        this.db.prepare(`
+          INSERT OR IGNORE INTO memories (
+            id, user_id, content, category, memory_type, importance, confidence,
+            is_latest, source, document_date, event_date, prominence,
+            last_accessed, access_count, source_chunk, embedding, metadata,
+            created_at, updated_at
+          ) VALUES (?, ?, ?, 'insight', 'static_profile', ?, 1.0,
+            1, 'user', ?, ?, 1.0, NULL, 0, NULL, NULL, ?, ?, ?)
+        `).run(
+          registry.id,
+          registry.userId,
+          registry.title,
+          importance,
+          registry.createdAt,
+          dueDate,
+          JSON.stringify(metadata),
+          registry.createdAt,
+          Date.now(),
+        );
+      }
+
+      const restored = this.getMemory(id);
+      if (!restored) return null;
+
+      if (registry.parentId && this.getMemory(registry.parentId)) {
+        this.db.prepare(`
+          INSERT OR IGNORE INTO memory_relations (
+            id, source_id, target_id, relation_type, confidence, created_at
+          ) VALUES (?, ?, ?, 'EXTENDS', 1.0, ?)
+        `).run(nanoid(), id, registry.parentId, Date.now());
+      }
+
+      this.db.prepare(`
+        INSERT INTO goal_registry_events (goal_id, action, detail, created_at)
+        VALUES (?, 'restored_projection', 'Rebuilt missing searchable memory projection', ?)
+      `).run(id, Date.now());
+      return restored;
+    } finally {
+      restoring.delete(id);
+    }
+  }
+
+  /** Tombstone a goal identity without erasing its status/title/history. */
+  markGoalRegistryDeleted(id: string): boolean {
+    const now = Date.now();
+    const mark = this.db.transaction(() => {
+      const result = this.db.prepare(`
+        UPDATE goal_registry
+        SET deleted_at = ?, updated_at = ?
+        WHERE id = ? AND deleted_at IS NULL
+      `).run(now, now, id);
+      if (result.changes === 0) return false;
+      this.db.prepare(`
+        INSERT INTO goal_registry_events (goal_id, action, detail, created_at)
+        VALUES (?, 'deleted', 'Explicit goal deletion; identity retained as tombstone', ?)
+      `).run(id, now);
+      return true;
+    });
+    return mark.immediate();
+  }
+
+  /**
+   * Keep the public add/update APIs backward-compatible while ensuring every
+   * scheduled goal link resolves to a same-owner registry identity. Raw SQL
+   * writers are still protected by the fail-closed triggers.
+   */
+  private ensureScheduledGoalReference(
+    goalId: string,
+    userId: string,
+    title: string,
+    kind: ScheduledItemKind,
+  ): void {
+    const existing = this.getGoalRegistryEntry(goalId);
+    if (existing) {
+      if (existing.deletedAt !== null) {
+        throw new Error(`Cannot link scheduled item to deleted goal ${goalId}`);
+      }
+      if (existing.userId !== userId) {
+        throw new Error(`Cannot link scheduled item to goal ${goalId} owned by another user`);
+      }
+      return;
+    }
+
+    const memory = this.getMemory(goalId);
+    const metadata = memory?.metadata;
+    const memoryGoalType = metadata?.goalType;
+    const goalType: GoalRegistryEntry['goalType'] =
+      memoryGoalType === 'goal' || memoryGoalType === 'milestone' || memoryGoalType === 'task'
+        ? memoryGoalType
+        : kind === 'task' ? 'task' : 'goal';
+    const statusValue = metadata?.status;
+    const status: GoalRegistryEntry['status'] =
+      statusValue === 'active' || statusValue === 'completed' || statusValue === 'backlog'
+        ? statusValue
+        : 'backlog';
+    const now = Date.now();
+    const registryMetadata: Record<string, unknown> = metadata
+      ? { ...metadata, goalType, status }
+      : {
+          goalType,
+          status,
+          registryRecovered: true,
+          recoveredFrom: 'scheduled_item_reference',
+        };
+    this.db.prepare(`
+      INSERT INTO goal_registry (
+        id, user_id, title, goal_type, status, parent_id, metadata,
+        is_placeholder, origin, created_at, updated_at, completed_at, deleted_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+    `).run(
+      goalId,
+      userId,
+      memory?.content ?? (title || `[Recovered goal ${goalId}]`),
+      goalType,
+      status,
+      typeof registryMetadata.parentId === 'string' ? registryMetadata.parentId : null,
+      JSON.stringify(registryMetadata),
+      memory ? 0 : 1,
+      memory ? 'memory' : 'scheduled_reference',
+      memory?.createdAt ?? now,
+      memory?.updatedAt ?? now,
+      status === 'completed' && typeof registryMetadata.completedAt === 'number'
+        ? registryMetadata.completedAt
+        : null,
+    );
+    this.db.prepare(`
+      INSERT INTO goal_registry_events (goal_id, action, detail, created_at)
+      VALUES (?, ?, ?, ?)
+    `).run(
+      goalId,
+      memory ? 'backfilled' : 'placeholder_created',
+      memory ? 'Registered goal while creating scheduled reference' : 'Registered unresolved scheduled reference',
+      now,
+    );
+  }
+
+  /** Goal hierarchy records bypass ordinary-memory latest/decay filtering. */
+  getGoalMemoriesByUser(userId: string): ScallopMemoryEntry[] {
+    // Self-heal any projection removed by ordinary-memory cleanup. Explicit
+    // deletion tombstones are excluded and therefore never resurrected.
+    const durableIds = this.db.prepare(`
+      SELECT id FROM goal_registry WHERE user_id = ? AND deleted_at IS NULL
+    `).all(userId) as Array<{ id: string }>;
+    for (const { id } of durableIds) {
+      this.restoreGoalMemoryFromRegistry(id);
+    }
+    const rows = this.db.prepare(`
+      SELECT * FROM memories
+      WHERE user_id = ? AND metadata IS NOT NULL AND json_valid(metadata)
+        AND json_extract(metadata, '$.goalType') IN ('goal', 'milestone', 'task')
+      ORDER BY
+        CASE json_extract(metadata, '$.status')
+          WHEN 'active' THEN 0 WHEN 'backlog' THEN 1 ELSE 2 END,
+        document_date DESC
+    `).all(userId) as Record<string, unknown>[];
+    return rows.map(row => this.rowToMemory(row));
+  }
+
+  /** Remove dangling board references before an explicit goal deletion. */
+  unlinkScheduledItemsFromGoal(goalId: string): number {
+    const result = this.db.prepare(`
+      UPDATE scheduled_items
+      SET goal_id = NULL,
+          source_memory_id = CASE WHEN source_memory_id = ? THEN NULL ELSE source_memory_id END,
+          updated_at = ?
+      WHERE goal_id = ? OR source_memory_id = ?
+    `).run(goalId, Date.now(), goalId, goalId);
+    return result.changes;
   }
 
   /**
@@ -2616,33 +4221,276 @@ export class ScallopDatabase {
     return row ? this.rowToBehavioralPatterns(row) : null;
   }
 
+  // ============ External Tool Operation Ledger ============
+
+  /**
+   * Write the durable intent record before dispatching an external mutation.
+   * A known definitive failure may be retried; prepared, uncertain, and
+   * successful operations fail closed so restarts cannot duplicate a write.
+   */
+  reserveToolOperation(input: {
+    operationId: string;
+    sessionId: string;
+    toolName: string;
+    callSignature: string;
+    userIntentDigest: string;
+  }): ToolOperationReservation {
+    const reserve = this.db.transaction((): ToolOperationReservation => {
+      const existing = this.db.prepare(`
+        SELECT status FROM tool_operation_ledger WHERE operation_id = ?
+      `).get(input.operationId) as { status: ToolOperationStatus } | undefined;
+      const now = Date.now();
+
+      if (!existing) {
+        this.db.prepare(`
+          INSERT INTO tool_operation_ledger (
+            operation_id, session_id, tool_name, call_signature,
+            user_intent_digest, status, result_digest,
+            attempt_count, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, 'prepared', NULL, 1, ?, ?)
+        `).run(
+          input.operationId,
+          input.sessionId,
+          input.toolName,
+          input.callSignature,
+          input.userIntentDigest,
+          now,
+          now,
+        );
+        return { reserved: true };
+      }
+
+      if (existing.status === 'failed') {
+        this.db.prepare(`
+          UPDATE tool_operation_ledger
+          SET status = 'prepared', result_digest = NULL,
+              attempt_count = attempt_count + 1, updated_at = ?
+          WHERE operation_id = ? AND status = 'failed'
+        `).run(now, input.operationId);
+        return { reserved: true };
+      }
+
+      return { reserved: false, existingStatus: existing.status };
+    });
+    return reserve.immediate();
+  }
+
+  /** Complete a prepared dispatch. A timeout/abort wins over late completion. */
+  completeToolOperation(
+    operationId: string,
+    status: Exclude<ToolOperationStatus, 'prepared'>,
+    resultDigest?: string,
+  ): boolean {
+    const result = this.db.prepare(`
+      UPDATE tool_operation_ledger
+      SET status = ?, result_digest = ?, updated_at = ?
+      WHERE operation_id = ? AND status = 'prepared'
+    `).run(status, resultDigest ?? null, Date.now(), operationId);
+    return result.changes === 1;
+  }
+
+  /** Test/diagnostic lookup; contains hashes and metadata only. */
+  getToolOperation(operationId: string): {
+    operationId: string;
+    sessionId: string;
+    toolName: string;
+    callSignature: string;
+    userIntentDigest: string;
+    status: ToolOperationStatus;
+    resultDigest: string | null;
+    attemptCount: number;
+    createdAt: number;
+    updatedAt: number;
+  } | null {
+    const row = this.db.prepare(`
+      SELECT * FROM tool_operation_ledger WHERE operation_id = ?
+    `).get(operationId) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    return {
+      operationId: String(row.operation_id),
+      sessionId: String(row.session_id),
+      toolName: String(row.tool_name),
+      callSignature: String(row.call_signature),
+      userIntentDigest: String(row.user_intent_digest),
+      status: row.status as ToolOperationStatus,
+      resultDigest: row.result_digest == null ? null : String(row.result_digest),
+      attemptCount: Number(row.attempt_count),
+      createdAt: Number(row.created_at),
+      updatedAt: Number(row.updated_at),
+    };
+  }
+
   // ============ Session Operations ============
 
   createSession(id: string, metadata?: Record<string, unknown>): SessionRow {
     const now = Date.now();
     const stmt = this.db.prepare(`
-      INSERT INTO sessions (id, metadata, input_tokens, output_tokens, created_at, updated_at)
-      VALUES (?, ?, 0, 0, ?, ?)
+      INSERT INTO sessions (
+        id, metadata, input_tokens, output_tokens, created_at, updated_at,
+        archived_at, archive_reason, transcript_deleted_at
+      )
+      VALUES (?, ?, 0, 0, ?, ?, NULL, NULL, NULL)
     `);
     stmt.run(id, metadata ? JSON.stringify(metadata) : null, now, now);
-    return { id, metadata: metadata || null, inputTokens: 0, outputTokens: 0, createdAt: now, updatedAt: now };
+    return {
+      id,
+      metadata: metadata || null,
+      inputTokens: 0,
+      outputTokens: 0,
+      createdAt: now,
+      updatedAt: now,
+      archivedAt: null,
+      archiveReason: null,
+      transcriptDeletedAt: null,
+    };
   }
 
+  /** Return durable session metadata, including archived/forgotten tombstones. */
   getSession(id: string): SessionRow | null {
     const stmt = this.db.prepare('SELECT * FROM sessions WHERE id = ?');
     const row = stmt.get(id) as Record<string, unknown> | undefined;
     return row ? this.rowToSession(row) : null;
   }
 
-  deleteSession(id: string): boolean {
-    const stmt = this.db.prepare('DELETE FROM sessions WHERE id = ?');
-    const result = stmt.run(id);
-    return result.changes > 0;
+  /** Return a resumable session only. */
+  getActiveSession(id: string): SessionRow | null {
+    const stmt = this.db.prepare(`
+      SELECT * FROM sessions
+      WHERE id = ? AND archived_at IS NULL AND transcript_deleted_at IS NULL
+    `);
+    const row = stmt.get(id) as Record<string, unknown> | undefined;
+    return row ? this.rowToSession(row) : null;
   }
 
-  listSessions(limit?: number, offset?: number): SessionRow[] {
-    let query = 'SELECT * FROM sessions ORDER BY updated_at DESC';
+  /**
+   * Close a session while preserving its full transcript and any summary.
+   * Repeated calls are idempotent and produce a single archive audit event.
+   */
+  archiveSession(id: string, reason: string = 'new_conversation', actor: string = 'system'): boolean {
+    const archive = this.db.transaction(() => {
+      const row = this.db.prepare(`
+        SELECT id, metadata, archived_at, transcript_deleted_at,
+          (SELECT COUNT(*) FROM session_messages WHERE session_id = sessions.id) AS message_count
+        FROM sessions
+        WHERE id = ?
+      `).get(id) as Record<string, unknown> | undefined;
+      if (!row || row.archived_at != null || row.transcript_deleted_at != null) return false;
+
+      const now = Date.now();
+      const result = this.db.prepare(`
+        UPDATE sessions
+        SET archived_at = ?, archive_reason = ?
+        WHERE id = ? AND archived_at IS NULL AND transcript_deleted_at IS NULL
+      `).run(now, reason, id);
+      if (result.changes === 0) return false;
+
+      this.insertSessionLifecycleEvent({
+        sessionId: id,
+        userId: this.sessionUserIdFromMetadata(row.metadata),
+        action: 'archived',
+        reason,
+        actor,
+        messageCount: Number(row.message_count ?? 0),
+        createdAt: now,
+      });
+      return true;
+    });
+    return archive();
+  }
+
+  /** Archive every active session for one durable channel identity. */
+  archiveActiveSessionsByUserId(
+    userId: string,
+    reason: string = 'new_conversation',
+    actor: string = 'system',
+    channelId?: string,
+  ): number {
+    const rows = this.db.prepare(`
+      SELECT id, metadata
+      FROM sessions
+      WHERE archived_at IS NULL
+        AND transcript_deleted_at IS NULL
+    `).all() as Array<{ id: string; metadata: string | null }>;
+    let archived = 0;
+    for (const row of rows) {
+      let metadata: Record<string, unknown>;
+      try {
+        const parsed = row.metadata ? JSON.parse(row.metadata) as unknown : null;
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) continue;
+        metadata = parsed as Record<string, unknown>;
+      } catch {
+        continue;
+      }
+      if (metadata.userId !== userId) continue;
+      if (channelId && typeof metadata.channelId === 'string' && metadata.channelId !== channelId) continue;
+      // A user's primary conversation and its worker sessions deliberately
+      // share identity metadata. /new must not interrupt an in-flight worker.
+      if (metadata.isSubAgent === true || metadata.source === 'scheduler') continue;
+      if (this.archiveSession(row.id, reason, actor)) archived++;
+    }
+    return archived;
+  }
+
+  /**
+   * Destructively forget a transcript while retaining a non-resumable session
+   * tombstone, its summary, and an append-only audit event. User-facing callers
+   * must put confirmation in front of this low-level operation.
+   */
+  deleteSession(id: string, reason: string = 'explicit_forget', actor: string = 'system'): boolean {
+    const forget = this.db.transaction(() => {
+      const row = this.db.prepare(`
+        SELECT id, metadata, archived_at, transcript_deleted_at,
+          (
+            SELECT COUNT(*) FROM (
+              SELECT id AS message_id FROM session_messages WHERE session_id = sessions.id
+              UNION
+              SELECT original_message_id AS message_id
+              FROM session_message_archive WHERE session_id = sessions.id
+            )
+          ) AS message_count,
+          EXISTS (
+            SELECT 1 FROM session_lifecycle_events
+            WHERE session_id = sessions.id AND action = 'forgotten'
+          ) AS already_forgotten
+        FROM sessions
+        WHERE id = ?
+      `).get(id) as Record<string, unknown> | undefined;
+      if (!row) return false;
+
+      const now = Date.now();
+      const messageCount = Number(row.message_count ?? 0);
+      this.db.prepare('DELETE FROM session_messages WHERE session_id = ?').run(id);
+      this.db.prepare('DELETE FROM session_message_archive WHERE session_id = ?').run(id);
+      this.db.prepare(`
+        UPDATE sessions
+        SET archived_at = COALESCE(archived_at, ?),
+            archive_reason = ?,
+            transcript_deleted_at = ?
+        WHERE id = ?
+      `).run(now, reason, now, id);
+      if (Number(row.already_forgotten ?? 0) === 0) {
+        this.insertSessionLifecycleEvent({
+          sessionId: id,
+          userId: this.sessionUserIdFromMetadata(row.metadata),
+          action: 'forgotten',
+          reason,
+          actor,
+          messageCount,
+          createdAt: now,
+        });
+      }
+      return true;
+    });
+    return forget();
+  }
+
+  listSessions(limit?: number, offset?: number, includeArchived: boolean = false): SessionRow[] {
+    let query = 'SELECT * FROM sessions';
     const params: unknown[] = [];
+    if (!includeArchived) {
+      query += ' WHERE archived_at IS NULL AND transcript_deleted_at IS NULL';
+    }
+    query += ' ORDER BY updated_at DESC';
     if (limit) {
       query += ' LIMIT ?';
       params.push(limit);
@@ -2659,7 +4507,7 @@ export class ScallopDatabase {
   updateSessionMetadata(id: string, metadata: Record<string, unknown>): void {
     const now = Date.now();
     // Merge with existing metadata
-    const existing = this.getSession(id);
+    const existing = this.getActiveSession(id);
     const merged = { ...(existing?.metadata || {}), ...metadata };
     this.db.prepare('UPDATE sessions SET metadata = ?, updated_at = ? WHERE id = ?')
       .run(JSON.stringify(merged), now, id);
@@ -2676,20 +4524,35 @@ export class ScallopDatabase {
     `).run(inputTokens, outputTokens, now, id);
   }
 
-  addSessionMessage(sessionId: string, role: string, content: string): SessionMessageRow {
+  addSessionMessage(
+    sessionId: string,
+    role: string,
+    content: string,
+    messageKind?: PersistedSessionMessageKind,
+  ): SessionMessageRow {
     const now = Date.now();
+    const metadata = this.getSession(sessionId)?.metadata;
+    const resolvedKind = messageKind ?? inferSessionMessageKind(role, content, metadata);
     const stmt = this.db.prepare(`
-      INSERT INTO session_messages (session_id, role, content, created_at)
-      VALUES (?, ?, ?, ?)
+      INSERT INTO session_messages (session_id, role, content, message_kind, created_at)
+      VALUES (?, ?, ?, ?, ?)
     `);
-    const result = stmt.run(sessionId, role, content, now);
+    const result = stmt.run(sessionId, role, content, resolvedKind, now);
     // Update session updated_at
     this.db.prepare('UPDATE sessions SET updated_at = ? WHERE id = ?').run(now, sessionId);
-    return { id: Number(result.lastInsertRowid), sessionId, role, content, createdAt: now };
+    return {
+      id: Number(result.lastInsertRowid), sessionId, role, content,
+      messageKind: resolvedKind, createdAt: now,
+    };
   }
 
   getSessionMessages(sessionId: string): SessionMessageRow[] {
-    const stmt = this.db.prepare('SELECT * FROM session_messages WHERE session_id = ? ORDER BY id');
+    const stmt = this.db.prepare(`
+      SELECT sm.*, s.metadata AS session_metadata
+      FROM session_messages sm
+      LEFT JOIN sessions s ON s.id = sm.session_id
+      WHERE sm.session_id = ? ORDER BY sm.id
+    `);
     const rows = stmt.all(sessionId) as Record<string, unknown>[];
     return rows.map(row => this.rowToSessionMessage(row));
   }
@@ -2698,12 +4561,16 @@ export class ScallopDatabase {
     let rows: Record<string, unknown>[];
     if (before) {
       const stmt = this.db.prepare(
-        'SELECT * FROM session_messages WHERE session_id = ? AND id < ? ORDER BY id DESC LIMIT ?'
+        `SELECT sm.*, s.metadata AS session_metadata
+         FROM session_messages sm LEFT JOIN sessions s ON s.id = sm.session_id
+         WHERE sm.session_id = ? AND sm.id < ? ORDER BY sm.id DESC LIMIT ?`
       );
       rows = stmt.all(sessionId, before, limit + 1) as Record<string, unknown>[];
     } else {
       const stmt = this.db.prepare(
-        'SELECT * FROM session_messages WHERE session_id = ? ORDER BY id DESC LIMIT ?'
+        `SELECT sm.*, s.metadata AS session_metadata
+         FROM session_messages sm LEFT JOIN sessions s ON s.id = sm.session_id
+         WHERE sm.session_id = ? ORDER BY sm.id DESC LIMIT ?`
       );
       rows = stmt.all(sessionId, limit + 1) as Record<string, unknown>[];
     }
@@ -2718,12 +4585,16 @@ export class ScallopDatabase {
     let rows: Record<string, unknown>[];
     if (before) {
       const stmt = this.db.prepare(
-        'SELECT * FROM session_messages WHERE id < ? ORDER BY id DESC LIMIT ?'
+        `SELECT sm.*, s.metadata AS session_metadata
+         FROM session_messages sm LEFT JOIN sessions s ON s.id = sm.session_id
+         WHERE sm.id < ? ORDER BY sm.id DESC LIMIT ?`
       );
       rows = stmt.all(before, limit + 1) as Record<string, unknown>[];
     } else {
       const stmt = this.db.prepare(
-        'SELECT * FROM session_messages ORDER BY id DESC LIMIT ?'
+        `SELECT sm.*, s.metadata AS session_metadata
+         FROM session_messages sm LEFT JOIN sessions s ON s.id = sm.session_id
+         ORDER BY sm.id DESC LIMIT ?`
       );
       rows = stmt.all(limit + 1) as Record<string, unknown>[];
     }
@@ -2753,7 +4624,7 @@ export class ScallopDatabase {
     if (candidates.length === 0) return [];
     const placeholders = candidates.map(() => '?').join(', ');
     const stmt = this.db.prepare(`
-      SELECT sm.*
+      SELECT sm.*, s.metadata AS session_metadata
       FROM session_messages sm
       INNER JOIN sessions s ON s.id = sm.session_id
       WHERE json_extract(s.metadata, '$.userId') IN (${placeholders})
@@ -2765,41 +4636,361 @@ export class ScallopDatabase {
     return rows.map(row => this.rowToSessionMessage(row));
   }
 
-  findSessionByUserId(userId: string): SessionRow | null {
-    const stmt = this.db.prepare(
-      "SELECT * FROM sessions WHERE json_extract(metadata, '$.userId') = ? ORDER BY updated_at DESC LIMIT 1"
+  findSessionByUserId(userId: string, channelId?: string): SessionRow | null {
+    const rows = this.db.prepare(`
+      SELECT * FROM sessions
+      WHERE archived_at IS NULL AND transcript_deleted_at IS NULL
+      ORDER BY updated_at DESC
+    `).all() as Record<string, unknown>[];
+    for (const row of rows) {
+      const session = this.rowToSession(row);
+      if (session.metadata?.userId !== userId) continue;
+      if (channelId
+        && typeof session.metadata?.channelId === 'string'
+        && session.metadata.channelId !== channelId) continue;
+      if (session.metadata?.isSubAgent === true || session.metadata?.source === 'scheduler') continue;
+      return session;
+    }
+    return null;
+  }
+
+  getSessionLifecycleEvents(sessionId: string): SessionLifecycleEventRow[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM session_lifecycle_events
+      WHERE session_id = ?
+      ORDER BY id
+    `).all(sessionId) as Record<string, unknown>[];
+    return rows.map(row => ({
+      id: row.id as number,
+      sessionId: row.session_id as string,
+      userId: row.user_id as string | null,
+      action: row.action as SessionLifecycleEventRow['action'],
+      reason: row.reason as string,
+      actor: row.actor as string,
+      messageCount: row.message_count as number,
+      createdAt: row.created_at as number,
+    }));
+  }
+
+  /** Read the cold, lossless copy of a transcript after hot-row pruning. */
+  getArchivedSessionMessages(sessionId: string): SessionMessageRow[] {
+    const rows = this.db.prepare(`
+      SELECT archive.original_message_id AS id, archive.session_id,
+        archive.role, archive.content, archive.message_kind, archive.created_at,
+        s.metadata AS session_metadata
+      FROM session_message_archive archive
+      LEFT JOIN sessions s ON s.id = archive.session_id
+      WHERE archive.session_id = ?
+      ORDER BY archive.original_message_id
+    `).all(sessionId) as Record<string, unknown>[];
+    return rows.map(row => this.rowToSessionMessage(row));
+  }
+
+  private sessionUserIdFromMetadata(rawMetadata: unknown): string | null {
+    if (typeof rawMetadata !== 'string') return null;
+    try {
+      const parsed = JSON.parse(rawMetadata) as Record<string, unknown>;
+      return typeof parsed.userId === 'string' ? parsed.userId : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private insertSessionLifecycleEvent(event: Omit<SessionLifecycleEventRow, 'id'>): void {
+    this.db.prepare(`
+      INSERT INTO session_lifecycle_events
+        (session_id, user_id, action, reason, actor, message_count, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      event.sessionId,
+      event.userId,
+      event.action,
+      event.reason,
+      event.actor,
+      event.messageCount,
+      event.createdAt,
     );
-    const row = stmt.get(userId) as Record<string, unknown> | undefined;
-    return row ? this.rowToSession(row) : null;
   }
 
   // ============ Session Summary Operations ============
 
-  addSessionSummary(summary: Omit<SessionSummaryRow, 'id' | 'createdAt'>): SessionSummaryRow {
-    const id = nanoid();
-    const now = Date.now();
+  addSessionSummary(
+    summary: SessionSummaryInput,
+    verification?: SessionSummaryVerificationRequest,
+  ): SessionSummaryRow {
+    const store = this.db.transaction(() => {
+      const id = nanoid();
+      const now = Date.now();
+      const requestValid = !!verification
+        && verification.verifier.trim().length > 0
+        && Number.isInteger(verification.verificationVersion)
+        && verification.verificationVersion > 0;
+      const evaluation = verification && requestValid
+        ? this.evaluateSessionSummaryVerification(summary, false)
+        : {
+            valid: false,
+            reason: verification ? 'invalid_verification_request' : 'verification_not_requested',
+          };
+      const schemaValid = requestValid && evaluation.valid;
+      const verifiedAt = schemaValid
+        ? (Number.isFinite(verification?.verifiedAt) ? verification!.verifiedAt! : now)
+        : null;
+      const verifier = verification?.verifier.trim() || null;
+      const verificationVersion = verification?.verificationVersion ?? null;
 
-    this.db.prepare(`
-      INSERT INTO session_summaries (id, session_id, user_id, summary, topics, message_count, duration_ms, embedding, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      id,
-      summary.sessionId,
-      summary.userId,
-      summary.summary,
-      JSON.stringify(summary.topics),
-      summary.messageCount,
-      summary.durationMs,
-      summary.embedding ? JSON.stringify(summary.embedding) : null,
-      now
-    );
+      this.db.prepare(`
+        INSERT INTO session_summaries (
+          id, session_id, user_id, summary, topics, message_count, duration_ms,
+          embedding, created_at, verified_at, verifier, verification_version, schema_valid
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id,
+        summary.sessionId,
+        summary.userId,
+        summary.summary,
+        JSON.stringify(summary.topics),
+        summary.messageCount,
+        summary.durationMs,
+        summary.embedding ? JSON.stringify(summary.embedding) : null,
+        now,
+        verifiedAt,
+        verifier,
+        verificationVersion,
+        schemaValid ? 1 : 0,
+      );
 
-    return { ...summary, id, createdAt: now };
+      this.insertSessionSummaryVerificationEvent({
+        summaryId: id,
+        sessionId: summary.sessionId,
+        outcome: schemaValid ? 'verified' : 'rejected',
+        verifier: verifier ?? 'unverified_writer',
+        verificationVersion: verificationVersion ?? 0,
+        reason: evaluation.reason,
+        checkedAt: now,
+      });
+
+      return {
+        ...summary,
+        id,
+        createdAt: now,
+        verifiedAt,
+        verifier,
+        verificationVersion,
+        schemaValid,
+      };
+    });
+    return store();
+  }
+
+  /**
+   * Regenerate a rejected summary without deleting it. A valid replacement
+   * snapshots the current row before updating its stable ID; an invalid
+   * candidate is also retained in revision history for diagnosis.
+   */
+  upsertVerifiedSessionSummary(
+    summary: SessionSummaryInput,
+    verification: SessionSummaryVerificationRequest,
+  ): SessionSummaryRow {
+    const existing = this.getSessionSummary(summary.sessionId);
+    if (!existing) return this.addSessionSummary(summary, verification);
+    if (this.hasVerifiedSessionSummary(summary.sessionId)) return existing;
+
+    const replace = this.db.transaction(() => {
+      const now = Date.now();
+      const requestValid = verification.verifier.trim().length > 0
+        && Number.isInteger(verification.verificationVersion)
+        && verification.verificationVersion > 0;
+      const evaluation = requestValid
+        ? this.evaluateSessionSummaryVerification(summary, false)
+        : { valid: false, reason: 'invalid_verification_request' };
+
+      if (!evaluation.valid) {
+        const candidateRevisionId = this.insertSessionSummaryRevision({
+          summaryId: existing.id,
+          summary,
+          createdAt: now,
+          verifiedAt: null,
+          verifier: verification.verifier.trim() || null,
+          verificationVersion: verification.verificationVersion,
+          schemaValid: false,
+          reason: `rejected_regeneration_candidate:${evaluation.reason}`,
+          archivedAt: now,
+        });
+        this.insertSessionSummaryVerificationEvent({
+          summaryId: candidateRevisionId,
+          sessionId: summary.sessionId,
+          outcome: 'rejected',
+          verifier: verification.verifier.trim() || 'unknown_verifier',
+          verificationVersion: verification.verificationVersion,
+          reason: evaluation.reason,
+          checkedAt: now,
+        });
+        return existing;
+      }
+
+      this.insertSessionSummaryRevision({
+        summaryId: existing.id,
+        summary: existing,
+        createdAt: existing.createdAt,
+        verifiedAt: existing.verifiedAt ?? null,
+        verifier: existing.verifier ?? null,
+        verificationVersion: existing.verificationVersion ?? null,
+        schemaValid: existing.schemaValid === true,
+        reason: 'superseded_by_verified_regeneration',
+        archivedAt: now,
+      });
+      const verifiedAt = Number.isFinite(verification.verifiedAt)
+        ? verification.verifiedAt!
+        : now;
+      this.db.prepare(`
+        UPDATE session_summaries
+        SET user_id = ?, summary = ?, topics = ?, message_count = ?,
+            duration_ms = ?, embedding = ?, created_at = ?, verified_at = ?,
+            verifier = ?, verification_version = ?, schema_valid = 1
+        WHERE id = ?
+      `).run(
+        summary.userId,
+        summary.summary,
+        JSON.stringify(summary.topics),
+        summary.messageCount,
+        summary.durationMs,
+        summary.embedding ? JSON.stringify(summary.embedding) : null,
+        now,
+        verifiedAt,
+        verification.verifier.trim(),
+        verification.verificationVersion,
+        existing.id,
+      );
+      this.insertSessionSummaryVerificationEvent({
+        summaryId: existing.id,
+        sessionId: summary.sessionId,
+        outcome: 'verified',
+        verifier: verification.verifier.trim(),
+        verificationVersion: verification.verificationVersion,
+        reason: evaluation.reason,
+        checkedAt: now,
+      });
+      return this.getSessionSummary(summary.sessionId)!;
+    });
+    return replace();
+  }
+
+  hasVerifiedSessionSummary(sessionId: string): boolean {
+    const row = this.db.prepare(`
+      SELECT 1
+      FROM session_summaries summary
+      WHERE summary.session_id = ?
+        AND summary.schema_valid = 1
+        AND summary.verified_at IS NOT NULL
+        AND summary.verifier IS NOT NULL
+        AND summary.verification_version >= 1
+        AND EXISTS (
+          SELECT 1 FROM session_summary_verification_events receipt
+          WHERE receipt.summary_id = summary.id
+            AND receipt.outcome = 'verified'
+            AND receipt.verifier = summary.verifier
+            AND receipt.verification_version = summary.verification_version
+        )
+      LIMIT 1
+    `).get(sessionId);
+    return !!row;
+  }
+
+  /** Re-evaluate a preserved interim summary against its durable transcript. */
+  verifySessionSummary(
+    sessionId: string,
+    verification: SessionSummaryVerificationRequest,
+  ): SessionSummaryRow | null {
+    const verify = this.db.transaction(() => {
+      const existing = this.getSessionSummary(sessionId);
+      if (!existing) return null;
+      const requestValid = verification.verifier.trim().length > 0
+        && Number.isInteger(verification.verificationVersion)
+        && verification.verificationVersion > 0;
+      const evaluation = requestValid
+        ? this.evaluateSessionSummaryVerification(existing, false)
+        : { valid: false, reason: 'invalid_verification_request' };
+      const checkedAt = Date.now();
+      const verifiedAt = evaluation.valid
+        ? (Number.isFinite(verification.verifiedAt) ? verification.verifiedAt! : checkedAt)
+        : null;
+      this.db.prepare(`
+        UPDATE session_summaries
+        SET verified_at = ?, verifier = ?, verification_version = ?, schema_valid = ?
+        WHERE id = ?
+      `).run(
+        verifiedAt,
+        verification.verifier.trim(),
+        verification.verificationVersion,
+        evaluation.valid ? 1 : 0,
+        existing.id,
+      );
+      this.insertSessionSummaryVerificationEvent({
+        summaryId: existing.id,
+        sessionId,
+        outcome: evaluation.valid ? 'verified' : 'rejected',
+        verifier: verification.verifier.trim() || 'unknown_verifier',
+        verificationVersion: verification.verificationVersion,
+        reason: evaluation.reason,
+        checkedAt,
+      });
+      return this.getSessionSummary(sessionId);
+    });
+    return verify();
+  }
+
+  getSessionSummaryVerificationEvents(summaryId: string): SessionSummaryVerificationEventRow[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM session_summary_verification_events
+      WHERE summary_id = ? ORDER BY id
+    `).all(summaryId) as Record<string, unknown>[];
+    return rows.map(row => ({
+      id: Number(row.id),
+      summaryId: String(row.summary_id),
+      sessionId: String(row.session_id),
+      outcome: row.outcome as SessionSummaryVerificationEventRow['outcome'],
+      verifier: String(row.verifier),
+      verificationVersion: Number(row.verification_version),
+      reason: String(row.reason),
+      checkedAt: Number(row.checked_at),
+    }));
+  }
+
+  getSessionSummaryRevisions(sessionId: string): SessionSummaryRevisionRow[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM session_summary_revisions
+      WHERE session_id = ? ORDER BY revision_number
+    `).all(sessionId) as Record<string, unknown>[];
+    return rows.map(row => ({
+      id: String(row.summary_id),
+      revisionId: String(row.id),
+      summaryId: String(row.summary_id),
+      sessionId: String(row.session_id),
+      revisionNumber: Number(row.revision_number),
+      userId: String(row.user_id ?? 'default'),
+      summary: String(row.summary),
+      topics: this.parseSummaryTopics(row.topics) ?? [],
+      messageCount: Number(row.message_count),
+      durationMs: Number(row.duration_ms),
+      embedding: row.embedding ? JSON.parse(String(row.embedding)) as number[] : null,
+      createdAt: Number(row.original_created_at),
+      verifiedAt: row.verified_at == null ? null : Number(row.verified_at),
+      verifier: row.verifier == null ? null : String(row.verifier),
+      verificationVersion: row.verification_version == null
+        ? null
+        : Number(row.verification_version),
+      schemaValid: Number(row.schema_valid) === 1,
+      revisionReason: String(row.revision_reason),
+      archivedAt: Number(row.archived_at),
+    }));
   }
 
   getSessionSummary(sessionId: string): SessionSummaryRow | null {
     const row = this.db.prepare(
-      'SELECT * FROM session_summaries WHERE session_id = ?'
+      `SELECT * FROM session_summaries
+       WHERE session_id = ?
+       ORDER BY schema_valid DESC, verified_at DESC, created_at DESC
+       LIMIT 1`
     ).get(sessionId) as Record<string, unknown> | undefined;
     return row ? this.rowToSessionSummary(row) : null;
   }
@@ -2823,32 +5014,367 @@ export class ScallopDatabase {
     return row.count;
   }
 
+  getSessionSummaryFailure(sessionId: string): SessionSummaryFailureState | null {
+    const row = this.db.prepare(`
+      SELECT session_id AS key, failure_count, last_failure_at, next_retry_at, last_error_code
+      FROM session_summary_failures WHERE session_id = ?
+    `).get(sessionId) as Record<string, unknown> | undefined;
+    return row ? this.rowToSessionSummaryFailureState(row) : null;
+  }
+
+  recordSessionSummaryFailure(
+    sessionId: string,
+    errorCode: string,
+    now: number = Date.now(),
+  ): SessionSummaryFailureState {
+    const record = this.db.transaction(() => {
+      const prior = this.getSessionSummaryFailure(sessionId);
+      const failureCount = (prior?.failureCount ?? 0) + 1;
+      const nextRetryAt = now + summaryFailureBackoffMs(failureCount);
+      this.db.prepare(`
+        INSERT INTO session_summary_failures
+          (session_id, failure_count, last_failure_at, next_retry_at, last_error_code)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(session_id) DO UPDATE SET
+          failure_count = excluded.failure_count,
+          last_failure_at = excluded.last_failure_at,
+          next_retry_at = excluded.next_retry_at,
+          last_error_code = excluded.last_error_code
+      `).run(sessionId, failureCount, now, nextRetryAt, errorCode);
+      return { key: sessionId, failureCount, lastFailureAt: now, nextRetryAt, lastErrorCode: errorCode };
+    });
+    return record.immediate();
+  }
+
+  clearSessionSummaryFailure(sessionId: string): void {
+    this.db.prepare('DELETE FROM session_summary_failures WHERE session_id = ?').run(sessionId);
+  }
+
+  getStructuredRouteCircuit(route: string): SessionSummaryFailureState | null {
+    const row = this.db.prepare(`
+      SELECT route AS key, failure_count, last_failure_at, next_retry_at, last_error_code
+      FROM structured_route_circuits WHERE route = ?
+    `).get(route) as Record<string, unknown> | undefined;
+    return row ? this.rowToSessionSummaryFailureState(row) : null;
+  }
+
+  recordStructuredRouteFailure(
+    route: string,
+    errorCode: string,
+    now: number = Date.now(),
+  ): SessionSummaryFailureState {
+    const record = this.db.transaction(() => {
+      const prior = this.getStructuredRouteCircuit(route);
+      const failureCount = (prior?.failureCount ?? 0) + 1;
+      const nextRetryAt = now + summaryFailureBackoffMs(failureCount);
+      this.db.prepare(`
+        INSERT INTO structured_route_circuits
+          (route, failure_count, last_failure_at, next_retry_at, last_error_code)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(route) DO UPDATE SET
+          failure_count = excluded.failure_count,
+          last_failure_at = excluded.last_failure_at,
+          next_retry_at = excluded.next_retry_at,
+          last_error_code = excluded.last_error_code
+      `).run(route, failureCount, now, nextRetryAt, errorCode);
+      return { key: route, failureCount, lastFailureAt: now, nextRetryAt, lastErrorCode: errorCode };
+    });
+    return record.immediate();
+  }
+
+  clearStructuredRouteCircuit(route: string): void {
+    this.db.prepare('DELETE FROM structured_route_circuits WHERE route = ?').run(route);
+  }
+
+  private parseSummaryTopics(raw: unknown): string[] | null {
+    let parsed = raw;
+    if (typeof raw === 'string') {
+      try {
+        parsed = JSON.parse(raw) as unknown;
+      } catch {
+        return null;
+      }
+    }
+    if (!Array.isArray(parsed) || !parsed.every(topic => typeof topic === 'string')) return null;
+    return parsed.map(topic => topic.trim());
+  }
+
+  /** Structural + transcript-bound verification used by retention receipts. */
+  private evaluateSessionSummaryVerification(
+    summary: {
+      sessionId: string;
+      summary: string;
+      topics: unknown;
+      messageCount: number;
+      durationMs: number;
+    },
+    legacyAudit: boolean,
+  ): { valid: boolean; reason: string } {
+    const text = typeof summary.summary === 'string' ? summary.summary.trim() : '';
+    const minimumLength = legacyAudit ? 20 : 10;
+    if (text.length < minimumLength || text.length > 12_000) {
+      return { valid: false, reason: 'summary_text_out_of_bounds' };
+    }
+    const topics = this.parseSummaryTopics(summary.topics);
+    if (!topics || topics.length < 1 || topics.length > 20
+      || topics.some(topic => topic.length < 1 || topic.length > 100)) {
+      return { valid: false, reason: 'topics_schema_invalid' };
+    }
+    if (!Number.isInteger(summary.messageCount) || summary.messageCount < 2) {
+      return { valid: false, reason: 'message_count_invalid' };
+    }
+    if (!Number.isFinite(summary.durationMs) || summary.durationMs < 0) {
+      return { valid: false, reason: 'duration_invalid' };
+    }
+
+    const session = this.getSession(summary.sessionId);
+    if (!session) return { valid: false, reason: 'source_session_missing' };
+    const rows = this.db.prepare(`
+      SELECT id AS message_id, role, content, message_kind
+      FROM session_messages WHERE session_id = ?
+      UNION ALL
+      SELECT original_message_id AS message_id, role, content, message_kind
+      FROM session_message_archive WHERE session_id = ?
+    `).all(summary.sessionId, summary.sessionId) as Array<{
+      message_id: number;
+      role: string;
+      content: string;
+      message_kind: unknown;
+    }>;
+    const messages = new Map<number, typeof rows[number]>();
+    // Hot rows are selected first and remain authoritative during a partially
+    // completed archive transaction; cold duplicates are ignored by ID.
+    for (const row of rows) {
+      if (!messages.has(row.message_id)) messages.set(row.message_id, row);
+    }
+
+    let humanTurns = 0;
+    let assistantFinals = 0;
+    for (const row of messages.values()) {
+      const inferred = inferSessionMessageKind(row.role, row.content, session.metadata);
+      const kind = isPersistedSessionMessageKind(row.message_kind) ? row.message_kind : inferred;
+      if ((kind === 'human_user' || kind === 'assistant_final') && kind !== inferred) {
+        return { valid: false, reason: 'visible_message_kind_mismatch' };
+      }
+      if (kind === 'human_user') humanTurns++;
+      if (kind === 'assistant_final') assistantFinals++;
+    }
+    const visibleCount = humanTurns + assistantFinals;
+    if (humanTurns < 1 || assistantFinals < 1) {
+      return { valid: false, reason: 'conversation_pair_missing' };
+    }
+    if (visibleCount !== summary.messageCount) {
+      return { valid: false, reason: 'message_count_mismatch' };
+    }
+    return {
+      valid: true,
+      reason: legacyAudit ? 'legacy_structure_and_transcript_match' : 'schema_and_transcript_match',
+    };
+  }
+
+  private insertSessionSummaryRevision(input: {
+    summaryId: string;
+    summary: SessionSummaryInput | SessionSummaryRow;
+    createdAt: number;
+    verifiedAt: number | null;
+    verifier: string | null;
+    verificationVersion: number | null;
+    schemaValid: boolean;
+    reason: string;
+    archivedAt: number;
+  }): string {
+    const prior = this.db.prepare(`
+      SELECT MAX(revision_number) AS revision_number
+      FROM session_summary_revisions WHERE summary_id = ?
+    `).get(input.summaryId) as { revision_number: number | null };
+    const revisionNumber = (prior.revision_number ?? 0) + 1;
+    const revisionId = nanoid();
+    this.db.prepare(`
+      INSERT INTO session_summary_revisions (
+        id, summary_id, session_id, user_id, revision_number, summary, topics,
+        message_count, duration_ms, embedding, original_created_at,
+        verified_at, verifier, verification_version, schema_valid,
+        revision_reason, archived_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      revisionId,
+      input.summaryId,
+      input.summary.sessionId,
+      input.summary.userId,
+      revisionNumber,
+      input.summary.summary,
+      JSON.stringify(input.summary.topics),
+      input.summary.messageCount,
+      input.summary.durationMs,
+      input.summary.embedding ? JSON.stringify(input.summary.embedding) : null,
+      input.createdAt,
+      input.verifiedAt,
+      input.verifier,
+      input.verificationVersion,
+      input.schemaValid ? 1 : 0,
+      input.reason,
+      input.archivedAt,
+    );
+    return revisionId;
+  }
+
+  private insertSessionSummaryVerificationEvent(
+    event: Omit<SessionSummaryVerificationEventRow, 'id'>,
+  ): void {
+    this.db.prepare(`
+      INSERT INTO session_summary_verification_events (
+        summary_id, session_id, outcome, verifier,
+        verification_version, reason, checked_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      event.summaryId,
+      event.sessionId,
+      event.outcome,
+      event.verifier,
+      event.verificationVersion,
+      event.reason,
+      event.checkedAt,
+    );
+  }
+
+  private rowToSessionSummaryFailureState(row: Record<string, unknown>): SessionSummaryFailureState {
+    return {
+      key: row.key as string,
+      failureCount: Number(row.failure_count),
+      lastFailureAt: Number(row.last_failure_at),
+      nextRetryAt: Number(row.next_retry_at),
+      lastErrorCode: row.last_error_code as string,
+    };
+  }
+
   private rowToSessionSummary(row: Record<string, unknown>): SessionSummaryRow {
     return {
       id: row.id as string,
       sessionId: row.session_id as string,
       userId: row.user_id as string,
       summary: row.summary as string,
-      topics: row.topics ? JSON.parse(row.topics as string) : [],
+      topics: this.parseSummaryTopics(row.topics) ?? [],
       messageCount: row.message_count as number,
       durationMs: row.duration_ms as number,
       embedding: row.embedding ? JSON.parse(row.embedding as string) : null,
       createdAt: row.created_at as number,
+      verifiedAt: row.verified_at == null ? null : Number(row.verified_at),
+      verifier: row.verifier == null ? null : String(row.verifier),
+      verificationVersion: row.verification_version == null ? null : Number(row.verification_version),
+      schemaValid: Number(row.schema_valid ?? 0) === 1,
     };
   }
 
   /**
-   * Delete sessions (and their messages) older than maxAgeDays.
-   * Returns the number of sessions deleted.
+   * Prune raw transcripts only after a session has been explicitly archived
+   * and has a verified durable summary. The session tombstone and summary are
+   * retained, and unsummarized sessions are never touched.
+   *
+   * The historical method name is kept for API compatibility.
    */
   pruneOldSessions(maxAgeDays: number = 30): number {
     const cutoff = Date.now() - maxAgeDays * 24 * 60 * 60 * 1000;
-    // Delete messages first (foreign key not enforced in SQLite by default)
-    this.db.prepare(
-      'DELETE FROM session_messages WHERE session_id IN (SELECT id FROM sessions WHERE updated_at < ?)'
-    ).run(cutoff);
-    const result = this.db.prepare('DELETE FROM sessions WHERE updated_at < ?').run(cutoff);
-    return result.changes;
+    const prune = this.db.transaction(() => {
+      const rows = this.db.prepare(`
+        SELECT s.id, s.metadata,
+          (SELECT COUNT(*) FROM session_messages WHERE session_id = s.id) AS message_count
+        FROM sessions s
+        WHERE s.updated_at < ?
+          AND s.archived_at IS NOT NULL
+          AND s.transcript_deleted_at IS NULL
+          AND EXISTS (
+            SELECT 1
+            FROM session_summaries summary
+            WHERE summary.session_id = s.id
+              AND summary.schema_valid = 1
+              AND summary.verified_at IS NOT NULL
+              AND summary.verifier IS NOT NULL
+              AND summary.verification_version >= 1
+              AND EXISTS (
+                SELECT 1 FROM session_summary_verification_events receipt
+                WHERE receipt.summary_id = summary.id
+                  AND receipt.outcome = 'verified'
+                  AND receipt.verifier = summary.verifier
+                  AND receipt.verification_version = summary.verification_version
+              )
+          )
+      `).all(cutoff) as Record<string, unknown>[];
+
+      const now = Date.now();
+      let pruned = 0;
+      for (const row of rows) {
+        const sessionId = row.id as string;
+        const summaryRow = this.db.prepare(`
+          SELECT * FROM session_summaries
+          WHERE session_id = ? AND schema_valid = 1 AND verified_at IS NOT NULL
+          ORDER BY verified_at DESC LIMIT 1
+        `).get(sessionId) as Record<string, unknown> | undefined;
+        if (!summaryRow) continue;
+        const summary = this.rowToSessionSummary(summaryRow);
+        const revalidation = this.evaluateSessionSummaryVerification(summary, false);
+        if (!revalidation.valid) {
+          this.db.prepare(`
+            UPDATE session_summaries
+            SET schema_valid = 0, verified_at = NULL
+            WHERE id = ?
+          `).run(summary.id);
+          this.insertSessionSummaryVerificationEvent({
+            summaryId: summary.id,
+            sessionId,
+            outcome: 'rejected',
+            verifier: 'retention_revalidation',
+            verificationVersion: 1,
+            reason: revalidation.reason,
+            checkedAt: now,
+          });
+          continue;
+        }
+        this.db.prepare(`
+          INSERT OR IGNORE INTO session_message_archive (
+            original_message_id, session_id, role, content, message_kind, created_at,
+            archived_at, archive_reason
+          )
+          SELECT id, session_id, role, content, message_kind, created_at, ?,
+            'retention_after_verified_summary'
+          FROM session_messages
+          WHERE session_id = ?
+        `).run(now, sessionId);
+
+        const missing = this.db.prepare(`
+          SELECT COUNT(*) AS count
+          FROM session_messages live
+          LEFT JOIN session_message_archive cold
+            ON cold.original_message_id = live.id
+          WHERE live.session_id = ?
+            AND (
+              cold.original_message_id IS NULL
+              OR cold.message_kind IS NULL
+              OR cold.message_kind != live.message_kind
+            )
+        `).get(sessionId) as { count: number };
+        if (missing.count > 0) {
+          throw new Error(`Refusing to prune ${sessionId}: ${missing.count} message(s) were not archived`);
+        }
+        this.db.prepare('DELETE FROM session_messages WHERE session_id = ?').run(sessionId);
+        this.db.prepare(`
+          UPDATE sessions
+          SET transcript_deleted_at = ?
+          WHERE id = ? AND transcript_deleted_at IS NULL
+        `).run(now, sessionId);
+        this.insertSessionLifecycleEvent({
+          sessionId,
+          userId: this.sessionUserIdFromMetadata(row.metadata),
+          action: 'transcript_pruned',
+          reason: 'retention_after_verified_summary_and_raw_archive',
+          actor: 'gardener',
+          messageCount: Number(row.message_count ?? 0),
+          createdAt: now,
+        });
+        pruned++;
+      }
+      return pruned;
+    });
+    return prune();
   }
 
   /**
@@ -2966,6 +5492,7 @@ export class ScallopDatabase {
    * Status defaults to 'pending' if not specified
    */
   addScheduledItem(item: Omit<ScheduledItem, 'id' | 'status' | 'createdAt' | 'updatedAt' | 'firedAt' | 'kind' | 'taskConfig' | 'boardStatus' | 'priority' | 'labels' | 'result' | 'dependsOn' | 'goalId' | 'workerId' | 'preferredWorkerId' | 'leaseToken' | 'leasedAt' | 'leaseExpiresAt' | 'attemptCount' | 'maxAttempts' | 'lastError' | 'handedOffFrom' | 'messageProvenance' | 'sourceItemId'> & { status?: ScheduledItemStatus; kind?: ScheduledItemKind; taskConfig?: TaskConfig | null; boardStatus?: BoardStatus | null; priority?: Priority; labels?: string[] | null; dependsOn?: string[] | null; goalId?: string | null; preferredWorkerId?: string | null; maxAttempts?: number; messageProvenance?: ScheduledMessageProvenance; sourceItemId?: string | null }): ScheduledItem {
+    if (item.recurring) validateRecurringSchedule(item.recurring, item.message);
     const id = nanoid();
     const now = Date.now();
     const status = item.status ?? (
@@ -2976,8 +5503,9 @@ export class ScallopDatabase {
     );
     const boardStatus = item.boardStatus ?? (
       status === 'processing' ? 'in_progress'
+        : status === 'blocked' ? 'waiting'
         : status === 'fired' || status === 'acted' ? 'done'
-          : status === 'dismissed' || status === 'expired' ? 'archived'
+          : status === 'dismissed' || status === 'expired' || status === 'failed' ? 'archived'
             : item.triggerAt > 0 ? 'scheduled' : 'inbox'
     );
     const messageProvenance: ScheduledMessageProvenance = item.source === 'user'
@@ -2999,6 +5527,15 @@ export class ScallopDatabase {
       if (existing) {
         return existing;
       }
+    }
+
+    if (item.goalId) {
+      this.ensureScheduledGoalReference(
+        item.goalId,
+        item.userId,
+        item.message,
+        item.kind ?? 'nudge',
+      );
     }
 
     const stmt = this.db.prepare(`
@@ -3286,7 +5823,7 @@ export class ScallopDatabase {
       `).run(now, now);
       this.db.prepare(`
         UPDATE scheduled_items
-        SET status = 'expired', board_status = 'archived', worker_id = NULL,
+        SET status = 'failed', board_status = 'archived', worker_id = NULL,
             lease_token = NULL, leased_at = NULL, lease_expires_at = NULL,
             last_error = COALESCE(last_error, 'Worker lease expired; retry budget exhausted'), updated_at = ?
         WHERE kind = 'task' AND status = 'processing'
@@ -3406,6 +5943,9 @@ export class ScallopDatabase {
     result: BoardItemResult,
     now: number = Date.now(),
   ): boolean {
+    // A natural-language response is not evidence of completion. Only an
+    // explicit successful worker outcome may cross the done/goal boundary.
+    if (result.taskComplete !== true || result.outcome !== 'succeeded') return false;
     const updated = this.db.prepare(`
       UPDATE scheduled_items
       SET status = 'fired', board_status = 'done', result = ?, fired_at = ?,
@@ -3425,7 +5965,12 @@ export class ScallopDatabase {
     itemId: string,
     leaseToken: string,
     error: string,
-    options: { retryable?: boolean; retryAt?: number } = {},
+    options: {
+      retryable?: boolean;
+      retryAt?: number;
+      result?: BoardItemResult;
+      failureCode?: string;
+    } = {},
     now: number = Date.now(),
   ): 'retry_scheduled' | 'exhausted' | 'stale_lease' {
     const transaction = this.db.transaction(() => {
@@ -3450,10 +5995,16 @@ export class ScallopDatabase {
         return 'retry_scheduled' as const;
       }
 
-      const failureResult: BoardItemResult = { response: `Error: ${error}`, completedAt: now };
+      const failureResult: BoardItemResult = options.result ?? {
+        response: `Error: ${error}`,
+        completedAt: now,
+        taskComplete: false,
+        outcome: 'failed',
+        failureCode: options.failureCode ?? 'task_execution_failed',
+      };
       this.db.prepare(`
         UPDATE scheduled_items
-        SET status = 'expired', board_status = 'archived', result = ?,
+        SET status = 'failed', board_status = 'archived', result = ?,
             worker_id = NULL, lease_token = NULL, leased_at = NULL,
             lease_expires_at = NULL, last_error = ?, updated_at = ?
         WHERE id = ? AND lease_token = ?
@@ -3461,6 +6012,174 @@ export class ScallopDatabase {
       return 'exhausted' as const;
     });
     return transaction.immediate();
+  }
+
+  /** Pause a live task without making it claimable again. */
+  blockBoardTaskLease(
+    itemId: string,
+    leaseToken: string,
+    reason: string,
+    result: BoardItemResult,
+    now: number = Date.now(),
+  ): boolean {
+    const blockedResult: BoardItemResult = {
+      ...result,
+      taskComplete: false,
+      outcome: 'blocked',
+    };
+    const updated = this.db.prepare(`
+      UPDATE scheduled_items
+      SET status = 'blocked', board_status = 'waiting', result = ?,
+          worker_id = NULL, lease_token = NULL, leased_at = NULL,
+          lease_expires_at = NULL, last_error = ?, updated_at = ?
+      WHERE id = ? AND status = 'processing' AND lease_token = ?
+        AND lease_expires_at > ?
+    `).run(JSON.stringify(blockedResult), reason, now, itemId, leaseToken, now);
+    return updated.changes > 0;
+  }
+
+  /** Expire a missed occurrence while preserving why no worker ran. */
+  expireBoardTaskLease(
+    itemId: string,
+    leaseToken: string,
+    reason: string,
+    result: BoardItemResult,
+    now: number = Date.now(),
+  ): boolean {
+    const updated = this.db.prepare(`
+      UPDATE scheduled_items
+      SET status = 'expired', board_status = 'archived', result = ?,
+          worker_id = NULL, lease_token = NULL, leased_at = NULL,
+          lease_expires_at = NULL, last_error = ?, updated_at = ?
+      WHERE id = ? AND status = 'processing' AND lease_token = ?
+        AND lease_expires_at > ?
+    `).run(JSON.stringify(result), reason, now, itemId, leaseToken, now);
+    return updated.changes > 0;
+  }
+
+  /**
+   * Persist an identical runtime-failure streak across retries and successor
+   * rows in a recurring series. Opening and notification reservation happen in
+   * one transaction so restarts or competing schedulers cannot resurrect the
+   * loop or send duplicate pause notices.
+   */
+  recordRecurringTaskFailure(
+    item: ScheduledItem,
+    error: string,
+    failureCode?: string,
+    forceOpen: boolean = false,
+    now: number = Date.now(),
+  ): RecurringTaskFailureCircuitResult | null {
+    if (!item.recurring || !item.taskConfig?.goal) return null;
+    const seriesKey = recurringTaskSeriesKey(item);
+    const fingerprint = recurringFailureFingerprint(error, failureCode);
+    const transaction = this.db.transaction(() => {
+      const existing = this.db.prepare(`
+        SELECT failure_fingerprint, failure_count, opened_at, notification_reserved_at
+        FROM recurring_task_failure_circuits WHERE series_key = ?
+      `).get(seriesKey) as {
+        failure_fingerprint: string;
+        failure_count: number;
+        opened_at: number | null;
+        notification_reserved_at: number | null;
+      } | undefined;
+      const sameFailure = existing?.failure_fingerprint === fingerprint;
+      const failureCount = sameFailure ? existing.failure_count + 1 : 1;
+      let openedAt = sameFailure ? existing.opened_at : null;
+      let notificationReservedAt = sameFailure ? existing.notification_reserved_at : null;
+      if (openedAt == null && (forceOpen || failureCount >= 2)) openedAt = now;
+      const shouldNotify = openedAt != null && notificationReservedAt == null;
+      if (shouldNotify) notificationReservedAt = now;
+
+      this.db.prepare(`
+        INSERT INTO recurring_task_failure_circuits (
+          series_key, failure_fingerprint, failure_count, opened_at,
+          notification_reserved_at, last_failure_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(series_key) DO UPDATE SET
+          failure_fingerprint = excluded.failure_fingerprint,
+          failure_count = excluded.failure_count,
+          opened_at = excluded.opened_at,
+          notification_reserved_at = excluded.notification_reserved_at,
+          last_failure_at = excluded.last_failure_at,
+          updated_at = excluded.updated_at
+      `).run(
+        seriesKey,
+        fingerprint,
+        failureCount,
+        openedAt,
+        notificationReservedAt,
+        now,
+        now,
+      );
+      return {
+        seriesKey,
+        fingerprint,
+        failureCount,
+        opened: openedAt != null,
+        shouldNotify,
+      } satisfies RecurringTaskFailureCircuitResult;
+    });
+    return transaction.immediate();
+  }
+
+  /** Prevent newly-created successor rows from bypassing an open series circuit. */
+  isRecurringTaskFailureCircuitOpen(item: ScheduledItem): boolean {
+    if (!item.recurring || !item.taskConfig?.goal) return false;
+    const row = this.db.prepare(`
+      SELECT 1 FROM recurring_task_failure_circuits
+      WHERE series_key = ? AND opened_at IS NOT NULL
+    `).get(recurringTaskSeriesKey(item));
+    return row != null;
+  }
+
+  /** A verified worker success starts the series with a clean failure streak. */
+  resetRecurringTaskFailureCircuit(item: ScheduledItem): boolean {
+    if (!item.recurring || !item.taskConfig?.goal) return false;
+    return this.db.prepare(
+      'DELETE FROM recurring_task_failure_circuits WHERE series_key = ?',
+    ).run(recurringTaskSeriesKey(item)).changes > 0;
+  }
+
+  /**
+   * Circuit-break pending siblings in the same recurring task series after a
+   * permanent capability failure. Returns the number of additional rows paused.
+   */
+  pauseRecurringTaskSeries(item: ScheduledItem, reason: string, now: number = Date.now()): number {
+    if (!item.recurring || !item.taskConfig?.goal) return 0;
+    const resultPayload: BoardItemResult = {
+      response: 'This recurring task is paused after repeated or exhausted runtime failures.',
+      completedAt: now,
+      taskComplete: false,
+      outcome: 'blocked',
+      failureCode: 'recurring_runtime_circuit_open',
+    };
+    const result = this.db.prepare(`
+      UPDATE scheduled_items
+      SET status = 'blocked', board_status = 'waiting',
+          result = COALESCE(result, ?), last_error = ?, updated_at = ?
+      WHERE user_id = ? AND kind = 'task' AND status = 'pending'
+        AND recurring IS NOT NULL AND json_valid(recurring)
+        AND json_extract(recurring, '$.type') = ?
+        AND json_extract(recurring, '$.hour') = ?
+        AND json_extract(recurring, '$.minute') = ?
+        AND COALESCE(json_extract(recurring, '$.dayOfWeek'), -1) = ?
+        AND COALESCE(json_extract(recurring, '$.dayOfMonth'), -1) = ?
+        AND task_config IS NOT NULL AND json_valid(task_config)
+        AND json_extract(task_config, '$.goal') = ?
+    `).run(
+      JSON.stringify(resultPayload),
+      reason,
+      now,
+      item.userId,
+      item.recurring.type,
+      item.recurring.hour,
+      item.recurring.minute,
+      item.recurring.dayOfWeek ?? -1,
+      item.recurring.dayOfMonth ?? -1,
+      item.taskConfig.goal,
+    );
+    return result.changes;
   }
 
   /** Release a live task to a named worker while retaining its audit trail. */
@@ -3508,7 +6227,7 @@ export class ScallopDatabase {
       `).run(now, now).changes;
       const exhausted = this.db.prepare(`
         UPDATE scheduled_items
-        SET status = 'expired', board_status = 'archived', worker_id = NULL,
+        SET status = 'failed', board_status = 'archived', worker_id = NULL,
             lease_token = NULL, leased_at = NULL, lease_expires_at = NULL,
             last_error = COALESCE(last_error, 'Worker lease expired; retry budget exhausted'), updated_at = ?
         WHERE kind = 'task' AND status = 'processing'
@@ -3889,10 +6608,12 @@ export class ScallopDatabase {
       params.push(updates.status);
       sets.push(`board_status = CASE ?
         WHEN 'processing' THEN 'in_progress'
+        WHEN 'blocked' THEN 'waiting'
         WHEN 'fired' THEN 'done'
         WHEN 'acted' THEN 'done'
         WHEN 'dismissed' THEN 'archived'
         WHEN 'expired' THEN 'archived'
+        WHEN 'failed' THEN 'archived'
         ELSE CASE
           WHEN board_status IN ('inbox', 'backlog', 'scheduled', 'waiting') THEN board_status
           WHEN COALESCE(?, trigger_at) > 0 THEN 'scheduled'
@@ -3925,6 +6646,16 @@ export class ScallopDatabase {
     status?: ScheduledItemStatus;
   }): boolean {
     const now = Date.now();
+    if (updates.goalId) {
+      const current = this.getScheduledItem(id);
+      if (!current) return false;
+      this.ensureScheduledGoalReference(
+        updates.goalId,
+        current.userId,
+        updates.message ?? current.message,
+        updates.kind ?? current.kind,
+      );
+    }
     const sets: string[] = ['updated_at = ?'];
     const params: unknown[] = [now];
 
@@ -3968,10 +6699,12 @@ export class ScallopDatabase {
       if (updates.boardStatus === undefined) {
         sets.push(`board_status = CASE ?
           WHEN 'processing' THEN 'in_progress'
+          WHEN 'blocked' THEN 'waiting'
           WHEN 'fired' THEN 'done'
           WHEN 'acted' THEN 'done'
           WHEN 'dismissed' THEN 'archived'
           WHEN 'expired' THEN 'archived'
+          WHEN 'failed' THEN 'archived'
           ELSE CASE
             WHEN board_status IN ('inbox', 'backlog', 'scheduled', 'waiting') THEN board_status
             WHEN COALESCE(?, trigger_at) > 0 THEN 'scheduled'
@@ -4162,11 +6895,7 @@ export class ScallopDatabase {
    * Record a proactive message that was sent to a user. Persists to SQLite so
    * the in-memory dedup history survives process restarts.
    */
-  /**
-   * Record an LLM call trace for fine-tune dataset building.
-   * Self-pruning: roughly every 200 inserts, drops rows older than 45 days
-   * so the table can't grow unbounded on the Pi if nightly pulls lapse.
-   */
+  /** Record an LLM diagnostic trace. Content retention is controlled upstream. */
   insertLlmTrace(row: {
     ts: number;
     purpose: string;
@@ -4205,16 +6934,38 @@ export class ScallopDatabase {
       row.modelMaxOutputTokens ?? null
     );
 
-    if (++this.llmTraceInsertCount % 200 === 0) {
-      this.pruneLlmTraces(Date.now() - 45 * 24 * 60 * 60 * 1000);
+    // Timestamp-based maintenance works across restarts and low-volume bots;
+    // an insert counter could stay below its threshold forever.
+    if (Date.now() - this.lastRetentionMaintenanceAt >= 60 * 60 * 1000) {
+      this.runRetentionMaintenance();
     }
   }
-
-  private llmTraceInsertCount = 0;
 
   /** Delete traces older than `cutoffMs`. Returns rows removed. */
   pruneLlmTraces(cutoffMs: number): number {
     return this.db.prepare('DELETE FROM llm_traces WHERE ts < ?').run(cutoffMs).changes as number;
+  }
+
+  /**
+   * Startup/hourly retention for potentially private diagnostics. Full trace
+   * content is opt-in and defaults to a short seven-day window; compact
+   * proactive decisions keep a longer configurable diagnostic window.
+   */
+  runRetentionMaintenance(now: number = Date.now()): {
+    tracesDeleted: number;
+    proactiveDecisionsDeleted: number;
+  } {
+    const days = (name: string, fallback: number): number => {
+      const parsed = Number(process.env[name]);
+      return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+    };
+    const traceDays = days('LLM_TRACE_RETENTION_DAYS', 7);
+    const decisionDays = days('PROACTIVE_DECISION_RETENTION_DAYS', 30);
+    const dayMs = 24 * 60 * 60 * 1000;
+    const tracesDeleted = this.pruneLlmTraces(now - traceDays * dayMs);
+    const proactiveDecisionsDeleted = this.pruneProactiveDecisions(now - decisionDays * dayMs);
+    this.lastRetentionMaintenanceAt = now;
+    return { tracesDeleted, proactiveDecisionsDeleted };
   }
 
   /** Trace counts by purpose/parse outcome since `sinceMs` (observability). */
@@ -4412,6 +7163,51 @@ export class ScallopDatabase {
       reason: r.reason,
       detail: r.detail ? parseDetailJSON(r.detail) : null,
     }));
+  }
+
+  /**
+   * Return the durable evaluation which started the current fingerprint cache
+   * window. Cache-hit diagnostics are deliberately excluded: using a later
+   * `unchanged_*` row as the anchor would slide the TTL forever and prevent a
+   * genuinely fresh evaluation while the underlying signal stayed unchanged.
+   */
+  getLatestProactiveEvaluationAnchor(userId: string): {
+    id: number;
+    userId: string;
+    at: number;
+    stage: string;
+    outcome: string;
+    reason: string | null;
+    detail: Record<string, unknown> | null;
+  } | null {
+    const row = this.db.prepare(`
+      SELECT id, user_id, at, stage, outcome, reason, detail
+      FROM proactive_decisions
+      WHERE user_id = ?
+        AND stage = 'evaluate'
+        AND json_type(detail, '$.signalFingerprint') = 'text'
+        AND (outcome = 'created' OR reason = 'llm_skipped_all')
+      ORDER BY at DESC, id DESC
+      LIMIT 1
+    `).get(userId) as {
+      id: number;
+      user_id: string;
+      at: number;
+      stage: string;
+      outcome: string;
+      reason: string | null;
+      detail: string | null;
+    } | undefined;
+    if (!row) return null;
+    return {
+      id: row.id,
+      userId: row.user_id,
+      at: row.at,
+      stage: row.stage,
+      outcome: row.outcome,
+      reason: row.reason,
+      detail: row.detail ? parseDetailJSON(row.detail) : null,
+    };
   }
 
   /** Prune proactive_decisions older than `cutoffMs`. */
@@ -5146,22 +7942,43 @@ export class ScallopDatabase {
   }
 
   private rowToSession(row: Record<string, unknown>): SessionRow {
+    let metadata: Record<string, unknown> | null = null;
+    if (typeof row.metadata === 'string') {
+      try {
+        const parsed = JSON.parse(row.metadata) as unknown;
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          metadata = parsed as Record<string, unknown>;
+        }
+      } catch {
+        // Preserve the row and treat malformed legacy metadata as unknown.
+      }
+    }
     return {
       id: row.id as string,
-      metadata: row.metadata ? JSON.parse(row.metadata as string) : null,
+      metadata,
       inputTokens: row.input_tokens as number,
       outputTokens: row.output_tokens as number,
       createdAt: row.created_at as number,
       updatedAt: row.updated_at as number,
+      archivedAt: row.archived_at == null ? null : row.archived_at as number,
+      archiveReason: row.archive_reason == null ? null : row.archive_reason as string,
+      transcriptDeletedAt: row.transcript_deleted_at == null ? null : row.transcript_deleted_at as number,
     };
   }
 
   private rowToSessionMessage(row: Record<string, unknown>): SessionMessageRow {
+    const metadata = typeof row.session_metadata === 'string'
+      ? parseDetailJSON(row.session_metadata)
+      : null;
+    const messageKind = isPersistedSessionMessageKind(row.message_kind)
+      ? row.message_kind
+      : inferSessionMessageKind(String(row.role), row.content, metadata);
     return {
       id: row.id as number,
       sessionId: row.session_id as string,
       role: row.role as string,
       content: row.content as string,
+      messageKind,
       createdAt: row.created_at as number,
     };
   }
@@ -5247,14 +8064,33 @@ export class ScallopDatabase {
   deleteOldSubAgentRuns(maxAgeMs: number): number {
     const cutoff = Date.now() - maxAgeMs;
     const result = this.db.prepare(
-      "DELETE FROM subagent_runs WHERE status NOT IN ('pending', 'running') AND created_at < ?"
+      "DELETE FROM subagent_runs WHERE status NOT IN ('pending', 'running') AND COALESCE(completed_at, created_at) < ?"
     ).run(cutoff);
+    return result.changes;
+  }
+
+  /**
+   * Remove bulky/private run payloads but keep the compact execution ledger
+   * (status, timings, model, token counts, iterations and completion signal).
+   */
+  compactOldSubAgentRuns(maxAgeMs: number): number {
+    const cutoff = Date.now() - maxAgeMs;
+    const result = this.db.prepare(`
+      UPDATE subagent_runs
+      SET task = '[compacted]', label = 'sub-agent', allowed_skills = NULL,
+          result_response = NULL,
+          error = CASE WHEN error IS NULL THEN NULL ELSE '[redacted]' END
+      WHERE status NOT IN ('pending', 'running')
+        AND COALESCE(completed_at, created_at) < ?
+        AND (task != '[compacted]' OR allowed_skills IS NOT NULL
+          OR result_response IS NOT NULL OR (error IS NOT NULL AND error != '[redacted]'))
+    `).run(cutoff);
     return result.changes;
   }
 
   getSubAgentChildSessionIds(maxAgeMs?: number): string[] {
     const sql = maxAgeMs
-      ? 'SELECT child_session_id FROM subagent_runs WHERE created_at < ?'
+      ? "SELECT child_session_id FROM subagent_runs WHERE status NOT IN ('pending', 'running') AND COALESCE(completed_at, created_at) < ?"
       : 'SELECT child_session_id FROM subagent_runs';
     const params = maxAgeMs ? [Date.now() - maxAgeMs] : [];
     const rows = this.db.prepare(sql).all(...params) as Array<Record<string, unknown>>;

@@ -94,6 +94,17 @@ export interface CompletionRequest {
   /** Token budget for thinking/reasoning (used by thinking levels system) */
   thinkingBudgetTokens?: number;
   /**
+   * Provider-enforced JSON shape for strict background routes. Providers with
+   * native JSON Schema support send the full schema; compatible providers that
+   * only support JSON mode may enforce JSON and leave final schema validation
+   * to the caller.
+   */
+  structuredOutput?: {
+    name: string;
+    schema: Record<string, unknown>;
+    strict?: boolean;
+  };
+  /**
    * Abort signal to cancel an in-flight request. Providers that support
    * cancellation (Anthropic, OpenAI, OpenRouter, Moonshot via fetch/SDK
    * signal plumbing) will terminate the underlying HTTP call; others

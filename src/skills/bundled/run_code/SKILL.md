@@ -22,6 +22,8 @@ scripts:
 metadata:
   openclaw:
     emoji: "\U0001F9EE"
+    safety:
+      localWrite: true
     requires:
       bins: [node]
 ---

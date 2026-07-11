@@ -152,7 +152,7 @@ function getHelpMessage(): string {
 
 **Slash Commands:**
 \`/ask <message>\` - Ask me a question
-\`/reset\` - Clear your conversation history
+\`/reset\` - Preserve this conversation and start a new one
 \`/help\` - Show this help message
 \`/status\` - Show session status
 
@@ -338,7 +338,7 @@ export class DiscordChannel {
 
         case 'reset':
           await this.handleReset(userId);
-          await interaction.reply('Conversation history cleared. Starting fresh!');
+          await interaction.reply('Started a new conversation. Your previous conversation is preserved.');
           break;
 
         case 'help':
@@ -403,10 +403,11 @@ export class DiscordChannel {
    */
   async handleReset(userId: string): Promise<void> {
     const sessionId = this.userSessions.get(userId);
-    if (sessionId) {
-      await this.sessionManager.deleteSession(sessionId);
-      this.userSessions.delete(userId);
-    }
+    const session = await this.sessionManager.startNewSession({
+      userId,
+      channelId: 'discord',
+    }, sessionId);
+    this.userSessions.set(userId, session.id);
   }
 
   /**

@@ -5,6 +5,8 @@ user-invocable: true
 metadata:
   openclaw:
     emoji: "\U0001F4E6"
+    safety:
+      localWrite: true
     requires:
       bins: [npm]
 ---

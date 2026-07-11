@@ -8,6 +8,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { getRecentChatContext } from './chat-context.js';
 import type { ScallopDatabase, SessionMessageRow } from '../memory/db.js';
+import { inferSessionMessageKind } from '../memory/session-message-kinds.js';
 
 // ============ Constants ============
 
@@ -17,11 +18,14 @@ const HOUR_MS = 60 * 60 * 1000;
 // ============ Helpers ============
 
 function makeMessage(overrides?: Partial<SessionMessageRow>): SessionMessageRow {
+  const role = overrides?.role ?? 'user';
+  const content = overrides?.content ?? 'Hello there';
   return {
     id: 1,
     sessionId: 'sess-1',
-    role: 'user',
-    content: 'Hello there',
+    role,
+    content,
+    messageKind: overrides?.messageKind ?? inferSessionMessageKind(role, content),
     createdAt: NOW - HOUR_MS,
     ...overrides,
   };
@@ -31,6 +35,7 @@ function makeMockDb(messages: SessionMessageRow[]): ScallopDatabase {
   return {
     getAllMessagesPaginated: vi.fn().mockReturnValue({ messages, hasMore: false }),
     getRecentMessagesByUserId: vi.fn().mockReturnValue(messages),
+    getSession: vi.fn().mockReturnValue({ id: 'sess-1', metadata: { userId: 'telegram:123' } }),
   } as unknown as ScallopDatabase;
 }
 
@@ -109,7 +114,7 @@ describe('getRecentChatContext', () => {
     const db = makeMockDb(messages);
 
     getRecentChatContext(db, { maxMessages: 3 });
-    expect(db.getAllMessagesPaginated).toHaveBeenCalledWith(3);
+    expect(db.getAllMessagesPaginated).toHaveBeenCalledWith(100);
   });
 
   it('uses a user-scoped query when a user ID is supplied', () => {
@@ -119,7 +124,7 @@ describe('getRecentChatContext', () => {
     const result = getRecentChatContext(db, 'telegram:123');
 
     expect(result?.formattedContext).toBe('User: Private chat');
-    expect(db.getRecentMessagesByUserId).toHaveBeenCalledWith('telegram:123', 10);
+    expect(db.getRecentMessagesByUserId).toHaveBeenCalledWith('telegram:123', 200);
     expect(db.getAllMessagesPaginated).not.toHaveBeenCalled();
   });
 
@@ -131,7 +136,7 @@ describe('getRecentChatContext', () => {
     const result = getRecentChatContext(db, 'default', { identityCandidates: aliases });
 
     expect(result?.formattedContext).toBe('User: Owner chat');
-    expect(db.getRecentMessagesByUserId).toHaveBeenCalledWith('default', 10, aliases);
+    expect(db.getRecentMessagesByUserId).toHaveBeenCalledWith('default', 200, aliases);
   });
 
   it('respects custom maxCharsPerMessage option', () => {
@@ -173,5 +178,31 @@ describe('getRecentChatContext', () => {
     const result = getRecentChatContext(db)!;
     expect(result.messageCount).toBe(1);
     expect(result.formattedContext).toBe('Assistant: Valid reply');
+  });
+
+  it('does not include tool results or sub-agent protocol as user conversation', () => {
+    const messages = [
+      makeMessage({ id: 1, content: 'Real user message', createdAt: NOW - 2 * HOUR_MS }),
+      makeMessage({
+        id: 2,
+        content: JSON.stringify([{ type: 'tool_result', tool_use_id: '1', content: 'private output' }]),
+        createdAt: NOW - HOUR_MS,
+      }),
+    ];
+    const db = makeMockDb(messages);
+    expect(getRecentChatContext(db)?.formattedContext).toBe('User: Real user message');
+
+    vi.mocked(db.getSession).mockReturnValue({
+      id: 'sess-1', metadata: { userId: 'telegram:123', isSubAgent: true },
+    } as never);
+    expect(getRecentChatContext(db)).toBeNull();
+  });
+
+  it('does not revive archived conversation context after a new-chat boundary', () => {
+    const db = makeMockDb([makeMessage({ content: 'Old unrelated topic' })]);
+    vi.mocked(db.getSession).mockReturnValue({
+      id: 'sess-1', metadata: { userId: 'telegram:123' }, archivedAt: NOW,
+    } as never);
+    expect(getRecentChatContext(db)).toBeNull();
   });
 });

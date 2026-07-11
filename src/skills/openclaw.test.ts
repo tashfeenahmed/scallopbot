@@ -62,6 +62,15 @@ metadata:
         - MY_API_KEY
       config:
         - ~/.myconfig
+    safety:
+      readOnly: false
+      externalWrite: true
+      localWrite: false
+      sensitive: true
+      requiresConfirmation: true
+    evidence:
+      authoritative: true
+      source: analytics-api:v2
     install:
       - id: brew
         kind: brew
@@ -90,6 +99,17 @@ Skill instructions here.
       expect(metadata?.openclaw?.requires?.anyBins).toContain('code');
       expect(metadata?.openclaw?.requires?.env).toContain('MY_API_KEY');
       expect(metadata?.openclaw?.requires?.config).toContain('~/.myconfig');
+      expect(metadata?.openclaw?.safety).toEqual({
+        readOnly: false,
+        externalWrite: true,
+        localWrite: false,
+        sensitive: true,
+        requiresConfirmation: true,
+      });
+      expect(metadata?.openclaw?.evidence).toEqual({
+        authoritative: true,
+        source: 'analytics-api:v2',
+      });
       expect(metadata?.openclaw?.install?.[0].kind).toBe('brew');
     });
 

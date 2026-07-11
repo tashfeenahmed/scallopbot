@@ -108,6 +108,7 @@ const createMockAgent = () => ({
 const createMockSessionManager = () => ({
   createSession: vi.fn().mockResolvedValue({ id: 'test-session' }),
   getSession: vi.fn().mockResolvedValue(null),
+  startNewSession: vi.fn().mockResolvedValue({ id: 'fresh-session' }),
   deleteSession: vi.fn().mockResolvedValue(true),
 });
 
@@ -213,7 +214,11 @@ describe('WhatsAppChannel', () => {
     // Then reset
     await channel.handleReset('1234567890');
 
-    expect(mockSessionManager.deleteSession).toHaveBeenCalledWith('test-session');
+    expect(mockSessionManager.startNewSession).toHaveBeenCalledWith({
+      userId: '1234567890',
+      channelId: 'whatsapp',
+    }, 'test-session');
+    expect(mockSessionManager.deleteSession).not.toHaveBeenCalled();
   });
 
   it('should report voice support correctly', async () => {
@@ -328,7 +333,11 @@ describe('SlackChannel', () => {
     await channel.getOrCreateSession('U12345');
     await channel.handleReset('U12345');
 
-    expect(mockSessionManager.deleteSession).toHaveBeenCalledWith('test-session');
+    expect(mockSessionManager.startNewSession).toHaveBeenCalledWith({
+      userId: 'U12345',
+      channelId: 'slack',
+    }, 'test-session');
+    expect(mockSessionManager.deleteSession).not.toHaveBeenCalled();
   });
 });
 
@@ -428,7 +437,11 @@ describe('SignalChannel', () => {
     await channel.getOrCreateSession('+15551234567');
     await channel.handleReset('+15551234567');
 
-    expect(mockSessionManager.deleteSession).toHaveBeenCalledWith('test-session');
+    expect(mockSessionManager.startNewSession).toHaveBeenCalledWith({
+      userId: '+15551234567',
+      channelId: 'signal',
+    }, 'test-session');
+    expect(mockSessionManager.deleteSession).not.toHaveBeenCalled();
   });
 
   it('should report voice support correctly', async () => {
@@ -544,7 +557,11 @@ describe('MatrixChannel', () => {
     await channel.getOrCreateSession('!room:matrix.org');
     await channel.handleReset('!room:matrix.org');
 
-    expect(mockSessionManager.deleteSession).toHaveBeenCalledWith('test-session');
+    expect(mockSessionManager.startNewSession).toHaveBeenCalledWith({
+      userId: '!room:matrix.org',
+      channelId: 'matrix',
+    }, 'test-session');
+    expect(mockSessionManager.deleteSession).not.toHaveBeenCalled();
   });
 
   it('should configure auto-join', async () => {

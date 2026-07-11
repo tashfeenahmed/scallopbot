@@ -235,7 +235,12 @@ describe('E2E Nudge/Task System', () => {
       // Should have been moved out of pending
       expect(firedItems).toHaveLength(0);
       const task = db.getScheduledItemsByUser('default').find(i => i.message.includes('flight'));
-      expect(task?.result?.response).toContain('no sub-agent executor');
+      expect(task?.result).toMatchObject({
+        taskComplete: false,
+        outcome: 'blocked',
+        failureCode: 'task_executor_unavailable',
+      });
+      expect(task?.result?.response).toContain('background worker is unavailable');
     });
   });
 

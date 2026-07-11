@@ -64,6 +64,7 @@ describe('DiscordChannel', () => {
     mockSessionManager = {
       createSession: vi.fn().mockResolvedValue({ id: 'session-123' }),
       getSession: vi.fn().mockResolvedValue({ id: 'session-123', messages: [] }),
+      startNewSession: vi.fn().mockResolvedValue({ id: 'fresh-session-456' }),
       deleteSession: vi.fn().mockResolvedValue(undefined),
     } as unknown as SessionManager;
 
@@ -344,7 +345,11 @@ describe('DiscordChannel', () => {
 
       await channel.handleSlashCommand(mockInteraction as any);
 
-      expect(mockSessionManager.deleteSession).toHaveBeenCalled();
+      expect(mockSessionManager.startNewSession).toHaveBeenCalledWith({
+        userId: 'user-123',
+        channelId: 'discord',
+      }, 'session-123');
+      expect(mockSessionManager.deleteSession).not.toHaveBeenCalled();
     });
 
     it('should handle /help slash command', async () => {
@@ -390,11 +395,15 @@ describe('DiscordChannel', () => {
       expect(mockSessionManager.createSession).toHaveBeenCalledTimes(1);
     });
 
-    it('should reset session for user', async () => {
+    it('should preserve the old session and activate a fresh session for user', async () => {
       await channel.getOrCreateSession('user-123');
       await channel.handleReset('user-123');
 
-      expect(mockSessionManager.deleteSession).toHaveBeenCalled();
+      expect(mockSessionManager.startNewSession).toHaveBeenCalledWith({
+        userId: 'user-123',
+        channelId: 'discord',
+      }, 'session-123');
+      expect(mockSessionManager.deleteSession).not.toHaveBeenCalled();
     });
   });
 });

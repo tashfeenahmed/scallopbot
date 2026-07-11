@@ -85,6 +85,57 @@ describe('OpenRouterProvider', () => {
       expect(response.content[0]).toEqual({ type: 'text', text: 'Hello from OpenRouter!' });
     });
 
+    it('sends a strict JSON Schema for structured background calls', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          choices: [{ message: { content: '{"ok":true}', tool_calls: null }, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 1, completion_tokens: 1 },
+          model: 'openai/gpt-4o',
+        }),
+      });
+
+      await provider.complete({
+        messages: [{ role: 'user', content: 'Return JSON' }],
+        structuredOutput: {
+          name: 'strict_result',
+          schema: {
+            type: 'object', additionalProperties: false,
+            properties: { ok: { type: 'boolean' } }, required: ['ok'],
+          },
+        },
+      });
+
+      const init = mockFetch.mock.calls[0][1] as RequestInit;
+      const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      expect(body.response_format).toEqual({
+        type: 'json_schema',
+        json_schema: expect.objectContaining({ name: 'strict_result', strict: true }),
+      });
+    });
+
+    it('explicitly disables reasoning for strict background calls', async () => {
+      const reasoningProvider = new OpenRouterProvider({
+        apiKey: 'test-key',
+        model: 'qwen/qwen3.6-plus',
+      });
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          choices: [{ message: { content: '{"ok":true}' }, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 1, completion_tokens: 1 }, model: 'qwen/qwen3.6-plus',
+        }),
+      });
+
+      await reasoningProvider.complete({
+        messages: [{ role: 'user', content: 'Return JSON' }],
+        enableThinking: false,
+      });
+
+      const body = JSON.parse(String((mockFetch.mock.calls[0][1] as RequestInit).body));
+      expect(body.reasoning).toEqual({ effort: 'none', exclude: true });
+    });
+
     it('should handle tool calls correctly', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,

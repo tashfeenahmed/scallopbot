@@ -19,6 +19,8 @@ inputSchema:
 metadata:
   openclaw:
     emoji: "\U0001F514"
+    safety:
+      localWrite: true
     requires:
       bins: []
 ---

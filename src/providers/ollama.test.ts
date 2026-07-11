@@ -124,6 +124,48 @@ describe('OllamaProvider', () => {
       });
     });
 
+    it('passes the JSON schema and disables thinking for structured output', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          message: { role: 'assistant', content: '{"ok":true}' }, done: true,
+          prompt_eval_count: 1, eval_count: 1,
+        }),
+      });
+      const schema = {
+        type: 'object', additionalProperties: false,
+        properties: { ok: { type: 'boolean' } }, required: ['ok'],
+      };
+
+      await provider.complete({
+        messages: [{ role: 'user', content: 'Return JSON' }],
+        temperature: 0.1,
+        maxTokens: 200,
+        enableThinking: false,
+        structuredOutput: { name: 'strict_result', schema },
+      });
+
+      const body = JSON.parse(String(mockFetch.mock.calls[0][1].body));
+      expect(body).toMatchObject({
+        think: false,
+        format: schema,
+        options: { temperature: 0.1, num_predict: 200 },
+      });
+    });
+
+    it('fails safely when a model cannot honor no-thinking structured output', async () => {
+      const gptOss = new OllamaProvider({ model: 'gpt-oss:20b' });
+      await expect(gptOss.complete({
+        messages: [{ role: 'user', content: 'Return JSON' }],
+        enableThinking: false,
+        structuredOutput: {
+          name: 'strict_result',
+          schema: { type: 'object', properties: {}, additionalProperties: false },
+        },
+      })).rejects.toThrow('cannot disable thinking for structured output');
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
     it('should throw error when API call fails', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: false,

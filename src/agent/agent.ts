@@ -38,6 +38,29 @@ import { selectBest, scoreResponseHeuristic } from './critic.js';
 import type { EvolutionRecorder } from '../evolution/signals.js';
 import { stripThinkTags } from '../utils/output-safety.js';
 import { resolveStateUserId } from '../utils/state-user-id.js';
+import { compactCompletedConversationHistory } from '../memory/session-message-view.js';
+import {
+  assessToolCallForTurn,
+  boundToolCalls,
+  digestToolOutput,
+  hasUnverifiedSuccessClaim,
+  isLikelyExternalMutation,
+  localIsoDate,
+  toolOperationIdentity,
+  toolOutputIndicatesFailure,
+  type TurnToolSafetyContext,
+} from './tool-safety.js';
+import {
+  buildEvidenceClaimLedger,
+  buildRuntimeEvidenceProvenance,
+  type EvidenceExecutionContext,
+  type EvidenceProvenanceReceipt,
+} from '../security/evidence-grounding.js';
+
+/** Hard safety budgets for a single user turn. */
+const MAX_TOOL_CALLS_PER_RESPONSE = 8;
+const MAX_TOOL_CALLS_PER_TURN = 20;
+const MAX_PARALLEL_TOOL_CALLS = 4;
 
 export interface AgentOptions {
   provider: LLMProvider;
@@ -90,10 +113,16 @@ export interface AgentOptions {
   bestOfNThreshold?: number;
   /** Optional self-evolution recorder: captures improvement signals at turn end (best-effort). */
   evolutionRecorder?: EvolutionRecorder;
+  /** Opaque scheduler-owned binding for unattended factual evidence. */
+  evidenceExecutionContext?: EvidenceExecutionContext;
   /** Disable heuristic tier selection and use the standard tier for every turn. */
   enableComplexityAnalysis?: boolean;
   /** Explicit aliases for this deployment's single canonical state owner. */
   canonicalSingleUserIds?: readonly string[];
+  /** Maximum wall time for one foreground model attempt, including recovery. */
+  foregroundCallTimeoutMs?: number;
+  /** Maximum wall time for the complete foreground turn. */
+  turnTimeoutMs?: number;
 }
 
 export type AgentCompletionReason =
@@ -132,6 +161,15 @@ export interface ProgressUpdate {
   count?: number;
   action?: string;
   items?: { type: 'fact' | 'conversation'; content: string; subject?: string }[];
+  /** Privacy-safe proof for unattended task verification; never contains raw output. */
+  evidence?: {
+    outputDigest: string;
+    outputBytes: number;
+    verified: boolean;
+    /** Bounded hashes of normalized factual claims from raw tool output. */
+    claimDigests: string[];
+    claimLedgerTruncated: boolean;
+  } & EvidenceProvenanceReceipt;
 }
 
 const DEFAULT_SYSTEM_PROMPT = `You are a personal AI assistant with direct system access via skills. Get things done - don't describe, DO.
@@ -229,8 +267,11 @@ export class Agent {
   private bestOfNThreshold: number;
   /** Optional self-evolution signal recorder (best-effort, turn-end). */
   private evolutionRecorder: EvolutionRecorder | null;
+  private evidenceExecutionContext: EvidenceExecutionContext | undefined;
   private enableComplexityAnalysis: boolean;
   private canonicalSingleUserIds: readonly string[];
+  private foregroundCallTimeoutMs: number;
+  private turnTimeoutMs: number;
 
   /** Enhanced tool loop detector */
   private toolLoopDetector = new ToolLoopDetector();
@@ -263,8 +304,11 @@ export class Agent {
     this.bestOfN = Math.max(1, options.bestOfN ?? 1);
     this.bestOfNThreshold = options.bestOfNThreshold ?? 0.85;
     this.evolutionRecorder = options.evolutionRecorder ?? null;
+    this.evidenceExecutionContext = options.evidenceExecutionContext;
     this.enableComplexityAnalysis = options.enableComplexityAnalysis ?? true;
     this.canonicalSingleUserIds = [...(options.canonicalSingleUserIds ?? [])];
+    this.foregroundCallTimeoutMs = Math.max(50, options.foregroundCallTimeoutMs ?? 25_000);
+    this.turnTimeoutMs = Math.max(this.foregroundCallTimeoutMs, options.turnTimeoutMs ?? 55_000);
 
     this.logger.info({ enableThinking: this.enableThinking, bestOfN: this.bestOfN, bestOfNThreshold: this.bestOfNThreshold }, 'Agent thinking mode configured');
   }
@@ -336,6 +380,39 @@ export class Agent {
       ? session.metadata.userId
       : 'default';
     const resolvedUserId = resolveStateUserId(channelUserId, this.canonicalSingleUserIds);
+    const cleanChannelUserId = channelUserId.includes(':')
+      ? channelUserId.slice(channelUserId.indexOf(':') + 1)
+      : channelUserId;
+    const userTimezone = this.configManager
+      ? this.configManager.getUserTimezone(cleanChannelUserId)
+      : Intl.DateTimeFormat().resolvedOptions().timeZone;
+    let previousAssistantMessage: string | undefined;
+    for (const message of [...session.messages].reverse()) {
+      if (message.role !== 'assistant') continue;
+      if (typeof message.content === 'string') {
+        const visible = stripThinkTags(message.content).trim();
+        if (visible) {
+          previousAssistantMessage = visible;
+          break;
+        }
+        continue;
+      }
+      // Assistant text emitted beside tool calls is internal planning, not the
+      // target-specific confirmation prompt a later bare "yes" may authorize.
+      if (message.content.some(block => block.type === 'tool_use')) continue;
+      const visible = this.extractTextContent(message.content).trim();
+      if (visible) {
+        previousAssistantMessage = visible;
+        break;
+      }
+    }
+    let turnToolSafety: TurnToolSafetyContext = {
+      userMessage,
+      previousAssistantMessage,
+      timezone: userTimezone,
+      now: new Date(),
+    };
+    const turnDeadline = Date.now() + this.turnTimeoutMs;
 
     // Check budget before processing
     if (this.costTracker) {
@@ -539,10 +616,19 @@ export class Agent {
     let completionReason: AgentCompletionReason | null = null;
     // Self-evolution signal accounting (best-effort, captured at turn end).
     let totalToolCalls = 0;
+    let toolCallBudgetUsed = 0;
+    let successfulExternalMutations = 0;
+    let failedExternalMutations = 0;
+    const successfulMutationSignatures = new Set<string>();
     const failedSkills: string[] = [];
 
     // Agent loop
     while (iterations < this.maxIterations) {
+      if (Date.now() >= turnDeadline) {
+        finalResponse = 'I reached the response deadline before every step completed. I stopped safely and have not marked any unverified action as done.';
+        completionReason = 'budget_exhausted';
+        break;
+      }
       iterations++;
 
       // Check if user requested stop
@@ -598,6 +684,22 @@ export class Agent {
             });
           }
         }
+        const latestInterrupt = interrupts.at(-1);
+        if (latestInterrupt) {
+          // A newer human message supersedes the original turn contract. Bare
+          // confirmations fail closed here because a progress/tool message is
+          // not a durable target-specific confirmation prompt.
+          turnToolSafety = {
+            userMessage: latestInterrupt.text,
+            previousAssistantMessage: undefined,
+            timezone: userTimezone,
+            now: new Date(),
+          };
+          systemPrompt.dynamic = systemPrompt.dynamic.replace(
+            /\n\n## ACTIVE TURN CONTRACT[\s\S]*?## END ACTIVE TURN CONTRACT/,
+            this.buildActiveTurnContract(latestInterrupt.text),
+          );
+        }
         this.logger.debug({ sessionId, drained: interrupts.length }, 'User interrupts injected into context');
       }
 
@@ -641,10 +743,19 @@ export class Agent {
         return true;
       });
 
+      // Completed turns are replayed as their human-visible transcript only.
+      // Keep the newest genuine human turn and its active tool chain verbatim,
+      // but never resend old reasoning/tool payloads just because provider roles
+      // happened to label tool results as `user`.
+      const replayMessages = compactCompletedConversationHistory(sanitizedMessages, {
+        maxCompletedTurns: 8,
+        maxVisibleCharsPerMessage: 2_000,
+      });
+
       // Process messages through context manager (compression, deduplication)
       let messages = this.contextManager
-        ? this.contextManager.buildContextMessages(sanitizedMessages)
-        : sanitizedMessages;
+        ? this.contextManager.buildContextMessages(replayMessages)
+        : replayMessages;
 
       // Proactive overflow prevention: run the cheapest-first compaction stages
       // BEFORE sending, so we don't waste a round-trip hitting the context wall.
@@ -702,20 +813,45 @@ export class Agent {
 
       // Call LLM with error recovery (fallback and emergency compression)
       let response;
+      const callAbortController = new AbortController();
+      const remainingTurnMs = Math.max(1, turnDeadline - Date.now());
+      const callTimeoutMs = Math.min(this.foregroundCallTimeoutMs, remainingTurnMs);
+      const callSignal = abortSignal
+        ? AbortSignal.any([abortSignal, callAbortController.signal])
+        : callAbortController.signal;
+      const timedRequest: CompletionRequest = { ...request, signal: callSignal };
+      let callTimeout: ReturnType<typeof setTimeout> | undefined;
       try {
-        response = await this.executeWithRecovery(
-          activeProvider,
-          request,
-          sessionId,
-          complexity.suggestedModelTier
-        );
+        response = await Promise.race([
+          this.executeWithRecovery(
+            activeProvider,
+            timedRequest,
+            sessionId,
+            complexity.suggestedModelTier
+          ),
+          new Promise<never>((_resolve, reject) => {
+            callTimeout = setTimeout(() => {
+              callAbortController.abort();
+              reject(new Error(`Foreground model call exceeded ${callTimeoutMs}ms`));
+            }, callTimeoutMs);
+          }),
+        ]);
       } catch (error) {
         this.logger.error({
           iteration: iterations,
           error: (error as Error).message,
           provider: activeProvider.name
         }, 'LLM call failed after recovery attempts');
-        throw error;
+        const failureMessage = (error as Error).message;
+        finalResponse = failureMessage.startsWith('Foreground model call exceeded')
+          ? 'I hit the response deadline while working on that. I stopped safely instead of leaving you waiting, and I have not marked any unverified action as complete.'
+          : /token budget/i.test(failureMessage)
+            ? 'I stopped because the token budget was exhausted. The task is incomplete and no unverified action has been marked complete.'
+            : 'I could not get a reliable model response after trying the available recovery path. No unverified action has been marked complete.';
+        completionReason = 'budget_exhausted';
+        break;
+      } finally {
+        if (callTimeout) clearTimeout(callTimeout);
       }
       // Track token usage. totalInputTokens sums across iterations (billing);
       // peakInputTokens is the largest single prompt (context pressure).
@@ -725,10 +861,32 @@ export class Agent {
 
       // Process response content
       const textContent = this.extractTextContent(response.content);
-      const toolUses = this.extractToolUses(response.content);
+      const emittedToolUses = this.extractToolUses(response.content);
+      const remainingToolBudget = Math.max(0, MAX_TOOL_CALLS_PER_TURN - toolCallBudgetUsed);
+      const boundedTools = boundToolCalls(
+        emittedToolUses,
+        Math.min(MAX_TOOL_CALLS_PER_RESPONSE, remainingToolBudget),
+      );
+      const toolUses = boundedTools.accepted;
+      const acceptedToolIds = new Set(toolUses.map((toolUse) => toolUse.id));
+      const responseContent = boundedTools.dropped.length > 0
+        ? response.content.filter((block) => block.type !== 'tool_use' || acceptedToolIds.has(block.id))
+        : response.content;
+      if (boundedTools.dropped.length > 0) {
+        const reasons = boundedTools.dropped.reduce<Record<string, number>>((counts, entry) => {
+          counts[entry.reason] = (counts[entry.reason] ?? 0) + 1;
+          return counts;
+        }, {});
+        this.logger.warn(
+          { emitted: emittedToolUses.length, accepted: toolUses.length, reasons, remainingToolBudget },
+          'Rejected unsafe or over-budget tool-call batch',
+        );
+      }
 
       // Check for explicit task completion marker
-      const taskComplete = this.isTaskComplete(textContent);
+      // A response cannot be complete while it is still asking us to execute
+      // tools. Previously `[DONE]` next to a tool call skipped the call entirely.
+      const taskComplete = emittedToolUses.length === 0 && this.isTaskComplete(textContent);
 
       this.logger.info({
         iteration: iterations,
@@ -736,6 +894,7 @@ export class Agent {
         hasText: !!textContent,
         textLength: textContent?.length || 0,
         toolUseCount: toolUses.length,
+        emittedToolUseCount: emittedToolUses.length,
         toolNames: toolUses.map(t => t.name),
         taskComplete,
       }, 'LLM response received');
@@ -755,7 +914,7 @@ export class Agent {
       }
 
       // Handle max_tokens with no tool use — the response was truncated
-      if (response.stopReason === 'max_tokens' && toolUses.length === 0) {
+      if (response.stopReason === 'max_tokens' && emittedToolUses.length === 0) {
         maxTokensContinuations++;
 
         // Avoid infinite continuation loops
@@ -763,14 +922,14 @@ export class Agent {
           finalResponse = textContent || 'My response was too long and got cut off. Please try a more specific request.';
           completionReason = 'max_tokens';
           if (response.content.length > 0) {
-            await this.persistAssistantMessage(sessionId, response.content);
+            await this.persistAssistantMessage(sessionId, responseContent);
           }
           break;
         }
 
         // Save any partial content the LLM produced
         if (response.content.length > 0) {
-          await this.persistAssistantMessage(sessionId, response.content);
+          await this.persistAssistantMessage(sessionId, responseContent);
         }
 
         // Prompt continuation so the LLM can finish
@@ -783,7 +942,7 @@ export class Agent {
       }
 
       // If task is explicitly complete OR no tool use with end_turn, we're done
-      if (taskComplete || (response.stopReason === 'end_turn' && toolUses.length === 0)) {
+      if (taskComplete || (response.stopReason === 'end_turn' && emittedToolUses.length === 0)) {
         // Edge case: model returned end_turn with literally empty content (no text,
         // no tool calls — common after a long tool loop where the model gave up or
         // burned its budget on reasoning_content). Don't dump silence on the user;
@@ -806,7 +965,7 @@ export class Agent {
         // Before breaking, check if user sent new messages during this LLM call
         if (this.interruptQueue?.hasPending(sessionId)) {
           // Save assistant response, but DON'T break — continue loop to drain interrupts
-          await this.persistAssistantMessage(sessionId, response.content);
+          await this.persistAssistantMessage(sessionId, responseContent);
           this.logger.info({ sessionId }, 'Pending user interrupts detected at exit — continuing loop');
           continue;
         }
@@ -835,7 +994,12 @@ export class Agent {
         //      trivial turns (greetings, "Done!") never trigger resampling.
         //   2. score gate — even on eligible turns, only weak first answers
         //      escalate; strong ones short-circuit.
-        let persistContent = response.content;
+        // Persist the exact public final text. This removes the internal [DONE]
+        // control marker and prevents the final-response watchdog from adding a
+        // duplicate cleaned message.
+        let persistContent: ContentBlock[] = taskComplete
+          ? [{ type: 'text', text: finalResponse }]
+          : responseContent;
         if (
           this.bestOfN > 1 &&
           complexity.suggestedModelTier === 'capable' &&
@@ -843,18 +1007,37 @@ export class Agent {
         ) {
           const firstScore = scoreResponseHeuristic(finalResponse, userMessage).score;
           if (firstScore < this.bestOfNThreshold) {
-            this.logger.info(
-              { firstScore: Number(firstScore.toFixed(2)), threshold: this.bestOfNThreshold },
-              'First answer below quality bar — escalating to best-of-N'
+            const remainingMs = turnDeadline - Date.now();
+            // Reserve a small persistence/final-watchdog margin. Quality
+            // sampling is optional and may never outrun the public deadline.
+            const finalizationReserveMs = Math.min(250, Math.max(10, Math.floor(remainingMs * 0.05)));
+            const samplingDeadline = Math.min(
+              turnDeadline - finalizationReserveMs,
+              Date.now() + this.foregroundCallTimeoutMs,
             );
-            try {
-              const improved = await this.generateBestResponse(request, finalResponse, userMessage, activeProvider);
-              if (improved && improved !== finalResponse) {
-                finalResponse = improved;
-                persistContent = [{ type: 'text', text: improved }];
+            if (samplingDeadline - Date.now() >= 25) {
+              this.logger.info(
+                { firstScore: Number(firstScore.toFixed(2)), threshold: this.bestOfNThreshold },
+                'First answer below quality bar — escalating to best-of-N'
+              );
+              try {
+                const improved = await this.generateBestResponse(
+                  request,
+                  finalResponse,
+                  userMessage,
+                  activeProvider,
+                  samplingDeadline,
+                  abortSignal,
+                );
+                if (improved && improved !== finalResponse) {
+                  finalResponse = improved;
+                  persistContent = [{ type: 'text', text: improved }];
+                }
+              } catch (e) {
+                this.logger.warn({ error: (e as Error).message }, 'Best-of-N selection failed; keeping original response');
               }
-            } catch (e) {
-              this.logger.warn({ error: (e as Error).message }, 'Best-of-N selection failed; keeping original response');
+            } else {
+              this.logger.debug({ remainingMs }, 'Skipping best-of-N because the turn deadline is near');
             }
           } else {
             this.logger.debug(
@@ -864,37 +1047,95 @@ export class Agent {
           }
         }
 
+        // Never let fluent prose convert a failed external write into a false
+        // success confirmation. Tool evidence, not the model's wording, is the
+        // source of truth.
+        if (
+          failedExternalMutations > 0 &&
+          successfulExternalMutations === 0 &&
+          hasUnverifiedSuccessClaim(finalResponse)
+        ) {
+          finalResponse = 'I could not verify that external action, so I have not marked it complete. The tool reported a failure or required clarification.';
+          persistContent = [{ type: 'text', text: finalResponse }];
+          completionReason = 'tool_loop';
+        }
+
         // Add assistant response to session
         await this.persistAssistantMessage(sessionId, persistContent);
 
-        completionReason = taskComplete ? 'explicit_done' : 'natural_end';
+        completionReason ??= taskComplete ? 'explicit_done' : 'natural_end';
         break;
       }
 
-      // Send assistant's planning text to user before executing tools
+      // Notify callbacks about lifecycle only. Model-authored text beside tool
+      // calls may contain chain-of-thought, prompts, or raw call arguments and
+      // must never cross even a third-party progress callback boundary.
       if (textContent && onProgress) {
-        // Clean the text content - remove any JSON tool call patterns that some models output
-        const cleanedText = this.cleanProgressMessage(textContent);
-        if (cleanedText) {
-          try {
-            await onProgress({
-              type: 'planning',
-              message: cleanedText,
-              iteration: iterations,
-            });
-          } catch (e) {
-            this.logger.warn({ error: (e as Error).message }, 'Progress callback failed');
-          }
+        try {
+          await onProgress({
+            type: 'planning',
+            message: 'Planning next steps…',
+            iteration: iterations,
+          });
+        } catch (e) {
+          this.logger.warn({ error: (e as Error).message }, 'Progress callback failed');
         }
       }
 
       // Add assistant message with tool use
-      await this.persistAssistantMessage(sessionId, response.content);
+      await this.persistAssistantMessage(sessionId, responseContent);
+
+      // A malformed response may contain only duplicate/over-budget calls. Do
+      // not persist an empty tool-result message or execute anything else.
+      if (emittedToolUses.length > 0 && toolUses.length === 0) {
+        const exhausted = remainingToolBudget === 0;
+        const note = exhausted
+          ? `[System: The per-turn tool budget of ${MAX_TOOL_CALLS_PER_TURN} is exhausted. Do not call more tools; give the user a concise, honest final status.]`
+          : '[System: Every proposed tool call was rejected because the batch was duplicated or malformed. Re-plan once with only the minimum distinct calls needed.]';
+        await this.sessionManager.addMessage(sessionId, { role: 'user', content: note });
+        if (exhausted) {
+          finalResponse = `I stopped after reaching the safe tool-call limit (${MAX_TOOL_CALLS_PER_TURN}). I have not claimed any unverified remaining actions as complete.`;
+          completionReason = 'tool_loop';
+          break;
+        }
+        continue;
+      }
+
+      // A user correction that arrived while the model was planning
+      // supersedes every tool call produced from the older intent. Pair the
+      // persisted tool_use blocks with explicit cancellation results, then
+      // restart planning after the interrupt is drained on the next loop.
+      if (toolUses.length > 0 && this.interruptQueue?.hasPending(sessionId)) {
+        const supersededResults: ContentBlock[] = toolUses.map(toolUse => ({
+          type: 'tool_result' as const,
+          tool_use_id: toolUse.id,
+          content: 'Cancelled: a newer user message superseded the intent used to plan this call.',
+          is_error: true,
+        }));
+        await this.sessionManager.addMessage(sessionId, { role: 'user', content: supersededResults });
+        toolCallBudgetUsed += toolUses.length;
+        this.logger.info(
+          { sessionId, cancelledToolCount: toolUses.length },
+          'Cancelled stale tool plan because a newer user interrupt is pending',
+        );
+        continue;
+      }
 
       // Execute tools and gather results
       this.logger.info({ toolCount: toolUses.length, tools: toolUses.map(t => t.name) }, 'Executing tools');
       const userId = currentSession?.metadata?.userId;
-      const toolResults = await this.executeTools(toolUses, sessionId, userId, onProgress, shouldStop);
+      const toolResults = await this.executeTools(
+        toolUses,
+        sessionId,
+        userId,
+        onProgress,
+        shouldStop,
+        turnToolSafety,
+        successfulMutationSignatures,
+        turnDeadline,
+        abortSignal,
+      );
+      toolCallBudgetUsed += toolUses.length;
       this.logger.info({
         resultCount: toolResults.length,
         results: toolResults.map(r => ({
@@ -909,7 +1150,26 @@ export class Agent {
         role: 'user',
         content: toolResults,
       });
+      if (boundedTools.dropped.length > 0) {
+        await this.sessionManager.addMessage(sessionId, {
+          role: 'user',
+          content: `[System: ${boundedTools.dropped.length} duplicate or over-budget tool call(s) were rejected. Do not retry them as a batch; use the results above and make at most the minimum distinct next call.]`,
+        });
+      }
       this.logger.info({ iteration: iterations }, 'Tool results added to session, continuing loop');
+
+      const resultById = new Map(
+        toolResults
+          .filter((result): result is Extract<ContentBlock, { type: 'tool_result' }> => result.type === 'tool_result')
+          .map((result) => [result.tool_use_id, result]),
+      );
+      for (const toolUse of toolUses) {
+        const skill = this.skillRegistry?.getSkill(toolUse.name) || null;
+        if (!isLikelyExternalMutation(toolUse, skill)) continue;
+        const result = resultById.get(toolUse.id);
+        if (!result || result.is_error) failedExternalMutations++;
+        else successfulExternalMutations++;
+      }
 
       // Enhanced tool loop detection via ToolLoopDetector
       for (const t of toolUses) {
@@ -988,6 +1248,10 @@ export class Agent {
     // A zero-iteration configuration or a future loop exit that does not set a
     // more specific reason is still an iteration-budget stop, never success.
     completionReason ??= 'iteration_limit';
+    if (!finalResponse.trim()) {
+      finalResponse = 'I stopped without a reliable final result. Nothing unverified has been marked complete; please retry this request.';
+    }
+    await this.ensureFinalResponsePersisted(sessionId, finalResponse);
 
     // Clean up tool loop detector for this session
     this.toolLoopDetector.clearSession(sessionId);
@@ -1209,7 +1473,15 @@ Only install skills when the user asks, or when you determine a skill would help
 
     const now = new Date();
     const tzOptions = { timeZone: userTimezone };
+    const authoritativeLocalDate = localIsoDate(now, userTimezone);
+    const authoritativeWeekday = now.toLocaleDateString('en-US', { weekday: 'long', ...tzOptions });
     dynamic += `\n\nCurrent date and time: ${now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', ...tzOptions })} at ${now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true, ...tzOptions })}`;
+    dynamic += `\nAuthoritative local calendar date: ${authoritativeLocalDate} (${authoritativeWeekday}) in ${userTimezone}. Use this exact value for “today”; do not infer a different date or weekday from conversation history.`;
+
+    // Keep tool selection bound to the newest human request. Older transcript,
+    // memories and sub-agent results are context only and must never silently
+    // reactivate a previous task.
+    dynamic += this.buildActiveTurnContract(userMessage);
 
     // Model self-identity: tell the bot which model it actually runs on, derived
     // from the active chat provider, so it answers "which model are you?"
@@ -1231,6 +1503,20 @@ Only install skills when the user asks, or when you determine a skill would help
     }
 
     return { prompt: { stable, dynamic }, memoryStats, memoryItems };
+  }
+
+  private buildActiveTurnContract(userMessage: string): string {
+    const activeRequest = userMessage.length > 4_000
+      ? `${userMessage.slice(0, 4_000)}\n[truncated]`
+      : userMessage;
+    return `\n\n## ACTIVE TURN CONTRACT
+The current user request is quoted below. Execute tools only when they directly serve this request; do not continue an older task merely because it appears in history or memory.
+<current_user_request>${JSON.stringify(activeRequest)}</current_user_request>
+- Treat every external write as uncompleted until its exact tool result proves success.
+- If current-turn wording is sensitive or structurally ambiguous, ask before writing it to another service.
+- Resolve relative dates from the authoritative timezone/date above; never calculate them from an older message.
+- Before the final reply, account for every part of the current request and disclose any part that failed or remains unverified.
+## END ACTIVE TURN CONTRACT`;
   }
 
   /**
@@ -1323,6 +1609,14 @@ Only install skills when the user asks, or when you determine a skill would help
       };
 
       const SHORT_TERM_WINDOW_MS = 6 * 60 * 60 * 1000;
+      const isUserGroundedMemory = (memory: {
+        source?: string;
+        memoryType: string;
+        learnedFrom?: string;
+        metadata?: Record<string, unknown> | null;
+      }): boolean => memory.source !== 'assistant'
+        && memory.learnedFrom !== 'self_reflection'
+        && memory.metadata?.audience !== 'assistant';
 
       const [recentFacts, userFacts, relevantResults] = await Promise.all([
         Promise.resolve(this.scallopStore.getRecentMemories(userId, SHORT_TERM_WINDOW_MS)),
@@ -1342,21 +1636,21 @@ Only install skills when the user asks, or when you determine a skill would help
       const allFactTexts: { content: string; subject?: string }[] = [];
 
       for (const fact of recentFacts) {
-        if (!seenIds.has(fact.id) && !isPastEvent(fact)) {
+        if (isUserGroundedMemory(fact) && !seenIds.has(fact.id) && !isPastEvent(fact)) {
           seenIds.add(fact.id);
           const subject = fact.metadata?.subject as string | undefined;
           allFactTexts.push({ content: fact.content, subject });
         }
       }
       for (const result of relevantResults) {
-        if (!seenIds.has(result.memory.id) && !isPastEvent(result.memory)) {
+        if (isUserGroundedMemory(result.memory) && !seenIds.has(result.memory.id) && !isPastEvent(result.memory)) {
           seenIds.add(result.memory.id);
           const subject = result.memory.metadata?.subject as string | undefined;
           allFactTexts.push({ content: result.memory.content, subject });
         }
       }
       for (const fact of userFacts) {
-        if (!seenIds.has(fact.id) && !isPastEvent(fact)) {
+        if (isUserGroundedMemory(fact) && !seenIds.has(fact.id) && !isPastEvent(fact)) {
           seenIds.add(fact.id);
           const subject = fact.metadata?.subject as string | undefined;
           allFactTexts.push({ content: fact.content, subject });
@@ -1470,6 +1764,22 @@ Only install skills when the user asks, or when you determine a skill would help
     return true;
   }
 
+  /** Ensure every loop exit leaves the same user-visible final in durable history. */
+  private async ensureFinalResponsePersisted(sessionId: string, response: string): Promise<void> {
+    const session = await this.sessionManager.getSession(sessionId);
+    const lastAssistant = [...(session?.messages ?? [])]
+      .reverse()
+      .find((message) => message.role === 'assistant');
+    let visible = '';
+    if (lastAssistant) {
+      visible = typeof lastAssistant.content === 'string'
+        ? stripThinkTags(lastAssistant.content).trim()
+        : this.extractTextContent(lastAssistant.content).trim();
+    }
+    if (visible === response.trim()) return;
+    await this.persistAssistantMessage(sessionId, [{ type: 'text', text: response.trim() }]);
+  }
+
   private extractTextContent(content: ContentBlock[]): string {
     const text = content
       .filter((block): block is { type: 'text'; text: string } => block.type === 'text')
@@ -1576,27 +1886,6 @@ Only install skills when the user asks, or when you determine a skill would help
    */
   private stripDoneMarker(text: string): string {
     return text.replace(/\[done\]\s*$/i, '').trim();
-  }
-
-  /**
-   * Clean progress message by removing JSON tool call patterns
-   * Some models output tool calls as JSON text instead of proper tool_calls
-   */
-  private cleanProgressMessage(text: string): string {
-    // Remove JSON blocks that look like tool calls
-    const cleaned = text
-      // Remove JSON objects with function/arguments keys
-      .replace(/\{[\s\S]*?"function"[\s\S]*?"arguments"[\s\S]*?\}/g, '')
-      // Remove JSON objects with name/input keys
-      .replace(/\{[\s\S]*?"name"[\s\S]*?"input"[\s\S]*?\}/g, '')
-      // Remove standalone JSON objects
-      .replace(/```json[\s\S]*?```/g, '')
-      .replace(/```[\s\S]*?\{[\s\S]*?\}[\s\S]*?```/g, '')
-      // Clean up extra whitespace
-      .replace(/\n{3,}/g, '\n\n')
-      .trim();
-
-    return cleaned;
   }
 
   /**
@@ -1785,19 +2074,30 @@ Only install skills when the user asks, or when you determine a skill would help
     baseRequest: CompletionRequest,
     originalText: string,
     userMessage: string,
-    provider: LLMProvider
+    provider: LLMProvider,
+    deadlineAt: number,
+    parentSignal?: AbortSignal,
   ): Promise<string> {
+    const remainingMs = deadlineAt - Date.now();
+    if (remainingMs <= 0 || parentSignal?.aborted) return originalText;
+    const controller = new AbortController();
+    const signal = parentSignal
+      ? AbortSignal.any([parentSignal, controller.signal])
+      : controller.signal;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+
     // Sample the extra candidates CONCURRENTLY: they're independent, so firing
     // them in parallel keeps the slow path at ~1× latency instead of (N-1)×.
     // Each failure is swallowed and dropped — candidate #0 (the original) is
     // always present, so we can never end up worse than where we started.
-    const extraCandidates = await Promise.all(
+    const sampling = Promise.all(
       Array.from({ length: this.bestOfN - 1 }, async (_unused, i) => {
         try {
           const resp = await provider.complete({
             ...baseRequest,
             tools: undefined, // final synthesis — no further tool use
             temperature: 0.7,
+            signal,
           });
           const text = this.stripDoneMarker(this.extractTextContent(resp.content));
           return text.trim() ? text : null;
@@ -1807,6 +2107,19 @@ Only install skills when the user asks, or when you determine a skill would help
         }
       })
     );
+    const extraCandidates = await Promise.race([
+      sampling,
+      new Promise<null>((resolve) => {
+        timeout = setTimeout(() => {
+          controller.abort();
+          resolve(null);
+        }, remainingMs);
+      }),
+    ]).finally(() => {
+      if (timeout) clearTimeout(timeout);
+    });
+
+    if (!extraCandidates) return originalText;
 
     const candidates: string[] = [originalText, ...extraCandidates.filter((t): t is string => !!t)];
 
@@ -1856,7 +2169,7 @@ Only install skills when the user asks, or when you determine a skill would help
   /** Read-only tools that can safely run in parallel */
   private static readonly PARALLEL_SAFE_TOOLS = new Set([
     'read_file', 'ls', 'glob', 'grep', 'codesearch', 'web_search',
-    'memory_search', 'question', 'webfetch', 'goals',
+    'memory_search', 'question', 'webfetch',
   ]);
 
   /**
@@ -1866,14 +2179,22 @@ Only install skills when the user asks, or when you determine a skill would help
     toolUse: ToolUseContent,
     sessionId: string,
     userId?: string,
-    onProgress?: ProgressCallback
+    onProgress?: ProgressCallback,
+    turnSafety?: TurnToolSafetyContext,
+    successfulMutationSignatures?: Set<string>,
+    toolSignal?: AbortSignal,
+    toolDeadlineAt?: number,
   ): Promise<ContentBlock> {
     // Emit tool:before_call hook
     triggerHook({
       type: 'tool',
       action: 'before_call',
       sessionId,
-      context: { toolName: toolUse.name, input: toolUse.input },
+      context: {
+        toolName: toolUse.name,
+        inputKeys: Object.keys(toolUse.input),
+        inputBytes: Buffer.byteLength(JSON.stringify(toolUse.input), 'utf8'),
+      },
       timestamp: new Date(),
     }).catch(() => {});
 
@@ -1889,6 +2210,41 @@ Only install skills when the user asks, or when you determine a skill would help
         this.logger.info({ requested: toolUse.name, resolved: match }, 'Tool name auto-repaired');
         skill = this.skillRegistry.getSkill(match) || null;
       }
+    }
+
+    const safety = turnSafety
+      ? assessToolCallForTurn(toolUse, turnSafety, skill)
+      : null;
+    if (!turnSafety && isLikelyExternalMutation(toolUse, skill)) {
+      return {
+        type: 'tool_result',
+        tool_use_id: toolUse.id,
+        content: 'Error: External mutations require an explicit current-turn user intent context.',
+        is_error: true,
+      };
+    }
+    if (safety && !safety.allowed) {
+      this.logger.warn(
+        { toolName: toolUse.name, reason: safety.reason },
+        'Blocked tool call at current-turn safety boundary',
+      );
+      return {
+        type: 'tool_result',
+        tool_use_id: toolUse.id,
+        content: `Error: ${safety.reason}`,
+        is_error: true,
+      };
+    }
+    if (
+      safety?.isMutation &&
+      successfulMutationSignatures?.has(safety.signature)
+    ) {
+      return {
+        type: 'tool_result',
+        tool_use_id: toolUse.id,
+        content: 'Error: This exact mutating call already succeeded during the current turn. It was not executed again; use the existing result.',
+        is_error: true,
+      };
     }
 
     // Recheck policy at the execution boundary. Schema filtering is only a UX
@@ -1921,13 +2277,55 @@ Only install skills when the user asks, or when you determine a skill would help
       };
     }
 
+    if (toolSignal?.aborted || (toolDeadlineAt !== undefined && Date.now() >= toolDeadlineAt)) {
+      return {
+        type: 'tool_result',
+        tool_use_id: toolUse.id,
+        content: 'Error: Tool dispatch was skipped because the foreground turn deadline expired.',
+        is_error: true,
+      };
+    }
+
+    let operationId: string | undefined;
+    let operationAbortHandler: (() => void) | undefined;
+    if (safety?.isExternalMutation && turnSafety) {
+      const identity = toolOperationIdentity(sessionId, turnSafety.userMessage, toolUse);
+      const reservation = this.sessionManager.reserveToolOperation({
+        operationId: identity.operationId,
+        sessionId,
+        toolName: resolvedToolName,
+        callSignature: safety.signature,
+        userIntentDigest: identity.userIntentDigest,
+      });
+      if (!reservation.reserved) {
+        const alreadySucceeded = reservation.existingStatus === 'succeeded';
+        return {
+          type: 'tool_result',
+          tool_use_id: toolUse.id,
+          content: alreadySucceeded
+            ? 'Error: This exact external operation already succeeded and was not dispatched again. Ask the user to say “again” if a second write is intentional.'
+            : 'Error: This exact external operation has an unknown or in-flight outcome and was not retried. Verify the external system before attempting a new write.',
+          is_error: true,
+        };
+      }
+      operationId = identity.operationId;
+      operationAbortHandler = () => {
+        this.sessionManager.completeToolOperation(operationId!, 'uncertain');
+      };
+      toolSignal?.addEventListener('abort', operationAbortHandler, { once: true });
+      if (toolSignal?.aborted) operationAbortHandler();
+    }
+
     if (skill && (skill.handler || this.skillExecutor)) {
-      this.logger.debug({ skillName: toolUse.name, input: toolUse.input, native: !!skill.handler }, 'Executing skill');
+      this.logger.debug(
+        { skillName: toolUse.name, inputKeys: Object.keys(toolUse.input), native: !!skill.handler },
+        'Executing skill',
+      );
 
       if (onProgress) {
         await onProgress({
           type: 'tool_start',
-          message: JSON.stringify(toolUse.input),
+          message: 'Started',
           toolName: toolUse.name,
         });
       }
@@ -1935,6 +2333,7 @@ Only install skills when the user asks, or when you determine a skill would help
       try {
         let resultContent: string;
         let resultSuccess: boolean;
+        let evidenceContent = '';
 
         if (skill.handler) {
           const result = await skill.handler({
@@ -1942,8 +2341,12 @@ Only install skills when the user asks, or when you determine a skill would help
             workspace: this.workspace,
             sessionId,
             userId,
+            idempotencyKey: operationId,
+            signal: toolSignal,
+            deadlineAt: toolDeadlineAt,
           });
           resultSuccess = result.success;
+          evidenceContent = result.output ?? '';
           resultContent = result.success
             ? (result.output || 'Success')
             : `Error: ${result.error || result.output}`;
@@ -1954,29 +2357,72 @@ Only install skills when the user asks, or when you determine a skill would help
             cwd: this.workspace,
             userId,
             sessionId,
+            idempotencyKey: operationId,
+            signal: toolSignal,
+            deadlineAt: toolDeadlineAt,
           });
           let skillOutput = result.output || '';
           let skillError = result.error || '';
           try {
-            const parsed = JSON.parse(skillOutput);
+            const parsed = JSON.parse(skillOutput) as Record<string, unknown>;
             if (parsed && typeof parsed === 'object') {
-              skillOutput = parsed.output || parsed.error || skillOutput;
-              if (parsed.error) skillError = parsed.error;
+              if (Object.prototype.hasOwnProperty.call(parsed, 'output')) {
+                skillOutput = typeof parsed.output === 'string'
+                  ? parsed.output
+                  : parsed.output == null ? '' : JSON.stringify(parsed.output);
+              }
+              if (parsed.error) {
+                skillError = String(parsed.error);
+                result.success = false;
+              }
             }
           } catch {
             // Not JSON, use raw output
           }
+          evidenceContent = skillOutput;
           resultSuccess = result.success;
           resultContent = result.success
             ? (skillOutput || 'Success')
             : `Error: ${skillError || skillOutput || 'Command failed with no error output'}`;
         }
 
+        // Some shell/API wrappers exit zero even when the payload is an HTTP or
+        // typed failure. Do not turn that into a success receipt.
+        if (resultSuccess && toolOutputIndicatesFailure(resultContent)) {
+          resultSuccess = false;
+          resultContent = `Error: Tool output indicates failure despite a successful process exit. ${resultContent}`;
+        }
+        if (resultSuccess && safety?.isMutation) {
+          successfulMutationSignatures?.add(safety.signature);
+        }
+        if (operationId) {
+          const resultDigest = digestToolOutput(evidenceContent).outputDigest;
+          this.sessionManager.completeToolOperation(
+            operationId,
+            resultSuccess ? 'succeeded' : 'failed',
+            resultDigest,
+          );
+        }
+
         if (onProgress) {
+          // Evidence measures the tool's real output. The human-facing
+          // fallback "Success" is never accepted as factual proof.
+          const digest = digestToolOutput(evidenceContent);
+          const claimLedger = buildEvidenceClaimLedger(evidenceContent);
+          const provenance = buildRuntimeEvidenceProvenance({
+            toolName: resolvedToolName,
+            toolInput: toolUse.input,
+            skillSource: skill.source,
+            skillPath: skill.path,
+            declaration: skill.frontmatter.metadata?.openclaw?.evidence,
+            executionContext: this.evidenceExecutionContext,
+            accountScope: userId,
+          });
           await onProgress({
-            type: 'tool_complete',
-            message: resultContent.slice(0, 2000),
+            type: resultSuccess ? 'tool_complete' : 'tool_error',
+            message: resultSuccess ? 'Completed' : 'Failed',
             toolName: toolUse.name,
+            evidence: { ...digest, ...claimLedger, ...provenance, verified: resultSuccess },
           });
         }
 
@@ -1989,13 +2435,30 @@ Only install skills when the user asks, or when you determine a skill would help
 
       } catch (error) {
         const err = error as Error;
+        if (operationId) {
+          // A thrown/aborted external call may have crossed the network before
+          // failing locally. Preserve uncertainty and block automatic retry.
+          this.sessionManager.completeToolOperation(operationId, 'uncertain');
+        }
         this.logger.error({ skillName: toolUse.name, error: err.message }, 'Skill execution failed');
 
         if (onProgress) {
+          const digest = digestToolOutput(err.message);
+          const claimLedger = buildEvidenceClaimLedger(err.message);
+          const provenance = buildRuntimeEvidenceProvenance({
+            toolName: resolvedToolName,
+            toolInput: toolUse.input,
+            skillSource: skill?.source,
+            skillPath: skill?.path,
+            declaration: skill?.frontmatter.metadata?.openclaw?.evidence,
+            executionContext: this.evidenceExecutionContext,
+            accountScope: userId,
+          });
           await onProgress({
             type: 'tool_error',
-            message: err.message,
+            message: 'Failed',
             toolName: toolUse.name,
+            evidence: { ...digest, ...claimLedger, ...provenance, verified: false },
           });
         }
 
@@ -2005,7 +2468,20 @@ Only install skills when the user asks, or when you determine a skill would help
           content: `Error executing skill: ${err.message}`,
           is_error: true,
         };
+      } finally {
+        if (operationAbortHandler) {
+          toolSignal?.removeEventListener('abort', operationAbortHandler);
+        }
       }
+    }
+
+    if (operationId) {
+      // Dispatch never reached an executable handler. This is a known local
+      // failure, so a corrected tool installation may retry the same intent.
+      this.sessionManager.completeToolOperation(operationId, 'failed');
+    }
+    if (operationAbortHandler) {
+      toolSignal?.removeEventListener('abort', operationAbortHandler);
     }
 
     // Skill not found — provide helpful error with available tool names
@@ -2025,19 +2501,106 @@ Only install skills when the user asks, or when you determine a skill would help
     };
   }
 
+  /** Enforce the enclosing foreground deadline around every dispatch path. */
+  private async executeSingleToolWithinDeadline(
+    toolUse: ToolUseContent,
+    sessionId: string,
+    userId?: string,
+    onProgress?: ProgressCallback,
+    turnSafety?: TurnToolSafetyContext,
+    successfulMutationSignatures?: Set<string>,
+    turnDeadlineAt?: number,
+    parentSignal?: AbortSignal,
+  ): Promise<ContentBlock> {
+    if (this.interruptQueue?.hasPending(sessionId)) {
+      return {
+        type: 'tool_result',
+        tool_use_id: toolUse.id,
+        content: 'Execution cancelled because a newer user message superseded this tool plan.',
+        is_error: true,
+      };
+    }
+    if (turnDeadlineAt === undefined) {
+      return this.executeSingleTool(
+        toolUse, sessionId, userId, onProgress, turnSafety, successfulMutationSignatures,
+        parentSignal,
+      );
+    }
+
+    const remainingMs = turnDeadlineAt - Date.now();
+    if (remainingMs <= 0 || parentSignal?.aborted) {
+      return {
+        type: 'tool_result',
+        tool_use_id: toolUse.id,
+        content: 'Error: Tool execution was skipped because the foreground turn was cancelled or its deadline expired.',
+        is_error: true,
+      };
+    }
+
+    const deadlineController = new AbortController();
+    const signal = parentSignal
+      ? AbortSignal.any([parentSignal, deadlineController.signal])
+      : deadlineController.signal;
+    let deadlineTriggered = false;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    let cancelHandler: (() => void) | undefined;
+    const cancellation = new Promise<ContentBlock>((resolve) => {
+      cancelHandler = () => resolve({
+        type: 'tool_result',
+        tool_use_id: toolUse.id,
+        content: deadlineTriggered
+          ? 'Error: Tool execution exceeded the foreground turn deadline and was aborted. Any external outcome is unverified and will not be retried automatically.'
+          : 'Error: Tool execution was cancelled before completion. Any external outcome is unverified and will not be retried automatically.',
+        is_error: true,
+      });
+      signal.addEventListener('abort', cancelHandler, { once: true });
+      if (signal.aborted) cancelHandler();
+      timeout = setTimeout(() => {
+        deadlineTriggered = true;
+        deadlineController.abort();
+      }, remainingMs);
+    });
+
+    try {
+      return await Promise.race([
+        this.executeSingleTool(
+          toolUse,
+          sessionId,
+          userId,
+          onProgress,
+          turnSafety,
+          successfulMutationSignatures,
+          signal,
+          turnDeadlineAt,
+        ),
+        cancellation,
+      ]);
+    } finally {
+      if (timeout) clearTimeout(timeout);
+      if (cancelHandler) signal.removeEventListener('abort', cancelHandler);
+    }
+  }
+
   private async executeTools(
     toolUses: ToolUseContent[],
     sessionId: string,
     userId?: string,
     onProgress?: ProgressCallback,
-    shouldStop?: ShouldStopCallback
+    shouldStop?: ShouldStopCallback,
+    turnSafety?: TurnToolSafetyContext,
+    successfulMutationSignatures?: Set<string>,
+    turnDeadlineAt?: number,
+    abortSignal?: AbortSignal,
   ): Promise<ContentBlock[]> {
+    const supersededByInterrupt = () => this.interruptQueue?.hasPending(sessionId) === true;
     // Check for early stop
-    if (shouldStop && shouldStop()) {
+    if ((shouldStop && shouldStop()) || supersededByInterrupt()) {
       return toolUses.map(t => ({
         type: 'tool_result' as const,
         tool_use_id: t.id,
-        content: 'Execution stopped by user request.',
+        content: supersededByInterrupt()
+          ? 'Execution cancelled because a newer user message superseded this tool plan.'
+          : 'Execution stopped by user request.',
         is_error: true,
       }));
     }
@@ -2060,29 +2623,49 @@ Only install skills when the user asks, or when you determine a skill would help
     // Execute parallel batch first (if any)
     if (parallelBatch.length > 1) {
       this.logger.info({ count: parallelBatch.length, tools: parallelBatch.map(t => t.name) }, 'Executing tools in parallel');
-      const parallelResults = await Promise.all(
-        parallelBatch.map(toolUse => this.executeSingleTool(toolUse, sessionId, userId, onProgress))
-      );
-      results.push(...parallelResults);
+      for (let offset = 0; offset < parallelBatch.length; offset += MAX_PARALLEL_TOOL_CALLS) {
+        const chunk = parallelBatch.slice(offset, offset + MAX_PARALLEL_TOOL_CALLS);
+        const parallelResults = await Promise.all(
+          chunk.map((toolUse) => this.executeSingleToolWithinDeadline(
+            toolUse,
+            sessionId,
+            userId,
+            onProgress,
+            turnSafety,
+            successfulMutationSignatures,
+            turnDeadlineAt,
+            abortSignal,
+          )),
+        );
+        results.push(...parallelResults);
+      }
     } else if (parallelBatch.length === 1) {
       // Single tool — no need for Promise.all overhead
-      results.push(await this.executeSingleTool(parallelBatch[0], sessionId, userId, onProgress));
+      results.push(await this.executeSingleToolWithinDeadline(
+        parallelBatch[0], sessionId, userId, onProgress, turnSafety, successfulMutationSignatures,
+        turnDeadlineAt, abortSignal,
+      ));
     }
 
     // Execute sequential tools one by one
     for (const toolUse of sequentialQueue) {
-      if (shouldStop && shouldStop()) {
+      if ((shouldStop && shouldStop()) || supersededByInterrupt()) {
         // Fill remaining with stop messages
         results.push({
           type: 'tool_result',
           tool_use_id: toolUse.id,
-          content: 'Execution stopped by user request.',
+          content: supersededByInterrupt()
+            ? 'Execution cancelled because a newer user message superseded this tool plan.'
+            : 'Execution stopped by user request.',
           is_error: true,
         });
         continue;
       }
 
-      results.push(await this.executeSingleTool(toolUse, sessionId, userId, onProgress));
+      results.push(await this.executeSingleToolWithinDeadline(
+        toolUse, sessionId, userId, onProgress, turnSafety, successfulMutationSignatures,
+        turnDeadlineAt, abortSignal,
+      ));
     }
 
     return results;

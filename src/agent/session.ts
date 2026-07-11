@@ -1,6 +1,11 @@
 import { nanoid } from 'nanoid';
 import type { Message, TokenUsage } from '../providers/types.js';
-import type { ScallopDatabase } from '../memory/db.js';
+import type {
+  ScallopDatabase,
+  ToolOperationReservation,
+  ToolOperationStatus,
+} from '../memory/db.js';
+import { inferSessionMessageKind } from '../memory/session-message-kinds.js';
 
 export interface SessionMetadata {
   userId?: string;
@@ -57,6 +62,65 @@ export class SessionManager {
     return session;
   }
 
+  /**
+   * Close the current conversation without deleting it, then force-create a
+   * genuinely new active session for the same channel identity. This also
+   * closes any stale active session recovered after a process restart.
+   */
+  async startNewSession(
+    metadata: SessionMetadata & { id?: string },
+    currentSessionId?: string,
+  ): Promise<Session> {
+    if (currentSessionId) {
+      this.db.archiveSession(currentSessionId, 'new_conversation', 'user_command');
+    }
+
+    if (typeof metadata.userId === 'string' && metadata.userId.length > 0) {
+      this.db.archiveActiveSessionsByUserId(
+        metadata.userId,
+        'new_conversation',
+        'user_command',
+        typeof metadata.channelId === 'string' ? metadata.channelId : undefined,
+      );
+    }
+
+    // An archived session may be cached even though it is intentionally no
+    // longer resumable. Clearing the small LRU is cheap and avoids stale reuse.
+    this.cache.clear();
+    // Override any caller-supplied ID: a reset must never reuse a tombstone or
+    // accidentally reopen the conversation it just archived.
+    return this.createSession({ ...metadata, id: nanoid() });
+  }
+
+  /** Archive a conversation without deleting messages or its summary. */
+  async archiveSession(
+    sessionId: string,
+    reason: string = 'closed',
+    actor: string = 'system',
+  ): Promise<boolean> {
+    const result = this.db.archiveSession(sessionId, reason, actor);
+    this.cache.delete(sessionId);
+    return result;
+  }
+
+  reserveToolOperation(input: {
+    operationId: string;
+    sessionId: string;
+    toolName: string;
+    callSignature: string;
+    userIntentDigest: string;
+  }): ToolOperationReservation {
+    return this.db.reserveToolOperation(input);
+  }
+
+  completeToolOperation(
+    operationId: string,
+    status: Exclude<ToolOperationStatus, 'prepared'>,
+    resultDigest?: string,
+  ): boolean {
+    return this.db.completeToolOperation(operationId, status, resultDigest);
+  }
+
   async addMessage(sessionId: string, message: Message): Promise<void> {
     const session = await this.getSession(sessionId);
     if (!session) {
@@ -67,8 +131,26 @@ export class SessionManager {
     const content = typeof message.content === 'string'
       ? message.content
       : JSON.stringify(message.content);
+    const inferredKind = inferSessionMessageKind(
+      message.role,
+      message.content,
+      session.metadata as Record<string, unknown> | undefined,
+    );
+    // This trusted boundary still knows whether JSON-looking input was a
+    // literal human string or a structured provider ContentBlock[] value.
+    // Known injected control prefixes and worker sessions remain internal.
+    const messageKind = message.role === 'user'
+      && typeof message.content === 'string'
+      && inferredKind !== 'system_internal'
+      && inferredKind !== 'worker_internal'
+      ? 'human_user'
+      : message.role === 'assistant'
+        && typeof message.content === 'string'
+        && inferredKind === 'assistant_final'
+        ? 'assistant_final'
+        : inferredKind;
 
-    this.db.addSessionMessage(sessionId, message.role, content);
+    this.db.addSessionMessage(sessionId, message.role, content, messageKind);
 
     session.messages.push(message);
     session.updatedAt = new Date();
@@ -84,7 +166,7 @@ export class SessionManager {
       return cached;
     }
 
-    const row = this.db.getSession(sessionId);
+    const row = this.db.getActiveSession(sessionId);
     if (!row) return undefined;
 
     const messageRows = this.db.getSessionMessages(sessionId);
@@ -110,8 +192,23 @@ export class SessionManager {
     return session;
   }
 
-  async deleteSession(sessionId: string): Promise<boolean> {
-    const result = this.db.deleteSession(sessionId);
+  /**
+   * Destructive transcript removal is deliberately separate from /new and
+   * requires an explicit confirmation flag from a user-facing confirmation
+   * flow. The durable summary/tombstone/audit event are retained.
+   */
+  async deleteSession(
+    sessionId: string,
+    options?: { confirmed: boolean; reason?: string; actor?: string },
+  ): Promise<boolean> {
+    if (options?.confirmed !== true) {
+      throw new Error('Deleting a conversation requires explicit confirmation');
+    }
+    const result = this.db.deleteSession(
+      sessionId,
+      options.reason ?? 'explicit_forget',
+      options.actor ?? 'user_command',
+    );
     this.cache.delete(sessionId);
     return result;
   }

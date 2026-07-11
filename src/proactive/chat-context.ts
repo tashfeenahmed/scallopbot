@@ -7,6 +7,7 @@
  */
 
 import type { ScallopDatabase } from '../memory/db.js';
+import { classifySessionMessage } from '../memory/session-message-view.js';
 
 export interface RecentChatContext {
   formattedContext: string;
@@ -33,23 +34,6 @@ const DEFAULT_STALENESS_MS = 48 * 60 * 60 * 1000; // 48 hours
  * Extract text from a session message content field.
  * Content may be a plain string or a JSON-serialized ContentBlock[] array.
  */
-function extractText(content: string): string {
-  if (!content) return '';
-  // Try parsing as JSON ContentBlock[] (array of {type:'text', text:...})
-  if (content.startsWith('[')) {
-    try {
-      const blocks = JSON.parse(content) as Array<{ type: string; text?: string }>;
-      return blocks
-        .filter((b) => b.type === 'text' && b.text)
-        .map((b) => b.text!)
-        .join('\n');
-    } catch {
-      // Not valid JSON — treat as plain text
-    }
-  }
-  return content;
-}
-
 /**
  * Retrieve recent chat messages and format them as a compact transcript
  * for injection into sub-agent system prompts.
@@ -67,24 +51,39 @@ export function getRecentChatContext(
   const maxChars = options?.maxCharsPerMessage ?? DEFAULT_MAX_CHARS;
   const stalenessMs = options?.stalenessMs ?? DEFAULT_STALENESS_MS;
 
-  const messages = userId
+  // Over-fetch because provider protocol rows (tool results/reasoning) are not
+  // conversation turns and must not consume the context window.
+  const rawLimit = Math.min(1_000, Math.max(maxMessages * 20, 100));
+  const rawMessages = userId
     ? (options?.identityCandidates
-        ? db.getRecentMessagesByUserId(userId, maxMessages, options.identityCandidates)
-        : db.getRecentMessagesByUserId(userId, maxMessages))
-    : db.getAllMessagesPaginated(maxMessages).messages;
+        ? db.getRecentMessagesByUserId(userId, rawLimit, options.identityCandidates)
+        : db.getRecentMessagesByUserId(userId, rawLimit))
+    : db.getAllMessagesPaginated(rawLimit).messages;
+
+  const messages = rawMessages
+    .map(message => {
+      const session = db.getSession?.(message.sessionId);
+      return {
+        message,
+        archived: session?.archivedAt != null || session?.transcriptDeletedAt != null,
+        view: classifySessionMessage(message, { sessionMetadata: session?.metadata }),
+      };
+    })
+    .filter(({ view, archived }) => view.isHumanVisible && !archived)
+    .slice(-maxMessages);
 
   if (messages.length === 0) return null;
 
-  const lastMessage = messages[messages.length - 1];
+  const lastMessage = messages[messages.length - 1].message;
   const lastMessageAt = lastMessage.createdAt;
 
   // Staleness guard
   if (Date.now() - lastMessageAt > stalenessMs) return null;
 
   const lines: string[] = [];
-  for (const msg of messages) {
-    const role = msg.role === 'user' ? 'User' : 'Assistant';
-    let text = extractText(msg.content);
+  for (const { view } of messages) {
+    const role = view.isHumanTurn ? 'User' : 'Assistant';
+    let text = view.visibleText;
     if (text.length > maxChars) {
       text = text.slice(0, maxChars) + '…';
     }

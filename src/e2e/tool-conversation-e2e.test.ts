@@ -223,9 +223,11 @@ describe('E2E Tool Conversation', () => {
       expect(startedSkills).toContain('glob');
       expect(startedSkills).toContain('grep');
 
-      // Should see skill_complete events for each
+      // Every tool must produce a terminal event. A no-match grep is correctly
+      // reported as skill_error rather than being mislabeled successful.
       const skillCompletes = messages.filter(m => m.type === 'skill_complete');
-      const completedSkills = skillCompletes.map(m => m.skill);
+      const skillTerminals = messages.filter(m => m.type === 'skill_complete' || m.type === 'skill_error');
+      const completedSkills = skillTerminals.map(m => m.skill);
       expect(completedSkills).toContain('ls');
       expect(completedSkills).toContain('glob');
       expect(completedSkills).toContain('grep');
@@ -242,7 +244,7 @@ describe('E2E Tool Conversation', () => {
       expect(globComplete).toBeDefined();
 
       // grep output should contain function definitions
-      const grepComplete = skillCompletes.find(m => m.skill === 'grep');
+      const grepComplete = skillTerminals.find(m => m.skill === 'grep');
       expect(grepComplete).toBeDefined();
 
       // Final response
@@ -345,7 +347,7 @@ describe('E2E Tool Conversation', () => {
 
       // All three tools should have started and completed
       const starts = messages.filter(m => m.type === 'skill_start');
-      const completes = messages.filter(m => m.type === 'skill_complete');
+      const completes = messages.filter(m => m.type === 'skill_complete' || m.type === 'skill_error');
 
       expect(starts.length).toBeGreaterThanOrEqual(3);
       expect(completes.length).toBeGreaterThanOrEqual(3);

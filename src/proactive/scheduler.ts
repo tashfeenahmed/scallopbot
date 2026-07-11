@@ -12,6 +12,8 @@ import type {
   ScheduledItem,
   RecurringSchedule,
   BoardItemResult,
+  TaskConfig,
+  ToolEvidenceReceipt,
 } from '../memory/db.js';
 import { BoardService } from '../board/board-service.js';
 import { computeBoardStatus } from '../board/types.js';
@@ -52,6 +54,13 @@ import {
   PROACTIVE_STYLE_HISTORY_MS,
 } from './proactive-config.js';
 import { getTodayStartMs } from './proactive-utils.js';
+import {
+  buildEvidenceExecutionContext,
+  isAuthoritativeEvidenceReceipt,
+  NEVER_AUTHORITATIVE_EVIDENCE_TOOLS,
+  verifyResponseEvidenceClaims,
+  type EvidenceExecutionContext,
+} from '../security/evidence-grounding.js';
 import {
   parseProactivePreferences,
   proactiveTopicMatchesText,
@@ -136,6 +145,196 @@ function millisecondsUntilLocalMorning(now: Date, timeZone: string, jitterSeed?:
   );
 }
 
+const FACTUAL_TASK_RE = /\b(?:analytics?|metrics?|statistics?|stats?|subscribers?|followers?|views?|revenue|traffic|conversions?|sales|balances?|prices?|exchange rates?|weather|flight status|stock prices?|account data|real data|source data|look ?up|research|fetch|retrieve|query|measure|counts?)\b/i;
+const NON_EVIDENCE_SOURCE_TOOLS = new Set([
+  'board', 'goals', 'reminder', 'triggers', 'progress', 'question', 'telegram_send',
+]);
+const DEFAULT_TASK_MAX_LATENESS_MS = 24 * 60 * 60 * 1000;
+
+function configuredEvidenceSourceTools(config: TaskConfig): string[] {
+  const eligible = (tools: readonly string[]) => [...new Set(tools)]
+    .filter(Boolean)
+    .filter(tool => !NON_EVIDENCE_SOURCE_TOOLS.has(tool))
+    .filter(tool => !NEVER_AUTHORITATIVE_EVIDENCE_TOOLS.has(tool.toLowerCase()));
+  const explicit = eligible(config.requiredEvidenceTools ?? []);
+  if (explicit.length > 0) return explicit;
+  const configured = eligible(config.tools ?? []);
+  return configured;
+}
+
+export function taskRequiresRuntimeEvidence(config: TaskConfig): boolean {
+  if (config.evidencePolicy === 'tool_receipts') return true;
+  // A model-authored `none` flag must not be able to exempt a factual report.
+  // It is only an opt-out for tasks whose goal is genuinely non-factual.
+  if (FACTUAL_TASK_RE.test(config.goal)) return true;
+  if (config.evidencePolicy === 'none') return false;
+  return (config.tools?.length ?? 0) > 0;
+}
+
+export function verifyTaskRuntimeEvidence(
+  config: TaskConfig,
+  receipts: readonly ToolEvidenceReceipt[] | undefined,
+  response?: string,
+  expectedContext?: EvidenceExecutionContext,
+): { passed: boolean; reason?: string } {
+  if (!taskRequiresRuntimeEvidence(config)) return { passed: true };
+  const successful = (receipts ?? []).filter(receipt => (
+    receipt.success
+    && Number.isFinite(receipt.completedAt)
+    && receipt.completedAt > 0
+    && Number.isFinite(receipt.outputBytes)
+    && receipt.outputBytes > 0
+    && /^[a-f0-9]{64}$/i.test(receipt.outputDigest)
+  ));
+  if (successful.length === 0) {
+    return { passed: false, reason: 'No successful runtime tool receipt was produced' };
+  }
+  const authoritative = successful.filter(receipt => isAuthoritativeEvidenceReceipt(receipt, expectedContext));
+  if (authoritative.length === 0) {
+    return {
+      passed: false,
+      reason: 'No authoritative runtime receipt with source/request/account provenance was produced',
+    };
+  }
+  const explicitlyRequired = [...new Set(config.requiredEvidenceTools ?? [])];
+  const configuredSources = configuredEvidenceSourceTools(config);
+  if (configuredSources.length === 0) {
+    return { passed: false, reason: 'No configured evidence source can be matched to the runtime receipt' };
+  }
+  let relevantReceipts: ToolEvidenceReceipt[];
+  if (explicitlyRequired.length > 0) {
+    const missing = explicitlyRequired.filter(
+      tool => !authoritative.some(receipt => receipt.toolName === tool),
+    );
+    if (missing.length > 0) {
+      return { passed: false, reason: `Missing required tool receipt(s): ${missing.join(', ')}` };
+    }
+    relevantReceipts = authoritative.filter(receipt => explicitlyRequired.includes(receipt.toolName));
+  } else {
+    relevantReceipts = authoritative.filter(receipt => configuredSources.includes(receipt.toolName));
+    if (relevantReceipts.length === 0) {
+      return { passed: false, reason: `No receipt came from a configured evidence source (${configuredSources.join(', ')})` };
+    }
+  }
+  if (response !== undefined) {
+    const grounding = verifyResponseEvidenceClaims(response, relevantReceipts);
+    if (!grounding.passed) return { passed: false, reason: grounding.reason };
+  }
+  return { passed: true };
+}
+
+function evidenceContextForScheduledItem(item: ScheduledItem, config: TaskConfig): EvidenceExecutionContext {
+  return buildEvidenceExecutionContext(`${config.goal}\n${item.message}`, item.userId);
+}
+
+interface ZonedDateParts {
+  year: number;
+  month: number;
+  day: number;
+  weekday: number;
+}
+
+function zonedDateParts(at: Date, timeZone: string): ZonedDateParts {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    weekday: 'short',
+  }).formatToParts(at);
+  const value = (type: string) => Number(parts.find(part => part.type === type)?.value);
+  const weekdays: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+  const weekdayName = parts.find(part => part.type === 'weekday')?.value ?? '';
+  const result = { year: value('year'), month: value('month'), day: value('day'), weekday: weekdays[weekdayName] };
+  if (Object.values(result).some(Number.isNaN) || result.weekday === undefined) {
+    throw new Error(`Could not resolve date parts for timezone ${timeZone}`);
+  }
+  return result;
+}
+
+function zonedWallClockToUtc(
+  year: number,
+  month: number,
+  day: number,
+  hour: number,
+  minute: number,
+  timeZone: string,
+): number {
+  const desiredAsUtc = Date.UTC(year, month - 1, day, hour, minute);
+  let guess = desiredAsUtc;
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    hourCycle: 'h23',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+  });
+  for (let i = 0; i < 3; i++) {
+    const parts = formatter.formatToParts(new Date(guess));
+    const value = (type: string) => Number(parts.find(part => part.type === type)?.value);
+    const renderedAsUtc = Date.UTC(
+      value('year'), value('month') - 1, value('day'),
+      value('hour') % 24, value('minute'), value('second'),
+    );
+    guess += desiredAsUtc - renderedAsUtc;
+  }
+  return guess;
+}
+
+/** Compute one future occurrence in the user's timezone without cadence drift. */
+export function calculateNextRecurringOccurrence(
+  schedule: RecurringSchedule,
+  timeZone: string,
+  fromMs: number = Date.now(),
+): number | null {
+  const from = new Date(fromMs);
+  const local = zonedDateParts(from, timeZone);
+  let cursor = new Date(Date.UTC(local.year, local.month - 1, local.day));
+  const advance = (days: number = 1) => {
+    cursor = new Date(cursor.getTime() + days * 24 * 60 * 60 * 1000);
+  };
+
+  switch (schedule.type) {
+    case 'daily':
+      advance();
+      break;
+    case 'weekly': {
+      const dayOfWeek = schedule.dayOfWeek ?? local.weekday;
+      let daysUntil = dayOfWeek - local.weekday;
+      if (daysUntil <= 0) daysUntil += 7;
+      advance(daysUntil);
+      break;
+    }
+    case 'monthly': {
+      const desiredDay = schedule.dayOfMonth ?? local.day;
+      const nextMonth = new Date(Date.UTC(local.year, local.month, 1));
+      const lastDay = new Date(Date.UTC(
+        nextMonth.getUTCFullYear(), nextMonth.getUTCMonth() + 1, 0,
+      )).getUTCDate();
+      cursor = new Date(Date.UTC(
+        nextMonth.getUTCFullYear(), nextMonth.getUTCMonth(), Math.min(desiredDay, lastDay),
+      ));
+      break;
+    }
+    case 'weekdays':
+      do advance(); while (cursor.getUTCDay() === 0 || cursor.getUTCDay() === 6);
+      break;
+    case 'weekends':
+      do advance(); while (cursor.getUTCDay() !== 0 && cursor.getUTCDay() !== 6);
+      break;
+    default:
+      return null;
+  }
+
+  return zonedWallClockToUtc(
+    cursor.getUTCFullYear(),
+    cursor.getUTCMonth() + 1,
+    cursor.getUTCDate(),
+    schedule.hour,
+    schedule.minute,
+    timeZone,
+  );
+}
+
 /**
  * Strip internal markup, XML function calls, error prefixes, and thinking blocks
  * from raw sub-agent output so it's safe to show to the user.
@@ -192,6 +391,8 @@ interface TaskProcessResult {
   outcome: ProcessOutcome;
   result?: BoardItemResult;
   error?: string;
+  failureDisposition?: 'retry' | 'fail' | 'block';
+  failureCode?: string;
 }
 
 /**
@@ -309,7 +510,8 @@ export class UnifiedScheduler {
   private async ensureSchedulerSession(userId: string = 'default'): Promise<string | null> {
     const stateUserId = resolveStateUserId(userId, this.canonicalSingleUserIds);
     const existing = this.schedulerSessionIds.get(stateUserId);
-    if (existing) return existing;
+    if (existing && this.db.getActiveSession(existing)) return existing;
+    if (existing) this.schedulerSessionIds.delete(stateUserId);
     if (!this.sessionManager) return null;
     try {
       const { channel } = parseUserIdPrefix(userId);
@@ -752,6 +954,29 @@ export class UnifiedScheduler {
         const item = this.db.getScheduledItem(claim.item.id);
         if (!item) continue;
 
+        const latenessMs = item.triggerAt > 0 ? Date.now() - item.triggerAt : 0;
+        const maxLatenessMs = Math.max(
+          0,
+          item.taskConfig?.maxLatenessMs ?? DEFAULT_TASK_MAX_LATENESS_MS,
+        );
+        if (item.taskConfig?.stalePolicy !== 'run_once' && latenessMs > maxLatenessMs) {
+          const reason = `Missed occurrence expired after ${Math.round(latenessMs / 60_000)} minutes`;
+          const expired = this.boardService.expireLeasedTask(
+            item.id,
+            claim.leaseToken,
+            reason,
+            {
+              response: reason,
+              completedAt: Date.now(),
+              taskComplete: false,
+              outcome: 'blocked',
+              failureCode: 'stale_occurrence_expired',
+            },
+          );
+          if (expired && item.recurring) this.rescheduleRecurringItem(item);
+          continue;
+        }
+
         // Agent-created tasks obey quiet hours; explicit user tasks retain the
         // exact time selected by the user. Releasing this administrative claim
         // restores the attempt because no model work was performed.
@@ -796,10 +1021,30 @@ export class UnifiedScheduler {
 
       if (!leaseActive) return;
 
+      if (processed.failureDisposition === 'block' && processed.result) {
+        if (!renew()) return;
+        const reason = processed.error ?? 'Required capability is unavailable';
+        const blocked = this.boardService.blockLeasedTask(
+          item.id,
+          leaseToken,
+          reason,
+          processed.result,
+        );
+        if (blocked && item.recurring) {
+          const paused = this.db.pauseRecurringTaskSeries(item, reason);
+          this.logger.warn({ itemId: item.id, paused }, 'Recurring task circuit breaker opened');
+        }
+        return;
+      }
+
       if (
-        processed.outcome === 'sent' ||
-        processed.outcome === 'suppressed' ||
-        processed.outcome === 'cancelled'
+        processed.result?.taskComplete === true
+        && processed.result.outcome === 'succeeded'
+        && (
+          processed.outcome === 'sent'
+          || processed.outcome === 'suppressed'
+          || processed.outcome === 'cancelled'
+        )
       ) {
         if (!processed.result || !renew()) return;
         const finalResult: BoardItemResult = {
@@ -811,7 +1056,10 @@ export class UnifiedScheduler {
         return;
       }
 
-      if (processed.outcome === 'deferred' || (isFailureOutcome(processed.outcome) && processed.result)) {
+      if (
+        processed.outcome === 'deferred'
+        || (isFailureOutcome(processed.outcome) && processed.result?.outcome === 'succeeded')
+      ) {
         const delay = this.taskRetryDelayMs;
         this.boardService.deferLeasedTask(
           item.id,
@@ -822,12 +1070,46 @@ export class UnifiedScheduler {
         return;
       }
 
-      this.boardService.failLeasedTask(
+      const failureOutcome = this.boardService.failLeasedTask(
         item.id,
         leaseToken,
         processed.error ?? 'Scheduled task execution failed',
-        { retryAt: Date.now() + this.taskRetryDelayMs },
+        {
+          retryAt: Date.now() + this.taskRetryDelayMs,
+          retryable: processed.failureDisposition !== 'fail',
+          result: processed.result,
+          failureCode: processed.failureCode,
+        },
       );
+      if (item.recurring && failureOutcome !== 'stale_lease') {
+        const error = processed.error ?? 'Scheduled task execution failed';
+        const circuit = this.db.recordRecurringTaskFailure(
+          item,
+          error,
+          processed.failureCode,
+          failureOutcome === 'exhausted' || processed.failureDisposition === 'fail',
+        );
+        if (circuit?.opened) {
+          const paused = this.db.pauseRecurringTaskSeries(item, error);
+          this.logger.warn(
+            { itemId: item.id, failureCount: circuit.failureCount, paused },
+            'Recurring task runtime circuit breaker opened',
+          );
+          if (circuit.shouldNotify) {
+            const message = failureOutcome === 'exhausted'
+              ? 'I paused this recurring task because its allowed attempts failed. I will not schedule more copies until it is reviewed.'
+              : 'I paused this recurring task after the same run failed repeatedly. I will not schedule more copies until it is reviewed.';
+            try {
+              await this.sendFormattedMessage(item, message, 'task_result', true);
+            } catch (error) {
+              this.logger.warn(
+                { itemId: item.id, error: (error as Error).message },
+                'Could not deliver recurring task circuit notification',
+              );
+            }
+          }
+        }
+      }
     } finally {
       clearInterval(heartbeat);
     }
@@ -838,9 +1120,42 @@ export class UnifiedScheduler {
    * Silently skips if sub-agent fails (no fallback to raw task description).
    */
   private async processTask(item: ScheduledItem, lease: TaskLeaseContext): Promise<TaskProcessResult> {
+    const config = item.taskConfig;
     // If the work already completed but delivery failed, retry the stored result
     // instead of executing the task (and its potentially mutating tools) twice.
     if (item.result?.response) {
+      if (item.result.taskComplete !== true || item.result.outcome !== 'succeeded') {
+        return {
+          outcome: 'failed',
+          result: { ...item.result, taskComplete: false, outcome: 'failed' },
+          error: 'Stored task result is not a verified success',
+          failureDisposition: 'fail',
+          failureCode: item.result.failureCode ?? 'unverified_stored_result',
+        };
+      }
+      if (config) {
+        const evidenceContext = evidenceContextForScheduledItem(item, config);
+        const storedEvidence = verifyTaskRuntimeEvidence(
+          { ...config, goal: `${config.goal}\n${item.message}\n${item.result.response}` },
+          item.result.evidenceReceipts,
+          item.result.response,
+          evidenceContext,
+        );
+        if (!storedEvidence.passed) {
+          return {
+            outcome: 'failed',
+            result: {
+              ...item.result,
+              taskComplete: false,
+              outcome: 'failed',
+              failureCode: 'missing_runtime_evidence',
+            },
+            error: storedEvidence.reason,
+            failureDisposition: 'fail',
+            failureCode: 'missing_runtime_evidence',
+          };
+        }
+      }
       const storedResult = sanitizeAgentResponse(item.result.response);
       if (storedResult) {
         if (!lease.renew()) return { outcome: 'failed', error: 'Task lease lost before delivery' };
@@ -849,12 +1164,31 @@ export class UnifiedScheduler {
       }
     }
 
-    const config = item.taskConfig;
+    // A durable circuit applies to the whole recurring series, including a
+    // successor inserted by another process after the original pending rows
+    // were paused. Reviewing/resetting the circuit is required before more
+    // unattended work is allowed to run.
+    if (this.db.isRecurringTaskFailureCircuitOpen(item)) {
+      return {
+        outcome: 'failed',
+        result: {
+          response: 'This recurring task remains paused after repeated runtime failures.',
+          completedAt: Date.now(),
+          taskComplete: false,
+          outcome: 'blocked',
+          failureCode: 'recurring_runtime_circuit_open',
+        },
+        error: 'Recurring task runtime circuit is open',
+        failureDisposition: 'block',
+        failureCode: 'recurring_runtime_circuit_open',
+      };
+    }
+
     const schedulerSessionId = await this.ensureSchedulerSession(item.userId);
     const executionParentSessionId = this.getOwnedSessionId(item.sessionId, item.userId)
       ?? schedulerSessionId;
     if (!config || !this.subAgentExecutor || !executionParentSessionId) {
-      this.logger.warn({ itemId: item.id }, 'Scheduled task cannot run; suppressing raw task description');
+      this.logger.warn({ itemId: item.id }, 'Scheduled task cannot run; opening capability circuit');
       this.db.recordProactiveDecision({
         userId: item.userId,
         stage: 'deliver',
@@ -863,14 +1197,74 @@ export class UnifiedScheduler {
         detail: { itemId: item.id },
       });
       const unavailableResult: BoardItemResult = {
-        response: 'Task could not run because no sub-agent executor was available.',
+        response: 'I paused this scheduled task because its background worker is unavailable. I will not keep retrying it automatically.',
         completedAt: Date.now(),
         taskComplete: false,
+        outcome: 'blocked',
+        failureCode: 'task_executor_unavailable',
       };
-      if (!lease.renew() || !this.boardService.storeLeasedResult(item.id, lease.leaseToken, unavailableResult)) {
-        return { outcome: 'failed', error: 'Task lease lost while recording unavailable executor' };
+      if (!lease.renew()) return { outcome: 'failed', error: 'Task lease lost before capability block' };
+      const delivery = await this.sendFormattedMessage(item, unavailableResult.response, 'task_result', true);
+      if (delivery === 'sent') unavailableResult.notifiedAt = Date.now();
+      return {
+        outcome: 'failed',
+        result: unavailableResult,
+        error: 'Scheduled task executor is unavailable',
+        failureDisposition: 'block',
+        failureCode: 'task_executor_unavailable',
+      };
+    }
+
+    const plannedEvidenceConfig: TaskConfig = {
+      ...config,
+      goal: `${config.goal}\n${item.message}`,
+    };
+    const evidenceExecutionContext = evidenceContextForScheduledItem(item, config);
+    const evidenceRequired = taskRequiresRuntimeEvidence(plannedEvidenceConfig);
+    const requestedTools = config.tools ?? [];
+    const evidenceSourceTools = configuredEvidenceSourceTools(config);
+    if (evidenceRequired && evidenceSourceTools.length === 0) {
+      const result: BoardItemResult = {
+        response: 'I paused this scheduled report because it has no verified data source configured. I will not invent the missing data or keep retrying.',
+        completedAt: Date.now(),
+        taskComplete: false,
+        outcome: 'blocked',
+        failureCode: 'evidence_capability_not_configured',
+      };
+      if (lease.renew()) {
+        const delivery = await this.sendFormattedMessage(item, result.response, 'task_result', true);
+        if (delivery === 'sent') result.notifiedAt = Date.now();
       }
-      return { outcome: 'suppressed', result: unavailableResult };
+      return {
+        outcome: 'failed', result,
+        error: 'No evidence-producing capability is configured',
+        failureDisposition: 'block',
+        failureCode: result.failureCode,
+      };
+    }
+
+    const preflight = typeof this.subAgentExecutor.preflightSkills === 'function'
+      ? this.subAgentExecutor.preflightSkills(requestedTools)
+      : { available: requestedTools, missing: [], documentationOnly: [] };
+    if (preflight.missing.length > 0) {
+      const missing = preflight.missing.join(', ');
+      const result: BoardItemResult = {
+        response: `I paused this scheduled task because its required capability is unavailable (${missing}). I will not keep retrying until that capability is restored.`,
+        completedAt: Date.now(),
+        taskComplete: false,
+        outcome: 'blocked',
+        failureCode: 'required_capability_unavailable',
+      };
+      if (lease.renew()) {
+        const delivery = await this.sendFormattedMessage(item, result.response, 'task_result', true);
+        if (delivery === 'sent') result.notifiedAt = Date.now();
+      }
+      return {
+        outcome: 'failed', result,
+        error: `Required capability unavailable: ${missing}`,
+        failureDisposition: 'block',
+        failureCode: result.failureCode,
+      };
     }
 
     this.logger.info(
@@ -909,11 +1303,44 @@ export class UnifiedScheduler {
           timeoutSeconds: 420,
           waitForResult: true,
           recentChatContext: chatContext?.formattedContext,
+          evidenceExecutionContext,
         },
       );
 
       if (!result.taskComplete) {
         throw new Error('Scheduled sub-agent stopped before completing its task');
+      }
+
+      const evidenceConfig: TaskConfig = {
+        ...plannedEvidenceConfig,
+        // Validate the actual delivered claim as well as the planned goal. A
+        // seemingly non-factual task cannot smuggle analytics through an
+        // evidencePolicy='none' config and then return unsupported figures.
+        goal: `${plannedEvidenceConfig.goal}\n${result.response}`,
+      };
+      const evidence = verifyTaskRuntimeEvidence(
+        evidenceConfig,
+        result.evidenceReceipts,
+        result.response,
+        evidenceExecutionContext,
+      );
+      if (!evidence.passed) {
+        return {
+          outcome: 'failed',
+          result: {
+            response: `The scheduled task did not produce verifiable source evidence: ${evidence.reason}.`,
+            completedAt: Date.now(),
+            iterationsUsed: result.iterationsUsed,
+            costUsd: result.costUsd,
+            taskComplete: false,
+            outcome: 'failed',
+            evidenceReceipts: result.evidenceReceipts,
+            failureCode: 'missing_runtime_evidence',
+          },
+          error: evidence.reason,
+          failureDisposition: 'retry',
+          failureCode: 'missing_runtime_evidence',
+        };
       }
 
       const boardResult: BoardItemResult = {
@@ -922,7 +1349,13 @@ export class UnifiedScheduler {
         iterationsUsed: result.iterationsUsed,
         costUsd: result.costUsd,
         taskComplete: result.taskComplete,
+        outcome: 'succeeded',
+        completionSource: 'worker',
+        evidenceReceipts: result.evidenceReceipts,
       };
+      // A real completed worker run clears any prior identical-failure streak
+      // before the next occurrence is created.
+      this.db.resetRecurringTaskFailureCircuit(item);
       if (!lease.renew() || !lease.isActive()) {
         return { outcome: 'failed', error: 'Task lease lost before result persistence' };
       }
@@ -1376,7 +1809,11 @@ export class UnifiedScheduler {
   /** Reject stale/corrupt cross-owner session references before any read/write. */
   private getOwnedSessionId(sessionId: string | null | undefined, userId: string): string | null {
     if (!sessionId) return null;
-    const session = this.db.getSession(sessionId);
+    // Archived/forgotten tombstones retain identity metadata for audit and
+    // recovery, but they are never valid execution parents. Reusing one here
+    // causes the sub-agent gateway to reject the worker after /new because its
+    // SessionManager correctly exposes active sessions only.
+    const session = this.db.getActiveSession(sessionId);
     const sessionUserId = session?.metadata?.userId;
     if (typeof sessionUserId !== 'string') return null;
     return this.ownedIdentityCandidates(userId).has(sessionUserId) ? sessionId : null;
@@ -1461,41 +1898,7 @@ export class UnifiedScheduler {
       'Scheduled item fired'
     );
 
-    // Handle recurring items
-    if (item.recurring) {
-      const nextTriggerAt = this.calculateNextOccurrence(item.recurring, item.userId);
-      if (nextTriggerAt) {
-        // Skip reschedule if a similar item already exists (prevents duplication)
-        if (this.db.hasSimilarPendingScheduledItem(item.userId, item.message)) {
-          this.logger.debug({ itemId: item.id }, 'Skipping reschedule - similar item already pending');
-          return;
-        }
-        // Create a new item for the next occurrence (preserves board fields)
-        this.db.addScheduledItem({
-          userId: item.userId,
-          sessionId: item.sessionId,
-          source: item.source,
-          messageProvenance: item.messageProvenance,
-          kind: item.kind,
-          type: item.type,
-          message: item.message,
-          context: item.context,
-          triggerAt: nextTriggerAt,
-          recurring: item.recurring,
-          sourceMemoryId: item.sourceMemoryId,
-          sourceItemId: item.sourceItemId,
-          taskConfig: item.taskConfig,
-          boardStatus: 'scheduled',
-          priority: item.priority,
-          labels: item.labels,
-          goalId: item.goalId,
-        });
-        this.logger.debug(
-          { itemId: item.id, nextTrigger: new Date(nextTriggerAt).toISOString() },
-          'Rescheduled recurring item'
-        );
-      }
-    }
+    if (item.recurring) this.rescheduleRecurringItem(item);
 
     // Reschedule goal check-ins through goal service
     if (item.type === 'goal_checkin' && item.context && this.goalService) {
@@ -1513,100 +1916,57 @@ export class UnifiedScheduler {
     }
   }
 
+  /** Create exactly one future occurrence, also used when stale runs are skipped. */
+  private rescheduleRecurringItem(item: ScheduledItem): ScheduledItem | null {
+    if (!item.recurring) return null;
+    const nextTriggerAt = this.calculateNextOccurrence(item.recurring, item.userId);
+    if (!nextTriggerAt) return null;
+    if (this.db.hasSimilarPendingScheduledItem(item.userId, item.message)) {
+      this.logger.debug({ itemId: item.id }, 'Skipping reschedule - similar item already pending');
+      return null;
+    }
+    const next = this.db.addScheduledItem({
+      userId: item.userId,
+      sessionId: item.sessionId,
+      source: item.source,
+      messageProvenance: item.messageProvenance,
+      kind: item.kind,
+      type: item.type,
+      message: item.message,
+      context: item.context,
+      triggerAt: nextTriggerAt,
+      recurring: item.recurring,
+      sourceMemoryId: item.sourceMemoryId,
+      sourceItemId: item.sourceItemId,
+      taskConfig: item.taskConfig,
+      boardStatus: 'scheduled',
+      priority: item.priority,
+      labels: item.labels,
+      dependsOn: item.dependsOn,
+      goalId: item.goalId,
+      preferredWorkerId: item.preferredWorkerId,
+      maxAttempts: item.maxAttempts,
+    });
+    this.logger.debug(
+      { itemId: item.id, nextTrigger: new Date(nextTriggerAt).toISOString() },
+      'Rescheduled recurring item',
+    );
+    return next;
+  }
+
   /**
    * Calculate the next occurrence for a recurring schedule
    */
   private calculateNextOccurrence(schedule: RecurringSchedule, userId: string): number | null {
-    const tz = this.getTimezone(userId);
-
-    // Get current date/time components in the user's timezone
-    const now = new Date();
-    const formatter = new Intl.DateTimeFormat('en-US', {
-      timeZone: tz,
-      year: 'numeric', month: '2-digit', day: '2-digit',
-      hour: '2-digit', minute: '2-digit', second: '2-digit',
-      hour12: false,
-      weekday: 'short',
-    });
-    const parts = formatter.formatToParts(now);
-    const getPart = (type: string) => parts.find(p => p.type === type)?.value || '';
-
-    const userYear = parseInt(getPart('year'), 10);
-    const userMonth = parseInt(getPart('month'), 10) - 1;
-    const userDay = parseInt(getPart('day'), 10);
-    const userHour = parseInt(getPart('hour'), 10);
-    const userMinute = parseInt(getPart('minute'), 10);
-
-    // Guard against NaN from unexpected Intl.DateTimeFormat output
-    if ([userYear, userMonth, userDay, userHour, userMinute].some(Number.isNaN)) {
-      this.logger.warn({ tz }, 'Failed to parse timezone date parts, falling back to system time');
-      return now.getTime() + 24 * 60 * 60 * 1000;
+    try {
+      return calculateNextRecurringOccurrence(schedule, this.getTimezone(userId));
+    } catch (error) {
+      this.logger.error(
+        { userId, schedule, error: (error as Error).message },
+        'Could not calculate next recurring occurrence',
+      );
+      return null;
     }
-
-    const dayNames: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
-    const userDayOfWeek = dayNames[getPart('weekday')] ?? now.getDay();
-
-    // Helper: build a UTC timestamp for a given date in the user's timezone.
-    // Uses Intl.DateTimeFormat.formatToParts offset-diff pattern so it's
-    // independent of the Node process's system timezone.
-    const toUtc = (y: number, m: number, d: number, h: number, min: number): number => {
-      const approxUtcMs = Date.UTC(y, m, d, h, min);
-      const partsFmt = new Intl.DateTimeFormat('en-US', {
-        timeZone: tz,
-        hourCycle: 'h23',
-        year: 'numeric', month: '2-digit', day: '2-digit',
-        hour: '2-digit', minute: '2-digit', second: '2-digit',
-      });
-      const p = partsFmt.formatToParts(new Date(approxUtcMs));
-      const g = (t: string) => parseInt(p.find(x => x.type === t)?.value || '0', 10);
-      const tzAsUtcMs = Date.UTC(g('year'), g('month') - 1, g('day'), g('hour'), g('minute'), g('second'));
-      const offsetMs = tzAsUtcMs - approxUtcMs;
-      return approxUtcMs - offsetMs;
-    };
-
-    // Start from "today" in user timezone, at the scheduled time.
-    // Use UTC date math so advance() doesn't depend on system TZ.
-    let targetDay = userDay;
-    let targetMonth = userMonth;
-    let targetYear = userYear;
-    const advance = () => {
-      const d = new Date(Date.UTC(targetYear, targetMonth, targetDay + 1));
-      targetDay = d.getUTCDate();
-      targetMonth = d.getUTCMonth();
-      targetYear = d.getUTCFullYear();
-    };
-    const getDow = () => new Date(Date.UTC(targetYear, targetMonth, targetDay)).getUTCDay();
-
-    switch (schedule.type) {
-      case 'daily':
-        advance(); // tomorrow
-        break;
-
-      case 'weekly':
-        if (schedule.dayOfWeek !== undefined) {
-          let daysUntil = schedule.dayOfWeek - userDayOfWeek;
-          if (daysUntil <= 0) daysUntil += 7;
-          for (let i = 0; i < daysUntil; i++) advance();
-        } else {
-          for (let i = 0; i < 7; i++) advance();
-        }
-        break;
-
-      case 'weekdays':
-        advance();
-        while (getDow() === 0 || getDow() === 6) advance();
-        break;
-
-      case 'weekends':
-        advance();
-        while (getDow() !== 0 && getDow() !== 6) advance();
-        break;
-
-      default:
-        return null;
-    }
-
-    return toUtc(targetYear, targetMonth, targetDay, schedule.hour, schedule.minute);
   }
 
   /**

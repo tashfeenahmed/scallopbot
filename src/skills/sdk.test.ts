@@ -125,6 +125,29 @@ describe('defineSkill', () => {
     expect(skillDef.skill.frontmatter.metadata?.openclaw?.emoji).toBe('🚀');
   });
 
+  it('should preserve typed execution-safety declarations', () => {
+    const skillDef = defineSkill('external-writer', 'Writes to an API')
+      .safety({ externalWrite: true, sensitive: true, requiresConfirmation: true })
+      .build();
+
+    expect(skillDef.skill.frontmatter.metadata?.openclaw?.safety).toEqual({
+      externalWrite: true,
+      sensitive: true,
+      requiresConfirmation: true,
+    });
+  });
+
+  it('should preserve authoritative evidence-source declarations', () => {
+    const skillDef = defineSkill('metrics-reader', 'Reads an analytics API')
+      .evidence({ authoritative: true, source: 'analytics-api:v2' })
+      .build();
+
+    expect(skillDef.skill.frontmatter.metadata?.openclaw?.evidence).toEqual({
+      authoritative: true,
+      source: 'analytics-api:v2',
+    });
+  });
+
   it('should set homepage', () => {
     const skillDef = defineSkill('test-skill', 'A test skill')
       .homepage('https://example.com')

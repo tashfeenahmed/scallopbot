@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { wordOverlap, DEDUP_OVERLAP_THRESHOLD } from './text-similarity.js';
+import {
+  wordOverlap,
+  semanticTopicOverlap,
+  DEDUP_OVERLAP_THRESHOLD,
+} from './text-similarity.js';
 
 describe('wordOverlap', () => {
   it('returns 1 for identical strings', () => {
@@ -49,6 +53,21 @@ describe('wordOverlap', () => {
 
   it('returns 0 when all words are below minWordLength', () => {
     expect(wordOverlap('is a', 'is a')).toBe(0);
+  });
+});
+
+describe('semanticTopicOverlap', () => {
+  it('matches differently worded outreach about the same named topic', () => {
+    expect(semanticTopicOverlap(
+      'Did the Atlas rollout happen?',
+      'Any update on Project Atlas?',
+    )).toBe(1);
+  });
+
+  it('canonicalizes common topic synonyms without merging unrelated entities', () => {
+    expect(semanticTopicOverlap('Dental visit tomorrow', 'Dentist appointment tomorrow')).toBe(1);
+    expect(semanticTopicOverlap('Trip to Lisbon', 'Flight to Lisbon')).toBe(1);
+    expect(semanticTopicOverlap('Flight to Lisbon', 'Flight to Dublin')).toBeLessThan(1);
   });
 });
 

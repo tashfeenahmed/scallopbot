@@ -12,6 +12,10 @@ import type { EmbeddingProvider } from './embeddings.js';
 import type { ScallopDatabase, SessionMessageRow } from './db.js';
 import { completionBudgetForPurpose, charsForTokenBudget, getModelTokenLimits } from '../routing/model-limits.js';
 import { extractJSON, extractResponseText } from '../proactive/proactive-utils.js';
+import {
+  classifySessionMessage,
+  filterHumanVisibleTranscript,
+} from './session-message-view.js';
 
 export interface SessionSummarizerOptions {
   provider: LLMProvider;
@@ -19,12 +23,31 @@ export interface SessionSummarizerOptions {
   embedder?: EmbeddingProvider;
   /** Minimum messages for a session to qualify for summarization (default: 4) */
   minMessages?: number;
+  /** Hard wall-clock budget for the strict JSON provider call (default: 10s). */
+  requestTimeoutMs?: number;
+  /** Injectable clock for deterministic durable-backoff tests. */
+  now?: () => number;
 }
 
 export interface SessionSummaryResult {
   summary: string;
   topics: string[];
 }
+
+export const SESSION_SUMMARY_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['summary', 'topics'],
+  properties: {
+    summary: { type: 'string', minLength: 1, maxLength: 12_000 },
+    topics: {
+      type: 'array',
+      minItems: 1,
+      maxItems: 20,
+      items: { type: 'string', minLength: 1, maxLength: 100 },
+    },
+  },
+};
 
 // Exported for fine-tune dataset construction (scripts/ft/).
 export const SESSION_SUMMARY_PROMPT = `Summarize this conversation in 2-3 concise sentences. Focus on:
@@ -48,15 +71,17 @@ export class SessionSummarizer {
   private logger: Logger;
   private embedder?: EmbeddingProvider;
   private minMessages: number;
-  /** Per-session failure counter so a chronically broken session doesn't retry every gardener tick. */
-  private failures: Map<string, number> = new Map();
-  private static readonly MAX_FAILURES = 3;
+  private requestTimeoutMs: number;
+  private now: () => number;
+  private static readonly ROUTE = 'session_summary';
 
   constructor(options: SessionSummarizerOptions) {
     this.provider = options.provider;
     this.logger = options.logger.child({ component: 'session-summarizer' });
     this.embedder = options.embedder;
     this.minMessages = options.minMessages ?? 4;
+    this.requestTimeoutMs = Math.max(1, options.requestTimeoutMs ?? 10_000);
+    this.now = options.now ?? Date.now;
   }
 
   /**
@@ -68,32 +93,53 @@ export class SessionSummarizer {
     sessionId: string,
     userId: string = 'default'
   ): Promise<boolean> {
-    // Skip sessions that have failed too many times. Without this, the gardener's
-    // `NOT EXISTS session_summaries` query re-selects the same broken session
-    // every tick, thrashing the LLM forever.
-    const priorFailures = this.failures.get(sessionId) ?? 0;
-    if (priorFailures >= SessionSummarizer.MAX_FAILURES) {
-      this.logger.debug({ sessionId, failures: priorFailures }, 'Skipping chronically failing session summary');
-      return false;
-    }
-
     // Check if summary already exists
     const existing = db.getSessionSummary(sessionId);
-    if (existing) {
-      this.logger.debug({ sessionId }, 'Session summary already exists, skipping');
+    if (existing && db.hasVerifiedSessionSummary(sessionId)) {
+      this.logger.debug({ sessionId }, 'Verified session summary already exists, skipping');
       return false;
+    }
+    if (existing) {
+      this.logger.info(
+        { sessionId, priorSummaryId: existing.id },
+        'Regenerating rejected session summary with lossless revision history',
+      );
     }
 
     // Get session messages
-    const messages = db.getSessionMessages(sessionId);
+    const sessionMetadata = db.getSession(sessionId)?.metadata;
+    const messages = filterHumanVisibleTranscript(
+      db.getSessionMessages(sessionId),
+      { sessionMetadata },
+    );
     if (messages.length < this.minMessages) {
       this.logger.debug({ sessionId, messageCount: messages.length }, 'Session too short for summary');
       return false;
     }
 
+    // Both gates are durable. A restart therefore cannot turn a malformed
+    // session—or a degraded structured-output provider—back into a tight
+    // background retry loop.
+    const now = this.now();
+    const sessionFailure = db.getSessionSummaryFailure(sessionId);
+    const routeCircuit = db.getStructuredRouteCircuit(SessionSummarizer.ROUTE);
+    const retryAt = Math.max(sessionFailure?.nextRetryAt ?? 0, routeCircuit?.nextRetryAt ?? 0);
+    if (retryAt > now) {
+      this.logger.debug(
+        {
+          sessionId,
+          retryAt,
+          sessionFailures: sessionFailure?.failureCount ?? 0,
+          routeFailures: routeCircuit?.failureCount ?? 0,
+        },
+        'Session summary retry is durably backed off',
+      );
+      return false;
+    }
+
     try {
-      const result = await this.generateSummary(messages);
-      if (!result) return false;
+      const result = await this.generateSummary(messages, sessionId);
+      if (!result) throw new Error('session_summary_invalid_json');
 
       // Generate embedding for the summary
       let embedding: number[] | null = null;
@@ -110,7 +156,7 @@ export class SessionSummarizer {
       const lastMsg = messages[messages.length - 1];
       const durationMs = lastMsg.createdAt - firstMsg.createdAt;
 
-      db.addSessionSummary({
+      const stored = db.upsertVerifiedSessionSummary({
         sessionId,
         userId,
         summary: result.summary,
@@ -118,19 +164,34 @@ export class SessionSummarizer {
         messageCount: messages.length,
         durationMs,
         embedding,
+      }, {
+        verifier: 'session_summarizer',
+        verificationVersion: 1,
       });
+      if (!stored.schemaValid || stored.verifiedAt == null) {
+        throw new Error('session_summary_verification_failed');
+      }
 
       this.logger.info(
         { sessionId, topics: result.topics, messageCount: messages.length },
         'Session summary generated'
       );
-      this.failures.delete(sessionId);
+      db.clearSessionSummaryFailure(sessionId);
+      db.clearStructuredRouteCircuit(SessionSummarizer.ROUTE);
       return true;
     } catch (err) {
-      const attempt = priorFailures + 1;
-      this.failures.set(sessionId, attempt);
+      const errorCode = this.summaryErrorCode(err);
+      const failedAt = this.now();
+      const sessionState = db.recordSessionSummaryFailure(sessionId, errorCode, failedAt);
+      const routeState = db.recordStructuredRouteFailure(SessionSummarizer.ROUTE, errorCode, failedAt);
       this.logger.warn(
-        { error: (err as Error).message, sessionId, attempt, willRetry: attempt < SessionSummarizer.MAX_FAILURES },
+        {
+          error: (err as Error).message,
+          errorCode,
+          sessionId,
+          attempt: sessionState.failureCount,
+          nextRetryAt: Math.max(sessionState.nextRetryAt, routeState.nextRetryAt),
+        },
         'Session summarization failed'
       );
       return false;
@@ -157,14 +218,11 @@ export class SessionSummarizer {
   /**
    * Generate summary from session messages using LLM.
    */
-  private async generateSummary(messages: SessionMessageRow[]): Promise<SessionSummaryResult | null> {
+  private async generateSummary(
+    messages: SessionMessageRow[],
+    sessionId: string,
+  ): Promise<SessionSummaryResult | null> {
     const firstBudget = completionBudgetForPurpose(this.provider, 'session_summary');
-    const retryBudget = completionBudgetForPurpose(
-      this.provider,
-      'session_summary_retry',
-      firstBudget * 2,
-      { minTokens: firstBudget + 1 }
-    );
     const limits = getModelTokenLimits(this.provider);
     const promptTokenBudget = Math.max(
       1000,
@@ -173,41 +231,17 @@ export class SessionSummarizer {
     const conversationCharLimit = Math.min(12_000, Math.max(4_000, charsForTokenBudget(promptTokenBudget)));
     const conversationText = this.buildConversationText(messages, conversationCharLimit);
 
-    const first = await this.requestSummary(conversationText, firstBudget);
-    const firstParsed = this.parseSummaryResponse(extractResponseText(first.content));
-    if (firstParsed) return firstParsed;
-
-    if (first.stopReason === 'max_tokens' && retryBudget > firstBudget) {
-      this.logger.debug(
-        { firstBudget, retryBudget, model: first.model, modelContextWindowTokens: limits.contextWindowTokens },
-        'Session summary hit max_tokens; retrying with larger output budget'
-      );
-      const retry = await this.requestSummary(conversationText, retryBudget);
-      return this.parseSummaryResponse(extractResponseText(retry.content));
-    }
-
-    return null;
+    const first = await this.requestSummary(conversationText, firstBudget, sessionId);
+    return this.parseSummaryResponse(extractResponseText(first.content));
   }
 
   private buildConversationText(messages: SessionMessageRow[], maxChars: number): string {
     let conversationText = '';
     for (const msg of messages) {
-      const role = msg.role === 'user' ? 'User' : 'Assistant';
-      // Parse content - may be JSON (content blocks) or plain string
-      let text: string;
-      try {
-        const parsed = JSON.parse(msg.content);
-        if (Array.isArray(parsed)) {
-          text = parsed
-            .filter((b: Record<string, unknown>) => b.type === 'text')
-            .map((b: Record<string, unknown>) => b.text)
-            .join(' ');
-        } else {
-          text = String(msg.content);
-        }
-      } catch {
-        text = msg.content;
-      }
+      const view = classifySessionMessage(msg);
+      if (!view.isHumanVisible || !view.visibleText) continue;
+      const role = view.isHumanTurn ? 'User' : 'Assistant';
+      const text = view.visibleText;
 
       const line = `${role}: ${text.substring(0, 700)}\n`;
       if (conversationText.length + line.length > maxChars) break;
@@ -216,27 +250,65 @@ export class SessionSummarizer {
     return conversationText;
   }
 
-  private async requestSummary(conversationText: string, maxTokens: number) {
+  private async requestSummary(conversationText: string, maxTokens: number, sessionId: string) {
     const prompt = SESSION_SUMMARY_PROMPT + conversationText;
-
-    return this.provider.complete({
-      messages: [{ role: 'user', content: prompt }],
-      temperature: 0.1,
-      maxTokens,
-      purpose: 'session_summary',
-      traceMetadata: {
-        conversationChars: conversationText.length,
-      },
+    const controller = new AbortController();
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = new Promise<never>((_resolve, reject) => {
+      timeout = setTimeout(() => {
+        controller.abort(new Error('session_summary_timeout'));
+        reject(new Error('session_summary_timeout'));
+      }, this.requestTimeoutMs);
     });
+
+    try {
+      return await Promise.race([
+        this.provider.complete({
+          messages: [{ role: 'user', content: prompt }],
+          temperature: 0.1,
+          maxTokens,
+          enableThinking: false,
+          structuredOutput: {
+            name: 'session_summary',
+            schema: SESSION_SUMMARY_SCHEMA,
+            strict: true,
+          },
+          signal: controller.signal,
+          purpose: 'session_summary',
+          traceSessionId: sessionId,
+          traceMetadata: {
+            conversationChars: conversationText.length,
+            structuredOutput: 'json',
+          },
+        }),
+        timedOut,
+      ]);
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
+  }
+
+  private summaryErrorCode(error: unknown): string {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes('session_summary_timeout')) return 'timeout';
+    if (message.includes('session_summary_invalid_json')) return 'invalid_json';
+    if (message.includes('session_summary_verification_failed')) return 'verification_failed';
+    return 'provider_error';
   }
 
   private parseSummaryResponse(responseText: string): SessionSummaryResult | null {
     const parsed = extractJSON<{ summary?: unknown; topics?: unknown }>(responseText);
     if (!parsed || typeof parsed.summary !== 'string' || parsed.summary.trim().length === 0) return null;
+    if (!Array.isArray(parsed.topics)
+      || parsed.topics.length < 1
+      || parsed.topics.length > 20
+      || !parsed.topics.every(topic => (
+        typeof topic === 'string' && topic.trim().length > 0 && topic.trim().length <= 100
+      ))) return null;
 
     return {
       summary: parsed.summary.trim(),
-      topics: Array.isArray(parsed.topics) ? parsed.topics : [],
+      topics: parsed.topics.map(topic => (topic as string).trim()),
     };
   }
 }

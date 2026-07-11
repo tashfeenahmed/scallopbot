@@ -9,8 +9,28 @@ import { SessionManager } from '../agent/session.js';
 import { UnifiedScheduler } from './scheduler.js';
 import { getTodayStartMs } from './proactive-utils.js';
 import { OutboundQueue } from './outbound-queue.js';
+import {
+  buildEvidenceClaimLedger,
+  buildEvidenceExecutionContext,
+  digestEvidenceProvenance,
+} from '../security/evidence-grounding.js';
 
 const logger = pino({ level: 'silent' });
+
+function authoritativeReceipt(toolName: string, output: string, taskRequest: string, digest: string) {
+  return {
+    toolName,
+    success: true,
+    completedAt: Date.now() - 2_000,
+    outputDigest: digest.repeat(64),
+    outputBytes: Math.max(1, Buffer.byteLength(output)),
+    ...buildEvidenceClaimLedger(output),
+    authority: 'authoritative' as const,
+    sourceDigest: digestEvidenceProvenance('test-source', toolName),
+    toolRequestDigest: digestEvidenceProvenance('test-request', toolName),
+    ...buildEvidenceExecutionContext(taskRequest, 'default'),
+  };
+}
 
 function middayTimezone(): string {
   const offset = 12 - new Date().getUTCHours();
@@ -1723,9 +1743,12 @@ describe('UnifiedScheduler proactive delivery safety', () => {
     });
     await scheduler.evaluate();
 
-    expect(send).not.toHaveBeenCalled();
-    expect(db.getScheduledItem(item.id)?.status).toBe('fired');
-    expect(db.getScheduledItem(item.id)?.result?.response).toContain('no sub-agent executor');
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send.mock.calls[0][1]).not.toContain(item.message);
+    expect(db.getScheduledItem(item.id)).toMatchObject({
+      status: 'blocked', boardStatus: 'waiting',
+      result: { outcome: 'blocked', taskComplete: false },
+    });
   });
 
   it('delivers a stored task result without rerunning an unavailable executor', async () => {
@@ -1746,6 +1769,15 @@ describe('UnifiedScheduler proactive delivery safety', () => {
     db.updateScheduledItemResult(item.id, {
       response: 'The report is ready: sign-ups increased by 12% this week.',
       completedAt: Date.now() - 2_000,
+      taskComplete: true,
+      outcome: 'succeeded',
+      completionSource: 'worker',
+      evidenceReceipts: [authoritativeReceipt(
+        'analytics',
+        'Sign-ups increased by 12% this week.',
+        'Collect the analytics report\nCollect the analytics report',
+        'a',
+      )],
     });
 
     scheduler = new UnifiedScheduler({
@@ -1773,6 +1805,15 @@ describe('UnifiedScheduler proactive delivery safety', () => {
     db.updateScheduledItemResult(task.id, {
       response: 'The weekly analytics are ready: sign-ups increased by 12%.',
       completedAt: now - 1_000,
+      taskComplete: true,
+      outcome: 'succeeded',
+      completionSource: 'worker',
+      evidenceReceipts: [authoritativeReceipt(
+        'analytics',
+        'Sign-ups increased by 12%.',
+        'Collect the weekly analytics from real data\nCollect the weekly analytics',
+        'b',
+      )],
     });
     const nudge = db.addScheduledItem({
       userId: 'default', sessionId: null, source: 'agent', kind: 'nudge', type: 'follow_up',
@@ -1814,6 +1855,15 @@ describe('UnifiedScheduler proactive delivery safety', () => {
     db.updateScheduledItemResult(task.id, {
       response: 'Release 1.4 is live and the health checks passed.',
       completedAt: now - 1_000,
+      taskComplete: true,
+      outcome: 'succeeded',
+      completionSource: 'worker',
+      evidenceReceipts: [authoritativeReceipt(
+        'releases',
+        'Release 1.4 is live.',
+        'Collect the release status\nCollect the release status',
+        'c',
+      )],
     });
     const send = vi.fn().mockResolvedValue(true);
     scheduler = new UnifiedScheduler({

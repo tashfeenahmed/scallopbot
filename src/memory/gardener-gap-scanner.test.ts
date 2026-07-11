@@ -57,6 +57,7 @@ function makeGapPipelineResponse(opts?: { action?: string }) {
       index: 1,
       action: opts?.action ?? 'nudge',
       userFacingMessage: 'Hey, it looks like your Rust goal has been sitting idle. Want to pick it back up?',
+      urgency: 'medium',
     }],
   });
 }

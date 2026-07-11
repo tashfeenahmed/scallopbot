@@ -13,7 +13,12 @@ import type { GapSignal } from './gap-scanner.js';
 import type { SmoothedAffect } from './affect-smoothing.js';
 import type { LLMProvider, CompletionRequest } from '../providers/types.js';
 import type { ScheduledItemKind, TaskConfig } from './db.js';
-import { wordOverlap, DEDUP_OVERLAP_THRESHOLD } from '../utils/text-similarity.js';
+import {
+  wordOverlap,
+  semanticTopicOverlap,
+  DEDUP_OVERLAP_THRESHOLD,
+  SEMANTIC_TOPIC_OVERLAP_THRESHOLD,
+} from '../utils/text-similarity.js';
 import { extractResponseText } from '../proactive/proactive-utils.js';
 import { sanitizeProactiveMessage } from '../proactive/message-safety.js';
 import { assessProactiveMessage } from '../proactive/message-quality.js';
@@ -99,6 +104,9 @@ export function isDuplicate(
 ): boolean {
   for (const item of existingItems) {
     if (wordOverlap(message, item.message) >= DEDUP_OVERLAP_THRESHOLD) {
+      return true;
+    }
+    if (semanticTopicOverlap(message, item.message) >= SEMANTIC_TOPIC_OVERLAP_THRESHOLD) {
       return true;
     }
     const existingIds = extractSourceIds(item.context);

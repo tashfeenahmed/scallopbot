@@ -633,7 +633,7 @@ describe('E2E Board System', () => {
       expect(breakItem!.boardStatus).toBe('done');
     });
 
-    it('transitions unavailable task items to done without leaking the task title', async () => {
+    it('blocks unavailable task items without pretending they completed', async () => {
       const weatherMsg = sentMessages.find(m =>
         m.message.toLowerCase().includes('weather') || m.message.toLowerCase().includes('hiking')
       );
@@ -642,9 +642,8 @@ describe('E2E Board System', () => {
       const db = ctx.scallopStore.getDatabase();
       const items = db.getScheduledItemsByUser('default');
       const weatherItem = items.find(i => i.message.includes('weather'));
-      // Should no longer be pending
-      expect(weatherItem!.status).not.toBe('pending');
-      expect(weatherItem!.result?.response).toContain('no sub-agent executor');
+      expect(weatherItem).toMatchObject({ status: 'blocked', boardStatus: 'waiting' });
+      expect(weatherItem!.result).toMatchObject({ taskComplete: false, outcome: 'blocked' });
     });
   });
 

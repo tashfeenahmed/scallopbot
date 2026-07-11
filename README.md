@@ -356,6 +356,11 @@ Actionable reminders automatically execute when they contain action words (check
 
 ## Deployment
 
+See the [full deployment guide](./DEPLOYMENT.md) or the
+[Raspberry Pi notes](./DEPLOYMENT_PI.md) for backup, isolation, rollback and
+security guidance. Keep production credentials and operator-specific details
+in a private runbook outside the repository.
+
 ### One-Command Server Setup (Ubuntu 24.04)
 
 ```bash
@@ -375,13 +380,6 @@ The install script is idempotent and sets up:
 | Ollama + nomic-embed-text | Local embeddings for semantic memory search |
 | ffmpeg + sox | Audio format conversion |
 
-### Alternative: Docker
-
-```bash
-docker build -t scallopbot .
-docker run -d --env-file .env scallopbot
-```
-
 ### Alternative: systemd
 
 ```bash
@@ -392,8 +390,10 @@ After=network.target
 
 [Service]
 Type=simple
-User=root
+User=scallopbot
+Group=scallopbot
 WorkingDirectory=/opt/scallopbot
+EnvironmentFile=/opt/scallopbot/.env
 ExecStart=/usr/bin/node /opt/scallopbot/dist/cli.js start
 Restart=always
 RestartSec=10

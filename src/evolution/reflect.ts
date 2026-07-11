@@ -42,6 +42,25 @@ const SYSTEM_PROMPT =
   'Generalize the procedure: NEVER copy personal names, contact details, account IDs, home paths, ' +
   'conversation quotes, credentials, or user-specific facts into a skill.';
 
+/** Provider-enforced shape for a documentation-only skill proposal. */
+export const SKILL_MUTATION_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['target', 'rationale', 'files'],
+  properties: {
+    target: { type: 'string', pattern: '^[a-z][a-z0-9_-]{0,127}$' },
+    rationale: { type: 'string' },
+    files: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['SKILL.md'],
+      properties: {
+        'SKILL.md': { type: 'string' },
+      },
+    },
+  },
+};
+
 function extractText(content: ContentBlock[]): string {
   return content
     .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
@@ -140,6 +159,13 @@ export async function reflectOnCluster(
       messages: [{ role: 'user', content: buildUserPrompt(cluster) }],
       maxTokens: opts.maxTokens ?? 2048,
       temperature: 0.4,
+      enableThinking: false,
+      structuredOutput: {
+        name: 'evolution_skill_mutation',
+        schema: SKILL_MUTATION_SCHEMA,
+        strict: true,
+      },
+      purpose: 'evolution_reflect',
       signal: opts.signal,
     });
     return parseMutation(extractText(response.content), intent);
@@ -157,6 +183,17 @@ const PROMPT_SYSTEM_PROMPT =
   '{"fragmentId":"learned_guidance","rationale":"...","content":"..."}';
 
 const PROMPT_MAX_CONTENT = 1200;
+/** Provider-enforced shape for learned prompt guidance. */
+export const PROMPT_MUTATION_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['fragmentId', 'rationale', 'content'],
+  properties: {
+    fragmentId: { type: 'string', pattern: '^[a-z][a-z0-9_-]{0,63}$' },
+    rationale: { type: 'string' },
+    content: { type: 'string', maxLength: PROMPT_MAX_CONTENT },
+  },
+};
 /** Reject guidance that tries to smuggle role markers / tool syntax into the prompt. */
 /** Parse + sanity-check a prompt mutation. Returns null on deviation. */
 export function parsePromptMutation(text: string, fragmentId: string): PromptMutation | null {
@@ -191,6 +228,13 @@ export async function reflectOnPromptCluster(
       messages: [{ role: 'user', content: buildUserPrompt(cluster) }],
       maxTokens: opts.maxTokens ?? 1024,
       temperature: 0.4,
+      enableThinking: false,
+      structuredOutput: {
+        name: 'evolution_prompt_mutation',
+        schema: PROMPT_MUTATION_SCHEMA,
+        strict: true,
+      },
+      purpose: 'evolution_reflect',
       signal: opts.signal,
     });
     return parsePromptMutation(extractText(response.content), cluster.key || 'learned_guidance');

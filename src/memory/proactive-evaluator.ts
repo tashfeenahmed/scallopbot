@@ -30,6 +30,7 @@ import {
   MAX_ITEMS_PER_EVAL,
   DIAL_BUDGETS,
 } from '../proactive/proactive-config.js';
+import { createHash } from 'node:crypto';
 
 // ============ Types ============
 
@@ -66,6 +67,25 @@ export interface ProactiveEvalInput {
   userPreferences?: string[];
   /** Injectable now for testing */
   now?: number;
+  /** Most recent no-action evaluation, used for durable change-driven caching. */
+  priorEvaluation?: {
+    signalFingerprint: string;
+    at: number;
+    reason?: string | null;
+    outcome?: string;
+  };
+  /** Re-evaluate unchanged state after this interval (default: 7 days). */
+  unchangedEvaluationWindowMs?: number;
+  /** Durable provider-route health shared across restarts (normally ScallopDatabase). */
+  circuitStore?: ProactiveCircuitStore;
+  /** Total wall-clock budget for this unattended JSON call (default: 10s). */
+  requestTimeoutMs?: number;
+}
+
+export interface ProactiveCircuitStore {
+  getStructuredRouteCircuit(route: string): { nextRetryAt: number } | null;
+  recordStructuredRouteFailure(route: string, errorCode: string, now?: number): unknown;
+  clearStructuredRouteCircuit(route: string): void;
 }
 
 export interface ProactiveEvalResult {
@@ -81,6 +101,87 @@ export interface ProactiveEvalResult {
   errorMessage?: string;
   /** Raw response length when the LLM replied but parsing yielded zero items */
   unparsedResponseLength?: number;
+  /** Stable hash of the grounded state evaluated during this run. */
+  signalFingerprint?: string;
+}
+
+const DEFAULT_UNCHANGED_EVALUATION_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
+
+export const PROACTIVE_EVALUATION_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['items'],
+  properties: {
+    items: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['index', 'action', 'userFacingMessage', 'urgency'],
+        properties: {
+          index: { type: 'integer' },
+          action: { type: 'string', enum: ['skip', 'nudge'] },
+          userFacingMessage: { type: 'string' },
+          urgency: { type: 'string', enum: ['low', 'medium', 'high'] },
+        },
+      },
+    },
+  },
+};
+const RECENT_RESOLUTION_RE = /\b(?:already|now|just)?\s*(?:done|completed|finished|resolved|fixed|cancelled|canceled|closed|handled|sorted)\b|\bno (?:longer|more|further) (?:needed|required|relevant)\b/i;
+const FINGERPRINT_STOP_WORDS = new Set([
+  'about', 'after', 'already', 'been', 'from', 'have', 'item', 'recent',
+  'still', 'task', 'that', 'this', 'user', 'with', 'without',
+]);
+
+function signalTopicTokens(signal: GapSignal): Set<string> {
+  const topics = Array.isArray(signal.context.topics)
+    ? signal.context.topics.filter((topic): topic is string => typeof topic === 'string').join(' ')
+    : '';
+  const text = `${topics} ${signal.description}`.toLowerCase();
+  return new Set((text.match(/[\p{L}\p{N}]{4,}/gu) ?? [])
+    .filter(token => !FINGERPRINT_STOP_WORDS.has(token)));
+}
+
+/** Suppress an old signal when a newer direct user message explicitly resolves its topic. */
+export function recentChatResolvesSignal(signal: GapSignal, recentChatContext?: string): boolean {
+  if (!recentChatContext) return false;
+  const directUserLines = recentChatContext.split('\n')
+    .filter(line => line.startsWith('User:'))
+    .map(line => line.slice('User:'.length).trim());
+  const relevantTokens = signalTopicTokens(signal);
+  if (relevantTokens.size === 0) return false;
+  return directUserLines.some(line => {
+    if (!RECENT_RESOLUTION_RE.test(line)) return false;
+    const lineTokens = new Set(line.toLowerCase().match(/[\p{L}\p{N}]{4,}/gu) ?? []);
+    return [...relevantTokens].some(token => lineTokens.has(token));
+  });
+}
+
+/** Hash meaningful proactive state so unchanged skipped inputs do not call an LLM repeatedly. */
+export function buildProactiveSignalFingerprint(input: ProactiveEvalInput, signals: GapSignal[]): string {
+  const stableState = {
+    signals: signals.map(signal => ({
+      type: signal.type,
+      severity: signal.severity,
+      sourceId: signal.sourceId,
+    })).sort((a, b) => `${a.type}:${a.sourceId}`.localeCompare(`${b.type}:${b.sourceId}`)),
+    sessionSummary: input.sessionSummary
+      ? { id: input.sessionSummary.id, createdAt: input.sessionSummary.createdAt, summary: input.sessionSummary.summary }
+      : null,
+    recentChatContext: input.recentChatContext ?? '',
+    goals: input.activeGoals.map(goal => ({
+      id: goal.id,
+      status: goal.metadata.status,
+      updatedAt: (goal as unknown as { updatedAt?: number }).updatedAt ?? goal.documentDate,
+    })).sort((a, b) => a.id.localeCompare(b.id)),
+    board: input.boardItems.map(item => ({ id: item.id, status: item.status, boardStatus: item.boardStatus, updatedAt: item.updatedAt }))
+      .sort((a, b) => a.id.localeCompare(b.id)),
+    preferences: [...(input.userPreferences ?? [])].sort(),
+    affect: input.affect ? { emotion: input.affect.emotion, goalSignal: input.affect.goalSignal } : null,
+  };
+  return createHash('sha256').update(JSON.stringify(stableState)).digest('hex').slice(0, 24);
 }
 
 export type ProactivePreferencePolarity = 'positive' | 'negative';
@@ -435,11 +536,18 @@ Summary: ${s.summary}`);
   return {
     messages: [{ role: 'user', content: userMessage }],
     system,
-    temperature: 0.45,
-    // 1500, not 500: thinking-heavy models (qwen3.6, kimi-thinking) burn budget
-    // on reasoning before emitting the JSON. At 500 the visible output came back
-    // empty/truncated, every parse failed, and proactivity silently died.
+    temperature: 0.1,
+    // This is a strict extraction/triage route, not an open-ended reasoning
+    // turn. Disable hidden reasoning so the whole budget remains available for
+    // the bounded JSON object.
+    enableThinking: false,
     maxTokens: 1500,
+    structuredOutput: {
+      name: 'proactive_evaluation',
+      schema: PROACTIVE_EVALUATION_SCHEMA,
+      strict: true,
+    },
+    purpose: 'proactive_evaluation',
   };
 }
 
@@ -503,35 +611,66 @@ export function parseEvaluatorResponse(
   return results;
 }
 
-// ============ LLM call with retry ============
+// ============ Bounded structured route ============
 
-/**
- * Call the provider with one retry on a transient failure.
- *
- * The evaluator runs unattended (~every 72 min). A single network/timeout
- * blip used to mark the whole tick 'llm_error' and skip silently until the
- * next cycle. One retry with a short backoff absorbs transient provider
- * errors so a momentary blip doesn't cost a full proactive cycle. A genuine
- * outage still surfaces as 'llm_error' after the retries are exhausted.
- */
-async function completeWithRetry(
+async function completeWithinDeadline(
   provider: LLMProvider,
   prompt: CompletionRequest,
-  retries = 1,
-  backoffMs = 1000,
+  timeoutMs: number,
 ): Promise<Awaited<ReturnType<LLMProvider['complete']>>> {
-  let lastErr: unknown;
-  for (let attempt = 0; attempt <= retries; attempt++) {
-    try {
-      return await provider.complete(prompt);
-    } catch (err) {
-      lastErr = err;
-      if (attempt < retries) {
-        await new Promise((resolve) => setTimeout(resolve, backoffMs * (attempt + 1)));
-      }
-    }
+  const controller = new AbortController();
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      provider.complete({ ...prompt, signal: controller.signal }),
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(() => {
+          controller.abort(new Error('proactive_evaluator_timeout'));
+          reject(new Error('proactive_evaluator_timeout'));
+        }, Math.max(1, timeoutMs));
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
   }
-  throw lastErr;
+}
+
+function responseMatchesEvaluatorSchema(text: string): boolean {
+  const parsed = extractJSON<{ items?: unknown }>(text);
+  if (!parsed || !Array.isArray(parsed.items)) return false;
+  return parsed.items.every(item => {
+    if (!item || typeof item !== 'object') return false;
+    const value = item as RawEvalItem;
+    return Number.isInteger(value.index)
+      && (value.action === 'skip' || value.action === 'nudge')
+      && typeof value.userFacingMessage === 'string'
+      && (value.urgency === 'low' || value.urgency === 'medium' || value.urgency === 'high');
+  });
+}
+
+function proactiveRoute(provider: LLMProvider): string {
+  return `proactive_evaluator:${provider.name}`;
+}
+
+function recordRouteFailure(
+  store: ProactiveCircuitStore | undefined,
+  route: string,
+  errorCode: string,
+  now: number,
+): void {
+  try {
+    store?.recordStructuredRouteFailure(route, errorCode, now);
+  } catch {
+    // Observability persistence must never crash the gardener tick.
+  }
+}
+
+function clearRouteFailure(store: ProactiveCircuitStore | undefined, route: string): void {
+  try {
+    store?.clearStructuredRouteCircuit(route);
+  } catch {
+    // The valid result is still safe to use; the next run may retry clearing.
+  }
 }
 
 // ============ Orchestrator ============
@@ -572,22 +711,79 @@ export async function evaluateProactive(
   const blockedTopics = preferenceProfile.negative
     .filter(rule => rule.scope === 'topic' && rule.topic)
     .map(rule => rule.topic!);
-  const allSignals = scannedSignals.filter(signal => {
+  const preferenceFilteredSignals = scannedSignals.filter(signal => {
     if (blockedTopics.length === 0) return true;
     const haystack = `${signal.description} ${JSON.stringify(signal.context)}`;
     return !blockedTopics.some(topic => proactiveTopicMatchesText(topic, haystack));
   });
+  const allSignals = preferenceFilteredSignals.filter(
+    signal => !recentChatResolvesSignal(signal, input.recentChatContext),
+  );
+  const signalFingerprint = buildProactiveSignalFingerprint(input, allSignals);
 
   // Nothing to evaluate
   if (allSignals.length === 0) {
-    return { items: [], signalsFound: 0, llmCalled: false, skipReason: 'no_signals' };
+    return {
+      items: [], signalsFound: 0, llmCalled: false,
+      skipReason: preferenceFilteredSignals.length > 0 ? 'resolved_in_recent_chat' : 'no_signals',
+      signalFingerprint,
+    };
+  }
+
+  const prior = input.priorEvaluation;
+  const unchangedWindow = input.unchangedEvaluationWindowMs
+    ?? DEFAULT_UNCHANGED_EVALUATION_WINDOW_MS;
+  const priorCreated = prior?.outcome === 'created';
+  const cacheablePriorReasons = new Set([
+    'llm_skipped_all', 'unchanged_signals', 'unchanged_after_create',
+  ]);
+  if (
+    prior
+    && prior.signalFingerprint === signalFingerprint
+    && (priorCreated || cacheablePriorReasons.has(prior.reason ?? ''))
+    && now - prior.at >= 0
+    && now - prior.at < unchangedWindow
+  ) {
+    return {
+      items: [], signalsFound: allSignals.length, llmCalled: false,
+      skipReason: priorCreated ? 'unchanged_after_create' : 'unchanged_signals',
+      signalFingerprint,
+    };
+  }
+
+  const route = proactiveRoute(provider);
+  try {
+    if ((input.circuitStore?.getStructuredRouteCircuit(route)?.nextRetryAt ?? 0) > now) {
+      return {
+        items: [], signalsFound: allSignals.length, llmCalled: false,
+        skipReason: 'provider_backoff', signalFingerprint,
+      };
+    }
+  } catch {
+    // Fall through to one bounded attempt if health persistence is unavailable.
   }
 
   // Single LLM call
   try {
     const prompt = buildEvaluatorPrompt(input, allSignals);
-    const response = await completeWithRetry(provider, prompt);
+    const response = await completeWithinDeadline(
+      provider,
+      prompt,
+      input.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
+    );
     const text = extractResponseText(response.content);
+    if (!responseMatchesEvaluatorSchema(text)) {
+      recordRouteFailure(input.circuitStore, route, 'invalid_json', now);
+      return {
+        items: [],
+        signalsFound: allSignals.length,
+        llmCalled: true,
+        skipReason: 'parse_failed',
+        unparsedResponseLength: text.length,
+        signalFingerprint,
+      };
+    }
+    clearRouteFailure(input.circuitStore, route);
     const rawItems = parseEvaluatorResponse(text, allSignals);
 
     // Budget enforcement
@@ -607,19 +803,23 @@ export async function evaluateProactive(
       items: filtered,
       signalsFound: allSignals.length,
       llmCalled: true,
-      // Distinguish "LLM said skip" from "we couldn't parse the reply" — the
-      // latter looked identical in logs for weeks while proactivity was dead.
-      ...(rawItems.length === 0 && extractJSON(text) === null
-        ? { skipReason: 'parse_failed', unparsedResponseLength: text.length }
-        : {}),
+      signalFingerprint,
     };
   } catch (err) {
+    const errorMessage = (err as Error).message;
+    recordRouteFailure(
+      input.circuitStore,
+      route,
+      errorMessage.includes('timeout') ? 'timeout' : 'provider_error',
+      now,
+    );
     return {
       items: [],
       signalsFound: allSignals.length,
       llmCalled: true,
       skipReason: 'llm_error',
-      errorMessage: (err as Error).message,
+      errorMessage,
+      signalFingerprint,
     };
   }
 }

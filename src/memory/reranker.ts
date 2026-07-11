@@ -16,8 +16,18 @@ import { extractResponseText } from '../proactive/proactive-utils.js';
 export interface RerankOptions {
   /** Maximum candidates to send to the LLM (default: 20) */
   maxCandidates?: number;
-  /** Timeout in milliseconds for the LLM call (not implemented — relies on provider timeout) */
+  /** End-to-end latency budget before falling back to deterministic scores. */
   timeoutMs?: number;
+  /** Durable circuit shared across processes/restarts (normally ScallopDatabase). */
+  circuitStore?: RerankCircuitStore;
+  /** Injectable clock for deterministic circuit tests. */
+  now?: () => number;
+}
+
+export interface RerankCircuitStore {
+  getStructuredRouteCircuit(route: string): { nextRetryAt: number } | null;
+  recordStructuredRouteFailure(route: string, errorCode: string, now?: number): unknown;
+  clearStructuredRouteCircuit(route: string): void;
 }
 
 /** A candidate memory to be re-ranked */
@@ -52,6 +62,92 @@ const SCORE_THRESHOLD = 0.15;
 /** Default maximum candidates to send to the LLM */
 const DEFAULT_MAX_CANDIDATES = 20;
 const DEFAULT_CANDIDATE_CONTENT_CHARS = 320;
+const DEFAULT_TIMEOUT_MS = 5_000;
+const CIRCUIT_FAILURE_THRESHOLD = 2;
+const CIRCUIT_COOLDOWN_MS = 5 * 60 * 1000;
+
+interface RerankProviderHealth {
+  failures: number;
+  openUntil: number;
+}
+
+// Provider objects are long-lived runtime singletons. WeakMap keeps the
+// circuit bounded and avoids cross-provider/test contamination.
+const providerHealth = new WeakMap<LLMProvider, RerankProviderHealth>();
+
+function rerankRoute(provider: LLMProvider): string {
+  return `rerank:${provider.name}`;
+}
+
+function circuitIsOpen(
+  provider: LLMProvider,
+  store?: RerankCircuitStore,
+  now: number = Date.now(),
+): boolean {
+  if (store) {
+    try {
+      return (store.getStructuredRouteCircuit(rerankRoute(provider))?.nextRetryAt ?? 0) > now;
+    } catch {
+      // Diagnostics must not break deterministic-score fallback.
+    }
+  }
+  const health = providerHealth.get(provider);
+  return !!health && health.openUntil > now;
+}
+
+function recordFailure(
+  provider: LLMProvider,
+  store?: RerankCircuitStore,
+  now: number = Date.now(),
+  errorCode: string = 'provider_error',
+): void {
+  if (store) {
+    try {
+      store.recordStructuredRouteFailure(rerankRoute(provider), errorCode, now);
+    } catch {
+      // Keep the process-local fallback circuit available if persistence fails.
+    }
+  }
+  const current = providerHealth.get(provider) ?? { failures: 0, openUntil: 0 };
+  current.failures++;
+  if (current.failures >= CIRCUIT_FAILURE_THRESHOLD) {
+    current.openUntil = now + CIRCUIT_COOLDOWN_MS;
+  }
+  providerHealth.set(provider, current);
+}
+
+function recordSuccess(provider: LLMProvider, store?: RerankCircuitStore): void {
+  if (store) {
+    try {
+      store.clearStructuredRouteCircuit(rerankRoute(provider));
+    } catch {
+      // Best effort; the current result is still valid.
+    }
+  }
+  providerHealth.delete(provider);
+}
+
+async function completeWithin(
+  provider: LLMProvider,
+  request: CompletionRequest,
+  timeoutMs: number,
+) {
+  const controller = new AbortController();
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      provider.complete({ ...request, signal: controller.signal }),
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(() => {
+          controller.abort();
+          reject(new Error(`Reranking exceeded ${timeoutMs}ms latency budget`));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
 
 /**
  * Re-rank memory search results using an LLM to score relevance.
@@ -73,43 +169,41 @@ export async function rerankResults(
   }
 
   const maxCandidates = options?.maxCandidates ?? DEFAULT_MAX_CANDIDATES;
+  const now = options?.now?.() ?? Date.now();
 
   // Truncate to maxCandidates (keep the highest-originalScore ones)
   const truncated = candidates.length > maxCandidates
     ? candidates.slice(0, maxCandidates)
     : candidates;
 
-  // Attempt LLM re-ranking
+  // An unhealthy structured route must not delay every foreground chat turn.
+  // Deterministic hybrid scores are always a safe fallback.
   let llmScores: Map<number, number> | null = null;
-  try {
+  if (!circuitIsOpen(provider, options?.circuitStore, now)) try {
     const maxTokens = completionBudgetForPurpose(
       provider,
       'rerank',
-      Math.max(1024, truncated.length * 48 + 256)
+      Math.max(2_048, truncated.length * 64 + 512),
     );
     const request = buildRerankPrompt(query, truncated, {
       maxTokens,
       maxContentChars: DEFAULT_CANDIDATE_CONTENT_CHARS,
     });
     request.purpose = 'rerank';
-    const response = await provider.complete(request);
+    request.enableThinking = false;
+    const response = await completeWithin(
+      provider,
+      request,
+      Math.max(50, options?.timeoutMs ?? DEFAULT_TIMEOUT_MS),
+    );
 
     const responseText = extractResponseText(response.content);
     llmScores = parseRerankResponse(responseText);
-
-    if (llmScores === null && response.stopReason === 'max_tokens' && truncated.length > 5) {
-      const retryCandidates = truncated.slice(0, Math.ceil(truncated.length / 2));
-      const retryMaxTokens = completionBudgetForPurpose(provider, 'rerank', maxTokens * 2);
-      const retryRequest = buildRerankPrompt(query, retryCandidates, {
-        maxTokens: retryMaxTokens,
-        maxContentChars: Math.floor(DEFAULT_CANDIDATE_CONTENT_CHARS / 2),
-      });
-      retryRequest.purpose = 'rerank';
-      const retryResponse = await provider.complete(retryRequest);
-      llmScores = parseRerankResponse(extractResponseText(retryResponse.content));
-    }
+    if (llmScores) recordSuccess(provider, options?.circuitStore);
+    else recordFailure(provider, options?.circuitStore, now, 'invalid_json');
   } catch {
-    // LLM call failed — fall through to graceful fallback
+    recordFailure(provider, options?.circuitStore, now, 'timeout_or_provider_error');
+    // LLM call failed/timed out — fall through to graceful fallback.
   }
 
   // Build results with score blending
@@ -165,7 +259,7 @@ Rules:
 - Consider whether the memory would be useful context when answering the query
 - If NONE of the memories are relevant, score ALL 0.0. Be strict: tangential content should score below 0.3
 
-Respond with a JSON array only: [{ "index": number, "score": number }, ...]`;
+Respond with a JSON object only: {"scores":[{ "index": number, "score": number }, ...]}`;
 
   const candidateLines = candidates
     .map((c, i) => `${i + 1}. "${truncateCandidateContent(c.content, options?.maxContentChars)}"`)
@@ -176,13 +270,35 @@ Respond with a JSON array only: [{ "index": number, "score": number }, ...]`;
 Memories:
 ${candidateLines}
 
-Score each memory's relevance to the query (JSON array only):`;
+Score each memory's relevance to the query (JSON object only):`;
 
   return {
     messages: [{ role: 'user', content: userMessage }],
     system,
     temperature: 0.1,
     maxTokens: options?.maxTokens ?? 1024,
+    structuredOutput: {
+      name: 'memory_rerank_scores',
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          scores: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                index: { type: 'integer', minimum: 0 },
+                score: { type: 'number', minimum: 0, maximum: 1 },
+              },
+              required: ['index', 'score'],
+            },
+          },
+        },
+        required: ['scores'],
+      },
+    },
   };
 }
 

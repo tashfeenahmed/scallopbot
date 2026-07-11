@@ -282,7 +282,7 @@ export class WhatsAppChannel implements Channel, VoiceChannel {
       case 'reset':
         const userId = jid.replace('@s.whatsapp.net', '').replace('@g.us', '');
         await this.handleReset(userId);
-        await this.sendText(jid, 'Conversation cleared. Starting fresh!');
+        await this.sendText(jid, 'Started a new conversation. Your previous conversation is preserved.');
         break;
 
       case 'status':
@@ -301,7 +301,7 @@ I'm your personal AI assistant. Just send me a message!
 
 *Commands:*
 /help - Show this message
-/reset - Clear conversation history
+/reset - Preserve this conversation and start a new one
 /status - Check bot status
 
 ${this.supportsVoice() ? '_Voice messages are supported!_' : ''}`;
@@ -406,10 +406,11 @@ ${this.supportsVoice() ? '_Voice messages are supported!_' : ''}`;
 
   async handleReset(userId: string): Promise<void> {
     const sessionId = this.userSessions.get(userId);
-    if (sessionId) {
-      await this.sessionManager.deleteSession(sessionId);
-      this.userSessions.delete(userId);
-    }
+    const session = await this.sessionManager.startNewSession({
+      userId,
+      channelId: 'whatsapp',
+    }, sessionId);
+    this.userSessions.set(userId, session.id);
   }
 
   private async sendText(jid: string, text: string): Promise<void> {

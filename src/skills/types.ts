@@ -31,6 +31,34 @@ export interface SkillMetadata {
     primaryEnv?: string;
     /** Installation instructions */
     install?: SkillInstaller[];
+    /**
+     * Optional execution-safety declaration.  Skills that talk to external
+     * systems should declare their side effects so the agent can enforce the
+     * same consent and evidence rules for first- and third-party skills.
+     */
+    safety?: {
+      /** The skill cannot mutate state. */
+      readOnly?: boolean;
+      /** The skill can create/update/delete data outside this workspace. */
+      externalWrite?: boolean;
+      /** Mutations are confined to the workspace or this deployment's local state. */
+      localWrite?: boolean;
+      /** The skill commonly handles health, financial, legal, or other sensitive data. */
+      sensitive?: boolean;
+      /** Always require an explicit request/confirmation before execution. */
+      requiresConfirmation?: boolean;
+    };
+    /**
+     * Explicit trust declaration for unattended factual reports. Merely being
+     * executable is not enough: absent this declaration, output is treated as
+     * untrusted computation and cannot complete an analytics/reporting task.
+     */
+    evidence?: {
+      /** Output is retrieved from the named authoritative source. */
+      authoritative?: boolean;
+      /** Stable source/version identifier (never an account ID or secret). */
+      source?: string;
+    };
   };
 }
 
@@ -95,6 +123,12 @@ export interface SkillHandlerContext {
   sessionId: string;
   /** User ID (channel-prefixed) */
   userId?: string;
+  /** Stable key for an externally-mutating operation; safe to forward to APIs. */
+  idempotencyKey?: string;
+  /** Cancellation signal scoped to the foreground turn deadline. */
+  signal?: AbortSignal;
+  /** Absolute epoch-ms deadline for this tool invocation. */
+  deadlineAt?: number;
 }
 
 /**
@@ -195,6 +229,12 @@ export interface SkillExecutionRequest {
   userId?: string;
   /** Session ID for context */
   sessionId?: string;
+  /** Stable key for an externally-mutating operation; exposed to the script env. */
+  idempotencyKey?: string;
+  /** Cancellation signal scoped to the foreground turn deadline. */
+  signal?: AbortSignal;
+  /** Absolute epoch-ms deadline for this tool invocation. */
+  deadlineAt?: number;
 }
 
 /**
@@ -210,4 +250,3 @@ export interface SkillExecutionResult {
   /** Exit code from script */
   exitCode?: number;
 }
-

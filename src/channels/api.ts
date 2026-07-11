@@ -29,7 +29,7 @@ import type { Channel, Attachment } from './types.js';
 import type { TriggerSource } from '../triggers/types.js';
 import type { CostTracker } from '../routing/cost.js';
 import type { ScallopMemoryStore } from '../memory/scallop-store.js';
-import type { ScallopDatabase } from '../memory/db.js';
+import type { ScallopDatabase, SessionMessageRow } from '../memory/db.js';
 import { AuthService } from './auth.js';
 import { nanoid } from 'nanoid';
 import type { InterruptQueue } from '../agent/interrupt-queue.js';
@@ -37,6 +37,10 @@ import type { BotConfigManager } from './bot-config.js';
 import type { ProviderRegistry } from '../providers/registry.js';
 import { stripThinkTags } from '../utils/output-safety.js';
 import { redactSensitiveText } from '../security/redaction.js';
+import {
+  classifySessionMessage,
+  isInternalSessionMetadata,
+} from '../memory/session-message-view.js';
 
 /** Maximum request body size (1MB) */
 const MAX_BODY_SIZE = 1024 * 1024;
@@ -49,16 +53,23 @@ const MAX_DEBUG_TEXT_LENGTH = 2_000;
  * Only return conversational text/media at this boundary. The full transcript
  * remains in SQLite for context replay and internal diagnostics.
  */
-function sanitizeHistoryMessage<T extends { role: string; content: string }>(message: T): T {
+function sanitizeHistoryMessage<T extends { role: string; content: string }>(message: T): T | null {
+  const view = classifySessionMessage(message);
+  if (!view.isHumanVisible) return null;
+
   const trimmed = message.content.trimStart();
   if (!trimmed.startsWith('[')) {
-    if (message.role !== 'assistant') return message;
-    return { ...message, content: stripThinkTags(message.content) };
+    const visible = message.role === 'assistant' ? stripThinkTags(message.content) : message.content;
+    const content = redactSensitiveText(visible).trim();
+    return content ? { ...message, content } : null;
   }
 
   try {
     const parsed = JSON.parse(message.content) as unknown;
-    if (!Array.isArray(parsed)) return message;
+    if (!Array.isArray(parsed)) {
+      const content = redactSensitiveText(view.visibleText).trim();
+      return content ? { ...message, content } : null;
+    }
     // Text emitted alongside a tool call is intermediate planning, not the
     // assistant's final answer. It belongs in internal/verbose traces only.
     const hasToolUse = parsed.some(block => (
@@ -70,20 +81,30 @@ function sanitizeHistoryMessage<T extends { role: string; content: string }>(mes
       const candidate = block as Record<string, unknown>;
       if (candidate.type === 'text' && typeof candidate.text === 'string') {
         if (message.role === 'assistant' && hasToolUse) return [];
-        const text = message.role === 'assistant'
+        const rawText = message.role === 'assistant'
           ? stripThinkTags(candidate.text)
           : candidate.text;
+        const text = redactSensitiveText(rawText).trim();
         return text ? [{ type: 'text', text }] : [];
       }
       if (candidate.type === 'image') return [block];
       return [];
     });
 
-    return { ...message, content: JSON.stringify(visibleBlocks) };
+    if (visibleBlocks.length > 0) {
+      return { ...message, content: JSON.stringify(visibleBlocks) };
+    }
+    // A genuine human may literally paste JSON shaped like tool protocol. Its
+    // persisted human_user kind is authoritative; render the literal text
+    // instead of letting a second heuristic hide the turn.
+    if (view.isHumanTurn && view.visibleText) {
+      const content = redactSensitiveText(view.visibleText).trim();
+      return content ? { ...message, content } : null;
+    }
+    return null;
   } catch {
-    return message.role === 'assistant'
-      ? { ...message, content: stripThinkTags(message.content) }
-      : message;
+    const content = redactSensitiveText(view.visibleText).trim();
+    return content ? { ...message, content } : null;
   }
 }
 
@@ -411,7 +432,7 @@ export class ApiChannel implements Channel, TriggerSource {
     // DB fallback: find existing session after server restart
     const prefixedUserId = `api:${userId}`;
     if (this.db) {
-      const existing = this.db.findSessionByUserId(prefixedUserId);
+      const existing = this.db.findSessionByUserId(prefixedUserId, 'api');
       if (existing) {
         // Re-hydrate into session manager so it picks up messages
         const session = await this.config.sessionManager.getSession(existing.id);
@@ -437,10 +458,11 @@ export class ApiChannel implements Channel, TriggerSource {
    */
   async handleReset(userId: string): Promise<void> {
     const sessionId = this.userSessions.get(userId);
-    if (sessionId) {
-      await this.config.sessionManager.deleteSession(sessionId);
-      this.userSessions.delete(userId);
-    }
+    const session = await this.config.sessionManager.startNewSession({
+      userId: `api:${userId}`,
+      channelId: 'api',
+    }, sessionId);
+    this.userSessions.set(userId, session.id);
     this.logger.debug({ userId }, 'Session reset');
   }
 
@@ -516,7 +538,7 @@ export class ApiChannel implements Channel, TriggerSource {
         await this.handleGetSession(res, sessionId);
       } else if (urlPath.startsWith('/api/sessions/') && method === 'DELETE') {
         const sessionId = urlPath.slice('/api/sessions/'.length);
-        await this.handleDeleteSession(res, sessionId);
+        await this.handleDeleteSession(res, sessionId, url);
       } else if (urlPath === '/api/files' && method === 'GET') {
         await this.handleFileDownload(res, url);
       } else if (urlPath === '/api/memories/graph' && method === 'GET') {
@@ -742,7 +764,7 @@ export class ApiChannel implements Channel, TriggerSource {
       return;
     }
 
-    const sessionId = body.sessionId || `api-${nanoid(8)}`;
+    let sessionId = body.sessionId || `api-${nanoid(8)}`;
 
     this.logger.debug({ sessionId, messageLength: body.message.length }, 'Chat request');
 
@@ -750,6 +772,12 @@ export class ApiChannel implements Channel, TriggerSource {
       // Auto-create session if it doesn't exist
       const existing = await this.config.sessionManager.getSession(sessionId);
       if (!existing) {
+        // Archived/forgotten sessions retain a tombstone so their summary and
+        // lifecycle audit survive. Never collide with that durable ID or
+        // silently resume it when an old client submits a stale sessionId.
+        if (this.db?.getSession(sessionId)) {
+          sessionId = `api-${nanoid(8)}`;
+        }
         await this.config.sessionManager.createSession({
           userId: 'default',
           channelId: 'api',
@@ -783,7 +811,7 @@ export class ApiChannel implements Channel, TriggerSource {
       return;
     }
 
-    const sessionId = body.sessionId || `api-${nanoid(8)}`;
+    let sessionId = body.sessionId || `api-${nanoid(8)}`;
 
     // Set up SSE
     res.writeHead(200, {
@@ -798,6 +826,9 @@ export class ApiChannel implements Channel, TriggerSource {
       // Auto-create session if it doesn't exist
       const existing = await this.config.sessionManager.getSession(sessionId);
       if (!existing) {
+        if (this.db?.getSession(sessionId)) {
+          sessionId = `api-${nanoid(8)}`;
+        }
         await this.config.sessionManager.createSession({
           userId: 'default',
           channelId: 'api',
@@ -859,9 +890,30 @@ export class ApiChannel implements Channel, TriggerSource {
   /**
    * Handle DELETE /api/sessions/:id
    */
-  private async handleDeleteSession(res: ServerResponse, sessionId: string): Promise<void> {
-    // SessionManager doesn't have a delete method, but we can clear it
-    // This could be enhanced to actually delete the session file
+  private async handleDeleteSession(res: ServerResponse, sessionId: string, url: URL): Promise<void> {
+    // Requiring the exact session ID prevents a generic/accidental DELETE from
+    // becoming an irreversible forget action.
+    if (url.searchParams.get('confirm') !== sessionId) {
+      this.sendJson(res, 409, {
+        deleted: false,
+        error: 'Explicit confirmation is required to forget this conversation',
+        confirmation: `Repeat with ?confirm=${encodeURIComponent(sessionId)}`,
+      });
+      return;
+    }
+
+    const deleted = await this.config.sessionManager.deleteSession(sessionId, {
+      confirmed: true,
+      reason: 'api_explicit_forget',
+      actor: 'api_user',
+    });
+    if (!deleted) {
+      this.sendJson(res, 404, { deleted: false, error: 'Session not found or already forgotten' });
+      return;
+    }
+    for (const [userId, activeSessionId] of this.userSessions) {
+      if (activeSessionId === sessionId) this.userSessions.delete(userId);
+    }
     this.sendJson(res, 200, { deleted: true, sessionId });
   }
 
@@ -873,7 +925,7 @@ export class ApiChannel implements Channel, TriggerSource {
       this.sendJson(res, 503, { error: 'Database not available' });
       return;
     }
-    const session = this.db.findSessionByUserId('api:default');
+    const session = this.db.findSessionByUserId('api:default', 'api');
     if (!session) {
       this.sendJson(res, 404, { error: 'No session found' });
       return;
@@ -892,8 +944,8 @@ export class ApiChannel implements Channel, TriggerSource {
     const limit = Math.min(parseInt(url.searchParams.get('limit') || '50', 10) || 50, 100);
     const beforeParam = url.searchParams.get('before');
     const before = beforeParam ? parseInt(beforeParam, 10) : undefined;
-    const { messages, hasMore } = this.db.getAllMessagesPaginated(limit, before);
-    this.sendJson(res, 200, { messages: messages.map(sanitizeHistoryMessage), hasMore });
+    const { messages, hasMore } = this.getHumanVisibleMessagePage(limit, before);
+    this.sendJson(res, 200, { messages, hasMore });
   }
 
   /**
@@ -907,8 +959,59 @@ export class ApiChannel implements Channel, TriggerSource {
     const limit = Math.min(parseInt(url.searchParams.get('limit') || '50', 10) || 50, 100);
     const beforeParam = url.searchParams.get('before');
     const before = beforeParam ? parseInt(beforeParam, 10) : undefined;
-    const { messages, hasMore } = this.db.getSessionMessagesPaginated(sessionId, limit, before);
-    this.sendJson(res, 200, { messages: messages.map(sanitizeHistoryMessage), hasMore });
+    const session = this.db.getSession(sessionId);
+    if (!session || isInternalSessionMetadata(session.metadata)) {
+      this.sendJson(res, 200, { messages: [], hasMore: false });
+      return;
+    }
+    const { messages, hasMore } = this.getHumanVisibleMessagePage(limit, before, sessionId);
+    this.sendJson(res, 200, { messages, hasMore });
+  }
+
+  /**
+   * Page over visible conversation turns rather than raw provider-protocol
+   * rows. Fetching raw pages until we have `limit + 1` visible rows prevents
+   * blank tool/reasoning rows from consuming dashboard pagination slots.
+   */
+  private getHumanVisibleMessagePage(
+    limit: number,
+    before?: number,
+    sessionId?: string,
+  ): { messages: SessionMessageRow[]; hasMore: boolean } {
+    if (!this.db) return { messages: [], hasMore: false };
+    const visible: SessionMessageRow[] = [];
+    let cursor = before;
+    let rawHasMore = true;
+    let pageCount = 0;
+
+    while (rawHasMore && visible.length <= limit && pageCount < 100) {
+      const page = sessionId
+        ? this.db.getSessionMessagesPaginated(sessionId, 100, cursor)
+        : this.db.getAllMessagesPaginated(100, cursor);
+      if (page.messages.length === 0) {
+        rawHasMore = false;
+        break;
+      }
+
+      const pageVisible = page.messages.flatMap((message): SessionMessageRow[] => {
+        if (!sessionId) {
+          const ownerSession = this.db!.getSession(message.sessionId);
+          if (!ownerSession || isInternalSessionMetadata(ownerSession.metadata)) return [];
+        }
+        const sanitized = sanitizeHistoryMessage(message);
+        return sanitized ? [sanitized] : [];
+      });
+      visible.unshift(...pageVisible);
+      cursor = page.messages[0].id;
+      rawHasMore = page.hasMore;
+      pageCount++;
+    }
+
+    const hasMore = visible.length > limit || (pageCount >= 100 && rawHasMore);
+    return {
+      messages: visible.length > limit ? visible.slice(-limit) : visible,
+      hasMore,
+    };
   }
 
   /**
@@ -1200,13 +1303,13 @@ export class ApiChannel implements Channel, TriggerSource {
     switch (cmd) {
       case 'new': {
         const userId = 'default';
-        const sessionId = this.userSessions.get(userId);
-        if (sessionId) {
-          await this.config.sessionManager.deleteSession(sessionId);
-          this.userSessions.delete(userId);
-        }
-        // Send empty sessionId to signal client to clear stored session
-        this.sendWsMessage(ws, { type: 'response', content: 'Starting a new conversation!', sessionId: '' });
+        await this.handleReset(userId);
+        const sessionId = this.userSessions.get(userId)!;
+        this.sendWsMessage(ws, {
+          type: 'response',
+          content: 'Started a new conversation. Your previous conversation is preserved.',
+          sessionId,
+        });
         return true;
       }
 

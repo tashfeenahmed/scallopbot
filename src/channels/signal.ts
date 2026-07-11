@@ -287,7 +287,7 @@ export class SignalChannel implements Channel, VoiceChannel {
 
       case 'reset':
         await this.handleReset(userId);
-        await this.sendMessage(userId, 'Conversation cleared. Starting fresh!');
+        await this.sendMessage(userId, 'Started a new conversation. Your previous conversation is preserved.');
         break;
 
       case 'status':
@@ -312,7 +312,7 @@ I'm your personal AI assistant. Just send me a message!
 
 *Commands:*
 /help - Show this message
-/reset - Clear conversation history
+/reset - Preserve this conversation and start a new one
 /status - Check bot status
 
 ${this.supportsVoice() ? 'Voice messages are supported!' : ''}`;
@@ -484,9 +484,10 @@ ${this.supportsVoice() ? 'Voice messages are supported!' : ''}`;
   async handleReset(userId: string): Promise<void> {
     const normalizedId = this.normalizeNumber(userId);
     const sessionId = this.userSessions.get(normalizedId);
-    if (sessionId) {
-      await this.sessionManager.deleteSession(sessionId);
-      this.userSessions.delete(normalizedId);
-    }
+    const session = await this.sessionManager.startNewSession({
+      userId: normalizedId,
+      channelId: 'signal',
+    }, sessionId);
+    this.userSessions.set(normalizedId, session.id);
   }
 }

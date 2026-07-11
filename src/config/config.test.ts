@@ -58,6 +58,8 @@ describe('Config Schema', () => {
       expect(result.success).toBe(true);
       if (result.success) {
         expect(result.data.agent.maxIterations).toBe(100);
+        expect(result.data.agent.foregroundCallTimeoutMs).toBe(25_000);
+        expect(result.data.agent.turnTimeoutMs).toBe(55_000);
         expect(result.data.logging.level).toBe('info');
         expect(result.data.providers.anthropic.model).toBe('claude-sonnet-4-20250514');
         expect(result.data.evolution).toMatchObject({
@@ -206,6 +208,8 @@ describe('Config Schema', () => {
       process.env.TELEGRAM_BOT_TOKEN = 'env-bot-token';
       process.env.AGENT_WORKSPACE = '/env/workspace';
       process.env.AGENT_MAX_ITERATIONS = '15';
+      process.env.AGENT_FOREGROUND_CALL_TIMEOUT_MS = '20000';
+      process.env.AGENT_TURN_TIMEOUT_MS = '40000';
       process.env.LOG_LEVEL = 'debug';
 
       const { loadConfig } = await import('./config.js');
@@ -215,6 +219,8 @@ describe('Config Schema', () => {
       expect(config.channels.telegram.botToken).toBe('env-bot-token');
       expect(config.agent.workspace).toBe('/env/workspace');
       expect(config.agent.maxIterations).toBe(15);
+      expect(config.agent.foregroundCallTimeoutMs).toBe(20_000);
+      expect(config.agent.turnTimeoutMs).toBe(40_000);
       expect(config.logging.level).toBe('debug');
     });
 
@@ -223,6 +229,25 @@ describe('Config Schema', () => {
       process.env.EVOLUTION_REQUIRE_FITNESS_GATE = 'false';
       const { loadConfig } = await import('./config.js');
       expect(loadConfig().evolution.requireFitnessGate).toBe(true);
+    });
+
+    it('keeps self-evolution off unless the operator explicitly sets exact true', async () => {
+      process.env.ANTHROPIC_API_KEY = 'sk-ant-env-key';
+      // Empty is equivalent to absent while preventing a developer's local
+      // .env from being injected into this hermetic configuration test.
+      process.env.EVOLUTION_ENABLED = '';
+      let configModule = await import('./config.js');
+      expect(configModule.loadConfig().evolution.enabled).toBe(false);
+
+      vi.resetModules();
+      process.env.EVOLUTION_ENABLED = 'TRUE';
+      configModule = await import('./config.js');
+      expect(configModule.loadConfig().evolution.enabled).toBe(false);
+
+      vi.resetModules();
+      process.env.EVOLUTION_ENABLED = 'true';
+      configModule = await import('./config.js');
+      expect(configModule.loadConfig().evolution.enabled).toBe(true);
     });
 
     it('should use default workspace if not provided', async () => {

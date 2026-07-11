@@ -39,6 +39,7 @@ describe('CLIChannel', () => {
     mockSessionManager = {
       createSession: vi.fn().mockResolvedValue({ id: 'session-123' }),
       getSession: vi.fn().mockResolvedValue({ id: 'session-123', messages: [] }),
+      startNewSession: vi.fn().mockResolvedValue({ id: 'fresh-session-456' }),
       deleteSession: vi.fn().mockResolvedValue(undefined),
     } as unknown as SessionManager;
 
@@ -160,7 +161,7 @@ describe('CLIChannel', () => {
     it('should include description of each command', () => {
       const help = getHelpMessage();
       expect(help).toContain('Show this help');
-      expect(help).toContain('Clear conversation');
+      expect(help).toContain('Preserve this conversation');
       expect(help).toContain('Exit');
     });
   });
@@ -188,10 +189,14 @@ describe('CLIChannel', () => {
       // First create a session by sending a message
       await channel.handleInput('Hello');
 
-      // Now reset should delete the session
+      // Reset closes the prior conversation and immediately activates a new one.
       await channel.handleInput('/reset');
 
-      expect(mockSessionManager.deleteSession).toHaveBeenCalled();
+      expect(mockSessionManager.startNewSession).toHaveBeenCalledWith({
+        userId: 'cli-user',
+        channelId: 'cli',
+      }, 'session-123');
+      expect(mockSessionManager.deleteSession).not.toHaveBeenCalled();
     });
 
     it('should handle /help command', async () => {
@@ -256,7 +261,9 @@ describe('CLIChannel', () => {
       await channel.handleInput('/reset');
       await channel.handleInput('New conversation');
 
-      expect(mockSessionManager.createSession).toHaveBeenCalledTimes(2);
+      expect(mockSessionManager.createSession).toHaveBeenCalledTimes(1);
+      expect(mockSessionManager.startNewSession).toHaveBeenCalledTimes(1);
+      expect(mockAgent.processMessage).toHaveBeenLastCalledWith('fresh-session-456', 'New conversation');
     });
   });
 

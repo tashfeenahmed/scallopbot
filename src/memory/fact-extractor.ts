@@ -7,7 +7,7 @@
  */
 
 import type { Logger } from 'pino';
-import type { LLMProvider } from '../providers/types.js';
+import type { CompletionRequest, LLMProvider } from '../providers/types.js';
 import type { CostTracker } from '../routing/cost.js';
 import { resolveStateUserId } from '../utils/state-user-id.js';
 import { cosineSimilarity, type EmbeddingProvider } from './embeddings.js';
@@ -67,6 +67,65 @@ export interface FactExtractionResult {
   error?: string;
 }
 
+interface FactSlot {
+  slot: string;
+  value: string;
+}
+
+function normalizeFactPart(value: string): string {
+  return value.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Extract only high-confidence single-valued attributes. Unknown shapes are
+ * deliberately left unclassified: two semantically related facts may both be
+ * true and must not be superseded merely because an LLM found them similar.
+ */
+function extractFactSlot(content: string): FactSlot | null {
+  const text = normalizeFactPart(content);
+  const locationOrWork = text.match(/^(lives?|works?)\s+(in|at|for|as)\s+(.+)$/u);
+  if (locationOrWork) {
+    return { slot: `${locationOrWork[1].replace(/s$/, '')}:${locationOrWork[2]}`, value: locationOrWork[3] };
+  }
+
+  const namedAttribute = text.match(
+    /^(?:(?:the|user s|users)\s+)?(name|age|location|city|country|timezone|language|employer|job|role|office|mood|focus|wife|husband|partner|flatmate|manager|boss)\s+(?:is|are)\s+(.+)$/u,
+  );
+  if (namedAttribute) return { slot: namedAttribute[1], value: namedAttribute[2] };
+
+  const quantified = text.match(/^has\s+(\d+)\s+(.+)$/u);
+  if (quantified) return { slot: `has:${quantified[2]}`, value: quantified[1] };
+  return null;
+}
+
+/** True only when both facts occupy a known single-valued slot with different values. */
+export function factsClearlyContradict(newFact: string, existingFact: string): boolean {
+  const next = extractFactSlot(newFact);
+  const previous = extractFactSlot(existingFact);
+  return !!next && !!previous && next.slot === previous.slot && next.value !== previous.value;
+}
+
+/**
+ * An LLM-provided old value is only a locator, never sufficient authority to
+ * supersede a fact by substring. Both facts must occupy the same known,
+ * single-valued slot and the old value must identify that slot's prior value.
+ */
+export function explicitCorrectionTargetsSameSlot(
+  newFact: string,
+  existingFact: string,
+  oldValue: string,
+): boolean {
+  const next = extractFactSlot(newFact);
+  const previous = extractFactSlot(existingFact);
+  const normalizedOld = normalizeFactPart(oldValue);
+  if (!next || !previous || next.slot !== previous.slot || normalizedOld.length < 2) return false;
+  if (next.value === previous.value) return false;
+  return previous.value === normalizedOld
+    || previous.value.startsWith(`${normalizedOld} `)
+    || previous.value.endsWith(` ${normalizedOld}`)
+    || previous.value.includes(` ${normalizedOld} `);
+}
+
 /**
  * Resource limits for memory-constrained environments
  */
@@ -101,6 +160,152 @@ export interface LLMFactExtractorOptions {
   getTimezone?: (userId: string) => string;
   /** Explicit aliases for this deployment's single canonical state owner. */
   canonicalSingleUserIds?: readonly string[];
+  /** Total wall-clock budget for each strict JSON provider call (default: 10s). */
+  requestTimeoutMs?: number;
+  /** Injectable clock for deterministic durable circuit tests. */
+  now?: () => number;
+}
+
+interface StructuredRouteCircuitStore {
+  getStructuredRouteCircuit(route: string): { nextRetryAt: number } | null;
+  recordStructuredRouteFailure(route: string, errorCode: string, now?: number): unknown;
+  clearStructuredRouteCircuit(route: string): void;
+}
+
+const nullableStringSchema = { type: ['string', 'null'] } as const;
+
+export const FACT_EXTRACTION_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['facts', 'proactive_triggers'],
+  properties: {
+    facts: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['content', 'subject', 'category', 'confidence', 'action', 'old_value', 'replaces'],
+        properties: {
+          content: { type: 'string' },
+          subject: { type: 'string' },
+          category: { type: 'string', enum: ['personal', 'work', 'location', 'preference', 'relationship', 'project', 'general'] },
+          confidence: { type: 'number' },
+          action: { type: 'string', enum: ['fact', 'forget', 'correction', 'preference_update'] },
+          old_value: nullableStringSchema,
+          replaces: nullableStringSchema,
+        },
+      },
+    },
+    proactive_triggers: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['type', 'kind', 'consent', 'description', 'trigger_time', 'context', 'guidance', 'goal', 'tools', 'recurring'],
+        properties: {
+          type: { type: 'string', enum: ['event_prep', 'commitment_check', 'goal_checkin', 'follow_up'] },
+          kind: { type: 'string', enum: ['nudge', 'task'] },
+          consent: { type: 'string', enum: ['explicit', 'inferred'] },
+          description: { type: 'string' },
+          trigger_time: { type: 'string' },
+          context: { type: 'string' },
+          guidance: nullableStringSchema,
+          goal: nullableStringSchema,
+          tools: {
+            anyOf: [
+              { type: 'array', items: { type: 'string' } },
+              { type: 'null' },
+            ],
+          },
+          recurring: {
+            anyOf: [
+              { type: 'null' },
+              {
+                type: 'object',
+                additionalProperties: false,
+                required: ['type', 'hour', 'minute', 'dayOfWeek', 'dayOfMonth'],
+                properties: {
+                  type: { type: 'string', enum: ['daily', 'weekly', 'monthly', 'weekdays', 'weekends'] },
+                  hour: { type: 'integer' },
+                  minute: { type: 'integer' },
+                  dayOfWeek: { type: ['integer', 'null'] },
+                  dayOfMonth: { type: ['integer', 'null'] },
+                },
+              },
+            ],
+          },
+        },
+      },
+    },
+  },
+};
+
+export const FACT_ONLY_SCHEMA: Record<string, unknown> = {
+  ...FACT_EXTRACTION_SCHEMA,
+  required: ['facts'],
+  properties: { facts: (FACT_EXTRACTION_SCHEMA.properties as Record<string, unknown>).facts },
+};
+
+export const MEMORY_CONSOLIDATION_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['superseded', 'user_profile', 'agent_profile', 'preferences_learned', 'recent_topics'],
+  properties: {
+    superseded: { type: 'array', items: { type: 'string' } },
+    user_profile: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['name', 'location', 'timezone', 'language', 'occupation', 'personality', 'mood', 'focus'],
+      properties: Object.fromEntries(
+        ['name', 'location', 'timezone', 'language', 'occupation', 'personality', 'mood', 'focus']
+          .map(key => [key, nullableStringSchema]),
+      ),
+    },
+    agent_profile: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['name', 'personality', 'tone', 'style', 'language'],
+      properties: Object.fromEntries(
+        ['name', 'personality', 'tone', 'style', 'language']
+          .map(key => [key, nullableStringSchema]),
+      ),
+    },
+    preferences_learned: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['domain', 'prefers', 'over', 'strength'],
+        properties: {
+          domain: { type: 'string' }, prefers: { type: 'string' }, over: { type: 'string' }, strength: { type: 'number' },
+        },
+      },
+    },
+    recent_topics: { type: 'array', items: { type: 'string' } },
+  },
+};
+
+async function completeWithinDeadline(
+  provider: LLMProvider,
+  request: CompletionRequest,
+  timeoutMs: number,
+  timeoutCode: string,
+): Promise<Awaited<ReturnType<LLMProvider['complete']>>> {
+  const controller = new AbortController();
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      provider.complete({ ...request, signal: controller.signal }),
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(() => {
+          controller.abort(new Error(timeoutCode));
+          reject(new Error(timeoutCode));
+        }, Math.max(1, timeoutMs));
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
 }
 
 /**
@@ -203,7 +408,7 @@ Format each trigger as:
   "guidance": "Specific instructions for the bot on what to do to help the user when the trigger fires (e.g., 'Search for directions and check weather', 'Look up flight status')",
   "goal": "What the sub-agent should accomplish (required for task kind, e.g., 'Look up flight EK204 status and check for delays')",
   "tools": ["optional array of tool names for task kind, e.g., 'web_search', 'bash'"],
-  "recurring": "null if one-time, OR an object: { \"type\": \"daily\" | \"weekly\" | \"weekdays\" | \"weekends\", \"hour\": 0-23, \"minute\": 0-59, \"dayOfWeek\": 0-6 (Sunday=0, only for weekly) }"
+  "recurring": "null if one-time, OR an object: { \"type\": \"daily\" | \"weekly\" | \"monthly\" | \"weekdays\" | \"weekends\", \"hour\": 0-23, \"minute\": 0-59, \"dayOfWeek\": 0-6 (Sunday=0, only for weekly), \"dayOfMonth\": 1-31 (only for monthly) }"
 }
 
 KIND RULES:
@@ -248,6 +453,7 @@ RECURRING RULES:
 - If the user says "every weekday", "monday to friday" → type "weekdays"
 - If the user says "every weekend" → type "weekends"
 - If the user says "every Monday", "every Tuesday", etc. → type "weekly" with the correct dayOfWeek
+- If the user says "monthly", "every month", or "on the Nth each month" → type "monthly" with the correct dayOfMonth
 - ALWAYS set hour and minute in the recurring object to match the intended time (24h format)
 - Do NOT leave recurring as null when the user explicitly asks for a repeating schedule!
 
@@ -297,6 +503,8 @@ export class LLMFactExtractor {
   private resourceLimits: Required<ResourceLimits>;
   private getTimezone: (userId: string) => string;
   private canonicalSingleUserIds: readonly string[];
+  private requestTimeoutMs: number;
+  private now: () => number;
   /** Counter for throttling consolidateMemory — runs every N extractions */
   private extractionCount = 0;
   private static readonly CONSOLIDATION_INTERVAL = 5;
@@ -312,6 +520,8 @@ export class LLMFactExtractor {
     this.deduplicationThreshold = options.deduplicationThreshold ?? 0.95;
     this.getTimezone = options.getTimezone ?? (() => Intl.DateTimeFormat().resolvedOptions().timeZone);
     this.canonicalSingleUserIds = [...(options.canonicalSingleUserIds ?? [])];
+    this.requestTimeoutMs = Math.max(1, options.requestTimeoutMs ?? 10_000);
+    this.now = options.now ?? Date.now;
 
     // Set resource limits with defaults suitable for 4GB RAM
     this.resourceLimits = {
@@ -352,6 +562,13 @@ export class LLMFactExtractor {
       duplicatesSkipped: 0,
     };
 
+    const route = this.structuredRoute('fact_extract');
+    if (this.structuredRouteIsBackedOff(route)) {
+      result.error = 'fact_extraction_provider_backoff';
+      this.logger.debug({ route }, 'Fact extraction skipped during durable provider backoff');
+      return result;
+    }
+
     try {
       // Build prompt with current date injected and optional context
       const now = new Date();
@@ -368,25 +585,36 @@ export class LLMFactExtractor {
       // Call LLM to extract facts and triggers. Cap max_tokens so thinking-heavy
       // models (qwen3.6) don't burn the entire budget on reasoning_content and
       // return empty JSON. 1500 is plenty for even a long facts+triggers payload.
-      const response = await this.provider.complete({
-        messages: [{ role: 'user', content: prompt }],
-        maxTokens: 1500,
-        purpose: 'fact_extract',
-      });
+      let response: Awaited<ReturnType<LLMProvider['complete']>>;
+      try {
+        response = await completeWithinDeadline(this.provider, {
+          messages: [{ role: 'user', content: prompt }],
+          temperature: 0.1,
+          maxTokens: 1500,
+          enableThinking: false,
+          structuredOutput: {
+            name: 'fact_and_trigger_extraction',
+            schema: FACT_EXTRACTION_SCHEMA,
+            strict: true,
+          },
+          purpose: 'fact_extract',
+        }, this.requestTimeoutMs, 'fact_extraction_timeout');
+      } catch (error) {
+        this.recordStructuredRouteFailure(route, error);
+        throw error;
+      }
 
       // Parse response - handle ContentBlock[] response
       const responseText = Array.isArray(response.content)
         ? response.content.map(block => 'text' in block ? block.text : '').join('')
         : String(response.content);
       const parsed = this.parseResponse(responseText);
-      if (!parsed.facts || !Array.isArray(parsed.facts)) {
-        this.logger.debug({ response: response.content }, 'No facts extracted');
-        // Still process triggers even when no facts found
-        if (parsed.proactive_triggers && Array.isArray(parsed.proactive_triggers) && parsed.proactive_triggers.length > 0) {
-          this.processExtractedTriggers(parsed.proactive_triggers, userId, message, null, sourceSessionId);
-        }
-        return result;
+      if (!parsed || !Array.isArray(parsed.facts)) {
+        const error = new Error('fact_extraction_invalid_json');
+        this.recordStructuredRouteFailure(route, error);
+        throw error;
       }
+      this.clearStructuredRouteFailure(route);
 
       result.facts = parsed.facts.map((f: {
         content: string;
@@ -394,16 +622,16 @@ export class LLMFactExtractor {
         category?: string;
         confidence?: number;
         action?: string;
-        old_value?: string;
-        replaces?: string;
+        old_value?: string | null;
+        replaces?: string | null;
       }) => ({
         content: f.content,
         subject: f.subject || 'user',
         category: (f.category as FactCategory) || 'general',
         confidence: typeof f.confidence === 'number' ? f.confidence : undefined,
         action: (f.action as FactAction) || 'fact',
-        oldValue: f.old_value,
-        replaces: f.replaces,
+        oldValue: f.old_value ?? undefined,
+        replaces: f.replaces ?? undefined,
       }));
 
       // Post-extraction noise filter: remove low-value facts before storing
@@ -708,15 +936,31 @@ export class LLMFactExtractor {
             const classification = classifications[i];
 
             if (classification.classification === 'UPDATES' && classification.targetId) {
-              // Mark old fact as superseded and store new version
-              this.scallopStore.update(classification.targetId, { isLatest: false });
-              await storeAndCollect(fact, sourceMessage, sourceMessageId);
-              // Persist the UPDATES relation edge so the graph is connected
-              const newMem = storedMemories[storedMemories.length - 1];
-              if (newMem) {
-                db.addRelation(newMem.id, classification.targetId, 'UPDATES', classification.confidence);
+              const target = relevantFacts.find(candidate => candidate.id === classification.targetId);
+              const safeUpdate = classification.confidence >= 0.8
+                && !!target
+                && normalizeFactPart(target.subject) === normalizeFactPart(fact.subject)
+                && target.category === fact.category
+                && factsClearlyContradict(fact.content, target.content);
+              if (safeUpdate) {
+                // Mark old fact as superseded only after deterministic
+                // same-slot contradiction verification.
+                this.scallopStore.update(classification.targetId, { isLatest: false });
+                await storeAndCollect(fact, sourceMessage, sourceMessageId);
+                const newMem = storedMemories[storedMemories.length - 1];
+                if (newMem) {
+                  db.addRelation(newMem.id, classification.targetId, 'UPDATES', classification.confidence);
+                }
+                result.updated++;
+                continue;
               }
-              result.updated++;
+
+              this.logger.warn(
+                { targetId: classification.targetId, confidence: classification.confidence },
+                'Rejected unverified memory supersession; storing both facts',
+              );
+              await storeAndCollect(fact, sourceMessage, sourceMessageId);
+              result.stored++;
               continue;
             }
 
@@ -1000,7 +1244,25 @@ export class LLMFactExtractor {
     let superseded = 0;
     const db = this.scallopStore.getDatabase();
     for (const candidate of candidates) {
-      if (candidate.score > 0.4) {
+      const explicitOldValue = normalizeFactPart(correction.oldValue || correction.replaces || '');
+      const matchesExplicitOldValue = explicitCorrectionTargetsSameSlot(
+        correction.content,
+        candidate.memory.content,
+        explicitOldValue,
+      );
+      const verifiedContradiction = factsClearlyContradict(correction.content, candidate.memory.content);
+      const candidateSubject = normalizeFactPart(
+        typeof candidate.memory.metadata?.subject === 'string'
+          ? candidate.memory.metadata.subject
+          : 'user',
+      );
+      const sameSubject = candidateSubject === normalizeFactPart(correction.subject);
+      const candidateCategory = typeof candidate.memory.metadata?.originalCategory === 'string'
+        ? candidate.memory.metadata.originalCategory
+        : candidate.memory.category;
+      const sameCategory = candidateCategory === correction.category;
+      if (candidate.score > 0.4 && sameSubject && sameCategory
+        && (matchesExplicitOldValue || verifiedContradiction)) {
         this.scallopStore.update(candidate.memory.id, { isLatest: false });
         // Bidirectional contradiction tracking + relation edge
         if (newMemory) {
@@ -1016,7 +1278,7 @@ export class LLMFactExtractor {
 
         superseded++;
         this.logger.info(
-          { oldId: candidate.memory.id, oldContent: candidate.memory.content, newContent: correction.content, profilesCleaned },
+          { oldId: candidate.memory.id, profilesCleaned },
           'Memory superseded by correction'
         );
       }
@@ -1150,13 +1412,26 @@ RULES:
 Respond with JSON only:
 {"superseded": [], "user_profile": {}, "agent_profile": {}, "preferences_learned": [], "recent_topics": []}`;
 
+    const route = this.structuredRoute('memory_manage');
+    if (this.structuredRouteIsBackedOff(route)) {
+      this.logger.debug({ route }, 'Memory consolidation skipped during durable provider backoff');
+      return;
+    }
+
+    let structuredResponseValid = false;
     try {
-      const response = await this.provider.complete({
+      const response = await completeWithinDeadline(this.provider, {
         messages: [{ role: 'user', content: prompt }],
         temperature: 0.1,
-        maxTokens: 400,
+        maxTokens: 800,
+        enableThinking: false,
+        structuredOutput: {
+          name: 'memory_consolidation',
+          schema: MEMORY_CONSOLIDATION_SCHEMA,
+          strict: true,
+        },
         purpose: 'memory_manage',
-      });
+      }, this.requestTimeoutMs, 'memory_consolidation_timeout');
 
       const responseText = Array.isArray(response.content)
         ? response.content.map(block => 'text' in block ? block.text : '').join('')
@@ -1164,12 +1439,12 @@ Respond with JSON only:
 
       // Parse the JSON response
       const jsonMatch = responseText.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) return;
+      if (!jsonMatch) throw new Error('memory_consolidation_invalid_json');
 
       const parsed = JSON.parse(jsonMatch[0]) as {
         superseded?: string[];
-        user_profile?: Record<string, string>;
-        agent_profile?: Record<string, string>;
+        user_profile?: Record<string, string | null>;
+        agent_profile?: Record<string, string | null>;
         preferences_learned?: Array<{
           domain?: string;
           prefers: string;
@@ -1178,6 +1453,15 @@ Respond with JSON only:
         }>;
         recent_topics?: string[];
       };
+      if (!Array.isArray(parsed.superseded)
+        || !parsed.user_profile || typeof parsed.user_profile !== 'object'
+        || !parsed.agent_profile || typeof parsed.agent_profile !== 'object'
+        || !Array.isArray(parsed.preferences_learned)
+        || !Array.isArray(parsed.recent_topics)) {
+        throw new Error('memory_consolidation_invalid_json');
+      }
+      structuredResponseValid = true;
+      this.clearStructuredRouteFailure(route);
 
       // 1. Supersede outdated memories
       if (parsed.superseded && Array.isArray(parsed.superseded) && parsed.superseded.length > 0) {
@@ -1186,16 +1470,19 @@ Respond with JSON only:
         const db = this.scallopStore.getDatabase();
         for (const id of parsed.superseded) {
           if (validIds.has(id)) {
-            this.scallopStore.update(id, { isLatest: false });
-            // Cascade: cancel scheduled items and clean stale profile entries
             const mem = candidateMap.get(id);
-            if (mem) {
-              db.cancelScheduledItemsBySourceMemory(id);
-              db.cancelSimilarScheduledItems(userId, mem.content);
-              db.cleanStaleProfileEntries(userId, mem.content);
+            const verified = !!mem && storedFacts.some(fact => factsClearlyContradict(fact, mem.content));
+            if (!verified) {
+              this.logger.warn({ supersededId: id }, 'Ignored unverified memory-manager supersession');
+              continue;
             }
+            this.scallopStore.update(id, { isLatest: false });
+            // Cascade only after deterministic contradiction verification.
+            db.cancelScheduledItemsBySourceMemory(id);
+            db.cancelSimilarScheduledItems(userId, mem.content);
+            db.cleanStaleProfileEntries(userId, mem.content);
             this.logger.info(
-              { supersededId: id, newFacts: storedFacts.map(f => f.substring(0, 40)) },
+              { supersededId: id },
               'Memory superseded by newer fact'
             );
           }
@@ -1355,6 +1642,7 @@ Respond with JSON only:
       }
 
     } catch (err) {
+      if (!structuredResponseValid) this.recordStructuredRouteFailure(route, err);
       this.logger.debug({ error: (err as Error).message }, 'Memory consolidation LLM call failed');
     }
   }
@@ -1453,12 +1741,14 @@ Respond with JSON only:
       let recurring: RecurringSchedule | null = null;
       if (trigger.recurring && typeof trigger.recurring === 'object') {
         const candidate = trigger.recurring;
-        const validType = ['daily', 'weekly', 'weekdays', 'weekends'].includes(candidate.type);
+        const validType = ['daily', 'weekly', 'monthly', 'weekdays', 'weekends'].includes(candidate.type);
         const validHour = Number.isInteger(candidate.hour) && candidate.hour >= 0 && candidate.hour <= 23;
         const validMinute = Number.isInteger(candidate.minute) && candidate.minute >= 0 && candidate.minute <= 59;
         const validWeekday = candidate.type !== 'weekly'
           || (Number.isInteger(candidate.dayOfWeek) && candidate.dayOfWeek! >= 0 && candidate.dayOfWeek! <= 6);
-        if (validType && validHour && validMinute && validWeekday) recurring = candidate;
+        const validMonthday = candidate.type !== 'monthly'
+          || (Number.isInteger(candidate.dayOfMonth) && candidate.dayOfMonth! >= 1 && candidate.dayOfMonth! <= 31);
+        if (validType && validHour && validMinute && validWeekday && validMonthday) recurring = candidate;
       }
 
       // Repeating interruptions always require explicit user consent. Fail
@@ -1816,6 +2106,48 @@ Respond with JSON only:
    * Parse LLM response, handling potential JSON issues.
    * Distinguishes between empty responses (normal) and parse failures (warnings).
    */
+  private structuredRoute(purpose: string): string {
+    return `${purpose}:${this.provider.name}`;
+  }
+
+  /** ScallopDatabase implements this interface; light test/custom stores may not. */
+  private getCircuitStore(): StructuredRouteCircuitStore | null {
+    const candidate = this.scallopStore.getDatabase() as unknown as Partial<StructuredRouteCircuitStore>;
+    return typeof candidate.getStructuredRouteCircuit === 'function'
+      && typeof candidate.recordStructuredRouteFailure === 'function'
+      && typeof candidate.clearStructuredRouteCircuit === 'function'
+      ? candidate as StructuredRouteCircuitStore
+      : null;
+  }
+
+  private structuredRouteIsBackedOff(route: string): boolean {
+    try {
+      return (this.getCircuitStore()?.getStructuredRouteCircuit(route)?.nextRetryAt ?? 0) > this.now();
+    } catch {
+      return false;
+    }
+  }
+
+  private recordStructuredRouteFailure(route: string, error: unknown): void {
+    const message = error instanceof Error ? error.message : String(error);
+    const code = message.includes('timeout')
+      ? 'timeout'
+      : message.includes('invalid_json') ? 'invalid_json' : 'provider_error';
+    try {
+      this.getCircuitStore()?.recordStructuredRouteFailure(route, code, this.now());
+    } catch {
+      // A diagnostics write must not replace the original extraction error.
+    }
+  }
+
+  private clearStructuredRouteFailure(route: string): void {
+    try {
+      this.getCircuitStore()?.clearStructuredRouteCircuit(route);
+    } catch {
+      // A valid response remains safe to process; clearing can retry next run.
+    }
+  }
+
   private parseResponse(content: string): {
     facts: ExtractedFactWithEmbedding[];
     proactive_triggers?: Array<{
@@ -1832,10 +2164,10 @@ Respond with JSON only:
       recurring_pattern?: string | null; // legacy fallback
       priority?: 'urgent' | 'high' | 'medium' | 'low';
     }>;
-  } {
+  } | null {
     if (!content || content.trim().length === 0) {
       this.logger.warn('LLM returned empty response during fact extraction');
-      return { facts: [] };
+      return null;
     }
 
     // Try to extract JSON from response
@@ -1845,7 +2177,7 @@ Respond with JSON only:
         { contentPreview: content.substring(0, 200) },
         'LLM response contained no JSON object — facts may have been lost'
       );
-      return { facts: [] };
+      return null;
     }
 
     try {
@@ -1855,7 +2187,7 @@ Respond with JSON only:
         { error: (err as Error).message, contentPreview: content.substring(0, 200) },
         'Failed to parse JSON from LLM response — facts were lost'
       );
-      return { facts: [] };
+      return null;
     }
   }
 
@@ -1873,7 +2205,8 @@ Respond with JSON only:
 export async function extractFactsWithLLM(
   provider: LLMProvider,
   message: string,
-  context?: string
+  context?: string,
+  requestTimeoutMs: number = 10_000,
 ): Promise<{ facts: ExtractedFactWithEmbedding[] }> {
   const now = new Date();
   const currentDate = now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
@@ -1884,10 +2217,18 @@ export async function extractFactsWithLLM(
   }
   prompt += `User message:\n${message}\n\nExtract facts (JSON only):`;
 
-  const response = await provider.complete({
+  const response = await completeWithinDeadline(provider, {
     messages: [{ role: 'user', content: prompt }],
+    temperature: 0.1,
+    maxTokens: 1200,
+    enableThinking: false,
+    structuredOutput: {
+      name: 'fact_extraction',
+      schema: FACT_ONLY_SCHEMA,
+      strict: true,
+    },
     purpose: 'fact_extract',
-  });
+  }, requestTimeoutMs, 'fact_extraction_timeout');
 
   // Handle ContentBlock[] response
   const responseText = Array.isArray(response.content)

@@ -61,4 +61,31 @@ describe('bash skill workspace confinement', () => {
     expect(result.success).toBe(false);
     expect(result.output).toContain('escapes workspace');
   });
+
+  it('requires fail mode for mutating curl requests', async () => {
+    const result = await new SkillExecutor().execute(skill, {
+      skillName: 'bash',
+      cwd: workspace,
+      args: { command: "curl -s -X POST https://example.invalid/items -d '{}'" },
+    });
+    expect(result.success).toBe(false);
+    expect(`${result.output ?? ''}${result.error ?? ''}`).toMatch(/--fail-with-body/);
+  });
+
+  it('requires typed status checks for other raw HTTP clients', async () => {
+    const commands = [
+      'http POST https://example.invalid/items name=x',
+      `python -c "import requests; requests.post('https://example.invalid/items')"`,
+      `node -e "fetch('https://example.invalid/items',{method:'POST'})"`,
+    ];
+    for (const command of commands) {
+      const result = await new SkillExecutor().execute(skill, {
+        skillName: 'bash',
+        cwd: workspace,
+        args: { command },
+      });
+      expect(result.success).toBe(false);
+      expect(`${result.output ?? ''}${result.error ?? ''}`).toMatch(/status|non-2xx/i);
+    }
+  });
 });

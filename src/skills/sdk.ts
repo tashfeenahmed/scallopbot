@@ -96,6 +96,10 @@ export interface SkillBuilderOptions {
   instructions?: string;
   /** Input schema for tool definition */
   inputSchema?: SkillFrontmatter['inputSchema'];
+  /** Typed execution-safety declaration enforced at the dispatch boundary. */
+  safety?: NonNullable<NonNullable<SkillMetadata['openclaw']>['safety']>;
+  /** Authoritative factual-source declaration for runtime evidence receipts. */
+  evidence?: NonNullable<NonNullable<SkillMetadata['openclaw']>['evidence']>;
 }
 
 /**
@@ -222,6 +226,18 @@ export class SkillBuilder {
     return this;
   }
 
+  /** Declare whether this skill is read-only or writes outside the workspace. */
+  safety(declaration: NonNullable<NonNullable<SkillMetadata['openclaw']>['safety']>): this {
+    this.options.safety = { ...declaration };
+    return this;
+  }
+
+  /** Declare a stable authoritative data source for unattended factual work. */
+  evidence(declaration: NonNullable<NonNullable<SkillMetadata['openclaw']>['evidence']>): this {
+    this.options.evidence = { ...declaration };
+    return this;
+  }
+
   /**
    * Set execution handler (SDK-style, used in SkillDefinition.execute)
    */
@@ -270,12 +286,16 @@ export class SkillBuilder {
       this.options.requiredBins?.length ||
       this.options.requiredAnyBins?.length ||
       this.options.requiredEnv?.length ||
-      this.options.requiredConfig?.length
+      this.options.requiredConfig?.length ||
+      this.options.safety ||
+      this.options.evidence
     ) {
       metadata.openclaw = {
         emoji: this.options.emoji,
         os: this.options.os,
         primaryEnv: this.options.primaryEnv,
+        safety: this.options.safety,
+        evidence: this.options.evidence,
       };
 
       if (
@@ -400,6 +420,7 @@ export function createSkill(
   if (options?.emoji) builder.emoji(options.emoji);
   if (options?.homepage) builder.homepage(options.homepage);
   if (options?.instructions) builder.instructions(options.instructions);
+  if (options?.safety) builder.safety(options.safety);
 
   return builder.onExecute(handler).build();
 }

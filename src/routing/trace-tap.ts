@@ -17,6 +17,7 @@ import type { LLMProvider, CompletionRequest, CompletionResponse } from '../prov
 import { extractJSON, extractResponseText } from '../proactive/proactive-utils.js';
 import { getModelTokenLimits } from './model-limits.js';
 import { redactSensitiveText } from '../security/redaction.js';
+import { createHash } from 'node:crypto';
 
 /** Purposes whose responses are expected to be parseable JSON. */
 const JSON_PURPOSES = new Set([
@@ -86,6 +87,26 @@ function prepareForPersistence(s: string): string {
     : redacted;
 }
 
+type TraceContentMode = 'metadata' | 'full';
+
+function traceContentMode(): TraceContentMode {
+  return process.env.LLM_TRACE_CONTENT_MODE?.toLowerCase() === 'full'
+    ? 'full'
+    : 'metadata';
+}
+
+function prepareTraceField(serialized: string): string {
+  if (traceContentMode() === 'full') return prepareForPersistence(serialized);
+  // Diagnostics retain enough information to compare failures/cost without
+  // retaining the user's conversation or tool payload. Full redacted traces
+  // remain an explicit opt-in for fine-tune dataset collection.
+  return JSON.stringify({
+    content_retained: false,
+    bytes: Buffer.byteLength(serialized, 'utf8'),
+    sha256: createHash('sha256').update(serialized).digest('hex'),
+  });
+}
+
 /** Serialize the request exactly as the model saw it (system + messages + tools). */
 function serializePrompt(request: CompletionRequest): string {
   return JSON.stringify({
@@ -128,8 +149,8 @@ export function wrapProviderWithTraceTap(provider: LLMProvider): LLMProvider {
             purpose,
             model,
             provider: target.name,
-            prompt: prepareForPersistence(serializePrompt(request)),
-            response: prepareForPersistence(serializeResponse(response)),
+            prompt: prepareTraceField(serializePrompt(request)),
+            response: prepareTraceField(serializeResponse(response)),
             parsedOk: computeParsedOk(purpose, response),
             sessionId: request.traceSessionId ?? null,
             latencyMs: Date.now() - started,

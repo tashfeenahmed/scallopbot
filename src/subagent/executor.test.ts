@@ -254,12 +254,92 @@ describe('SubAgentExecutor integration', () => {
 
     // Should complete in 1 iteration (simple question, mock answers immediately)
     expect(result.taskComplete).toBe(true);
+    expect(result.completionSource).toBe('explicit_done');
     expect(result.iterationsUsed).toBeLessThanOrEqual(10);
     expect(result.response).toContain('Austin');
     expect(result.response).not.toContain('[DONE]'); // [DONE] should be stripped
     // Synchronous results are returned inline and must not be announced again
     // on the parent's next turn.
     expect(announceQueue.pendingCount(parentSession.id)).toBe(0);
+  }, 30_000);
+
+  it('does not treat an honest natural-end failure as completed work', async () => {
+    const provider = createTrackingProvider([
+      'The analytics API is unavailable, so I could not retrieve the report.',
+    ]);
+    const { executor } = await buildExecutor(provider);
+    const parentSession = await ctx.sessionManager.createSession({ label: 'parent' });
+
+    const result = await executor.spawnAndWait(parentSession.id, {
+      task: 'Retrieve the analytics report',
+      label: 'natural-end-failure',
+    });
+
+    expect(result.response).toMatch(/unavailable/i);
+    expect(result.taskComplete).toBe(false);
+    expect(result.completionSource).toBeUndefined();
+  }, 30_000);
+
+  it('allows natural-end completion only when a real non-empty tool result verifies the work', async () => {
+    const sourcePath = `/tmp/subagent-verified-${Date.now()}.txt`;
+    fs.writeFileSync(sourcePath, 'verified source content');
+    const responses: CompletionResponse[] = [
+      {
+        content: [{ type: 'tool_use', id: 'read-source', name: 'read_file', input: { path: sourcePath } }],
+        stopReason: 'tool_use', usage: { inputTokens: 20, outputTokens: 10 }, model: 'mock-model',
+      },
+      {
+        content: [{ type: 'text', text: 'I read the source file successfully.' }],
+        stopReason: 'end_turn', usage: { inputTokens: 20, outputTokens: 10 }, model: 'mock-model',
+      },
+    ];
+    let index = 0;
+    const provider: LLMProvider = {
+      name: 'openai',
+      complete: vi.fn().mockImplementation(async () => responses[Math.min(index++, responses.length - 1)]),
+      isAvailable: () => true,
+    };
+    try {
+      const { executor } = await buildExecutor(provider);
+      const parentSession = await ctx.sessionManager.createSession({ label: 'parent' });
+      const result = await executor.spawnAndWait(parentSession.id, {
+        task: 'Read the source file', label: 'verified-tool-natural-end', skills: ['read_file'],
+      });
+      expect(result.taskComplete).toBe(true);
+      expect(result.completionSource).toBe('verified_tool_evidence');
+      expect(result.evidenceReceipts).toEqual(expect.arrayContaining([
+        expect.objectContaining({ toolName: 'read_file', success: true, outputBytes: expect.any(Number) }),
+      ]));
+    } finally {
+      fs.rmSync(sourcePath, { force: true });
+    }
+  }, 30_000);
+
+  it('does not let an explicit done marker override a failed final tool call', async () => {
+    const responses: CompletionResponse[] = [
+      {
+        content: [{ type: 'tool_use', id: 'missing-source', name: 'read_file', input: { path: '/tmp/definitely-missing-scallop-file' } }],
+        stopReason: 'tool_use', usage: { inputTokens: 20, outputTokens: 10 }, model: 'mock-model',
+      },
+      {
+        content: [{ type: 'text', text: 'The work is complete. [DONE]' }],
+        stopReason: 'end_turn', usage: { inputTokens: 20, outputTokens: 10 }, model: 'mock-model',
+      },
+    ];
+    let index = 0;
+    const provider: LLMProvider = {
+      name: 'openai',
+      complete: vi.fn().mockImplementation(async () => responses[Math.min(index++, responses.length - 1)]),
+      isAvailable: () => true,
+    };
+    const { executor } = await buildExecutor(provider);
+    const parentSession = await ctx.sessionManager.createSession({ label: 'parent' });
+    const result = await executor.spawnAndWait(parentSession.id, {
+      task: 'Read the missing source file', label: 'failed-tool-explicit-done', skills: ['read_file'],
+    });
+    expect(result.taskComplete).toBe(false);
+    expect(result.completionSource).toBeUndefined();
+    expect(result.evidenceReceipts?.at(-1)).toMatchObject({ success: false });
   }, 30_000);
 
   it('returns the actual tracked dollar cost for the isolated child session', async () => {

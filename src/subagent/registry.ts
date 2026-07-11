@@ -16,6 +16,13 @@ import type {
 } from './types.js';
 import { DEFAULT_SUBAGENT_CONFIG } from './types.js';
 import type { SubAgentRunRow } from '../memory/db.js';
+import { redactSensitiveText } from '../security/redaction.js';
+
+function safeDiagnosticText(value: string | undefined, maxChars: number): string | null {
+  if (!value) return null;
+  const redacted = redactSensitiveText(value);
+  return redacted.length > maxChars ? `${redacted.slice(0, maxChars)}…[truncated]` : redacted;
+}
 
 export interface SubAgentPersistence {
   insertSubAgentRun(run: SubAgentRunRow): void;
@@ -63,6 +70,7 @@ export class SubAgentRegistry {
       modelTier: input.modelTier || this.config.defaultModelTier,
       timeoutMs: timeoutSeconds * 1000,
       recentChatContext: input.recentChatContext,
+      evidenceExecutionContext: input.evidenceExecutionContext,
       tokenUsage: { inputTokens: 0, outputTokens: 0 },
       createdAt: Date.now(),
     };
@@ -123,10 +131,10 @@ export class SubAgentRegistry {
 
     this.persistence?.updateSubAgentRun(runId, {
       status: run.status,
-      resultResponse: run.result?.response,
+      resultResponse: safeDiagnosticText(run.result?.response, 2_000),
       resultIterations: run.result?.iterationsUsed,
       resultTaskComplete: run.result?.taskComplete,
-      error: run.error,
+      error: safeDiagnosticText(run.error, 500),
       startedAt: run.startedAt,
       completedAt: run.completedAt,
     });
@@ -311,16 +319,16 @@ export class SubAgentRegistry {
       id: run.id,
       parentSessionId: run.parentSessionId,
       childSessionId: run.childSessionId,
-      task: run.task,
-      label: run.label,
+      task: safeDiagnosticText(run.task, 1_000) ?? '[empty task]',
+      label: safeDiagnosticText(run.label, 120) ?? 'sub-agent',
       status: run.status,
       allowedSkills: run.allowedSkills.join(','),
       modelTier: run.modelTier,
       timeoutMs: run.timeoutMs,
-      resultResponse: run.result?.response ?? null,
+      resultResponse: safeDiagnosticText(run.result?.response, 2_000),
       resultIterations: run.result?.iterationsUsed ?? null,
       resultTaskComplete: run.result?.taskComplete ?? null,
-      error: run.error ?? null,
+      error: safeDiagnosticText(run.error, 500),
       inputTokens: run.tokenUsage.inputTokens,
       outputTokens: run.tokenUsage.outputTokens,
       createdAt: run.createdAt,

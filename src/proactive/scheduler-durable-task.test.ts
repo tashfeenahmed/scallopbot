@@ -27,12 +27,17 @@ function addDueTask(db: ScallopDatabase, overrides: { userId?: string; sessionId
     source: 'user',
     kind: 'task',
     type: 'event_prep',
-    message: overrides.message ?? 'Prepare the durable report',
+    message: overrides.message ?? 'Perform the durable workflow',
     context: null,
     triggerAt: overrides.triggerAt ?? Date.now() - 1_000,
     recurring: null,
     sourceMemoryId: null,
-    taskConfig: { goal: 'Prepare the durable report from real data', tools: [] },
+    taskConfig: {
+      goal: 'Perform the durable workflow',
+      tools: [],
+      // These tests exercise leasing/delivery, not factual provenance.
+      evidencePolicy: 'none',
+    },
     maxAttempts: 3,
   });
 }
@@ -236,21 +241,21 @@ describe('UnifiedScheduler durable task execution', () => {
   });
 
   it('runs tasks before nudges so companion messages remain deduplicated', async () => {
-    const item = addDueTask(db, { message: 'Prepare flight EK204 status' });
+    const item = addDueTask(db, { message: 'Prepare the release note' });
     db.addScheduledItem({
       userId: 'default',
       sessionId: null,
       source: 'agent',
       kind: 'nudge',
       type: 'follow_up',
-      message: 'Prepare flight EK204 status',
+      message: 'Prepare the release note',
       context: null,
       triggerAt: Date.now() - 1_000,
       recurring: null,
       sourceMemoryId: null,
     });
     const spawnAndWait = vi.fn().mockResolvedValue({
-      response: 'Flight EK204 is on time.',
+      response: 'The release note is ready.',
       iterationsUsed: 1,
       taskComplete: true,
       costUsd: 0.001,
@@ -262,19 +267,19 @@ describe('UnifiedScheduler durable task execution', () => {
 
     expect(db.getScheduledItem(item.id)?.status).toBe('fired');
     expect(send).toHaveBeenCalledTimes(1);
-    expect(send).toHaveBeenCalledWith('default', expect.stringContaining('EK204'));
+    expect(send).toHaveBeenCalledWith('default', expect.stringContaining('release note'));
   });
 
   it('completes a task whose already-delivered result is intentionally deduplicated', async () => {
     const item = db.addScheduledItem({
       userId: 'default', sessionId: null, source: 'agent', kind: 'task', type: 'event_prep',
-      message: 'Refresh flight EK204 status', context: null, triggerAt: Date.now() - 1,
+      message: 'Refresh the release note', context: null, triggerAt: Date.now() - 1,
       recurring: null, sourceMemoryId: null,
-      taskConfig: { goal: 'Refresh flight EK204 status from real data', tools: [] },
+      taskConfig: { goal: 'Refresh the release note', tools: [], evidencePolicy: 'none' },
       maxAttempts: 3,
     });
     const spawnAndWait = vi.fn().mockResolvedValue({
-      response: 'Flight EK204 remains on time.',
+      response: 'The release note remains ready.',
       iterationsUsed: 1,
       taskComplete: true,
       costUsd: 0.001,
@@ -282,7 +287,7 @@ describe('UnifiedScheduler durable task execution', () => {
     const send = vi.fn().mockResolvedValue(true);
     const scheduler = makeScheduler('dedup-worker', spawnAndWait, send);
     (scheduler as any).recentSends.set('default', [{
-      message: 'Flight EK204 remains on time.', time: Date.now(), source: 'task_result',
+      message: 'The release note remains ready.', time: Date.now(), source: 'task_result',
     }]);
 
     await scheduler.evaluate();
@@ -310,6 +315,29 @@ describe('UnifiedScheduler durable task execution', () => {
       'telegram-parent-session',
       expect.any(Object),
     );
+  });
+
+  it('never reuses an archived source session as a scheduled worker parent', async () => {
+    db.createSession('archived-telegram-parent', { userId: 'default', channelId: 'telegram' });
+    db.archiveSession('archived-telegram-parent', 'new_conversation', 'user_command');
+    addDueTask(db, { sessionId: 'archived-telegram-parent' });
+    const spawnAndWait = vi.fn().mockResolvedValue({
+      response: 'Ran from an active scheduler-owned parent.',
+      iterationsUsed: 1,
+      taskComplete: true,
+      costUsd: 0.001,
+    });
+    const scheduler = makeScheduler('active-parent-worker', spawnAndWait);
+
+    await scheduler.evaluate();
+
+    const parentSessionId = spawnAndWait.mock.calls[0][0] as string;
+    expect(parentSessionId).not.toBe('archived-telegram-parent');
+    expect(db.getActiveSession(parentSessionId)?.metadata).toMatchObject({
+      source: 'scheduler',
+      userId: 'default',
+    });
+    expect(db.getSession('archived-telegram-parent')?.archivedAt).not.toBeNull();
   });
 
   it('creates a sessionless scheduled sub-agent parent for the task owner', async () => {

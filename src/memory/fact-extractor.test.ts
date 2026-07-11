@@ -6,6 +6,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
   LLMFactExtractor,
   extractFactsWithLLM,
+  explicitCorrectionTargetsSameSlot,
+  factsClearlyContradict,
   type ExtractedFactWithEmbedding,
   type FactExtractionResult,
 } from './fact-extractor.js';
@@ -13,6 +15,33 @@ import type { ScallopMemoryStore } from './scallop-store.js';
 import type { LLMProvider } from '../providers/types.js';
 import type { EmbeddingProvider } from './embeddings.js';
 import type { Logger } from 'pino';
+
+describe('safe fact supersession', () => {
+  it('requires a known same slot with a changed value', () => {
+    expect(factsClearlyContradict('Office is One Acme Plaza', 'Office is in Springfield')).toBe(true);
+    expect(factsClearlyContradict('Wife is Jamie', 'Wife is Sarah')).toBe(true);
+    expect(factsClearlyContradict('Flatmate is Bob', 'Wife is Sarah')).toBe(false);
+    expect(factsClearlyContradict('Likes hiking', 'Works at Acme')).toBe(false);
+  });
+
+  it('does not supersede a separate fact merely because it contains the old value', () => {
+    expect(explicitCorrectionTargetsSameSlot(
+      'Wife is Jamie',
+      'Flatmate is Sarah',
+      'Sarah',
+    )).toBe(false);
+    expect(explicitCorrectionTargetsSameSlot(
+      'Wife is Jamie',
+      'Wife is Sarah',
+      'Sarah',
+    )).toBe(true);
+    expect(explicitCorrectionTargetsSameSlot(
+      'Lives in Dublin',
+      'Works at Springfield Analytics',
+      'Springfield',
+    )).toBe(false);
+  });
+});
 
 // Mock embedder that returns simple word-based vectors for testing
 // Designed so facts about the same topic (e.g., "office") have high similarity
@@ -77,6 +106,9 @@ const createMockDatabase = () => ({
   reinforceMemory: vi.fn(),
   addContradiction: vi.fn(),
   addRelation: vi.fn(),
+  getStructuredRouteCircuit: vi.fn().mockReturnValue(null),
+  recordStructuredRouteFailure: vi.fn(),
+  clearStructuredRouteCircuit: vi.fn(),
 });
 
 // Mock ScallopMemoryStore
@@ -138,6 +170,43 @@ describe('LLMFactExtractor', () => {
       expect(result.facts.length).toBe(2);
       expect(result.facts[0].content).toContain('Acme Corp');
       expect(result.facts[0].subject).toBe('user');
+      expect(mockProvider.complete).toHaveBeenCalledWith(expect.objectContaining({
+        enableThinking: false,
+        purpose: 'fact_extract',
+        signal: expect.any(AbortSignal),
+        structuredOutput: expect.objectContaining({
+          name: 'fact_and_trigger_extraction',
+          strict: true,
+        }),
+      }));
+    });
+
+    it('persists invalid JSON backoff and avoids repeatedly calling the provider', async () => {
+      const now = 1_705_320_000_000;
+      let circuit: { nextRetryAt: number } | null = null;
+      const db = createMockDatabase();
+      db.getStructuredRouteCircuit.mockImplementation(() => circuit);
+      db.recordStructuredRouteFailure.mockImplementation((_route, _code, failedAt = now) => {
+        circuit = { nextRetryAt: failedAt + 60_000 };
+      });
+      const provider = createMockProvider('not json');
+      const extractor = new LLMFactExtractor({
+        provider,
+        scallopStore: createMockScallopStore(db),
+        logger,
+        useRelationshipClassifier: false,
+        now: () => now,
+      });
+
+      const malformed = await extractor.extractFacts('I live in Springfield', 'user-123');
+      const backedOff = await extractor.extractFacts('I work at Acme', 'user-123');
+
+      expect(malformed.error).toBe('fact_extraction_invalid_json');
+      expect(db.recordStructuredRouteFailure).toHaveBeenCalledWith(
+        'fact_extract:mock', 'invalid_json', now,
+      );
+      expect(backedOff.error).toBe('fact_extraction_provider_backoff');
+      expect(provider.complete).toHaveBeenCalledTimes(1);
     });
 
     it('should extract facts about third parties', async () => {
@@ -588,6 +657,11 @@ describe('extractFactsWithLLM helper', () => {
     );
 
     expect(result.facts.length).toBe(1);
+    expect(mockProvider.complete).toHaveBeenCalledWith(expect.objectContaining({
+      enableThinking: false,
+      signal: expect.any(AbortSignal),
+      structuredOutput: expect.objectContaining({ name: 'fact_extraction', strict: true }),
+    }));
   });
 });
 

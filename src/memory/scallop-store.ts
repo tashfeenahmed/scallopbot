@@ -97,6 +97,8 @@ export interface ScallopSearchOptions {
   documentDateRange?: { start: number; end: number };
   /** Pre-computed query embedding — skips embedder.embed(query) when provided */
   queryEmbedding?: number[];
+  /** Include assistant-derived/reflection memories. Default false. */
+  includeAllSources?: boolean;
 }
 
 /**
@@ -421,7 +423,7 @@ export class ScallopMemoryStore {
         category,
         minProminence,
         isLatest,
-        includeAllSources: true,
+        includeAllSources: options.includeAllSources ?? false,
       });
     } else {
       this.logger.warn('Search called without userId - searching ALL users. This may leak memories across users in multi-user deployments.');
@@ -605,7 +607,10 @@ export class ScallopMemoryStore {
           originalScore: r.score,
         }));
 
-        const reranked = await rerankResults(query, rerankCandidates, this.rerankProvider, { maxCandidates: 20 });
+        const reranked = await rerankResults(query, rerankCandidates, this.rerankProvider, {
+          maxCandidates: 20,
+          circuitStore: this.db,
+        });
 
         // Map re-ranked scores back to search results. MMR needs the over-fetched
         // pool, so final limiting happens only after diversity selection.
@@ -637,7 +642,7 @@ export class ScallopMemoryStore {
       result.relatedMemories = this.relationGraph.getRelatedMemoriesWithActivation(
         result.memory.id,
         this.activationConfig,
-      );
+      ).filter(memory => options.includeAllSources === true || memory.source === 'user');
     }
 
     // Record access for top results

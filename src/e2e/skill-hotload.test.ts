@@ -201,11 +201,11 @@ describe('E2E Skill Hot-Loading', () => {
       const skillStarts = messages.filter(m => m.type === 'skill_start' && m.skill === 'manage_skills');
       expect(skillStarts.length).toBeGreaterThanOrEqual(2); // search + install
 
-      // Verify skill_complete for the install action
+      // Verify both actions reached a terminal tool event. Verbose transport
+      // deliberately does not expose raw tool output.
       const skillCompletes = messages.filter(m => m.type === 'skill_complete' && m.skill === 'manage_skills');
       expect(skillCompletes.length).toBeGreaterThanOrEqual(2);
-      const installComplete = skillCompletes.find(m => m.output?.includes('Installed'));
-      expect(installComplete).toBeDefined();
+      expect(skillCompletes.every(m => m.output === 'Completed')).toBe(true);
 
       // Verify final response
       const response = messages.find(m => m.type === 'response');

@@ -56,4 +56,38 @@ describe('proactive_decisions persistence', () => {
     expect(removed).toBe(1);
     expect(db.getRecentProactiveDecisions(10).length).toBe(1);
   });
+
+  it('does not let cache-hit diagnostics slide a signal cache window', () => {
+    db.recordProactiveDecision({
+      userId: 'default',
+      at: 100,
+      stage: 'evaluate',
+      outcome: 'skipped',
+      reason: 'llm_skipped_all',
+      detail: { signalFingerprint: 'same-signal' },
+    });
+    for (let at = 200; at <= 2_000; at += 100) {
+      db.recordProactiveDecision({
+        userId: 'default',
+        at,
+        stage: 'evaluate',
+        outcome: 'skipped',
+        reason: 'unchanged_signals',
+        detail: { signalFingerprint: 'same-signal' },
+      });
+    }
+    db.recordProactiveDecision({
+      userId: 'other',
+      at: 3_000,
+      stage: 'evaluate',
+      outcome: 'created',
+      detail: { signalFingerprint: 'other-signal' },
+    });
+
+    expect(db.getLatestProactiveEvaluationAnchor('default')).toMatchObject({
+      at: 100,
+      reason: 'llm_skipped_all',
+      detail: { signalFingerprint: 'same-signal' },
+    });
+  });
 });

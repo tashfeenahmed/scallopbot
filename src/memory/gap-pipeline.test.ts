@@ -231,6 +231,14 @@ describe('isDuplicate', () => {
     )).toBe(true);
   });
 
+  it('deduplicates a low-word-overlap rephrase about the same topic', () => {
+    expect(isDuplicate(
+      'Did the Atlas rollout happen?',
+      'new-summary-id',
+      [{ message: 'Any update on Project Atlas?', context: null }],
+    )).toBe(true);
+  });
+
   it('returns false when no match', () => {
     expect(isDuplicate(
       'New unique message about something',

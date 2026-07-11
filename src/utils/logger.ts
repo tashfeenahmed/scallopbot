@@ -1,5 +1,17 @@
 import pino from 'pino';
 import type { LoggingConfig } from '../config/config.js';
+import { sanitizeLogValue } from '../security/log-safety.js';
+
+const safeHooks: pino.LoggerOptions['hooks'] = {
+  logMethod(args, method) {
+    const sanitized = args.map(arg => (
+      typeof arg === 'string' || (arg && typeof arg === 'object')
+        ? sanitizeLogValue(arg)
+        : arg
+    ));
+    method.apply(this, sanitized as Parameters<typeof method>);
+  },
+};
 
 export function createLogger(config: LoggingConfig): pino.Logger {
   // Use pino-pretty only in development (when available)
@@ -11,6 +23,7 @@ export function createLogger(config: LoggingConfig): pino.Logger {
       require.resolve('pino-pretty');
       return pino({
         level: config.level,
+        hooks: safeHooks,
         transport: {
           target: 'pino-pretty',
           options: {
@@ -28,5 +41,6 @@ export function createLogger(config: LoggingConfig): pino.Logger {
   // Production: use JSON logging (no pino-pretty needed)
   return pino({
     level: config.level,
+    hooks: safeHooks,
   });
 }

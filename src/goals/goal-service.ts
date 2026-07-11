@@ -183,7 +183,8 @@ export class GoalService {
       userId,
       content: options.title,
       category: 'insight',
-      memoryType: 'regular',
+      // Goal hierarchy is durable application state, not a decaying recollection.
+      memoryType: 'static_profile',
       importance: 8, // Goals are high importance
       confidence: 1.0,
       isLatest: true,
@@ -238,7 +239,7 @@ export class GoalService {
       userId: goal.userId,
       content: options.title,
       category: 'insight',
-      memoryType: 'regular',
+      memoryType: 'static_profile',
       importance: 7,
       confidence: 1.0,
       isLatest: true,
@@ -297,7 +298,7 @@ export class GoalService {
       userId: milestone.userId,
       content: options.title,
       category: 'insight',
-      memoryType: 'regular',
+      memoryType: 'static_profile',
       importance: 6,
       confidence: 1.0,
       isLatest: true,
@@ -359,9 +360,21 @@ export class GoalService {
    * Get a goal item by ID
    */
   async getGoal(id: string): Promise<GoalItem | null> {
-    const memory = this.db.getMemory(id);
+    const registry = this.db.getGoalRegistryEntry(id);
+    if (registry?.deletedAt !== null && registry?.deletedAt !== undefined) {
+      return null;
+    }
+    let memory = this.db.getMemory(id);
+    if ((!memory || !isGoalItem(memory)) && registry) {
+      memory = this.db.restoreGoalMemoryFromRegistry(id);
+    }
     if (!memory || !isGoalItem(memory)) {
       return null;
+    }
+    if (memory.metadata?.status !== 'completed'
+      && (!memory.isLatest || memory.memoryType !== 'static_profile' || memory.prominence !== 1)) {
+      this.db.updateMemory(id, { isLatest: true, memoryType: 'static_profile', prominence: 1 });
+      memory = this.db.getMemory(id)!;
     }
     return this.memoryToGoalItem(memory);
   }
@@ -440,7 +453,17 @@ export class GoalService {
       await this.delete(child.id);
     }
 
-    // Delete the goal itself
+    // Preserve board history while removing references that would otherwise
+    // become dangling IDs after this explicit deletion.
+    this.db.unlinkScheduledItemsFromGoal(id);
+
+    // Keep an immutable identity/status tombstone before removing the
+    // searchable projection. This distinguishes an explicit delete from
+    // accidental memory cleanup, which GoalService self-heals from registry.
+    this.db.markGoalRegistryDeleted(id);
+
+    // Delete the goal's searchable memory projection; registry identity and
+    // lifecycle audit remain durable.
     const result = this.db.deleteMemory(id);
 
     // Update parent progress if exists
@@ -900,12 +923,23 @@ export class GoalService {
    * List goals by filter
    */
   async listGoals(userId: string, filter: GoalFilter = {}): Promise<GoalItem[]> {
-    // Get all insight memories for user
-    const memories = this.db.getMemoriesByUser(userId, {
-      category: 'insight',
-      isLatest: true,
-      limit: filter.limit ?? 100,
-    });
+    // Goals are durable state and therefore bypass ordinary memory decay and
+    // `is_latest` filtering. The database migration repairs legacy rows too.
+    let memories = this.db.getGoalMemoriesByUser(userId);
+    let repaired = false;
+    for (const memory of memories) {
+      const metadata = memory.metadata as unknown as GoalMetadata;
+      if (metadata.status !== 'completed'
+        && (!memory.isLatest || memory.memoryType !== 'static_profile' || memory.prominence !== 1)) {
+        this.db.updateMemory(memory.id, {
+          isLatest: true,
+          memoryType: 'static_profile',
+          prominence: 1,
+        });
+        repaired = true;
+      }
+    }
+    if (repaired) memories = this.db.getGoalMemoriesByUser(userId);
 
     // Filter to goal items
     let goals = memories.filter(isGoalItem).map((m) => this.memoryToGoalItem(m));
@@ -948,7 +982,7 @@ export class GoalService {
       );
     }
 
-    return goals;
+    return goals.slice(0, filter.limit ?? 100);
   }
 
   /**

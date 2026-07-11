@@ -24,6 +24,10 @@ export interface GardenerContext {
   getTimezone?: (userId: string) => string;
   /** Explicit channel identities belonging to this deployment's one canonical owner. */
   canonicalSingleUserIds?: readonly string[];
+  /** Seconds before bulky sub-agent protocol is compacted. */
+  subAgentCleanupAfterSeconds?: number;
+  /** Seconds to retain the compact redacted sub-agent run ledger. */
+  subAgentDiagnosticRetentionSeconds?: number;
 }
 
 /** True only when deployment configuration explicitly names a non-default owner alias. */

@@ -26,6 +26,7 @@ import {
 import { getTodayStartMs } from '../proactive/proactive-utils.js';
 import { DEFAULT_QUIET_HOURS, DIAL_BUDGETS, PROACTIVE_COOLDOWN_MS } from '../proactive/proactive-config.js';
 import { getRecentChatContext } from '../proactive/chat-context.js';
+import { classifySessionMessage } from './session-message-view.js';
 
 // ============ Step functions ============
 
@@ -139,7 +140,22 @@ export async function runSessionSummarization(ctx: GardenerContext): Promise<{ s
     const oldSessions = ctx.db.raw<{ id: string; metadata: string | null }>(
       `SELECT s.id, s.metadata FROM sessions s
        WHERE s.updated_at < ?
-         AND NOT EXISTS (SELECT 1 FROM session_summaries ss WHERE ss.session_id = s.id)
+         AND s.transcript_deleted_at IS NULL
+         AND NOT EXISTS (
+           SELECT 1 FROM session_summaries ss
+           WHERE ss.session_id = s.id
+             AND ss.schema_valid = 1
+             AND ss.verified_at IS NOT NULL
+             AND ss.verifier IS NOT NULL
+             AND ss.verification_version >= 1
+             AND EXISTS (
+               SELECT 1 FROM session_summary_verification_events receipt
+               WHERE receipt.summary_id = ss.id
+                 AND receipt.outcome = 'verified'
+                 AND receipt.verifier = ss.verifier
+                 AND receipt.verification_version = ss.verification_version
+             )
+         )
        ORDER BY s.updated_at DESC
        LIMIT 20`,
       [cutoff]
@@ -188,7 +204,7 @@ export async function runEnhancedForgetting(ctx: GardenerContext): Promise<void>
   let auditNeverRetrieved = 0;
   let auditStaleRetrieved = 0;
   let auditCandidateCount = 0;
-  let sessionsDeleted = 0;
+  let transcriptsPruned = 0;
   let memoriesDeleted = 0;
   let orphansDeleted = 0;
 
@@ -222,7 +238,10 @@ export async function runEnhancedForgetting(ctx: GardenerContext): Promise<void>
   // 3c. Hard prune truly dead memories
   if (!ctx.disableArchival) {
     try {
-      sessionsDeleted = ctx.db.pruneOldSessions(30);
+      // Historical DB method name retained for compatibility. It now prunes
+      // only raw transcripts from already-archived sessions with a verified
+      // summary; active and unsummarized conversations are never touched.
+      transcriptsPruned = ctx.db.pruneOldSessions(30);
       memoriesDeleted = ctx.db.pruneArchivedMemories(0.01);
     } catch (err) {
       ctx.logger.warn({ error: (err as Error).message }, 'Hard pruning failed');
@@ -242,7 +261,7 @@ export async function runEnhancedForgetting(ctx: GardenerContext): Promise<void>
       auditStaleRetrieved,
       auditCandidateCount,
       memoriesDeleted,
-      sessionsDeleted,
+      transcriptsPruned,
       orphansDeleted,
     },
     'Enhanced forgetting complete'
@@ -269,41 +288,42 @@ export function runBehavioralInference(ctx: GardenerContext): { messageCount: nu
 
     for (const [userId, sessionsForUser] of sessionsByUser) {
       const allMessages: Array<{ content: string; timestamp: number }> = [];
+      const behavioralSessions: Array<{ messageCount: number; durationMs: number; startTime: number }> = [];
       for (const session of sessionsForUser) {
         const messages = ctx.db.getSessionMessages(session.id);
+        const visibleMessages = messages
+          .map(message => ({ message, view: classifySessionMessage(message, { sessionMetadata: session.metadata }) }))
+          .filter(({ view }) => view.isHumanVisible);
         for (const msg of messages) {
-          if (msg.role === 'user') {
-            allMessages.push({ content: msg.content, timestamp: msg.createdAt });
+          const view = classifySessionMessage(msg, { sessionMetadata: session.metadata });
+          if (view.isHumanTurn && view.visibleText) {
+            allMessages.push({ content: view.visibleText, timestamp: msg.createdAt });
           }
+        }
+        if (visibleMessages.length > 0) {
+          behavioralSessions.push({
+            messageCount: visibleMessages.length,
+            durationMs: visibleMessages[visibleMessages.length - 1].message.createdAt
+              - visibleMessages[0].message.createdAt,
+            startTime: visibleMessages[0].message.createdAt,
+          });
         }
       }
       if (allMessages.length === 0) continue;
 
-      const sessionSummaries = ctx.db.getSessionSummariesByUser(userId, 20)
-        .filter(summary => sessionBelongsToStateUser(
-          ctx.db,
-          summary.sessionId,
-          userId,
-          ctx.canonicalSingleUserIds,
-        ));
-      const sessions = sessionSummaries
-        .filter(s => s.messageCount > 0)
-        .map(s => ({
-          messageCount: s.messageCount,
-          durationMs: s.durationMs,
-          startTime: s.createdAt,
-        }));
-
       const userMemories = ctx.db.getMemoriesByUser(userId, { isLatest: true, limit: 100 });
       const messageEmbeddings = userMemories
-        .filter(m => m.embedding != null)
+        .filter(m => m.embedding != null
+          && m.source !== 'assistant'
+          && m.memoryType !== 'derived'
+          && m.learnedFrom !== 'self_reflection')
         .map(m => ({
           content: m.content,
           embedding: m.embedding!,
         }));
 
       profileManager.inferBehavioralPatterns(userId, allMessages, {
-        sessions: sessions.length > 0 ? sessions : undefined,
+        sessions: behavioralSessions.length > 0 ? behavioralSessions : undefined,
         messageEmbeddings: messageEmbeddings.length > 0 ? messageEmbeddings : undefined,
       });
       ctx.logger.debug({ userId, messageCount: allMessages.length }, 'Behavioral patterns updated');
@@ -494,6 +514,12 @@ export async function runInnerThoughts(ctx: GardenerContext): Promise<void> {
     // opt-out is enforced again inside shouldEvaluate() before any LLM call.
     const dial = resolveProactiveDial(storedDial, preferenceProfile);
 
+    // Always anchor the cache to the evaluation that actually called the LLM
+    // (or created work), never to a later cache-hit diagnostic. Otherwise each
+    // `unchanged_signals` row refreshes the timestamp and the cache never
+    // expires for a long-lived signal.
+    const priorEvaluationDecision = ctx.db.getLatestProactiveEvaluationAnchor(userId);
+
     const result = await evaluateProactive({
       sessionSummary,
       behavioralPatterns,
@@ -506,6 +532,7 @@ export async function runInnerThoughts(ctx: GardenerContext): Promise<void> {
       lastProactiveAt,
       activeHours,
       userId,
+      circuitStore: ctx.db,
       todayItemCount,
       userPreferences,
       recentChatContext: getRecentChatContext(ctx.db, userId, {
@@ -514,6 +541,16 @@ export async function runInnerThoughts(ctx: GardenerContext): Promise<void> {
         stalenessMs: SESSION_CONTEXT_WINDOW_MS,
         identityCandidates: stateIdentityCandidates(userId, ctx.canonicalSingleUserIds),
       })?.formattedContext,
+      ...(priorEvaluationDecision
+        ? {
+            priorEvaluation: {
+              signalFingerprint: priorEvaluationDecision.detail!.signalFingerprint as string,
+              at: priorEvaluationDecision.at,
+              reason: priorEvaluationDecision.reason,
+              outcome: priorEvaluationDecision.outcome,
+            },
+          }
+        : {}),
     }, ctx.fusionProvider);
 
     // Schedule each output item
@@ -606,6 +643,7 @@ export async function runInnerThoughts(ctx: GardenerContext): Promise<void> {
         todayItemCount,
         budgetCap: DIAL_BUDGETS[dial],
         lastProactiveAt,
+        signalFingerprint: result.signalFingerprint,
         ...(result.skipReason === 'cooldown' && lastProactiveAt
           ? { cooldownRemainingMs: Math.max(0, PROACTIVE_COOLDOWN_MS - (evalNow - lastProactiveAt)) }
           : {}),
@@ -619,21 +657,29 @@ export async function runInnerThoughts(ctx: GardenerContext): Promise<void> {
 /**
  * B8: Clean up old sub-agent runs and their sessions
  */
-export function runSubAgentCleanup(ctx: GardenerContext, cleanupAfterSeconds: number = 3600): void {
+export function runSubAgentCleanup(ctx: GardenerContext, cleanupAfterSeconds?: number): void {
   try {
-    const maxAgeMs = cleanupAfterSeconds * 1000;
+    const maxAgeMs = (cleanupAfterSeconds ?? ctx.subAgentCleanupAfterSeconds ?? 3600) * 1000;
+    const ledgerMaxAgeMs = Math.max(
+      maxAgeMs,
+      (ctx.subAgentDiagnosticRetentionSeconds ?? 30 * 24 * 60 * 60) * 1000,
+    );
 
     // Get child session IDs of old sub-agent runs before deleting
     const childSessionIds = ctx.db.getSubAgentChildSessionIds(maxAgeMs);
 
-    // Delete old completed/failed sub-agent run records
-    const runsDeleted = ctx.db.deleteOldSubAgentRuns(maxAgeMs);
+    // Erase bulky/private payloads at the short protocol cutoff while keeping
+    // a compact redacted ledger for diagnostics.
+    const runsCompacted = ctx.db.compactOldSubAgentRuns(maxAgeMs);
+
+    // Delete only the compact ledger after the longer retention window.
+    const runsDeleted = ctx.db.deleteOldSubAgentRuns(ledgerMaxAgeMs);
 
     // Delete their sessions and messages
     let sessionsDeleted = 0;
     for (const sessionId of childSessionIds) {
       try {
-        ctx.db.deleteSession(sessionId);
+        ctx.db.deleteSession(sessionId, 'subagent_cleanup', 'gardener');
         sessionsDeleted++;
       } catch {
         // Session may already be deleted
@@ -648,9 +694,9 @@ export function runSubAgentCleanup(ctx: GardenerContext, cleanupAfterSeconds: nu
       // Non-critical — log and continue
     }
 
-    if (runsDeleted > 0 || sessionsDeleted > 0 || staleSessionsCleaned > 0) {
+    if (runsCompacted > 0 || runsDeleted > 0 || sessionsDeleted > 0 || staleSessionsCleaned > 0) {
       ctx.logger.info(
-        { runsDeleted, sessionsDeleted, staleSessionsCleaned },
+        { runsCompacted, runsDeleted, sessionsDeleted, staleSessionsCleaned },
         'Sub-agent cleanup complete'
       );
     }

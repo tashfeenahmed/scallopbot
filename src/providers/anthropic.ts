@@ -75,6 +75,15 @@ export class AnthropicProvider implements LLMProvider {
       ...(request.temperature !== undefined && { temperature: request.temperature }),
       ...(request.stopSequences && { stop_sequences: request.stopSequences }),
       ...(request.tools && { tools: this.formatTools(request.tools) }),
+      ...(request.enableThinking === false && { thinking: { type: 'disabled' as const } }),
+      ...(request.structuredOutput && {
+        output_config: {
+          format: {
+            type: 'json_schema' as const,
+            schema: request.structuredOutput.schema,
+          },
+        },
+      }),
     };
 
     const response = await this.executeWithRetry(() =>
@@ -96,6 +105,15 @@ export class AnthropicProvider implements LLMProvider {
       ...(request.temperature !== undefined && { temperature: request.temperature }),
       ...(request.stopSequences && { stop_sequences: request.stopSequences }),
       ...(request.tools && { tools: this.formatTools(request.tools) }),
+      ...(request.enableThinking === false && { thinking: { type: 'disabled' as const } }),
+      ...(request.structuredOutput && {
+        output_config: {
+          format: {
+            type: 'json_schema' as const,
+            schema: request.structuredOutput.schema,
+          },
+        },
+      }),
     };
 
     const stream = request.signal

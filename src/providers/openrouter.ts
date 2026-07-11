@@ -163,6 +163,14 @@ export class OpenRouterProvider implements LLMProvider {
       messages,
       max_tokens: isReasoning ? (request.maxTokens || 8192) : (request.maxTokens || 4096),
       usage: { include: true },
+      // OpenRouter otherwise infers reasoning from the model. An explicit
+      // false is a hard route contract for schema-only background work.
+      ...(request.enableThinking !== undefined && {
+        reasoning: {
+          effort: request.enableThinking ? 'high' : 'none',
+          ...(request.enableThinking === false && { exclude: true }),
+        },
+      }),
     };
 
     if (request.temperature !== undefined) {
@@ -182,6 +190,17 @@ export class OpenRouterProvider implements LLMProvider {
           parameters: tool.input_schema,
         },
       }));
+    }
+
+    if (request.structuredOutput) {
+      body.response_format = {
+        type: 'json_schema',
+        json_schema: {
+          name: request.structuredOutput.name,
+          strict: request.structuredOutput.strict ?? true,
+          schema: request.structuredOutput.schema,
+        },
+      };
     }
 
     const { response, bodyData, bodyError } = await this.executeWithRetry(
@@ -216,7 +235,7 @@ export class OpenRouterProvider implements LLMProvider {
 
   private formatMessages(request: CompletionRequest): OpenRouterMessage[] {
     const messages: OpenRouterMessage[] = [];
-    const isReasoning = this.isReasoningModel();
+    const isReasoning = this.isReasoningModel() && request.enableThinking !== false;
 
     // Add system message if present
     if (request.system) {

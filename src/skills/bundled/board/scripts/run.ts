@@ -15,13 +15,14 @@ import { nanoid } from 'nanoid';
 
 type BoardStatus = 'inbox' | 'backlog' | 'scheduled' | 'in_progress' | 'waiting' | 'done' | 'archived';
 type Priority = 'urgent' | 'high' | 'medium' | 'low';
-type RecurringType = 'daily' | 'weekly' | 'weekdays' | 'weekends';
+type RecurringType = 'daily' | 'weekly' | 'monthly' | 'weekdays' | 'weekends';
 
 interface RecurringSchedule {
   type: RecurringType;
   hour: number;
   minute: number;
   dayOfWeek?: number;
+  dayOfMonth?: number;
 }
 
 interface BoardItemResult {
@@ -32,6 +33,8 @@ interface BoardItemResult {
   costUsd?: number;
   taskComplete?: boolean;
   notifiedAt?: number | null;
+  outcome?: 'succeeded' | 'failed' | 'blocked';
+  completionSource?: 'user' | 'worker';
 }
 
 interface ScheduledItemRow {
@@ -105,7 +108,14 @@ interface BoardArgs {
   recurring?: RecurringSchedule;
   labels?: string[];
   goal_id?: string;
-  task_config?: { goal: string; tools?: string[] };
+  task_config?: {
+    goal: string;
+    tools?: string[];
+    evidencePolicy?: 'none' | 'tool_receipts';
+    requiredEvidenceTools?: string[];
+    stalePolicy?: 'expire' | 'run_once';
+    maxLatenessMs?: number;
+  };
   item_id?: string;
   status?: BoardStatus;
   result?: string;
@@ -184,10 +194,12 @@ function computeBoardStatus(row: ScheduledItemRow): BoardStatus {
   switch (row.status) {
     case 'pending':    return row.trigger_at > 0 ? 'scheduled' : 'inbox';
     case 'processing': return 'in_progress';
+    case 'blocked':    return 'waiting';
     case 'fired':
     case 'acted':      return 'done';
     case 'dismissed':
-    case 'expired':    return 'archived';
+    case 'expired':
+    case 'failed':     return 'archived';
     default:           return 'inbox';
   }
 }
@@ -312,6 +324,20 @@ function getNextOccurrence(schedule: RecurringSchedule): Date {
         for (let i = 0; i < daysUntil; i++) advance();
       }
       break;
+    case 'monthly': {
+      const desired = schedule.dayOfMonth ?? userNow.day;
+      const setMonthday = () => {
+        const last = new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
+        day = Math.min(desired, last);
+      };
+      setMonthday();
+      if (tzToUtc(year, month, day, schedule.hour, schedule.minute) <= userNow.now) {
+        const next = new Date(Date.UTC(year, month + 1, 1));
+        year = next.getUTCFullYear(); month = next.getUTCMonth();
+        setMonthday();
+      }
+      break;
+    }
     case 'weekdays':
       if (todayTarget <= userNow.now || getDow() === 0 || getDow() === 6) advance();
       while (getDow() === 0 || getDow() === 6) advance();
@@ -362,6 +388,15 @@ function parseRecurringString(input: string): RecurringSchedule | null {
     const time = parseTime(weeklyMatch[2]);
     if (dayOfWeek !== null && time) {
       return { type: 'weekly', hour: time.hour, minute: time.minute, dayOfWeek };
+    }
+  }
+
+  const monthlyMatch = lower.match(/^(?:monthly|every\s+month)(?:\s+on\s+(?:the\s+)?(\d{1,2})(?:st|nd|rd|th)?)?\s+(?:at\s+)?(\d{1,2}(?::\d{2})?\s*(?:am|pm)?|\d{1,2}:\d{2})$/i);
+  if (monthlyMatch) {
+    const dayOfMonth = monthlyMatch[1] ? parseInt(monthlyMatch[1], 10) : getUserNowParts().day;
+    const time = parseTime(monthlyMatch[2]);
+    if (dayOfMonth >= 1 && dayOfMonth <= 31 && time) {
+      return { type: 'monthly', hour: time.hour, minute: time.minute, dayOfMonth };
     }
   }
 
@@ -497,6 +532,7 @@ function formatRecurringDescription(recurring: RecurringSchedule): string {
   switch (recurring.type) {
     case 'daily': return `every day at ${timeFormatted}`;
     case 'weekly': return `every ${dayNames[recurring.dayOfWeek!]} at ${timeFormatted}`;
+    case 'monthly': return `monthly on day ${recurring.dayOfMonth} at ${timeFormatted}`;
     case 'weekdays': return `weekdays at ${timeFormatted}`;
     case 'weekends': return `weekends at ${timeFormatted}`;
   }
@@ -507,7 +543,12 @@ function formatRecurringDescription(recurring: RecurringSchedule): string {
 function getGoalTitle(db: Database.Database, goalId: string): string | undefined {
   const row = db.prepare('SELECT content FROM memories WHERE id = ? AND user_id = ?')
     .get(goalId, USER_ID) as { content: string } | undefined;
-  return row?.content;
+  if (row?.content) return row.content;
+  const durable = db.prepare(`
+    SELECT title FROM goal_registry
+    WHERE id = ? AND user_id = ? AND deleted_at IS NULL
+  `).get(goalId, USER_ID) as { title: string } | undefined;
+  return durable?.title;
 }
 
 // ─── Board Actions ───────────────────────────────────────────────────
@@ -712,6 +753,7 @@ function moveItem(args: BoardArgs): SkillResult {
   if (!targetStatus) {
     return { success: false, output: '', error: 'Missing required parameter: status (target column)', exitCode: 1 };
   }
+  if (targetStatus === 'done') return markDone({ ...args, action: 'done' });
 
   const db = openDb();
   const lookup = findOwnedItem(db, args.item_id);
@@ -723,8 +765,7 @@ function moveItem(args: BoardArgs): SkillResult {
 
   // Map to underlying status
   let underlyingStatus = row.status;
-  if (targetStatus === 'done') underlyingStatus = 'fired';
-  else if (targetStatus === 'archived') underlyingStatus = 'dismissed';
+  if (targetStatus === 'archived') underlyingStatus = 'dismissed';
   else if (targetStatus === 'in_progress') underlyingStatus = 'processing';
   else underlyingStatus = 'pending';
 
@@ -837,11 +878,15 @@ function markDone(args: BoardArgs): SkillResult {
   const updates: string[] = ['board_status = ?', 'status = ?', 'fired_at = ?', 'updated_at = ?'];
   const params: unknown[] = ['done', 'fired', now, now];
 
-  if (args.result) {
-    const result: BoardItemResult = { response: args.result, completedAt: now };
-    updates.push('result = ?');
-    params.push(JSON.stringify(result));
-  }
+  const result: BoardItemResult = {
+    response: args.result ?? 'Marked complete by the user.',
+    completedAt: now,
+    taskComplete: true,
+    outcome: 'succeeded',
+    completionSource: 'user',
+  };
+  updates.push('result = ?');
+  params.push(JSON.stringify(result));
 
   params.push(row.id, USER_ID);
   db.prepare(`UPDATE scheduled_items SET ${updates.join(', ')} WHERE id = ? AND user_id = ?`).run(...params);

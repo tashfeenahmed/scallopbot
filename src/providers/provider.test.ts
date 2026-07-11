@@ -167,6 +167,35 @@ describe('AnthropicProvider', () => {
       });
     });
 
+    it('passes native JSON Schema output and disables thinking when requested', async () => {
+      const Anthropic = (await import('@anthropic-ai/sdk')).default;
+      const mockCreate = vi.fn().mockResolvedValue({
+        content: [{ type: 'text', text: '{"ok":true}' }],
+        stop_reason: 'end_turn', usage: { input_tokens: 1, output_tokens: 1 },
+        model: 'claude-sonnet-4-5-20250929',
+      });
+      vi.mocked(Anthropic).mockImplementation(() => ({
+        messages: { create: mockCreate },
+      }) as any);
+      const { AnthropicProvider } = await import('./anthropic.js');
+      const provider = new AnthropicProvider({ apiKey: 'sk-ant-test-key' });
+      const schema = {
+        type: 'object', additionalProperties: false,
+        properties: { ok: { type: 'boolean' } }, required: ['ok'],
+      };
+
+      await provider.complete({
+        messages: [{ role: 'user', content: 'Return JSON' }],
+        enableThinking: false,
+        structuredOutput: { name: 'strict_result', schema },
+      });
+
+      expect(mockCreate).toHaveBeenCalledWith(expect.objectContaining({
+        thinking: { type: 'disabled' },
+        output_config: { format: { type: 'json_schema', schema } },
+      }));
+    });
+
     it('should use default maxTokens if not specified', async () => {
       const Anthropic = (await import('@anthropic-ai/sdk')).default;
       const mockCreate = vi.fn().mockResolvedValue({

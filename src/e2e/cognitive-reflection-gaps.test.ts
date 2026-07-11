@@ -211,6 +211,7 @@ describe('E2E Cognitive Reflection & Gaps', () => {
               index: 1,
               action: 'nudge',
               userFacingMessage: 'How is your progress with learning Rust programming going?',
+              urgency: 'medium',
             },
           ],
         }),

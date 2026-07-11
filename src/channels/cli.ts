@@ -77,7 +77,7 @@ export function getHelpMessage(voiceAvailable: boolean = false): string {
 ScallopBot CLI Commands:
 
   /help     - Show this help message
-  /reset    - Clear conversation history and start fresh
+  /reset    - Preserve this conversation and start a new one
   /exit     - Exit the CLI
   /quit     - Exit the CLI (alias)
   /status   - Show current session status
@@ -189,7 +189,7 @@ export class CLIChannel {
 
       case 'reset':
         await this.resetSession();
-        this.print('Conversation history cleared. Starting fresh!\n');
+        this.print('Started a new conversation. Your previous conversation is preserved.\n');
         return {};
 
       case 'status':
@@ -379,10 +379,11 @@ export class CLIChannel {
    * Reset the current session
    */
   private async resetSession(): Promise<void> {
-    if (this.sessionId) {
-      await this.sessionManager.deleteSession(this.sessionId);
-      this.sessionId = null;
-    }
+    const session = await this.sessionManager.startNewSession({
+      userId: 'cli-user',
+      channelId: 'cli',
+    }, this.sessionId ?? undefined);
+    this.sessionId = session.id;
   }
 
   /**

@@ -1,13 +1,17 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
+  buildProactiveSignalFingerprint,
   buildEvaluatorPrompt,
   classifyProactivePreference,
+  evaluateProactive,
   parseEvaluatorResponse,
   parseProactivePreferences,
   proactiveTopicMatchesText,
+  recentChatResolvesSignal,
   resolveProactiveDial,
   shouldEvaluate,
 } from './proactive-evaluator.js';
+import type { LLMProvider } from '../providers/types.js';
 import type { GapSignal } from './gap-scanner.js';
 
 function makeSignal(overrides?: Partial<GapSignal>): GapSignal {
@@ -238,5 +242,109 @@ describe('parseEvaluatorResponse', () => {
     expect(prompt.system).toContain('Deliberate privately');
     expect(String(prompt.messages[0].content)).toContain('I already finished the prototype review.');
     expect(String(prompt.messages[0].content)).toContain('preparing the prototype review');
+    expect(prompt).toMatchObject({
+      enableThinking: false,
+      purpose: 'proactive_evaluation',
+      structuredOutput: { name: 'proactive_evaluation', strict: true },
+    });
+  });
+});
+
+describe('change-driven proactive evaluation', () => {
+  it('recognizes a newer direct user resolution but not assistant-only claims', () => {
+    const signal = makeSignal({
+      description: 'Prototype review follow-up remains outstanding',
+      context: { sessionId: 'session-1', topics: ['prototype review'] },
+    });
+    expect(recentChatResolvesSignal(signal, 'User: The prototype review is already done.')).toBe(true);
+    expect(recentChatResolvesSignal(signal, 'Assistant: The prototype review is already done.')).toBe(false);
+  });
+
+  it('skips an unchanged prior no-action evaluation without another LLM call', async () => {
+    const now = 1_705_320_000_000;
+    const input = {
+      ...makeEvalInput(),
+      now,
+      boardItems: [{
+        id: 'task-1', title: 'Prototype review', status: 'pending' as const,
+        boardStatus: 'in_progress', updatedAt: now - 72 * 60 * 60 * 1000,
+        priority: 'medium',
+      }],
+    };
+    const provider: LLMProvider = {
+      name: 'test',
+      isAvailable: () => true,
+      complete: vi.fn().mockResolvedValue({
+        content: [{ type: 'text', text: '{"items":[]}' }],
+        stopReason: 'end_turn', usage: { inputTokens: 1, outputTokens: 1 }, model: 'test',
+      }),
+    };
+
+    const first = await evaluateProactive(input, provider);
+    expect(first.llmCalled).toBe(true);
+    expect(first.signalFingerprint).toMatch(/^[a-f0-9]{24}$/);
+    expect(buildProactiveSignalFingerprint(input, [makeSignal()]))
+      .toBe(buildProactiveSignalFingerprint(input, [makeSignal()]));
+
+    const second = await evaluateProactive({
+      ...input,
+      priorEvaluation: {
+        signalFingerprint: first.signalFingerprint!,
+        at: now - 60_000,
+        reason: 'llm_skipped_all',
+      },
+    }, provider);
+
+    expect(second).toMatchObject({ llmCalled: false, skipReason: 'unchanged_signals' });
+    expect(provider.complete).toHaveBeenCalledTimes(1);
+
+    const afterCreated = await evaluateProactive({
+      ...input,
+      priorEvaluation: {
+        signalFingerprint: first.signalFingerprint!,
+        at: now - 24 * 60 * 60 * 1000,
+        outcome: 'created',
+      },
+    }, provider);
+    expect(afterCreated).toMatchObject({ llmCalled: false, skipReason: 'unchanged_after_create' });
+    expect(provider.complete).toHaveBeenCalledTimes(1);
+  });
+
+  it('persists malformed-output backoff and skips the unchanged provider route', async () => {
+    const now = 1_705_320_000_000;
+    let circuit: { nextRetryAt: number } | null = null;
+    const circuitStore = {
+      getStructuredRouteCircuit: vi.fn(() => circuit),
+      recordStructuredRouteFailure: vi.fn((_route: string, _code: string, failedAt = now) => {
+        circuit = { nextRetryAt: failedAt + 60_000 };
+      }),
+      clearStructuredRouteCircuit: vi.fn(() => { circuit = null; }),
+    };
+    const provider: LLMProvider = {
+      name: 'structured-test',
+      isAvailable: () => true,
+      complete: vi.fn().mockResolvedValue({
+        content: [{ type: 'text', text: 'not json' }],
+        stopReason: 'end_turn', usage: { inputTokens: 1, outputTokens: 1 }, model: 'test',
+      }),
+    };
+    const input = {
+      ...makeEvalInput(), now, circuitStore,
+      boardItems: [{
+        id: 'task-1', title: 'Prototype review', status: 'pending' as const,
+        boardStatus: 'in_progress', updatedAt: now - 72 * 60 * 60 * 1000,
+        priority: 'medium',
+      }],
+    };
+
+    const malformed = await evaluateProactive(input, provider);
+    const backedOff = await evaluateProactive({ ...input, now: now + 1 }, provider);
+
+    expect(malformed).toMatchObject({ llmCalled: true, skipReason: 'parse_failed' });
+    expect(circuitStore.recordStructuredRouteFailure).toHaveBeenCalledWith(
+      'proactive_evaluator:structured-test', 'invalid_json', now,
+    );
+    expect(backedOff).toMatchObject({ llmCalled: false, skipReason: 'provider_backoff' });
+    expect(provider.complete).toHaveBeenCalledTimes(1);
   });
 });

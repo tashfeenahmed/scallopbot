@@ -41,6 +41,12 @@ const createMockSessionManager = (): SessionManager =>
       updatedAt: new Date(),
     }),
     getSession: vi.fn().mockResolvedValue(null),
+    startNewSession: vi.fn().mockResolvedValue({
+      id: 'fresh-session-456',
+      messages: [],
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    }),
     deleteSession: vi.fn().mockResolvedValue(true),
     addMessage: vi.fn().mockResolvedValue(undefined),
     listSessions: vi.fn().mockResolvedValue([]),
@@ -52,6 +58,7 @@ describe('ApiChannel', () => {
   let mockSessionManager: SessionManager & {
     createSession: ReturnType<typeof vi.fn>;
     getSession: ReturnType<typeof vi.fn>;
+    startNewSession: ReturnType<typeof vi.fn>;
     deleteSession: ReturnType<typeof vi.fn>;
   };
   let mockLogger: Logger;
@@ -62,6 +69,7 @@ describe('ApiChannel', () => {
     mockSessionManager = createMockSessionManager() as SessionManager & {
       createSession: ReturnType<typeof vi.fn>;
       getSession: ReturnType<typeof vi.fn>;
+      startNewSession: ReturnType<typeof vi.fn>;
       deleteSession: ReturnType<typeof vi.fn>;
     };
     mockLogger = createMockLogger();
@@ -184,17 +192,32 @@ describe('ApiChannel', () => {
   });
 
   describe('handleReset', () => {
-    it('should delete session and clear cache', async () => {
+    it('should archive the prior session and immediately create a fresh one', async () => {
       await channel.getOrCreateSession('user123');
 
       await channel.handleReset('user123');
 
-      expect(mockSessionManager.deleteSession).toHaveBeenCalledWith('new-session-123');
+      expect(mockSessionManager.startNewSession).toHaveBeenCalledWith({
+        userId: 'api:user123',
+        channelId: 'api',
+      }, 'new-session-123');
+      mockSessionManager.getSession.mockResolvedValue({
+        id: 'fresh-session-456',
+        messages: [],
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      } as Session);
+      expect(await channel.getOrCreateSession('user123')).toBe('fresh-session-456');
+      expect(mockSessionManager.deleteSession).not.toHaveBeenCalled();
     });
 
-    it('should do nothing if user has no session', async () => {
+    it('should still force-create a fresh session after a restart with no cache', async () => {
       await channel.handleReset('unknown-user');
 
+      expect(mockSessionManager.startNewSession).toHaveBeenCalledWith({
+        userId: 'api:unknown-user',
+        channelId: 'api',
+      }, undefined);
       expect(mockSessionManager.deleteSession).not.toHaveBeenCalled();
     });
   });
@@ -294,6 +317,36 @@ describe('ApiChannel', () => {
         expect((res.body as Record<string, unknown>).sessionId).toBe('custom-session');
       });
 
+      it('should rotate a stale archived sessionId instead of colliding with its tombstone', async () => {
+        const db = new ScallopDatabase(':memory:');
+        db.createSession('archived-session', { userId: 'default', channelId: 'api' });
+        db.addSessionMessage('archived-session', 'user', 'Preserved old history');
+        db.archiveSession('archived-session', 'new_conversation', 'user_command');
+        (channel as unknown as { db: ScallopDatabase | null }).db = db;
+
+        try {
+          const res = await makeRequest('/api/chat', 'POST', {
+            message: 'This belongs in a fresh conversation',
+            sessionId: 'archived-session',
+          });
+
+          const returnedSessionId = (res.body as Record<string, unknown>).sessionId;
+          expect(res.status).toBe(200);
+          expect(returnedSessionId).not.toBe('archived-session');
+          expect(mockSessionManager.createSession).toHaveBeenCalledWith({
+            userId: 'default',
+            channelId: 'api',
+            id: returnedSessionId,
+          });
+          expect(db.getSessionMessages('archived-session').map(message => message.content)).toEqual([
+            'Preserved old history',
+          ]);
+        } finally {
+          (channel as unknown as { db: ScallopDatabase | null }).db = null;
+          db.close();
+        }
+      });
+
       it('should return 400 for missing message', async () => {
         const res = await makeRequest('/api/chat', 'POST', {});
 
@@ -379,6 +432,29 @@ describe('ApiChannel', () => {
 
         expect(res.status).toBe(200);
         expect((res.body as Record<string, unknown>).sessions).toEqual([]);
+      });
+    });
+
+    describe('DELETE /api/sessions/:id', () => {
+      it('should reject deletion without exact explicit confirmation', async () => {
+        const res = await makeRequest('/api/sessions/session-to-forget', 'DELETE');
+
+        expect(res.status).toBe(409);
+        expect(mockSessionManager.deleteSession).not.toHaveBeenCalled();
+      });
+
+      it('should forget only the exactly confirmed session', async () => {
+        const res = await makeRequest(
+          '/api/sessions/session-to-forget?confirm=session-to-forget',
+          'DELETE',
+        );
+
+        expect(res.status).toBe(200);
+        expect(mockSessionManager.deleteSession).toHaveBeenCalledWith('session-to-forget', {
+          confirmed: true,
+          reason: 'api_explicit_forget',
+          actor: 'api_user',
+        });
       });
     });
 
@@ -721,14 +797,43 @@ describe('ApiChannel', () => {
       const db = new ScallopDatabase(':memory:');
       db.createAuthUser('test@example.com', 'unused-test-hash');
       db.createSession('history-session', { userId: 'api:default', channelId: 'api' });
+      db.addSessionMessage('history-session', 'user', 'Real historical question');
+      db.addSessionMessage('history-session', 'user', JSON.stringify([
+        {
+          type: 'tool_result',
+          tool_use_id: 'literal-user-json',
+          content: 'USER_LITERAL_TOOL_RESULT_JSON',
+        },
+      ]), 'human_user');
+      db.addSessionMessage(
+        'history-session',
+        'user',
+        'PERSISTED_KIND_INTERNAL_PLAIN_TEXT',
+        'system_internal',
+      );
+      db.addSessionMessage(
+        'history-session',
+        'assistant',
+        'PERSISTED_KIND_PROTOCOL_PLAIN_TEXT',
+        'assistant_protocol',
+      );
       db.addSessionMessage('history-session', 'assistant', JSON.stringify([
         { type: 'thinking', thinking: 'HISTORICAL_THOUGHT_SECRET' },
         { type: 'text', text: 'INTERNAL_PLAN_TEXT: I should call the tool now.' },
         { type: 'tool_use', id: 'tool-1', name: 'bash', input: { command: 'PRIVATE_TOOL_INPUT' } },
       ]));
+      db.createSession('worker-session', {
+        userId: 'api:default', channelId: 'api', isSubAgent: true,
+      });
+      db.addSessionMessage('worker-session', 'assistant', 'PRIVATE_WORKER_FINAL');
       db.addSessionMessage('history-session', 'user', JSON.stringify([
         { type: 'tool_result', tool_use_id: 'tool-1', content: 'PRIVATE_TOOL_OUTPUT' },
       ]));
+      for (let index = 0; index < 120; index++) {
+        db.addSessionMessage('history-session', 'user', JSON.stringify([
+          { type: 'tool_result', tool_use_id: `bulk-${index}`, content: `BULK_PRIVATE_${index}` },
+        ]));
+      }
       db.addSessionMessage('history-session', 'assistant', JSON.stringify([
         { type: 'thinking', thinking: 'SECOND_HISTORICAL_THOUGHT_SECRET' },
         { type: 'text', text: '<think>INLINE_THOUGHT_SECRET</think>Safe historical answer.' },
@@ -769,14 +874,19 @@ describe('ApiChannel', () => {
         expect(response.status).toBe(200);
         const serialized = JSON.stringify(response.body);
         expect(serialized).toContain('Safe historical answer.');
+        expect(serialized).toContain('USER_LITERAL_TOOL_RESULT_JSON');
         expect(serialized).not.toContain('HISTORICAL_THOUGHT_SECRET');
         expect(serialized).not.toContain('SECOND_HISTORICAL_THOUGHT_SECRET');
         expect(serialized).not.toContain('INLINE_THOUGHT_SECRET');
         expect(serialized).not.toContain('INTERNAL_PLAN_TEXT');
         expect(serialized).not.toContain('PRIVATE_TOOL_INPUT');
         expect(serialized).not.toContain('PRIVATE_TOOL_OUTPUT');
-        expect(serialized).not.toContain('tool_use');
-        expect(serialized).not.toContain('tool_result');
+        expect(serialized).not.toContain('PRIVATE_WORKER_FINAL');
+        expect(serialized).not.toContain('PERSISTED_KIND_INTERNAL_PLAIN_TEXT');
+        expect(serialized).not.toContain('PERSISTED_KIND_PROTOCOL_PLAIN_TEXT');
+        const messages = response.body.messages as Array<{ role: string; content: string }>;
+        expect(messages).toHaveLength(3);
+        expect(messages.map(message => message.role)).toEqual(['user', 'user', 'assistant']);
       } finally {
         await channel.stop();
         db.close();

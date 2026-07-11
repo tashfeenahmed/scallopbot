@@ -147,7 +147,7 @@ export class SlackChannel implements Channel {
                 type: 'section',
                 text: {
                   type: 'mrkdwn',
-                  text: '*Commands:*\n• `/reset` - Clear conversation history\n• `/help` - Show this help message\n• `/status` - Check bot status',
+                  text: '*Commands:*\n• `/reset` - Preserve this conversation and start a new one\n• `/help` - Show this help message\n• `/status` - Check bot status',
                 },
               },
               {
@@ -175,7 +175,7 @@ export class SlackChannel implements Channel {
       switch (subcommand) {
         case 'reset':
           await this.handleReset(command.user_id);
-          await respond('Conversation cleared. Starting fresh!');
+          await respond('Started a new conversation. Your previous conversation is preserved.');
           break;
 
         case 'status':
@@ -192,7 +192,7 @@ export class SlackChannel implements Channel {
                 type: 'section',
                 text: {
                   type: 'mrkdwn',
-                  text: '*ScallopBot Help*\n\n`/scallopbot help` - Show this message\n`/scallopbot reset` - Clear conversation history\n`/scallopbot status` - Check bot status\n\nOr just send me a message!',
+                  text: '*ScallopBot Help*\n\n`/scallopbot help` - Show this message\n`/scallopbot reset` - Preserve this conversation and start a new one\n`/scallopbot status` - Check bot status\n\nOr just send me a message!',
                 },
               },
             ],
@@ -210,7 +210,7 @@ export class SlackChannel implements Channel {
     switch (command.toLowerCase()) {
       case 'help':
         await say(
-          '*ScallopBot Help*\n\n• `/help` - Show this message\n• `/reset` - Clear conversation history\n• `/status` - Check bot status\n\nOr just send me a message!'
+          '*ScallopBot Help*\n\n• `/help` - Show this message\n• `/reset` - Preserve this conversation and start a new one\n• `/status` - Check bot status\n\nOr just send me a message!'
         );
         break;
 
@@ -356,9 +356,10 @@ export class SlackChannel implements Channel {
 
   async handleReset(userId: string): Promise<void> {
     const sessionId = this.userSessions.get(userId);
-    if (sessionId) {
-      await this.sessionManager.deleteSession(sessionId);
-      this.userSessions.delete(userId);
-    }
+    const session = await this.sessionManager.startNewSession({
+      userId,
+      channelId: 'slack',
+    }, sessionId);
+    this.userSessions.set(userId, session.id);
   }
 }

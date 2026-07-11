@@ -146,6 +146,10 @@ export class MoonshotProvider implements LLMProvider {
       ...(topP !== undefined && { top_p: topP }),
       ...(request.stopSequences && { stop: request.stopSequences }),
       ...(request.tools && { tools: this.formatTools(request.tools) }),
+      // Kimi's OpenAI-compatible endpoint supports JSON mode but does not
+      // consistently implement JSON Schema across model versions. Callers
+      // still validate the requested schema locally.
+      ...(request.structuredOutput && { response_format: { type: 'json_object' as const } }),
       // Only disable thinking if NOT enabling it (for Kimi K2 models)
       ...(isKimiK2 && !enableThinking && { thinking: { type: 'disabled' } }),
     };

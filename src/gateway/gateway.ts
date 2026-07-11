@@ -324,6 +324,9 @@ export class Gateway {
       workspace: this.config.agent.workspace,
       getTimezone: (userId: string) => this.configManager!.getUserTimezone(userId),
       canonicalSingleUserIds: this.canonicalSingleUserIds,
+      subAgentCleanupAfterSeconds: this.config.subagent?.cleanupAfterSeconds ?? 3600,
+      subAgentDiagnosticRetentionSeconds:
+        this.config.subagent?.diagnosticRetentionSeconds ?? 30 * 24 * 60 * 60,
       onMorningDigest: async (userId: string) => {
         await (this.unifiedScheduler?.sendMorningDigest(userId) ?? Promise.resolve(0));
       },
@@ -548,6 +551,8 @@ export class Gateway {
       workspace: this.config.agent.workspace,
       logger: this.logger,
       maxIterations: this.config.agent.maxIterations,
+      foregroundCallTimeoutMs: this.config.agent.foregroundCallTimeoutMs,
+      turnTimeoutMs: this.config.agent.turnTimeoutMs,
       enableThinking: this.config.providers.moonshot.enableThinking,
       toolPolicy: this.config.tools?.policy,
       channelToolPolicies: this.config.tools?.channelPolicies,
@@ -951,6 +956,7 @@ export class Gateway {
     // send_message skill
     const sendMessageSkill = defineSkill('send_message', 'Send a text message to the user immediately. Use this for conversational, human-like messaging.')
       .userInvocable(false)
+      .safety({ externalWrite: true })
       .inputSchema({
         type: 'object',
         properties: {
@@ -977,6 +983,7 @@ export class Gateway {
     // send_file skill
     const sendFileSkill = defineSkill('send_file', 'Send a file to the user via chat. Use this to send PDFs, images, documents, or any file the user requests.')
       .userInvocable(false)
+      .safety({ externalWrite: true })
       .inputSchema({
         type: 'object',
         properties: {

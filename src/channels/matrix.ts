@@ -265,7 +265,7 @@ export class MatrixChannel implements Channel {
       case 'reset':
         // For Matrix, we key sessions by room for simplicity
         await this.handleReset(roomId);
-        await this.sendMessage(roomId, 'Conversation cleared. Starting fresh!');
+        await this.sendMessage(roomId, 'Started a new conversation. Your previous conversation is preserved.');
         break;
 
       case 'status':
@@ -290,7 +290,7 @@ I'm your personal AI assistant. In DMs, just send me a message. In group chats, 
 
 **Commands:**
 - \`!help\` - Show this message
-- \`!reset\` - Clear conversation history
+- \`!reset\` - Preserve this conversation and start a new one
 - \`!status\` - Check bot status
 
 Matrix bridges to many platforms, so you can reach me from anywhere!`;
@@ -451,9 +451,10 @@ Matrix bridges to many platforms, so you can reach me from anywhere!`;
 
   async handleReset(roomId: string): Promise<void> {
     const sessionId = this.userSessions.get(roomId);
-    if (sessionId) {
-      await this.sessionManager.deleteSession(sessionId);
-      this.userSessions.delete(roomId);
-    }
+    const session = await this.sessionManager.startNewSession({
+      userId: roomId,
+      channelId: 'matrix',
+    }, sessionId);
+    this.userSessions.set(roomId, session.id);
   }
 }

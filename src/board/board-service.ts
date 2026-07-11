@@ -166,11 +166,11 @@ export class BoardService {
   moveItem(itemId: string, targetStatus: BoardStatus): BoardItem | null {
     const item = this.db.getScheduledItem(itemId);
     if (!item) return null;
+    if (targetStatus === 'done') return this.markDone(itemId);
 
     // Map board status to underlying status where needed
     let underlyingStatus = item.status;
-    if (targetStatus === 'done') underlyingStatus = 'fired';
-    else if (targetStatus === 'archived') underlyingStatus = 'dismissed';
+    if (targetStatus === 'archived') underlyingStatus = 'dismissed';
     else if (targetStatus === 'in_progress') underlyingStatus = 'processing';
     else if (['inbox', 'backlog', 'scheduled', 'waiting'].includes(targetStatus)) underlyingStatus = 'pending';
 
@@ -225,21 +225,23 @@ export class BoardService {
       status: 'fired',
     });
 
-    if (resultText) {
-      this.db.updateScheduledItemResult(itemId, {
-        response: resultText,
-        completedAt: Date.now(),
-      });
-    }
+    const now = Date.now();
+    this.db.updateScheduledItemResult(itemId, {
+      response: resultText ?? 'Marked complete by the user.',
+      completedAt: now,
+      taskComplete: true,
+      outcome: 'succeeded',
+      completionSource: 'user',
+    });
 
     // Goal bridge: if this board item is linked to a goal, mark the goal task complete
     if (item.goalId) {
       try {
-        const goalMem = this.db.getMemory(item.goalId);
+        const goalMem = this.db.getMemory(item.goalId)
+          ?? this.db.restoreGoalMemoryFromRegistry(item.goalId);
         if (goalMem) {
           const metadata = goalMem.metadata as Record<string, unknown> | null;
-          if (metadata?.goalType && metadata.status !== 'completed') {
-            const now = Date.now();
+          if (metadata?.goalType === 'task' && metadata.status !== 'completed') {
             const newMetadata = { ...metadata, status: 'completed', completedAt: now };
             this.db.updateMemory(item.goalId, { metadata: newMetadata });
 
@@ -247,7 +249,8 @@ export class BoardService {
             const parentId = metadata.parentId as string | undefined;
             if (parentId) {
               this.updateGoalProgress(parentId);
-              const parent = this.db.getMemory(parentId);
+              const parent = this.db.getMemory(parentId)
+                ?? this.db.restoreGoalMemoryFromRegistry(parentId);
               const parentMeta = parent?.metadata as Record<string, unknown> | null;
               if (parentMeta?.parentId) {
                 this.updateGoalProgress(parentMeta.parentId as string);
@@ -272,7 +275,8 @@ export class BoardService {
    * Used by the goal bridge when completing board items.
    */
   private updateGoalProgress(goalId: string): void {
-    const goal = this.db.getMemory(goalId);
+    const goal = this.db.getMemory(goalId)
+      ?? this.db.restoreGoalMemoryFromRegistry(goalId);
     if (!goal) return;
 
     const metadata = goal.metadata as Record<string, unknown> | null;
@@ -284,7 +288,8 @@ export class BoardService {
 
     let completed = 0;
     for (const rel of relations) {
-      const child = this.db.getMemory(rel.sourceId);
+      const child = this.db.getMemory(rel.sourceId)
+        ?? this.db.restoreGoalMemoryFromRegistry(rel.sourceId);
       const childMeta = child?.metadata as Record<string, unknown> | null;
       if (childMeta?.status === 'completed') completed++;
     }
@@ -394,12 +399,43 @@ export class BoardService {
     itemId: string,
     leaseToken: string,
     error: string,
-    options: { retryable?: boolean; retryAt?: number } = {},
+    options: {
+      retryable?: boolean;
+      retryAt?: number;
+      result?: BoardItemResult;
+      failureCode?: string;
+    } = {},
     now: number = Date.now(),
   ): 'retry_scheduled' | 'exhausted' | 'stale_lease' {
     const outcome = this.db.failBoardTaskLease(itemId, leaseToken, error, options, now);
     this.logger?.warn({ itemId, outcome, error }, 'Leased board task failed');
     return outcome;
+  }
+
+  blockLeasedTask(
+    itemId: string,
+    leaseToken: string,
+    reason: string,
+    result: BoardItemResult,
+    now: number = Date.now(),
+  ): BoardItem | null {
+    if (!this.db.blockBoardTaskLease(itemId, leaseToken, reason, result, now)) return null;
+    const blocked = this.db.getScheduledItem(itemId);
+    this.logger?.warn({ itemId, reason }, 'Leased board task blocked');
+    return blocked ? toBoardItem(blocked) : null;
+  }
+
+  expireLeasedTask(
+    itemId: string,
+    leaseToken: string,
+    reason: string,
+    result: BoardItemResult,
+    now: number = Date.now(),
+  ): BoardItem | null {
+    if (!this.db.expireBoardTaskLease(itemId, leaseToken, reason, result, now)) return null;
+    const expired = this.db.getScheduledItem(itemId);
+    this.logger?.info({ itemId, reason }, 'Stale board task occurrence expired');
+    return expired ? toBoardItem(expired) : null;
   }
 
   handoffTask(
@@ -426,10 +462,11 @@ export class BoardService {
   private completeLinkedGoal(item: ScheduledItem): void {
     if (!item.goalId) return;
     try {
-      const goalMem = this.db.getMemory(item.goalId);
+      const goalMem = this.db.getMemory(item.goalId)
+        ?? this.db.restoreGoalMemoryFromRegistry(item.goalId);
       if (!goalMem) return;
       const metadata = goalMem.metadata as Record<string, unknown> | null;
-      if (!metadata?.goalType || metadata.status === 'completed') return;
+      if (metadata?.goalType !== 'task' || metadata.status === 'completed') return;
       const now = Date.now();
       this.db.updateMemory(item.goalId, {
         metadata: { ...metadata, status: 'completed', completedAt: now },
@@ -437,7 +474,8 @@ export class BoardService {
       const parentId = metadata.parentId as string | undefined;
       if (parentId) {
         this.updateGoalProgress(parentId);
-        const parent = this.db.getMemory(parentId);
+        const parent = this.db.getMemory(parentId)
+          ?? this.db.restoreGoalMemoryFromRegistry(parentId);
         const parentMeta = parent?.metadata as Record<string, unknown> | null;
         if (parentMeta?.parentId) this.updateGoalProgress(parentMeta.parentId as string);
       }

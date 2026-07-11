@@ -19,13 +19,20 @@ function makeProvider(response: Partial<CompletionResponse>): LLMProvider & { mo
 
 describe('wrapProviderWithTraceTap', () => {
   let rows: LlmTraceRow[];
+  let previousMode: string | undefined;
 
   beforeEach(() => {
     rows = [];
+    previousMode = process.env.LLM_TRACE_CONTENT_MODE;
+    process.env.LLM_TRACE_CONTENT_MODE = 'full';
     setTraceSink((r) => rows.push(r));
   });
 
-  afterEach(() => setTraceSink(null));
+  afterEach(() => {
+    setTraceSink(null);
+    if (previousMode === undefined) delete process.env.LLM_TRACE_CONTENT_MODE;
+    else process.env.LLM_TRACE_CONTENT_MODE = previousMode;
+  });
 
   it('records tagged calls with parsed_ok=1 for valid JSON', async () => {
     const p = wrapProviderWithTraceTap(makeProvider({}));
@@ -125,6 +132,18 @@ describe('wrapProviderWithTraceTap', () => {
       if (previous === undefined) delete process.env.TEST_API_KEY;
       else process.env.TEST_API_KEY = previous;
     }
+  });
+
+  it('retains only hashes and sizes by default', async () => {
+    delete process.env.LLM_TRACE_CONTENT_MODE;
+    const p = wrapProviderWithTraceTap(makeProvider({}));
+    await p.complete({
+      messages: [{ role: 'user', content: 'private conversation payload' }],
+      purpose: 'fact_extract',
+    });
+    expect(rows[0].prompt).not.toContain('private conversation payload');
+    expect(JSON.parse(rows[0].prompt)).toMatchObject({ content_retained: false });
+    expect(JSON.parse(rows[0].response)).toMatchObject({ content_retained: false });
   });
 
   it('passes through when no sink is set', async () => {

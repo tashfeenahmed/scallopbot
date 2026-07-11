@@ -18,6 +18,7 @@ import {
   type MockCompletionResponse,
 } from './helpers.js';
 import { defineSkill } from '../skills/sdk.js';
+import type { SkillMetadata } from '../skills/types.js';
 import type { ContentBlock } from '../providers/types.js';
 import { flattenSystem } from '../providers/types.js';
 
@@ -29,7 +30,8 @@ function registerTestSkill(
   name: string,
   description: string,
   handler: (args: Record<string, unknown>) => Promise<{ success: boolean; output: string; error?: string }>,
-  inputSchema?: { type: 'object'; properties: Record<string, { type: string; description?: string }>; required?: string[] }
+  inputSchema?: { type: 'object'; properties: Record<string, { type: string; description?: string }>; required?: string[] },
+  safety?: NonNullable<NonNullable<SkillMetadata['openclaw']>['safety']>,
 ): void {
   const builder = defineSkill(name, description)
     .userInvocable(false)
@@ -40,6 +42,7 @@ function registerTestSkill(
   if (inputSchema) {
     builder.inputSchema(inputSchema);
   }
+  if (safety) builder.safety(safety);
 
   const skillDef = builder.build();
   ctx.skillRegistry.registerSkill(skillDef.skill);
@@ -102,7 +105,7 @@ describe('E2E Chat Scenarios', () => {
         expect(skillStart!.skill).toBe('echo_tool');
         expect(skillComplete).toBeDefined();
         expect(skillComplete!.skill).toBe('echo_tool');
-        expect(skillComplete!.output).toContain('echo: hello world');
+        expect(skillComplete!.output).toBe('Completed');
         expect(response).toBeDefined();
         expect(response!.content).toContain('echo returned');
 
@@ -332,7 +335,7 @@ describe('E2E Chat Scenarios', () => {
 
         const skillComplete = messages.find(m => m.type === 'skill_complete');
         expect(skillComplete).toBeDefined();
-        expect(skillComplete!.output).toContain('blue');
+        expect(skillComplete!.output).toBe('Completed');
 
         // Verify tool_result fed back to LLM contains the fact
         const allRequests = (ctx.mockProvider as unknown as { allRequests: unknown[] }).allRequests as Array<{ messages: Array<{ role: string; content: ContentBlock[] | string }> }>;
@@ -399,7 +402,7 @@ describe('E2E Chat Scenarios', () => {
             status: { type: 'string', description: 'Goal status' },
           },
           required: ['action'],
-        });
+        }, { localWrite: true });
       }, 30000);
 
       afterAll(async () => { await cleanupE2E(ctx); }, 15000);
@@ -527,7 +530,7 @@ describe('E2E Chat Scenarios', () => {
         expect(skillStart!.skill).toBe('failing_tool');
         expect(skillError).toBeDefined();
         expect(skillError!.skill).toBe('failing_tool');
-        expect(skillError!.error).toContain('Intentional test failure');
+        expect(skillError!.error).toBe('Failed');
 
         // Agent should still produce a final response
         const response = messages.find(m => m.type === 'response');
@@ -742,12 +745,17 @@ describe('E2E Chat Scenarios', () => {
         // Provider should have been called 4 times total (2 per turn)
         expect(ctx.mockProvider.callCount).toBe(4);
 
-        // Turn 2 LLM request should contain full turn 1 history
+        // Turn 2 keeps the human-visible outcome from turn 1 while dropping its
+        // completed provider protocol/tool payload.
         const allRequests = (ctx.mockProvider as unknown as { allRequests: unknown[] }).allRequests as Array<{ messages: Array<{ role: string; content: ContentBlock[] | string }> }>;
         // 3rd request (index 2) is the first request of turn 2
         const turn2FirstRequest = allRequests[2];
-        // Should have turn 1 messages (user, assistant tool_use, user tool_result, assistant final) + turn 2 user
-        expect(turn2FirstRequest.messages.length).toBeGreaterThanOrEqual(5);
+        const replay = JSON.stringify(turn2FirstRequest.messages);
+        expect(replay).toContain('Increment the counter');
+        expect(replay).toContain('Counter incremented to 1.');
+        expect(replay).toContain('Increment again');
+        expect(replay).not.toContain('cont_1');
+        expect(replay).not.toContain('count: 1');
 
         // Session should have 8 messages total
         const session = await ctx.sessionManager.getSession(sessionId);

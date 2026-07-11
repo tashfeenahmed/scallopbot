@@ -260,7 +260,7 @@ export class TelegramChannel {
       }
 
       await this.handleReset(userId);
-      await ctx.reply('Starting a new conversation!');
+      await ctx.reply('Started a new conversation. Your previous conversation is preserved.');
     });
 
     // /settings command
@@ -1551,19 +1551,20 @@ export class TelegramChannel {
           break;
         }
         case 'tool_start':
-          text = `🔧 tool:${update.toolName}\n${truncate(update.message)}`;
+          text = `🔧 tool:${update.toolName}\nStarted`;
           break;
         case 'tool_complete':
-          text = `✅ tool:${update.toolName}\n${truncate(update.message)}`;
+          text = `✅ tool:${update.toolName}\nCompleted`;
           break;
         case 'tool_error':
-          text = `❌ tool:${update.toolName}\n${truncate(update.message)}`;
+          text = `❌ tool:${update.toolName}\nFailed`;
           break;
         case 'thinking':
-          text = `💭 Thinking...\n${truncate(update.message)}`;
+          // Verbose mode exposes lifecycle state, never private chain-of-thought.
+          text = '💭 Reasoning in progress…';
           break;
         case 'planning':
-          text = `📋 Planning...\n${truncate(update.message)}`;
+          text = '📋 Planning next steps…';
           break;
         default:
           return;
@@ -1631,7 +1632,7 @@ export class TelegramChannel {
     // the next reply starts a fresh context and the agent cannot relate it to
     // the proactive message or earlier conversation that preceded the restart.
     const prefixedUserId = `telegram:${userId}`;
-    const existing = this.db.findSessionByUserId(prefixedUserId);
+    const existing = this.db.findSessionByUserId(prefixedUserId, 'telegram');
     if (existing) {
       const session = await this.sessionManager.getSession(existing.id);
       if (session) {
@@ -1652,10 +1653,11 @@ export class TelegramChannel {
 
   async handleReset(userId: string): Promise<void> {
     const sessionId = this.userSessions.get(userId);
-    if (sessionId) {
-      await this.sessionManager.deleteSession(sessionId);
-      this.userSessions.delete(userId);
-    }
+    const session = await this.sessionManager.startNewSession({
+      userId: `telegram:${userId}`,
+      channelId: 'telegram',
+    }, sessionId);
+    this.userSessions.set(userId, session.id);
   }
 
   async start(): Promise<void> {

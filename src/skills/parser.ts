@@ -220,6 +220,30 @@ function parseMetadata(raw: Record<string, unknown>): SkillMetadata {
       }
     }
 
+    // Parse typed execution-safety declarations. Leaving these fields behind
+    // in raw YAML would make external-write policy appear configured while the
+    // runtime silently treated the skill as undeclared.
+    if (oc.safety && typeof oc.safety === 'object') {
+      const rawSafety = oc.safety as Record<string, unknown>;
+      const safety: NonNullable<NonNullable<SkillMetadata['openclaw']>['safety']> = {};
+      for (const key of ['readOnly', 'externalWrite', 'localWrite', 'sensitive', 'requiresConfirmation'] as const) {
+        if (typeof rawSafety[key] === 'boolean') safety[key] = rawSafety[key];
+      }
+      metadata.openclaw.safety = safety;
+    }
+
+    if (oc.evidence && typeof oc.evidence === 'object') {
+      const rawEvidence = oc.evidence as Record<string, unknown>;
+      const evidence: NonNullable<NonNullable<SkillMetadata['openclaw']>['evidence']> = {};
+      if (typeof rawEvidence.authoritative === 'boolean') {
+        evidence.authoritative = rawEvidence.authoritative;
+      }
+      if (typeof rawEvidence.source === 'string' && rawEvidence.source.trim()) {
+        evidence.source = rawEvidence.source.trim();
+      }
+      metadata.openclaw.evidence = evidence;
+    }
+
     // Parse install instructions
     if (Array.isArray(oc.install)) {
       metadata.openclaw.install = oc.install

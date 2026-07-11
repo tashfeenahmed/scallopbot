@@ -619,6 +619,26 @@ describe('SkillExecutor', () => {
       // See executor.ts line ~214: exitCode: 124
       expect(124).toBe(124); // Placeholder assertion to document behavior
     });
+
+    it('aborts a running script at the caller deadline', async () => {
+      await fs.writeFile(path.join(scriptsDir, 'run.js'), 'setTimeout(() => console.log("late"), 10000)');
+      const skill = createMockSkill({ scriptsDir });
+      const controller = new AbortController();
+      const started = Date.now();
+      const running = executor.execute(skill, {
+        skillName: skill.name,
+        cwd: testDir,
+        signal: controller.signal,
+        deadlineAt: Date.now() + 5000,
+      });
+      setTimeout(() => controller.abort(), 30);
+
+      const result = await running;
+      expect(Date.now() - started).toBeLessThan(1000);
+      expect(result.success).toBe(false);
+      expect(result.exitCode).toBe(124);
+      expect(result.error).toMatch(/aborted/i);
+    });
   });
 
   describe('listScripts', () => {
@@ -730,12 +750,19 @@ describe('SkillExecutor', () => {
       const skill = createMockSkill();
       const env = buildSkillSubprocessEnv(
         skill,
-        { skillName: skill.name, userId: 'telegram:owner-123' },
+        {
+          skillName: skill.name,
+          userId: 'telegram:owner-123',
+          idempotencyKey: 'op-123',
+          deadlineAt: 123456,
+        },
         undefined,
         ['owner-123', 'telegram:owner-123'],
       );
       expect(env.SKILL_USER_ID).toBe('telegram:owner-123');
       expect(env.SKILL_STATE_USER_ID).toBe('default');
+      expect(env.SKILL_IDEMPOTENCY_KEY).toBe('op-123');
+      expect(env.SKILL_DEADLINE_AT).toBe('123456');
     });
   });
 });

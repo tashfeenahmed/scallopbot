@@ -100,6 +100,59 @@ describe('OpenAIProvider', () => {
       expect(response.usage.outputTokens).toBe(5);
     });
 
+    it('passes strict JSON Schema to providers that support it', async () => {
+      const { default: OpenAI } = await import('openai');
+      const mockCreate = vi.fn().mockResolvedValue({
+        choices: [{ message: { content: '{"ok":true}', tool_calls: null }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 1, completion_tokens: 1 },
+        model: 'gpt-4.1',
+      });
+      const mockInstance = new OpenAI({ apiKey: 'test' });
+      (mockInstance.chat.completions.create as unknown) = mockCreate;
+      (provider as unknown as { client: typeof mockInstance }).client = mockInstance;
+
+      await provider.complete({
+        messages: [{ role: 'user', content: 'Return JSON' }],
+        structuredOutput: {
+          name: 'strict_result',
+          schema: {
+            type: 'object', additionalProperties: false,
+            properties: { ok: { type: 'boolean' } }, required: ['ok'],
+          },
+        },
+      });
+
+      expect(mockCreate).toHaveBeenCalledWith(expect.objectContaining({
+        response_format: {
+          type: 'json_schema',
+          json_schema: expect.objectContaining({ name: 'strict_result', strict: true }),
+        },
+      }));
+    });
+
+    it('maps an explicit no-thinking request to none instead of medium reasoning', async () => {
+      const { default: OpenAI } = await import('openai');
+      const reasoningProvider = new OpenAIProvider({ apiKey: 'test-key', model: 'o4-mini' });
+      const mockCreate = vi.fn().mockResolvedValue({
+        choices: [{ message: { content: '{"ok":true}', tool_calls: null }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 1, completion_tokens: 1 }, model: 'o4-mini',
+      });
+      const mockInstance = new OpenAI({ apiKey: 'test' });
+      (mockInstance.chat.completions.create as unknown) = mockCreate;
+      (reasoningProvider as unknown as { client: typeof mockInstance }).client = mockInstance;
+
+      await reasoningProvider.complete({
+        messages: [{ role: 'user', content: 'Return JSON' }],
+        enableThinking: false,
+      });
+      await reasoningProvider.complete({
+        messages: [{ role: 'user', content: 'Use the provider default' }],
+      });
+
+      expect(mockCreate.mock.calls[0][0]).toEqual(expect.objectContaining({ reasoning_effort: 'none' }));
+      expect(mockCreate.mock.calls[1][0]).not.toHaveProperty('reasoning_effort');
+    });
+
     it('should handle tool calls correctly', async () => {
       const { default: OpenAI } = await import('openai');
       const mockCreate = vi.fn().mockResolvedValue({

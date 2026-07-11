@@ -62,6 +62,7 @@ export class GroqProvider implements LLMProvider {
       ...(request.temperature !== undefined && { temperature: request.temperature }),
       ...(request.stopSequences && { stop: request.stopSequences }),
       ...(request.tools && { tools: this.formatTools(request.tools) }),
+      ...(request.structuredOutput && { response_format: { type: 'json_object' as const } }),
     };
 
     const response = await this.executeWithRetry(() =>

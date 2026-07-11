@@ -225,7 +225,12 @@ export async function runSelfReflection(ctx: GardenerContext): Promise<void> {
             reflectedAt: new Date().toISOString(),
             topics: insight.topics,
             sourceSessionIds: insight.sourceSessionIds,
+            audience: 'assistant',
           },
+          // Reflection is the assistant's coaching about its own behaviour. It
+          // must never masquerade as something the user said or enter normal
+          // user-memory retrieval/profile inference.
+          source: 'assistant',
           learnedFrom: 'self_reflection',
           detectRelations: false,
         });

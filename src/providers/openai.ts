@@ -111,8 +111,23 @@ export class OpenAIProvider implements LLMProvider {
       ...(request.temperature !== undefined && !isReasoning && { temperature: request.temperature }),
       ...(request.stopSequences && { stop: request.stopSequences }),
       ...(request.tools && { tools: this.formatTools(request.tools) }),
-      // Enable reasoning for thinking-capable models
-      ...(isReasoning && { reasoning_effort: request.enableThinking ? 'high' : 'medium' }),
+      ...(request.structuredOutput && {
+        response_format: {
+          type: 'json_schema' as const,
+          json_schema: {
+            name: request.structuredOutput.name,
+            strict: request.structuredOutput.strict ?? true,
+            schema: request.structuredOutput.schema,
+          },
+        },
+      }),
+      // Do not silently turn an explicit no-thinking request into medium
+      // reasoning. Leaving the flag undefined preserves the provider default;
+      // strict background routes pass false and get a deterministic no-reasoning
+      // request instead.
+      ...(isReasoning && request.enableThinking !== undefined && {
+        reasoning_effort: request.enableThinking ? 'high' : 'none',
+      }),
     };
 
     const response = await this.executeWithRetry(() =>

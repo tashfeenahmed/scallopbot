@@ -327,6 +327,7 @@ describe('BackgroundGardener self-reflection integration', () => {
     // Verify insight properties
     const insight = insightMemories[0];
     expect(insight.memoryType).toBe('derived');
+    expect(insight.source).toBe('assistant');
     expect(insight.metadata).toBeDefined();
     expect(insight.metadata!.reflectedAt).toBeDefined();
     expect(insight.metadata!.topics).toBeDefined();

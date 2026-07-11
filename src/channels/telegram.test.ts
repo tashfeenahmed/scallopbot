@@ -189,12 +189,13 @@ describe('TelegramChannel', () => {
       expect(message).toContain('ScallopBot');
     });
 
-    it('should handle /reset command by clearing session', async () => {
+    it('should handle /reset by preserving the old session and activating a new one', async () => {
       const { TelegramChannel } = await import('./telegram.js');
 
       const mockSessionManager = {
         deleteSession: vi.fn().mockResolvedValue(true),
         createSession: vi.fn().mockResolvedValue({ id: 'new-session' }),
+        startNewSession: vi.fn().mockResolvedValue({ id: 'new-session' }),
       } as any;
 
       const channel = new TelegramChannel({
@@ -210,8 +211,12 @@ describe('TelegramChannel', () => {
 
       await channel.handleReset('user123');
 
-      expect(mockSessionManager.deleteSession).toHaveBeenCalledWith('old-session');
-      expect(channel.userSessions.has('user123')).toBe(false);
+      expect(mockSessionManager.startNewSession).toHaveBeenCalledWith({
+        userId: 'telegram:user123',
+        channelId: 'telegram',
+      }, 'old-session');
+      expect(mockSessionManager.deleteSession).not.toHaveBeenCalled();
+      expect(channel.userSessions.get('user123')).toBe('new-session');
     });
   });
 });

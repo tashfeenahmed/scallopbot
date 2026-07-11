@@ -365,12 +365,48 @@ describe('Agent', () => {
       ]);
 
       const sessionManager = new SessionManager(db);
-                        const logger = pino({ level: 'silent' });
+      const logger = pino({ level: 'silent' });
+      const localSkills = new Map<string, any>([
+        ['write', {
+          name: 'write', description: 'Write a workspace file', path: '/native/write',
+          source: 'sdk', frontmatter: {
+            name: 'write', description: 'Write a workspace file',
+            metadata: { openclaw: { safety: { localWrite: true } } },
+          },
+          content: '', available: true, hasScripts: true,
+          handler: async ({ args }: { args: Record<string, unknown> }) => {
+            await fs.writeFile(String(args.path), String(args.content));
+            return { success: true, output: 'File written' };
+          },
+        }],
+        ['read', {
+          name: 'read', description: 'Read a workspace file', path: '/native/read',
+          source: 'sdk', frontmatter: {
+            name: 'read', description: 'Read a workspace file',
+            metadata: { openclaw: { safety: { readOnly: true } } },
+          },
+          content: '', available: true, hasScripts: true,
+          handler: async ({ args }: { args: Record<string, unknown> }) => ({
+            success: true,
+            output: await fs.readFile(String(args.path), 'utf8'),
+          }),
+        }],
+      ]);
+      const localSkillRegistry = {
+        getSkill: (name: string) => localSkills.get(name) ?? null,
+        getToolDefinitions: () => [...localSkills.values()].map(skill => ({
+          name: skill.name,
+          description: skill.description,
+          input_schema: { type: 'object', properties: {} },
+        })),
+        generateSkillPrompt: () => '',
+      };
 
       const agent = new Agent({
         provider,
         sessionManager,
-                workspace: testDir,
+        skillRegistry: localSkillRegistry as any,
+        workspace: testDir,
         logger,
         maxIterations: 20,
       });

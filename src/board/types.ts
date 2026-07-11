@@ -123,11 +123,14 @@ export function computeBoardStatus(item: ScheduledItem): BoardStatus {
       return item.triggerAt > 0 ? 'scheduled' : 'inbox';
     case 'processing':
       return 'in_progress';
+    case 'blocked':
+      return 'waiting';
     case 'fired':
     case 'acted':
       return 'done';
     case 'dismissed':
     case 'expired':
+    case 'failed':
       return 'archived';
     default:
       return 'inbox';

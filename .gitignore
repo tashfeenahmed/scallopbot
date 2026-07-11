@@ -6,8 +6,15 @@ dist/
 
 # Environment files
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
+*.token
+*.refresh-token
+credentials.json
+tokens.json
+*.bak
+*.bak-*
+*.bak.*
 
 # IDE
 .vscode/
@@ -38,6 +45,7 @@ sessions/
 
 # Personal todos
 TODOS.md
+.private/
 
 # Data files (persist across deploys)
 memories.jsonl
@@ -53,8 +61,6 @@ hetzner-server
 hetzner-server.pub
 hetzner-server-rsa
 hetzner-server-rsa.pub
-DEPLOYMENT.md
-DEPLOYMENT_*.md
 *.db
 *.db-shm
 *.db-wal

@@ -16,6 +16,7 @@ import {
   runTrustScoreUpdate,
   runGoalDeadlineCheck,
   runInnerThoughts,
+  runSubAgentCleanup,
 } from './gardener-deep-steps.js';
 
 const TEST_DB_PATH = '/tmp/gardener-deep-steps-test.db';
@@ -188,6 +189,51 @@ describe('gardener-deep-steps', () => {
       expect(mockSummarizer.summarizeBatch).toHaveBeenCalledWith(db, ['old-session-1'], 'default');
       expect(result.summarized).toBe(1);
     });
+
+    it('retries rejected summaries but excludes sessions with a verified receipt', async () => {
+      const old = Date.now() - 3 * 60 * 60 * 1000;
+      for (const sessionId of ['rejected-summary-session', 'verified-summary-session']) {
+        db.createSession(sessionId, { userId: 'default', channelId: 'api' });
+        db.addSessionMessage(sessionId, 'user', 'What was the decision?');
+        db.addSessionMessage(sessionId, 'assistant', 'The safer rollout was selected.');
+        rawRun(db, 'UPDATE sessions SET updated_at = ? WHERE id = ?', [old, sessionId]);
+      }
+      db.addSessionSummary({
+        sessionId: 'rejected-summary-session',
+        userId: 'default',
+        summary: 'An interim legacy summary without verification.',
+        topics: ['decision'],
+        messageCount: 2,
+        durationMs: 0,
+        embedding: null,
+      });
+      db.addSessionSummary({
+        sessionId: 'verified-summary-session',
+        userId: 'default',
+        summary: 'The safer rollout was selected as the final decision.',
+        topics: ['decision'],
+        messageCount: 2,
+        durationMs: 0,
+        embedding: null,
+      }, {
+        verifier: 'session_summarizer',
+        verificationVersion: 1,
+      });
+      const mockSummarizer = {
+        summarizeBatch: vi.fn().mockResolvedValue(1),
+      };
+
+      const result = await runSessionSummarization(buildCtx(store, db, {
+        sessionSummarizer: mockSummarizer as any,
+      }));
+
+      expect(mockSummarizer.summarizeBatch).toHaveBeenCalledWith(
+        db,
+        ['rejected-summary-session'],
+        'default',
+      );
+      expect(result.summarized).toBe(1);
+    });
   });
 
   describe('runEnhancedForgetting', () => {
@@ -217,12 +263,62 @@ describe('gardener-deep-steps', () => {
       });
       db.addSessionMessage(session.id, 'user', 'Hello, how are you?');
       db.addSessionMessage(session.id, 'assistant', 'I am fine!');
+      db.addSessionMessage(session.id, 'user', JSON.stringify([
+        { type: 'tool_result', tool_use_id: 'tool-1', content: 'not a human turn' },
+      ]));
       db.addSessionMessage(session.id, 'user', 'Tell me about AI');
+
+      const worker = db.createSession('session-worker', {
+        userId: 'telegram:owner-example', channelId: 'telegram', isSubAgent: true,
+      });
+      db.addSessionMessage(worker.id, 'user', 'Internal worker instruction');
 
       const ctx = buildCtx(store, db);
       const result = runBehavioralInference(ctx);
 
       expect(result.messageCount).toBe(2); // Only user messages
+    });
+  });
+
+  describe('runSubAgentCleanup', () => {
+    it('removes old protocol sessions but preserves a compact diagnostic ledger', () => {
+      db.createSession('parent', { userId: 'telegram:owner-example' });
+      db.createSession('child', { userId: 'telegram:owner-example', isSubAgent: true });
+      db.createSession('child-active', { userId: 'telegram:owner-example', isSubAgent: true });
+      db.addSessionMessage('child', 'user', 'private task protocol');
+      const old = Date.now() - 2 * 60 * 60 * 1000;
+      db.insertSubAgentRun({
+        id: 'run-old', parentSessionId: 'parent', childSessionId: 'child',
+        task: 'private task', label: 'worker', status: 'completed', allowedSkills: 'bash',
+        modelTier: 'fast', timeoutMs: 1_000, resultResponse: null,
+        resultIterations: null, resultTaskComplete: null, error: null,
+        inputTokens: 10, outputTokens: 5, createdAt: old, startedAt: old, completedAt: old,
+      });
+      db.updateSubAgentRun('run-old', {
+        resultResponse: 'private result', resultIterations: 2, resultTaskComplete: true,
+      });
+      db.insertSubAgentRun({
+        id: 'run-active', parentSessionId: 'parent', childSessionId: 'child-active',
+        task: 'still running', label: 'worker', status: 'running', allowedSkills: 'bash',
+        modelTier: 'fast', timeoutMs: 1_000, resultResponse: null,
+        resultIterations: null, resultTaskComplete: null, error: null,
+        inputTokens: 1, outputTokens: 0, createdAt: old, startedAt: old, completedAt: null,
+      });
+
+      runSubAgentCleanup(buildCtx(store, db), 3600);
+
+      expect(db.getActiveSession('child')).toBeNull();
+      expect(db.getSessionMessages('child')).toEqual([]);
+      const runs = db.getSubAgentRunsByParent('parent');
+      expect(runs.find(run => run.id === 'run-active')).toMatchObject({
+        id: 'run-active', task: 'still running',
+      });
+      expect(runs.find(run => run.id === 'run-old')).toMatchObject({
+        id: 'run-old', task: '[compacted]', resultResponse: null,
+        resultIterations: 2, resultTaskComplete: true,
+        inputTokens: 10, outputTokens: 5,
+      });
+      expect(db.getActiveSession('child-active')).not.toBeNull();
     });
   });
 
@@ -239,6 +335,37 @@ describe('gardener-deep-steps', () => {
       const ctx = buildCtx(store, db);
       // Should not throw (returns void)
       expect(() => runTrustScoreUpdate(ctx)).not.toThrow();
+    });
+
+    it('adapts repeated ignored proactive sends down to the conservative dial', () => {
+      for (let i = 0; i < 6; i++) {
+        const session = db.createSession(`ignored-session-${i}`, { userId: 'default' });
+        db.addSessionMessage(session.id, 'user', `Question ${i}`);
+        db.addSessionMessage(session.id, 'assistant', `Answer ${i}`);
+        db.addSessionSummary({
+          sessionId: session.id,
+          userId: 'default',
+          summary: `Synthetic completed conversation ${i} used for trust calibration.`,
+          topics: ['trust calibration'],
+          messageCount: 2,
+          durationMs: 1_000,
+          embedding: null,
+        });
+      }
+      for (let i = 0; i < 6; i++) {
+        db.addScheduledItem({
+          userId: 'default', sessionId: null, source: 'agent', kind: 'nudge',
+          type: 'follow_up', message: `Ignored synthetic outreach ${i}`, context: null,
+          triggerAt: Date.now() - (i + 1) * 60_000, recurring: null,
+          sourceMemoryId: null, status: 'fired',
+        });
+      }
+
+      runTrustScoreUpdate(buildCtx(store, db));
+
+      expect(db.getBehavioralPatterns('default')?.responsePreferences).toMatchObject({
+        proactivenessDial: 'conservative',
+      });
     });
 
     it('handles <5 summaries without error', () => {

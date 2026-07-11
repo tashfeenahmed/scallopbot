@@ -92,6 +92,7 @@ The skill returns JSON to stdout:
 3. **Sensitive data**: Don't echo secrets or credentials to output
 4. **Long-running processes**: Use appropriate timeouts; default is 60 seconds
 5. **Resource limits**: Output is truncated at 30KB by default (adjustable via `max_output`, up to 200KB)
+6. **HTTP writes**: Mutating `curl` calls must include `--fail-with-body` (or `-f`) so a 4xx/5xx response cannot be mistaken for success
 
 ## Security Features
 

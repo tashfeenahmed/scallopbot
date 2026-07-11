@@ -132,6 +132,8 @@ const channelsSchema = z.object({
 const agentSchema = z.object({
   workspace: z.string().min(1, 'Workspace path is required'),
   maxIterations: z.number().int().positive().default(100),
+  foregroundCallTimeoutMs: z.number().int().min(1_000).max(300_000).default(25_000),
+  turnTimeoutMs: z.number().int().min(5_000).max(900_000).default(55_000),
 });
 
 // Logging configuration schema
@@ -218,6 +220,7 @@ const subagentSchema = z.object({
   defaultModelTier: z.enum(['fast', 'standard', 'capable']).default('fast'),
   maxIterations: z.number().int().positive().default(20),
   cleanupAfterSeconds: z.number().int().positive().default(3600),
+  diagnosticRetentionSeconds: z.number().int().positive().default(30 * 24 * 60 * 60),
   allowMemoryWrites: z.boolean().default(false),
 });
 
@@ -368,6 +371,7 @@ export const configSchema = z.object({
     defaultModelTier: 'fast' as const,
     maxIterations: 20,
     cleanupAfterSeconds: 3600,
+    diagnosticRetentionSeconds: 30 * 24 * 60 * 60,
     allowMemoryWrites: false,
   }),
 });
@@ -410,6 +414,12 @@ export function loadConfig(): Config {
   const maxIterations = process.env.AGENT_MAX_ITERATIONS
     ? parseInt(process.env.AGENT_MAX_ITERATIONS, 10)
     : 100;
+  const foregroundCallTimeoutMs = process.env.AGENT_FOREGROUND_CALL_TIMEOUT_MS
+    ? parseInt(process.env.AGENT_FOREGROUND_CALL_TIMEOUT_MS, 10)
+    : 25_000;
+  const turnTimeoutMs = process.env.AGENT_TURN_TIMEOUT_MS
+    ? parseInt(process.env.AGENT_TURN_TIMEOUT_MS, 10)
+    : 55_000;
   const logLevel = process.env.LOG_LEVEL || 'info';
   const parsePolicyJson = (name: string): unknown => {
     const raw = process.env[name];
@@ -586,6 +596,8 @@ export function loadConfig(): Config {
     agent: {
       workspace,
       maxIterations,
+      foregroundCallTimeoutMs,
+      turnTimeoutMs,
     },
     logging: {
       level: logLevel,
@@ -649,6 +661,9 @@ export function loadConfig(): Config {
       defaultModelTier: (process.env.SUBAGENT_MODEL_TIER as 'fast' | 'standard' | 'capable') || 'fast',
       maxIterations: process.env.SUBAGENT_MAX_ITERATIONS ? parseInt(process.env.SUBAGENT_MAX_ITERATIONS, 10) : 20,
       cleanupAfterSeconds: process.env.SUBAGENT_CLEANUP_AFTER ? parseInt(process.env.SUBAGENT_CLEANUP_AFTER, 10) : 3600,
+      diagnosticRetentionSeconds: process.env.SUBAGENT_DIAGNOSTIC_RETENTION
+        ? parseInt(process.env.SUBAGENT_DIAGNOSTIC_RETENTION, 10)
+        : 30 * 24 * 60 * 60,
       allowMemoryWrites: process.env.SUBAGENT_ALLOW_MEMORY_WRITES === 'true',
     },
   };
