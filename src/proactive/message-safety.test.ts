@@ -211,6 +211,20 @@ describe('renderUserFacingProactiveMessage', () => {
     expect(request.system).toContain('do not output SKIP merely');
   });
 
+  it('deterministically removes a canned opening from a grounded topic', async () => {
+    const router = {
+      executeWithFallback: vi.fn().mockResolvedValue({
+        response: { content: [{ type: 'text', text: 'SKIP' }] },
+      }),
+    };
+    await expect(renderUserFacingProactiveMessage(
+      'Hey, just checking in — how are things going with the prototype?',
+      router as any,
+      { forceRewrite: true, context: 'The prototype review was scheduled for this afternoon.' },
+    )).resolves.toBe('Any update on the prototype?');
+    expect(router.executeWithFallback).not.toHaveBeenCalled();
+  });
+
   it('rejects socially unsafe or canned rewrite candidates', async () => {
     const router = {
       executeWithFallback: vi.fn()

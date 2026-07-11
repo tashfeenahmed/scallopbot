@@ -305,6 +305,28 @@ function realizeRequestedReflection(
     ?? REFLECTION_VARIANTS[recentMessages.length % REFLECTION_VARIANTS.length];
 }
 
+/**
+ * Remove a narrow set of canned outreach openings when the draft already has
+ * a concrete topic. This avoids spending a model call—or accepting an
+ * over-conservative SKIP—just to turn "just checking in" into a direct
+ * question. Generic/socially unsafe drafts still fail the quality gate.
+ */
+function realizeGroundedCannedCheckIn(raw: string, context?: string): string | null {
+  if (!context?.trim() || proactiveContextIsResolved(context)) return null;
+  const safe = sanitizeProactiveMessage(raw);
+  if (!safe) return null;
+  const direct = safe.replace(
+    /^(?:hey[!,]?\s*)?(?:(?:i\s+)?(?:just\s+)?(?:wanted\s+to\s+)?(?:check(?:ing)?\s+in))(?:\s+(?:with\s+you))?\s*(?:[-—:,.]\s*)?/i,
+    '',
+  ).trim();
+  if (!direct || direct === safe) return null;
+  const topicQuestion = direct.match(/^how (?:are|is) things going with\s+(.+?)\??$/i);
+  const candidate = topicQuestion?.[1]
+    ? `Any update on ${topicQuestion[1].replace(/[?.!]+$/, '')}?`
+    : direct[0].toLocaleUpperCase('en-US') + direct.slice(1);
+  return assessProactiveMessage(candidate).acceptable ? candidate : null;
+}
+
 export function looksLikeInternalProactiveText(text: string): boolean {
   const trimmed = text.trim();
   if (!trimmed) return true;
@@ -363,6 +385,11 @@ export async function prepareUserFacingProactiveMessage(
   const deterministicReflection = realizeRequestedReflection(raw, options.recentMessages ?? []);
   if (deterministicReflection) {
     return { outcome: 'ready', message: deterministicReflection };
+  }
+
+  const groundedCheckIn = realizeGroundedCannedCheckIn(raw, options.context);
+  if (groundedCheckIn) {
+    return { outcome: 'ready', message: groundedCheckIn };
   }
 
   // A generated/forced draft must cross the rewrite boundary. Falling back to
