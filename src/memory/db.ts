@@ -2909,6 +2909,67 @@ export class ScallopDatabase {
   }
 
   /**
+   * Retry a claimed nudge with a bounded attempt budget. This prevents a
+   * permanently unrenderable generated draft from calling the provider every
+   * scheduler tick forever.
+   */
+  recordScheduledNudgeFailure(
+    id: string,
+    retryAt: number,
+    error: string,
+  ): 'retry' | 'expired' | 'unchanged' {
+    const now = Date.now();
+    const transaction = this.db.transaction((): 'retry' | 'expired' | 'unchanged' => {
+      const row = this.db.prepare(`
+        SELECT status, attempt_count, max_attempts FROM scheduled_items
+        WHERE id = ? AND kind = 'nudge'
+      `).get(id) as { status: string; attempt_count: number; max_attempts: number } | undefined;
+      if (!row || row.status !== 'processing') return 'unchanged';
+
+      const attemptCount = row.attempt_count + 1;
+      if (attemptCount >= row.max_attempts) {
+        this.db.prepare(`
+          UPDATE scheduled_items
+          SET status = 'expired', board_status = 'archived', attempt_count = ?,
+              last_error = ?, updated_at = ?
+          WHERE id = ? AND status = 'processing'
+        `).run(attemptCount, error, now, id);
+        return 'expired';
+      }
+
+      this.db.prepare(`
+        UPDATE scheduled_items
+        SET status = 'pending', board_status = 'waiting', trigger_at = ?,
+            attempt_count = ?, last_error = ?, updated_at = ?
+        WHERE id = ? AND status = 'processing'
+      `).run(retryAt, attemptCount, error, now, id);
+      return 'retry';
+    });
+    return transaction.immediate();
+  }
+
+  /**
+   * Retry a transport failure for an explicit user reminder without exhausting
+   * the small safety budget used by generated nudges. attempt_count remains an
+   * observable delivery-attempt counter, but max_attempts is intentionally not
+   * used as an expiry condition here.
+   */
+  recordScheduledExplicitDeliveryFailure(
+    id: string,
+    retryAt: number,
+    error: string,
+  ): boolean {
+    const now = Date.now();
+    const result = this.db.prepare(`
+      UPDATE scheduled_items
+      SET status = 'pending', board_status = 'waiting', trigger_at = ?,
+          attempt_count = attempt_count + 1, last_error = ?, updated_at = ?
+      WHERE id = ? AND kind = 'nudge' AND source = 'user' AND status = 'processing'
+    `).run(retryAt, error, now, id);
+    return result.changes > 0;
+  }
+
+  /**
    * Atomically lease the next dependency-ready board task to a worker.
    * A lease, unlike status='processing' alone, can be safely reclaimed after
    * worker failure without allowing two workers to complete the same attempt.
@@ -3235,6 +3296,21 @@ export class ScallopDatabase {
   }
 
   /**
+   * Close an inferred item that became stale/resolved without pretending it
+   * was delivered or dismissed by the user. Expired items do not influence
+   * proactive cooldown or trust feedback.
+   */
+  markScheduledItemExpired(id: string): boolean {
+    const now = Date.now();
+    const result = this.db.prepare(`
+      UPDATE scheduled_items
+      SET status = 'expired', board_status = 'archived', updated_at = ?
+      WHERE id = ? AND status IN ('pending', 'processing')
+    `).run(now, id);
+    return result.changes > 0;
+  }
+
+  /**
    * Mark a scheduled item as acted (user engaged with proactive message)
    */
   markScheduledItemActed(id: string): boolean {
@@ -3431,7 +3507,7 @@ export class ScallopDatabase {
   consolidateDuplicateScheduledItems(): number {
     const stmt = this.db.prepare(`
       SELECT id, user_id, message, trigger_at, created_at FROM scheduled_items
-      WHERE status = 'pending'
+      WHERE status = 'pending' AND source = 'agent'
       ORDER BY user_id, created_at ASC
     `);
     const rows = stmt.all() as Array<{ id: string; user_id: string; message: string; trigger_at: number; created_at: number }>;

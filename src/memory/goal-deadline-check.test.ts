@@ -201,6 +201,26 @@ describe('checkGoalDeadlines -- outside warning window', () => {
 // ============ Deduplication ============
 
 describe('checkGoalDeadlines -- deduplication', () => {
+  it('notifies at most once per goal deadline stage but allows escalation', () => {
+    const warningGoal = makeGoal({ id: 'staged', title: 'Ship release', dueDate: NOW + 5 * DAY_MS });
+    const warning = checkGoalDeadlines([warningGoal], [], { now: NOW });
+    expect(warning.notifications[0]).toEqual(expect.objectContaining({
+      goalId: 'staged', urgency: 'warning', dueDate: NOW + 5 * DAY_MS,
+    }));
+
+    const existingWarning = [{
+      message: warning.notifications[0].message,
+      goalId: 'staged',
+      dueDate: NOW + 5 * DAY_MS,
+      urgency: 'warning' as const,
+    }];
+    expect(checkGoalDeadlines([warningGoal], existingWarning, { now: NOW }).notifications).toEqual([]);
+
+    const urgentNow = NOW + 4 * DAY_MS;
+    const urgent = checkGoalDeadlines([warningGoal], existingWarning, { now: urgentNow });
+    expect(urgent.notifications[0]?.urgency).toBe('urgent');
+  });
+
   it('skips notification when similar reminder already exists', () => {
     const dueDate = NOW + 3 * DAY_MS;
     const goals = [makeGoal({ id: 'g10', title: 'Learn TypeScript', dueDate })];

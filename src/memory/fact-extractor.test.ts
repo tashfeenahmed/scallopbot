@@ -598,6 +598,50 @@ describe('Combined fact + trigger extraction', () => {
     logger = createMockLogger();
   });
 
+  it('interprets offset-less wall-clock trigger times in the user timezone', () => {
+    const mockDb = createMockDatabase();
+    const extractor = new LLMFactExtractor({
+      provider: createMockProvider('{"facts":[],"proactive_triggers":[]}'),
+      scallopStore: createMockScallopStore(mockDb),
+      logger,
+      useRelationshipClassifier: false,
+    });
+
+    const parsed = (extractor as any).parseTriggerTime(
+      '2026-07-11T09:00',
+      'America/New_York',
+    );
+    expect(parsed).toBe(Date.parse('2026-07-11T13:00:00Z'));
+  });
+
+  it('rejects invalid calendar dates and DST-skipped wall-clock times', () => {
+    const mockDb = createMockDatabase();
+    const extractor = new LLMFactExtractor({
+      provider: createMockProvider('{"facts":[],"proactive_triggers":[]}'),
+      scallopStore: createMockScallopStore(mockDb),
+      logger,
+      useRelationshipClassifier: false,
+    });
+
+    expect((extractor as any).parseTriggerTime(
+      '2026-02-30T10:00',
+      'America/New_York',
+    )).toBeNull();
+    expect((extractor as any).parseTriggerTime(
+      '2026-02-30T10:00Z',
+      'America/New_York',
+    )).toBeNull();
+    // New York jumps directly from 01:59 to 03:00 on this date.
+    expect((extractor as any).parseTriggerTime(
+      '2026-03-08T02:30',
+      'America/New_York',
+    )).toBeNull();
+    expect((extractor as any).parseTriggerTime(
+      '2026-03-08T03:30',
+      'America/New_York',
+    )).toBe(Date.parse('2026-03-08T07:30:00Z'));
+  });
+
   it('should extract both facts and triggers from a single LLM call', async () => {
     const mockDb = createMockDatabase();
     const mockScallopStore = createMockScallopStore(mockDb);
@@ -627,7 +671,10 @@ describe('Combined fact + trigger extraction', () => {
 
     const result = await extractor.extractFacts(
       'I have a dentist appointment tomorrow at 2pm',
-      'user-123'
+      'user-123',
+      undefined,
+      undefined,
+      'source-session-1',
     );
 
     // Facts should be extracted
@@ -638,6 +685,8 @@ describe('Combined fact + trigger extraction', () => {
     expect(mockDb.addScheduledItem).toHaveBeenCalledTimes(1);
     const scheduledCall = mockDb.addScheduledItem.mock.calls[0][0];
     expect(scheduledCall.type).toBe('event_prep');
+    expect(scheduledCall.source).toBe('agent');
+    expect(scheduledCall.sessionId).toBe('source-session-1');
     expect(scheduledCall.message).toBe('Dentist appointment tomorrow');
     // event_prep defaults to kind='task' when no explicit kind
     expect(scheduledCall.kind).toBe('task');
@@ -757,6 +806,7 @@ describe('Combined fact + trigger extraction', () => {
     const storedContext = mockDb.addScheduledItem.mock.calls[0][0].context;
     // No guidance → plain string, not JSON
     expect(storedContext).toBe('User needs to finish report');
+    expect(mockDb.addScheduledItem.mock.calls[0][0].source).toBe('agent');
   });
 
   it('should parse daily recurring pattern correctly', async () => {
@@ -770,6 +820,7 @@ describe('Combined fact + trigger extraction', () => {
       proactive_triggers: [
         {
           type: 'follow_up',
+          consent: 'explicit',
           description: 'Take morning medication',
           trigger_time: 'tomorrow 9:00',
           context: 'User takes medication every morning',
@@ -786,7 +837,7 @@ describe('Combined fact + trigger extraction', () => {
       useRelationshipClassifier: false,
     });
 
-    await extractor.extractFacts('I take my medication every day at 9am', 'user-123');
+    await extractor.extractFacts('Remind me to take my medication every day at 9am', 'user-123');
 
     expect(mockDb.addScheduledItem).toHaveBeenCalledTimes(1);
     const recurring = mockDb.addScheduledItem.mock.calls[0][0].recurring;
@@ -794,6 +845,7 @@ describe('Combined fact + trigger extraction', () => {
     expect(recurring.type).toBe('daily');
     expect(recurring.hour).toBe(9);
     expect(recurring.minute).toBe(0);
+    expect(mockDb.addScheduledItem.mock.calls[0][0].source).toBe('user');
   });
 
   it('should parse weekday recurring pattern correctly', async () => {
@@ -807,6 +859,7 @@ describe('Combined fact + trigger extraction', () => {
       proactive_triggers: [
         {
           type: 'commitment_check',
+          consent: 'explicit',
           description: 'Gym workout',
           trigger_time: 'tomorrow 6:30',
           context: 'User goes to gym every weekday morning',
@@ -823,7 +876,7 @@ describe('Combined fact + trigger extraction', () => {
       useRelationshipClassifier: false,
     });
 
-    await extractor.extractFacts('I go to gym every weekday at 7am', 'user-123');
+    await extractor.extractFacts('Remind me about the gym every weekday at 7am', 'user-123');
 
     expect(mockDb.addScheduledItem).toHaveBeenCalledTimes(1);
     const recurring = mockDb.addScheduledItem.mock.calls[0][0].recurring;
@@ -842,6 +895,7 @@ describe('Combined fact + trigger extraction', () => {
       proactive_triggers: [
         {
           type: 'event_prep',
+          consent: 'explicit',
           description: 'Monday team standup',
           trigger_time: 'Monday 8:00',
           context: 'Weekly team standup meeting',
@@ -858,7 +912,7 @@ describe('Combined fact + trigger extraction', () => {
       useRelationshipClassifier: false,
     });
 
-    await extractor.extractFacts('We have team standup every Monday at 9am', 'user-123');
+    await extractor.extractFacts('Every Monday, remind me about the 9am team standup', 'user-123');
 
     expect(mockDb.addScheduledItem).toHaveBeenCalledTimes(1);
     const recurring = mockDb.addScheduledItem.mock.calls[0][0].recurring;
@@ -867,6 +921,93 @@ describe('Combined fact + trigger extraction', () => {
     expect(recurring.dayOfWeek).toBe(1); // Monday
     expect(recurring.hour).toBe(9);
     expect(recurring.minute).toBe(0);
+  });
+
+  it('rejects an inferred recurring interruption without explicit consent', async () => {
+    const mockDb = createMockDatabase();
+    const mockScallopStore = createMockScallopStore(mockDb);
+    const mockProvider = createMockProvider(JSON.stringify({
+      facts: [],
+      proactive_triggers: [{
+        type: 'follow_up',
+        consent: 'explicit',
+        description: 'Take morning medication',
+        trigger_time: 'tomorrow 9:00',
+        context: 'User mentioned taking medication every morning',
+        recurring: { type: 'daily', hour: 9, minute: 0 },
+      }],
+    }));
+    const extractor = new LLMFactExtractor({
+      provider: mockProvider,
+      scallopStore: mockScallopStore,
+      logger,
+      useRelationshipClassifier: false,
+    });
+
+    await extractor.extractFacts('I take medication every morning at 9.', 'user-123');
+
+    expect(mockDb.addScheduledItem).not.toHaveBeenCalled();
+  });
+
+  it('preserves intentionally repeated explicit reminders', async () => {
+    const mockDb = createMockDatabase();
+    mockDb.hasSimilarPendingScheduledItem.mockReturnValue(true);
+    const mockProvider = createMockProvider(JSON.stringify({
+      facts: [],
+      proactive_triggers: [
+        {
+          type: 'follow_up', consent: 'explicit', description: 'Take the medication.',
+          trigger_time: '+1h', context: 'First requested dose reminder', recurring: null,
+        },
+        {
+          type: 'follow_up', consent: 'explicit', description: 'Take the medication.',
+          trigger_time: '+2h', context: 'Second requested dose reminder', recurring: null,
+        },
+      ],
+    }));
+    const extractor = new LLMFactExtractor({
+      provider: mockProvider,
+      scallopStore: createMockScallopStore(mockDb),
+      logger,
+      useRelationshipClassifier: false,
+    });
+
+    await extractor.extractFacts('Remind me to take it in one hour and again in two hours.', 'user-123');
+
+    expect(mockDb.addScheduledItem).toHaveBeenCalledTimes(2);
+    expect(mockDb.addScheduledItem.mock.calls.every(call => call[0].source === 'user')).toBe(true);
+    expect(mockDb.hasSimilarPendingScheduledItem).not.toHaveBeenCalled();
+  });
+
+  it('does not extend consent from one requested intent to a separate mentioned event', async () => {
+    const mockDb = createMockDatabase();
+    const mockProvider = createMockProvider(JSON.stringify({
+      facts: [],
+      proactive_triggers: [
+        {
+          type: 'follow_up', consent: 'explicit', description: 'Call your mom.',
+          trigger_time: '+1h', context: 'Requested reminder to call mom', recurring: null,
+        },
+        {
+          type: 'event_prep', consent: 'inferred', description: 'Your flight is Friday at 5.',
+          trigger_time: '+2h', context: 'User also mentioned a Friday flight', recurring: null,
+        },
+      ],
+    }));
+    const extractor = new LLMFactExtractor({
+      provider: mockProvider,
+      scallopStore: createMockScallopStore(mockDb),
+      logger,
+      useRelationshipClassifier: false,
+    });
+
+    await extractor.extractFacts(
+      'Remind me to call Mom tomorrow at 9. I also have a flight Friday at 5.',
+      'user-123',
+    );
+
+    expect(mockDb.addScheduledItem.mock.calls.map(call => call[0].source))
+      .toEqual(['user', 'agent']);
   });
 
   it('should create one-time trigger when recurring_pattern is null', async () => {

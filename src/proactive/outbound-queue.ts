@@ -22,18 +22,17 @@ import { extractResponseText } from './proactive-utils.js';
 
 // ============ LLM Combine Prompt ============
 
-const COMBINE_SYSTEM_PROMPT = `You combine multiple proactive messages into a single natural Telegram message.
+const COMBINE_SYSTEM_PROMPT = `You combine multiple proactive messages into one concise message from an AI assistant.
 
 Rules:
-- Write as if casually texting a friend
-- Include EVERY topic from the individual messages — never drop anything
-- Group related items naturally (e.g., two reminders together)
-- Keep total output concise: 2-5 sentences depending on how many topics
+- Sound natural and respectful without pretending to be a human friend
+- Preserve time-sensitive reminders and concrete new information
+- Merge duplicates and omit redundant generic check-ins
+- Prefer one coherent focus; include a second topic only when it is genuinely useful now
+- Keep total output concise: normally 1-3 sentences
 - No emojis, no bullet points, no headers, no structured formatting
-- Use natural transitions: "Also", "Oh and", "By the way", etc.
-- For unrelated topics, brief jumps are fine — don't force connections
 - Preserve any specific times, names, or details from the originals
-- Match the casual tone of the originals (e.g., "Hey", "Just a heads up")
+- Ask at most one question and avoid canned greetings/check-in language
 - Output ONLY the combined message, nothing else`;
 
 // ============ Types ============

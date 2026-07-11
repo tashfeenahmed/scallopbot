@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { stripThinkTags, extractResponseText, extractJSON } from './proactive-utils.js';
+import {
+  stripThinkTags,
+  extractResponseText,
+  extractJSON,
+  getTodayStartMs,
+} from './proactive-utils.js';
 
 describe('stripThinkTags', () => {
   it('removes a closed think block', () => {
@@ -70,5 +75,25 @@ describe('extractJSON', () => {
 
   it('returns null for a truncated object', () => {
     expect(extractJSON('{"items": [{"index": 1, "action": "nud')).toBeNull();
+  });
+});
+
+describe('getTodayStartMs', () => {
+  it('uses the offset at midnight on the New York spring DST transition', () => {
+    const middayAfterClocksAdvance = Date.parse('2024-03-10T16:00:00.000Z');
+    expect(new Date(getTodayStartMs('America/New_York', middayAfterClocksAdvance)).toISOString())
+      .toBe('2024-03-10T05:00:00.000Z');
+  });
+
+  it('uses the offset at midnight on the New York fall DST transition', () => {
+    const middayAfterClocksRetreat = Date.parse('2024-11-03T17:00:00.000Z');
+    expect(new Date(getTodayStartMs('America/New_York', middayAfterClocksRetreat)).toISOString())
+      .toBe('2024-11-03T04:00:00.000Z');
+  });
+
+  it('returns ordinary local midnight outside a DST transition', () => {
+    const now = Date.parse('2024-01-15T18:42:13.450Z');
+    expect(new Date(getTodayStartMs('America/New_York', now)).toISOString())
+      .toBe('2024-01-15T05:00:00.000Z');
   });
 });

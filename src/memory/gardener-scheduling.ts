@@ -5,7 +5,7 @@
 
 import type { ScallopDatabase, ScheduledItemKind, TaskConfig } from './db.js';
 import { computeDeliveryTime, type DeliveryTiming } from '../proactive/timing-model.js';
-import { getHourInTimezone } from '../proactive/proactive-utils.js';
+import { getHourInTimezone, getMinuteInTimezone } from '../proactive/proactive-utils.js';
 
 export interface ScheduleProactiveItemInput {
   db: ScallopDatabase;
@@ -45,8 +45,10 @@ export function scheduleProactiveItem(input: ScheduleProactiveItemInput): Schedu
     quietHours: input.quietHours,
     lastProactiveAt: input.lastProactiveAt,
     currentHour,
+    currentMinute: getMinuteInTimezone(now, input.timezone),
     urgency: input.urgency,
     now,
+    jitterSeed: `${input.userId}:${input.sourceMemoryId ?? input.type}:${input.message}`,
   });
 
   const item = input.db.addScheduledItem({
@@ -87,13 +89,14 @@ export function createProactiveItem(input: CreateProactiveItemInput): CreateProa
 }
 
 /**
- * Finds the most recent firedAt timestamp from agent-sourced scheduled items.
- * Returns null when no fired agent items exist.
+ * Finds the most recent actual inferred delivery. Scheduler state alone is not
+ * evidence that a message reached the user: suppressed/cancelled work may be
+ * archived or completed without an outbound send.
  */
 export function getLastProactiveAt(db: ScallopDatabase, userId: string): number | null {
-  const scheduledItems = db.getScheduledItemsByUser(userId);
-  const lastFiredAgent = scheduledItems
-    .filter(i => i.source === 'agent' && i.firedAt != null)
-    .sort((a, b) => (b.firedAt ?? 0) - (a.firedAt ?? 0));
-  return lastFiredAgent.length > 0 ? lastFiredAgent[0].firedAt : null;
+  const recentWindow = Date.now() - 30 * 24 * 60 * 60 * 1000;
+  const latest = db.getRecentProactiveSends(recentWindow)
+    .filter(send => send.userId === userId && send.source === 'agent')
+    .reduce((value, send) => Math.max(value, send.sentAt), 0);
+  return latest > 0 ? latest : null;
 }

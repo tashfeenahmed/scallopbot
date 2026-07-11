@@ -310,224 +310,32 @@ describe('scanStaleGoals', () => {
 // ============ scanBehavioralAnomalies ============
 
 describe('scanBehavioralAnomalies', () => {
-  it('returns empty array when messageFrequency is null (cold start)', () => {
-    const signals = makeSignals({ messageFrequency: null });
-    const result = scanBehavioralAnomalies(signals, NOW);
-    expect(result).toEqual([]);
-  });
-
-  it('detects frequency drop: decreasing trend AND dailyRate < weeklyAvg * 0.5', () => {
+  it('never turns passive usage changes into outreach signals', () => {
     const signals = makeSignals({
       messageFrequency: {
-        dailyRate: 2,
-        weeklyAvg: 10, // 2 < 10 * 0.5 = 5
-        trend: 'decreasing',
-        lastComputed: NOW,
-      },
-    });
-    const result = scanBehavioralAnomalies(signals, NOW);
-    expect(result).toHaveLength(1);
-    expect(result[0].type).toBe('behavioral_anomaly');
-    expect(result[0].severity).toBe('medium');
-    expect(result[0].description.toLowerCase()).toContain('frequency');
-  });
-
-  it('does not flag frequency when trend is not decreasing', () => {
-    const signals = makeSignals({
-      messageFrequency: {
-        dailyRate: 2,
-        weeklyAvg: 10,
-        trend: 'stable',
-        lastComputed: NOW,
-      },
-    });
-    const result = scanBehavioralAnomalies(signals, NOW);
-    // Should not produce a frequency drop signal
-    const freqSignal = result.find((s) =>
-      s.description.toLowerCase().includes('frequency'),
-    );
-    expect(freqSignal).toBeUndefined();
-  });
-
-  it('does not flag frequency when dailyRate >= weeklyAvg * 0.5', () => {
-    const signals = makeSignals({
-      messageFrequency: {
-        dailyRate: 6,
-        weeklyAvg: 10, // 6 >= 10 * 0.5 = 5
-        trend: 'decreasing',
-        lastComputed: NOW,
-      },
-    });
-    const result = scanBehavioralAnomalies(signals, NOW);
-    const freqSignal = result.find((s) =>
-      s.description.toLowerCase().includes('frequency'),
-    );
-    expect(freqSignal).toBeUndefined();
-  });
-
-  it('detects low session engagement: decreasing trend AND avgMessagesPerSession < 3', () => {
-    const signals = makeSignals({
-      messageFrequency: {
-        dailyRate: 5,
-        weeklyAvg: 5,
-        trend: 'stable',
-        lastComputed: NOW,
-      },
-      sessionEngagement: {
-        avgMessagesPerSession: 2,
-        avgDurationMs: 300000,
-        trend: 'decreasing',
-        lastComputed: NOW,
-      },
-    });
-    const result = scanBehavioralAnomalies(signals, NOW);
-    const engageSignal = result.find((s) =>
-      s.description.toLowerCase().includes('engagement') ||
-      s.description.toLowerCase().includes('session'),
-    );
-    expect(engageSignal).toBeDefined();
-    expect(engageSignal!.type).toBe('behavioral_anomaly');
-    expect(engageSignal!.severity).toBe('medium');
-  });
-
-  it('does not flag engagement when avgMessagesPerSession >= 3', () => {
-    const signals = makeSignals({
-      messageFrequency: {
-        dailyRate: 5,
-        weeklyAvg: 5,
-        trend: 'stable',
-        lastComputed: NOW,
-      },
-      sessionEngagement: {
-        avgMessagesPerSession: 5,
-        avgDurationMs: 600000,
-        trend: 'decreasing',
-        lastComputed: NOW,
-      },
-    });
-    const result = scanBehavioralAnomalies(signals, NOW);
-    const engageSignal = result.find((s) =>
-      s.description.toLowerCase().includes('engagement') ||
-      s.description.toLowerCase().includes('session'),
-    );
-    expect(engageSignal).toBeUndefined();
-  });
-
-  it('detects declining response length: trend === decreasing', () => {
-    const signals = makeSignals({
-      messageFrequency: {
-        dailyRate: 5,
-        weeklyAvg: 5,
-        trend: 'stable',
-        lastComputed: NOW,
-      },
-      responseLength: {
-        avgLength: 50,
-        trend: 'decreasing',
-        lastComputed: NOW,
-      },
-    });
-    const result = scanBehavioralAnomalies(signals, NOW);
-    const lengthSignal = result.find((s) =>
-      s.description.toLowerCase().includes('response') ||
-      s.description.toLowerCase().includes('length') ||
-      s.description.toLowerCase().includes('shorter'),
-    );
-    expect(lengthSignal).toBeDefined();
-    expect(lengthSignal!.type).toBe('behavioral_anomaly');
-    // Promoted from 'low' so the moderate dial stops silently skipping this signal
-    expect(lengthSignal!.severity).toBe('medium');
-  });
-
-  it('does not flag response length when trend is stable', () => {
-    const signals = makeSignals({
-      messageFrequency: {
-        dailyRate: 5,
-        weeklyAvg: 5,
-        trend: 'stable',
-        lastComputed: NOW,
-      },
-      responseLength: {
-        avgLength: 50,
-        trend: 'stable',
-        lastComputed: NOW,
-      },
-    });
-    const result = scanBehavioralAnomalies(signals, NOW);
-    const lengthSignal = result.find((s) =>
-      s.description.toLowerCase().includes('response') ||
-      s.description.toLowerCase().includes('length') ||
-      s.description.toLowerCase().includes('shorter'),
-    );
-    expect(lengthSignal).toBeUndefined();
-  });
-
-  it('returns multiple anomalies when all conditions met', () => {
-    const signals = makeSignals({
-      messageFrequency: {
-        dailyRate: 1,
-        weeklyAvg: 10, // drop
+        dailyRate: 0.2,
+        weeklyAvg: 12,
         trend: 'decreasing',
         lastComputed: NOW,
       },
       sessionEngagement: {
         avgMessagesPerSession: 1,
-        avgDurationMs: 60000,
+        avgDurationMs: 10_000,
         trend: 'decreasing',
         lastComputed: NOW,
       },
       responseLength: {
-        avgLength: 20,
+        avgLength: 2,
         trend: 'decreasing',
         lastComputed: NOW,
       },
     });
-    const result = scanBehavioralAnomalies(signals, NOW);
-    expect(result.length).toBe(3);
-    expect(result.every((s) => s.type === 'behavioral_anomaly')).toBe(true);
-    // All three anomalies (frequency drop, engagement drop, response_length) are
-    // now 'medium' so the moderate dial no longer skips them wholesale.
-    expect(result.filter((s) => s.severity === 'low').length).toBe(0);
-    expect(result.filter((s) => s.severity === 'medium').length).toBe(3);
+
+    expect(scanBehavioralAnomalies(signals, NOW)).toEqual([]);
   });
 
-  it('returns empty when no anomaly conditions met', () => {
-    const signals = makeSignals({
-      messageFrequency: {
-        dailyRate: 8,
-        weeklyAvg: 7,
-        trend: 'increasing',
-        lastComputed: NOW,
-      },
-      sessionEngagement: {
-        avgMessagesPerSession: 10,
-        avgDurationMs: 600000,
-        trend: 'stable',
-        lastComputed: NOW,
-      },
-      responseLength: {
-        avgLength: 200,
-        trend: 'increasing',
-        lastComputed: NOW,
-      },
-    });
-    const result = scanBehavioralAnomalies(signals, NOW);
-    expect(result).toEqual([]);
-  });
-
-  it('handles null sessionEngagement and responseLength gracefully', () => {
-    const signals = makeSignals({
-      messageFrequency: {
-        dailyRate: 8,
-        weeklyAvg: 7,
-        trend: 'stable',
-        lastComputed: NOW,
-      },
-      sessionEngagement: null,
-      responseLength: null,
-    });
-    const result = scanBehavioralAnomalies(signals, NOW);
-    expect(result).toEqual([]);
+  it('remains a safe no-op on cold start', () => {
+    expect(scanBehavioralAnomalies(makeSignals(), NOW)).toEqual([]);
   });
 });
 
@@ -539,85 +347,105 @@ describe('scanUnresolvedThreads', () => {
     expect(result).toEqual([]);
   });
 
-  it('detects unresolved question with no follow-up within 48h', () => {
+  it('skips completed, answered, and casual sessions with no later conversation', () => {
+    const summaries = [
+      makeSummary({
+        id: 'answered',
+        summary: 'The user asked how to deploy the service. The question was answered and the deployment was completed.',
+        topics: ['How to deploy?', 'deployment complete'],
+        createdAt: NOW - 3 * DAY_MS,
+      }),
+      makeSummary({
+        id: 'casual',
+        summary: 'The user chatted about weekend cooking plans and thanked the assistant.',
+        topics: ['cooking', 'weekend plans'],
+        createdAt: NOW - 4 * DAY_MS,
+      }),
+    ];
+
+    expect(scanUnresolvedThreads(summaries, NOW)).toEqual([]);
+  });
+
+  it('does not treat a bare question topic as proof that it is unanswered', () => {
     const summary = makeSummary({
-      id: 's1',
-      topics: ['How to deploy?', 'infrastructure'],
-      createdAt: NOW - 3 * DAY_MS, // 3 days ago, within 7-day window
+      id: 'question-topic',
+      summary: 'The conversation covered deployment options and trade-offs.',
+      topics: ['Should we migrate?', 'infrastructure'],
+      createdAt: NOW - 3 * DAY_MS,
+    });
+
+    expect(scanUnresolvedThreads([summary], NOW)).toEqual([]);
+  });
+
+  it('detects a user-requested follow-up after the waiting window', () => {
+    const summary = makeSummary({
+      id: 'requested-follow-up',
+      summary: 'The user asked the assistant to follow up next week about the deployment metrics.',
+      topics: ['deployment metrics', 'follow-up requested'],
+      createdAt: NOW - 3 * DAY_MS,
       messageCount: 5,
     });
     const result = scanUnresolvedThreads([summary], NOW);
+
     expect(result).toHaveLength(1);
-    expect(result[0].type).toBe('unresolved_thread');
-    expect(result[0].severity).toBe('medium');
-    expect(result[0].sourceId).toBe('s1');
-  });
-
-  it('does not flag question when follow-up exists within 48h', () => {
-    const summaries = [
-      makeSummary({
-        id: 's2',
-        topics: ['How to deploy?'],
-        createdAt: NOW - 3 * DAY_MS,
-        messageCount: 5,
-      }),
-      makeSummary({
-        id: 's3',
-        topics: ['deployment setup'],
-        createdAt: NOW - 3 * DAY_MS + 24 * 60 * 60 * 1000, // 24h after s2 (within 48h)
-        messageCount: 8,
-      }),
-    ];
-    const result = scanUnresolvedThreads(summaries, NOW);
-    // s2 has a follow-up within 48h, so no unresolved signal
-    const s2Signal = result.find((s) => s.sourceId === 's2');
-    expect(s2Signal).toBeUndefined();
-  });
-
-  it('skips summary with messageCount < 3 AND age < 48h (too fresh/short)', () => {
-    const summary = makeSummary({
-      id: 's4',
-      topics: ['What is this?'],
-      createdAt: NOW - 1 * DAY_MS, // 1 day ago
-      messageCount: 2, // < 3
+    expect(result[0]).toMatchObject({
+      type: 'unresolved_thread',
+      severity: 'medium',
+      sourceId: 'requested-follow-up',
     });
-    const result = scanUnresolvedThreads([summary], NOW);
-    expect(result).toEqual([]);
+    expect(result[0].context.openLoopKind).toBe('follow_up');
   });
 
-  it('does not skip summary with messageCount < 3 but age >= 48h', () => {
+  it('detects explicit pending evidence in topic tags', () => {
     const summary = makeSummary({
-      id: 's5',
-      topics: ['What is happening?'],
-      createdAt: NOW - 3 * DAY_MS, // 3 days ago (>= 48h)
-      messageCount: 2, // < 3 but old enough
-    });
-    const result = scanUnresolvedThreads([summary], NOW);
-    expect(result).toHaveLength(1);
-    expect(result[0].sourceId).toBe('s5');
-  });
-
-  it('flags topics without question marks as medium-severity unresolved threads', () => {
-    // Previously required a "?" in topics, which meant normal conversations
-    // never became signals. New behavior: any session with no follow-up
-    // within 48h is a candidate, floored at 'medium' (a thread with no
-    // follow-up is meaningfully unresolved) so the moderate dial considers it.
-    const summary = makeSummary({
-      id: 's6',
-      topics: ['deployment', 'infrastructure'],
+      id: 'pending-decision',
+      summary: 'The user compared the two hosting options.',
+      topics: ['hosting decision pending', 'infrastructure'],
       createdAt: NOW - 3 * DAY_MS,
+    });
+    const result = scanUnresolvedThreads([summary], NOW);
+
+    expect(result).toHaveLength(1);
+    expect(result[0].sourceId).toBe('pending-decision');
+    expect(result[0].context.openLoopKind).toBe('pending');
+  });
+
+  it('waits at least 48 hours even when a follow-up is explicit', () => {
+    const summary = makeSummary({
+      id: 'fresh-follow-up',
+      summary: 'The user asked the assistant to follow up about the test results.',
+      topics: ['test results', 'follow-up requested'],
+      createdAt: NOW - 1 * DAY_MS,
       messageCount: 10,
     });
-    const result = scanUnresolvedThreads([summary], NOW);
-    expect(result).toHaveLength(1);
-    expect(result[0].severity).toBe('medium');
-    expect(result[0].sourceId).toBe('s6');
+
+    expect(scanUnresolvedThreads([summary], NOW)).toEqual([]);
+  });
+
+  it('does not revive a follow-up that was explicitly negated or completed', () => {
+    const summaries = [
+      makeSummary({
+        id: 'not-needed',
+        summary: 'The deployment succeeded, so no further follow-up is needed.',
+        topics: ['deployment', 'follow-up not needed'],
+        createdAt: NOW - 3 * DAY_MS,
+      }),
+      makeSummary({
+        id: 'completed-follow-up',
+        summary: 'The follow-up was pending and was then completed successfully.',
+        topics: ['completed follow-up'],
+        createdAt: NOW - 3 * DAY_MS,
+      }),
+    ];
+
+    expect(scanUnresolvedThreads(summaries, NOW)).toEqual([]);
   });
 
   it('does not flag summaries older than 7 days', () => {
     const summary = makeSummary({
       id: 's7',
-      topics: ['How to fix this?'],
+      summary: 'The user asked the assistant to follow up about the old issue.',
+      topics: ['old issue', 'follow-up requested'],
       createdAt: NOW - 8 * DAY_MS, // 8 days ago
       messageCount: 10,
     });
@@ -625,55 +453,43 @@ describe('scanUnresolvedThreads', () => {
     expect(result).toEqual([]);
   });
 
-  it('handles multiple summaries with mixed resolution states', () => {
+  it('does not let an unrelated later chat erase an explicit open loop', () => {
     const summaries = [
-      // Unresolved: question, no follow-up, 4 days old
       makeSummary({
-        id: 'unresolved',
-        topics: ['Should we migrate?'],
+        id: 'open-deployment',
+        summary: 'The deployment decision remains pending until the cost review.',
+        topics: ['deployment decision', 'cost review'],
         createdAt: NOW - 4 * DAY_MS,
-        messageCount: 6,
-      }),
-      // Resolved: question with follow-up within 48h
-      makeSummary({
-        id: 'resolved-q',
-        topics: ['How to configure?'],
-        createdAt: NOW - 5 * DAY_MS,
-        messageCount: 5,
       }),
       makeSummary({
-        id: 'resolved-followup',
-        topics: ['configuration details'],
-        createdAt: NOW - 5 * DAY_MS + 12 * 60 * 60 * 1000, // 12h later
-        messageCount: 8,
-      }),
-      // No question: still flagged (now 'medium') because there's no follow-up.
-      makeSummary({
-        id: 'no-question',
-        topics: ['general chat'],
+        id: 'later-casual-chat',
+        summary: 'The user chatted about a recipe.',
+        topics: ['cooking'],
         createdAt: NOW - 2 * DAY_MS,
-        messageCount: 10,
       }),
     ];
+
     const result = scanUnresolvedThreads(summaries, NOW);
-    // Both the question-with-no-followup AND the no-question thread are
-    // candidates. The resolved-q+follow-up pair is excluded.
-    expect(result).toHaveLength(2);
-    const unresolved = result.find(r => r.sourceId === 'unresolved');
-    expect(unresolved?.severity).toBe('medium');
-    const noQuestion = result.find(r => r.sourceId === 'no-question');
-    expect(noQuestion?.severity).toBe('medium');
+    expect(result.map((signal) => signal.sourceId)).toEqual(['open-deployment']);
   });
 
-  it('detects question mark anywhere in topics array', () => {
-    const summary = makeSummary({
-      id: 's8',
-      topics: ['general', 'is this working?', 'setup'],
-      createdAt: NOW - 3 * DAY_MS,
-      messageCount: 5,
-    });
-    const result = scanUnresolvedThreads([summary], NOW);
-    expect(result).toHaveLength(1);
+  it('suppresses an open loop when a later related summary explicitly resolves it', () => {
+    const summaries = [
+      makeSummary({
+        id: 'pending-deployment',
+        summary: 'The deployment decision remains pending until the cost review.',
+        topics: ['deployment decision', 'cost review'],
+        createdAt: NOW - 5 * DAY_MS,
+      }),
+      makeSummary({
+        id: 'resolved-deployment',
+        summary: 'The deployment decision was resolved after the cost review.',
+        topics: ['deployment decision', 'cost review'],
+        createdAt: NOW - 2 * DAY_MS,
+      }),
+    ];
+
+    expect(scanUnresolvedThreads(summaries, NOW)).toEqual([]);
   });
 });
 
@@ -693,18 +509,14 @@ describe('scanForGaps', () => {
           lastComputed: NOW,
         },
       }),
-      sessionSummaries: [
-        // Empty/no-sessions is the truly clean state — any dangling session
-        // without a follow-up now surfaces as a low-severity signal, which
-        // is correct behavior (callers decide to act or not).
-      ],
+      sessionSummaries: [],
       now: NOW,
     };
     const result = scanForGaps(input);
     expect(result).toEqual([]);
   });
 
-  it('combines signals from all sub-scanners', () => {
+  it('combines grounded goal and open-loop signals without behavioral outreach', () => {
     const input: GapScanInput = {
       activeGoals: [
         makeGoal({
@@ -724,7 +536,8 @@ describe('scanForGaps', () => {
       sessionSummaries: [
         makeSummary({
           id: 'unresolved-q',
-          topics: ['How to fix this?'],
+          summary: 'The user asked the assistant to follow up after testing the fix.',
+          topics: ['fix validation', 'follow-up requested'],
           createdAt: NOW - 3 * DAY_MS,
           messageCount: 5,
         }),
@@ -734,8 +547,8 @@ describe('scanForGaps', () => {
     const result = scanForGaps(input);
     const types = result.map((s) => s.type);
     expect(types).toContain('stale_goal');
-    expect(types).toContain('behavioral_anomaly');
     expect(types).toContain('unresolved_thread');
+    expect(types).not.toContain('behavioral_anomaly');
   });
 
   it('uses Date.now() when now is not provided', () => {

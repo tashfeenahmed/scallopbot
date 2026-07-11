@@ -96,23 +96,103 @@ export function getHourInTimezone(nowMs: number, timezone?: string): number {
   }
 }
 
+/** Get the local minute (0-59) for minute-accurate proactive timing. */
+export function getMinuteInTimezone(nowMs: number, timezone?: string): number {
+  if (!timezone) return new Date(nowMs).getMinutes();
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: timezone,
+      minute: 'numeric',
+    }).formatToParts(new Date(nowMs));
+    const minute = parseInt(parts.find(p => p.type === 'minute')?.value ?? '', 10);
+    return Number.isFinite(minute) ? minute : new Date(nowMs).getMinutes();
+  } catch {
+    return new Date(nowMs).getMinutes();
+  }
+}
+
+interface ZonedDateTimeParts {
+  year: number;
+  month: number;
+  day: number;
+  hour: number;
+  minute: number;
+  second: number;
+}
+
+function zonedDateTimeParts(
+  formatter: Intl.DateTimeFormat,
+  instantMs: number,
+): ZonedDateTimeParts {
+  const parts = formatter.formatToParts(new Date(instantMs));
+  const value = (type: Intl.DateTimeFormatPartTypes): number => {
+    const parsed = Number(parts.find(part => part.type === type)?.value);
+    if (!Number.isFinite(parsed)) throw new Error(`Missing ${type} timezone part`);
+    return parsed;
+  };
+
+  return {
+    year: value('year'),
+    month: value('month'),
+    day: value('day'),
+    // Some ICU builds represent midnight as 24:00 even with a 24-hour
+    // formatter. It denotes the same local date for offset calculation here.
+    hour: value('hour') % 24,
+    minute: value('minute'),
+    second: value('second'),
+  };
+}
+
+function timezoneOffsetMs(formatter: Intl.DateTimeFormat, instantMs: number): number {
+  const local = zonedDateTimeParts(formatter, instantMs);
+  const localFieldsAsUtc = Date.UTC(
+    local.year,
+    local.month - 1,
+    local.day,
+    local.hour,
+    local.minute,
+    local.second,
+  );
+  const instantAtWholeSecond = Math.floor(instantMs / 1000) * 1000;
+  return localFieldsAsUtc - instantAtWholeSecond;
+}
+
 /**
- * Get the start of today (midnight) in the given timezone, as epoch ms.
- * Approximation: uses Intl to find the current local hour, then subtracts
- * that many hours from the current time (rounded down to the hour).
+ * Get the start of the current local calendar day as epoch milliseconds.
+ *
+ * The timezone offset is resolved at local midnight, rather than subtracting
+ * the current wall-clock hour. That distinction matters on DST transition
+ * days, when midnight and "now" can have different UTC offsets.
  */
 export function getTodayStartMs(timezone: string, nowMs?: number): number {
   try {
-    const now = new Date(nowMs ?? Date.now());
-    const parts = new Intl.DateTimeFormat('en-US', {
+    const currentMs = nowMs ?? Date.now();
+    const formatter = new Intl.DateTimeFormat('en-CA', {
       timeZone: timezone,
-      hour: 'numeric',
-      minute: 'numeric',
-      hour12: false,
-    }).formatToParts(now);
-    const hour = parseInt(parts.find(p => p.type === 'hour')?.value ?? '0', 10) % 24;
-    const minute = parseInt(parts.find(p => p.type === 'minute')?.value ?? '0', 10);
-    return now.getTime() - (hour * 3600_000 + minute * 60_000) - (now.getSeconds() * 1000) - now.getMilliseconds();
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hourCycle: 'h23',
+    });
+    const localNow = zonedDateTimeParts(formatter, currentMs);
+    const localMidnightFieldsAsUtc = Date.UTC(
+      localNow.year,
+      localNow.month - 1,
+      localNow.day,
+    );
+
+    // Resolve the offset iteratively because the UTC-shaped initial guess can
+    // lie on the other side of a DST boundary from local midnight.
+    let midnightMs = localMidnightFieldsAsUtc;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const next = localMidnightFieldsAsUtc - timezoneOffsetMs(formatter, midnightMs);
+      if (next === midnightMs) break;
+      midnightMs = next;
+    }
+    return midnightMs;
   } catch {
     // Fallback: midnight in server local time
     const now = new Date(nowMs ?? Date.now());

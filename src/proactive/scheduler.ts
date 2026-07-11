@@ -28,7 +28,23 @@ import {
 } from './feedback.js';
 import { getRecentChatContext } from './chat-context.js';
 import { wordOverlap } from '../utils/text-similarity.js';
-import { renderUserFacingProactiveMessage } from './message-safety.js';
+import {
+  prepareUserFacingProactiveMessage,
+  renderCompletedWorkDigest,
+  sanitizeProactiveMessage,
+  summarizeTaskResultForDelivery,
+} from './message-safety.js';
+import { assessProactiveMessage } from './message-quality.js';
+import {
+  MAX_AGENT_SENDS_PER_DAY,
+  MIN_GAP_MS,
+  PROACTIVE_STYLE_HISTORY_MS,
+} from './proactive-config.js';
+import { getTodayStartMs } from './proactive-utils.js';
+import {
+  parseProactivePreferences,
+  proactiveTopicMatchesText,
+} from '../memory/proactive-evaluator.js';
 
 /** How long to remember recently sent messages for dedup (2 hours).
  *  Extended from 30min so a recurring cognitive-layer signal that fires every
@@ -43,11 +59,40 @@ const SEND_DEDUP_THRESHOLD = 0.3;
  *  same user. Bypassed for user-set reminders (they have explicit times).
  *  Honors PROACTIVE_MIN_GAP_MS (previously the env var was read by
  *  proactive-config but silently ignored here — a hard-coded 1h won). */
-const MIN_AGENT_PROACTIVE_GAP_MS = (() => {
-  const raw = process.env.PROACTIVE_MIN_GAP_MS;
-  const parsed = raw ? parseInt(raw, 10) : NaN;
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 60 * 60 * 1000;
-})();
+const MIN_AGENT_PROACTIVE_GAP_MS = MIN_GAP_MS;
+const ACTIVE_CONVERSATION_WINDOW_MS = 5 * 60 * 1000;
+const ACTIVE_CONVERSATION_DEFERRAL_MS = 30 * 60 * 1000;
+const MAX_EXPLICIT_REMINDER_RETRY_MS = 6 * 60 * 60 * 1000;
+const SOURCE_RESOLUTION_RE = /\b(?:done|completed|finished|resolved|cancelled|canceled|called off|already handled|no (?:follow[- ]?up|reminder) (?:is |was )?needed)\b/i;
+const ANAPHORIC_RESOLUTION_RE = /\b(?:it|that|this)(?:'s| is| was| has been)\s+(?:already\s+)?(?:done|completed|finished|resolved|cancelled|canceled|handled)\b|\b(?:done|completed|finished|resolved|cancelled|canceled|handled)\s+(?:it|that|this)\b/i;
+const RESOLUTION_STOP_WORDS = new Set([
+  'about', 'after', 'again', 'been', 'could', 'did', 'does', 'from', 'going',
+  'have', 'into', 'just', 'needed', 'should', 'that', 'the', 'their', 'then',
+  'there', 'this', 'was', 'were', 'what', 'when', 'with', 'would', 'your',
+]);
+
+function resolutionTopicText(text: string): string {
+  return (text.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [])
+    .filter(word => word.length >= 3 && !RESOLUTION_STOP_WORDS.has(word))
+    .join(' ');
+}
+
+function messageResolvesScheduledIntent(message: string, itemText: string): boolean {
+  if (!SOURCE_RESOLUTION_RE.test(message)) return false;
+  if (ANAPHORIC_RESOLUTION_RE.test(message)) return true;
+  const messageTopics = resolutionTopicText(message);
+  const itemTopics = resolutionTopicText(itemText);
+  return wordOverlap(messageTopics, itemTopics, { minWordLength: 3 }) >= 0.2;
+}
+
+function stableMinuteJitter(seed: string, min: number, max: number): number {
+  let hash = 2166136261;
+  for (let i = 0; i < seed.length; i++) {
+    hash ^= seed.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return min + ((hash >>> 0) % (max - min + 1));
+}
 
 function getLocalTimeParts(now: Date, timeZone: string): { hour: number; minute: number } {
   try {
@@ -66,14 +111,18 @@ function getLocalTimeParts(now: Date, timeZone: string): { hour: number; minute:
   return { hour: now.getHours(), minute: now.getMinutes() };
 }
 
-function millisecondsUntilLocalMorning(now: Date, timeZone: string): number {
+function millisecondsUntilLocalMorning(now: Date, timeZone: string, jitterSeed?: string): number {
   const { hour, minute } = getLocalTimeParts(now, timeZone);
   const currentMinute = hour * 60 + minute;
   const morningMinute = 8 * 60;
   const minutesUntilMorning = currentMinute < morningMinute
     ? morningMinute - currentMinute
     : 24 * 60 - currentMinute + morningMinute;
-  return Math.max(60_000, minutesUntilMorning * 60_000 - now.getSeconds() * 1000 - now.getMilliseconds());
+  const jitterMinutes = jitterSeed ? stableMinuteJitter(jitterSeed, 5, 20) : 0;
+  return Math.max(
+    60_000,
+    (minutesUntilMorning + jitterMinutes) * 60_000 - now.getSeconds() * 1000 - now.getMilliseconds(),
+  );
 }
 
 /**
@@ -109,7 +158,18 @@ function sanitizeAgentResponse(raw: string): string {
  * Handler for sending messages to users
  */
 export type MessageHandler = (userId: string, message: string) => Promise<boolean>;
-type ProcessOutcome = 'sent' | 'suppressed' | 'deferred' | 'failed';
+type ProcessOutcome =
+  | 'sent'
+  | 'suppressed'
+  | 'cancelled'
+  | 'deferred'
+  | 'failed'
+  | 'render_failed'
+  | 'delivery_failed';
+
+function isFailureOutcome(outcome: ProcessOutcome): boolean {
+  return outcome === 'failed' || outcome === 'render_failed' || outcome === 'delivery_failed';
+}
 
 interface TaskLeaseContext {
   leaseToken: string;
@@ -148,7 +208,7 @@ export interface UnifiedSchedulerOptions {
   /** Callback to resolve IANA timezone for a user (defaults to server timezone) */
   getTimezone?: (userId: string) => string;
   /** Hard floor in ms between two agent-sourced proactive sends to the same
-   *  user. Defaults to 1h. Set to 0 in tests that need multiple agent items
+   *  user. Defaults to the centralized 6h policy. Set to 0 in tests that need multiple agent items
    *  to fire in a single tick. */
   minAgentProactiveGapMs?: number;
   /** Durable worker identity; injectable so multiple schedulers can be tested. */
@@ -269,7 +329,7 @@ export class UnifiedScheduler {
     // on restart. Without this, a redeploy opens a SEND_DEDUP_WINDOW_MS
     // window in which the cognitive layer can re-emit similar nudges.
     try {
-      const since = Date.now() - SEND_DEDUP_WINDOW_MS;
+      const since = Date.now() - PROACTIVE_STYLE_HISTORY_MS;
       const recent = this.db.getRecentProactiveSends(since);
       for (const r of recent) {
         const list = this.recentSends.get(r.userId) || [];
@@ -279,8 +339,9 @@ export class UnifiedScheduler {
       if (recent.length > 0) {
         this.logger.info({ entries: recent.length, users: this.recentSends.size }, 'Hydrated proactive send-dedup map from SQLite');
       }
-      // Opportunistic prune: drop log rows older than 2× the window.
-      this.db.pruneProactiveSendLog(Date.now() - 2 * SEND_DEDUP_WINDOW_MS);
+      // Keep enough history to detect day-to-day template repetition while
+      // bounding disk use on small devices.
+      this.db.pruneProactiveSendLog(Date.now() - 30 * 24 * 60 * 60 * 1000);
     } catch (err) {
       this.logger.warn({ error: (err as Error).message }, 'Failed to hydrate proactive send log');
     }
@@ -374,7 +435,7 @@ export class UnifiedScheduler {
           const isQuietHours = hour >= 22 || hour < 8;
           if (item.source === 'agent' && isQuietHours) {
             this.db.updateScheduledItemBoard(item.id, {
-              triggerAt: now.getTime() + millisecondsUntilLocalMorning(now, tz),
+              triggerAt: now.getTime() + millisecondsUntilLocalMorning(now, tz, item.id),
             });
             this.db.resetScheduledItemToPending(item.id);
             quietHoursDeferred++;
@@ -412,18 +473,27 @@ export class UnifiedScheduler {
         for (const item of readyNudges) {
           try {
             const outcome = await this.processNudge(item);
-            if (outcome === 'sent' || outcome === 'suppressed') {
+            if (outcome === 'sent') {
               this.markItemFiredAndReschedule(item);
+            } else if (outcome === 'suppressed' || outcome === 'cancelled') {
+              this.db.markScheduledItemExpired(item.id);
+            } else if (outcome === 'render_failed') {
+              this.retryGeneratedNudge(item, 'Generated nudge could not be rendered safely');
+            } else if (outcome === 'delivery_failed') {
+              this.retryNudgeDelivery(item, 'Nudge delivery failed');
             } else if (outcome === 'failed') {
-              this.db.updateScheduledItemBoard(item.id, { triggerAt: Date.now() + this.taskRetryDelayMs });
-              this.db.resetScheduledItemToPending(item.id);
+              this.retryGeneratedNudge(item, 'Generated nudge processing failed');
             }
           } catch (err) {
             this.logger.error(
               { itemId: item.id, error: (err as Error).message },
               'Failed to process scheduled nudge',
             );
-            this.db.resetScheduledItemToPending(item.id);
+            if (item.source === 'user') {
+              this.retryExplicitReminderDelivery(item, (err as Error).message);
+            } else {
+              this.retryGeneratedNudge(item, (err as Error).message);
+            }
           }
         }
       }
@@ -455,7 +525,108 @@ export class UnifiedScheduler {
       'Processing nudge'
     );
 
+    if (item.source === 'agent') {
+      const preferenceBlock = this.currentPreferenceBlock(item);
+      if (preferenceBlock) {
+        this.db.recordProactiveDecision({
+          userId: item.userId,
+          stage: 'deliver',
+          outcome: 'suppressed',
+          reason: preferenceBlock,
+          detail: { itemId: item.id },
+        });
+        return 'cancelled';
+      }
+
+      // Cancel only when a newer user turn actually resolves this intent.
+      // Unrelated conversation should refresh the renderer, not silently erase
+      // a future follow-up.
+      if (item.sessionId) {
+        const itemText = `${item.message}\n${item.context ?? ''}`;
+        const resolvingMessage = this.db.getSessionMessages(item.sessionId)
+          .filter(message => message.role === 'user' && message.createdAt > item.createdAt)
+          .find(message => messageResolvesScheduledIntent(message.content, itemText));
+        if (resolvingMessage) {
+          this.db.recordProactiveDecision({
+            userId: item.userId,
+            stage: 'deliver',
+            outcome: 'suppressed',
+            reason: 'source_conversation_changed',
+            detail: { itemId: item.id },
+          });
+          return 'cancelled';
+        }
+      }
+
+      // Avoid dropping a separate notification into an active exchange. This
+      // is a deferral, not a cancellation: the current chat may be unrelated.
+      const recent = this.db.getRecentMessagesByUserId(item.userId, 4);
+      const latest = recent.at(-1);
+      if (latest && Date.now() - latest.createdAt < ACTIVE_CONVERSATION_WINDOW_MS) {
+        this.db.updateScheduledItemBoard(item.id, {
+          triggerAt: Date.now() + ACTIVE_CONVERSATION_DEFERRAL_MS,
+        });
+        this.db.resetScheduledItemToPending(item.id);
+        this.db.recordProactiveDecision({
+          userId: item.userId,
+          stage: 'deliver',
+          outcome: 'deferred',
+          reason: 'active_conversation',
+          detail: { itemId: item.id },
+        });
+        return 'deferred';
+      }
+    }
+
     return this.sendFormattedMessage(item, item.message);
+  }
+
+  private retryGeneratedNudge(item: ScheduledItem, error: string): void {
+    this.db.recordScheduledNudgeFailure(
+      item.id,
+      Date.now() + this.taskRetryDelayMs,
+      error,
+    );
+  }
+
+  private retryNudgeDelivery(item: ScheduledItem, error: string): void {
+    if (item.source === 'user') {
+      this.retryExplicitReminderDelivery(item, error);
+      return;
+    }
+    this.retryGeneratedNudge(item, error);
+  }
+
+  /**
+   * Explicit reminders are durable user commitments, not speculative model
+   * output. Retry transport failures with capped exponential backoff without
+   * consuming the generated-content retry budget.
+   */
+  private retryExplicitReminderDelivery(item: ScheduledItem, error: string): void {
+    const exponent = Math.min(item.attemptCount, 8);
+    const delay = Math.min(
+      MAX_EXPLICIT_REMINDER_RETRY_MS,
+      this.taskRetryDelayMs * (2 ** exponent),
+    );
+    this.db.recordScheduledExplicitDeliveryFailure(
+      item.id,
+      Date.now() + delay,
+      error,
+    );
+  }
+
+  private currentPreferenceBlock(item: ScheduledItem): 'preference_opt_out' | 'topic_opt_out' | null {
+    const profile = parseProactivePreferences(
+      this.db.getMemoriesByUser(item.userId, { isLatest: true, limit: 100 })
+        .map(memory => memory.content),
+    );
+    if (profile.globalOptOut) return 'preference_opt_out';
+
+    const itemText = `${item.message}\n${item.context ?? ''}`;
+    const blockedTopic = profile.negative
+      .filter(rule => rule.scope === 'topic' && rule.topic)
+      .some(rule => proactiveTopicMatchesText(rule.topic!, itemText));
+    return blockedTopic ? 'topic_opt_out' : null;
   }
 
   /** Claim and drain the currently due task users through durable worker leases. */
@@ -520,7 +691,11 @@ export class UnifiedScheduler {
 
       if (!leaseActive) return;
 
-      if (processed.outcome === 'sent' || processed.outcome === 'suppressed') {
+      if (
+        processed.outcome === 'sent' ||
+        processed.outcome === 'suppressed' ||
+        processed.outcome === 'cancelled'
+      ) {
         if (!processed.result || !renew()) return;
         const finalResult: BoardItemResult = {
           ...processed.result,
@@ -531,9 +706,9 @@ export class UnifiedScheduler {
         return;
       }
 
-      if (processed.outcome === 'deferred' || (processed.outcome === 'failed' && processed.result)) {
+      if (processed.outcome === 'deferred' || (isFailureOutcome(processed.outcome) && processed.result)) {
         const delay = processed.outcome === 'deferred'
-          ? Math.max(1_000, this.minAgentProactiveGapMs)
+          ? Math.max(1_000, this.remainingAgentGapMs(item.userId))
           : this.taskRetryDelayMs;
         this.boardService.deferLeasedTask(
           item.id,
@@ -567,7 +742,7 @@ export class UnifiedScheduler {
       if (storedResult) {
         if (!lease.renew()) return { outcome: 'failed', error: 'Task lease lost before delivery' };
         const outcome = await this.sendFormattedMessage(item, storedResult, 'task_result', true);
-        return { outcome, result: item.result, error: outcome === 'failed' ? 'Stored result delivery failed' : undefined };
+        return { outcome, result: item.result, error: isFailureOutcome(outcome) ? 'Stored result delivery failed' : undefined };
       }
     }
 
@@ -656,12 +831,12 @@ export class UnifiedScheduler {
         const outcome = await this.sendFormattedMessage(item, clean, 'task_result', true);
         if (outcome === 'sent') {
           // Record task description & goal for dedup so companion nudges get suppressed.
-          this.recordSend(item.userId, item.message, item.source);
+          this.recordSend(item.userId, item.message, 'agent_alias');
           if (config.goal && config.goal !== item.message) {
-            this.recordSend(item.userId, config.goal, item.source);
+            this.recordSend(item.userId, config.goal, 'agent_alias');
           }
         }
-        return { outcome, result: boardResult, error: outcome === 'failed' ? 'Task result delivery failed' : undefined };
+        return { outcome, result: boardResult, error: isFailureOutcome(outcome) ? 'Task result delivery failed' : undefined };
       } else {
         // Sub-agent produced no user-facing output (error, empty, or all-markup response).
         // Don't send the raw task description — it reads like an internal to-do, not a message.
@@ -689,10 +864,38 @@ export class UnifiedScheduler {
     sourceOverride?: 'task_result' | 'inner_thoughts' | 'gap_scanner',
     leaseManaged: boolean = false,
   ): Promise<ProcessOutcome> {
-    // Hard min-gap throttle for agent-sourced sends: never two within
-    // MIN_AGENT_PROACTIVE_GAP_MS. User-set reminders bypass — they have
-    // explicit times the user chose.
-    if (item.source === 'agent' && this.isWithinMinAgentGap(item.userId)) {
+    // Delivery budgets are based on actual sends, not candidates created by a
+    // background evaluator. Explicit reminders and completed task results are
+    // separate products and retain their requested cadence.
+    if (
+      item.source === 'agent' &&
+      sourceOverride !== 'task_result' &&
+      this.hasReachedAgentDailyBudget(item.userId)
+    ) {
+      const now = new Date();
+      const timezone = this.getTimezone(item.userId);
+      if (!leaseManaged) {
+        this.db.updateScheduledItemBoard(item.id, {
+          triggerAt: now.getTime() + millisecondsUntilLocalMorning(now, timezone, item.id),
+        });
+        this.db.resetScheduledItemToPending(item.id);
+      }
+      this.db.recordProactiveDecision({
+        userId: item.userId,
+        stage: 'deliver',
+        outcome: 'deferred',
+        reason: 'daily_delivery_budget',
+        detail: { itemId: item.id, cap: MAX_AGENT_SENDS_PER_DAY },
+      });
+      return 'deferred';
+    }
+
+    // Hard min-gap throttle applies to inferred conversational outreach.
+    // Explicit reminders and completed task results are time-sensitive
+    // products, so they do not wait behind an earlier nudge.
+    const gapApplies = item.source === 'agent' && sourceOverride !== 'task_result';
+    const remainingGapMs = gapApplies ? this.remainingAgentGapMs(item.userId) : 0;
+    if (gapApplies && remainingGapMs > 0) {
       this.logger.info({ itemId: item.id, userId: item.userId }, 'Suppressing agent proactive — within min-gap of last agent send');
       this.db.recordProactiveDecision({
         userId: item.userId,
@@ -704,7 +907,7 @@ export class UnifiedScheduler {
       // Push trigger forward so it can fire after the gap window.
       if (!leaseManaged) {
         try {
-          this.db.updateScheduledItemBoard(item.id, { triggerAt: Date.now() + this.minAgentProactiveGapMs });
+          this.db.updateScheduledItemBoard(item.id, { triggerAt: Date.now() + remainingGapMs });
           this.db.resetScheduledItemToPending(item.id);
         } catch (err) {
           this.logger.warn({ err: (err as Error).message, itemId: item.id }, 'Failed to defer min-gap-throttled item');
@@ -713,6 +916,13 @@ export class UnifiedScheduler {
       return 'deferred';
     }
 
+    if (sourceOverride === 'task_result') {
+      message = await summarizeTaskResultForDelivery(
+        message,
+        this.router,
+        this.getRecentMessagesForStyle(item.userId),
+      );
+    }
     const originalMessage = message;
     // `source` identifies who initiated an item, not who authored its text.
     // Model-invoked reminder/board tools create user-sourced items too, so only
@@ -720,10 +930,38 @@ export class UnifiedScheduler {
     const isProvenUserLiteral = item.source === 'user'
       && item.messageProvenance === 'user_literal'
       && sourceOverride === undefined;
-    const safeMessage = isProvenUserLiteral
-      ? message.trim()
-      : await renderUserFacingProactiveMessage(message, this.router);
-    if (!safeMessage) {
+    const shouldRealizeAtDelivery = !isProvenUserLiteral && sourceOverride !== 'task_result';
+    const recentChat = !isProvenUserLiteral && sourceOverride !== 'task_result'
+      ? getRecentChatContext(this.db, item.userId, {
+          maxMessages: 8,
+          maxCharsPerMessage: 350,
+          stalenessMs: 7 * 24 * 60 * 60 * 1000,
+        })
+      : null;
+    const renderResult = isProvenUserLiteral
+      ? { outcome: 'ready' as const, message: message.trim() }
+      : await prepareUserFacingProactiveMessage(message, this.router, {
+          forceRewrite: shouldRealizeAtDelivery,
+          context: item.context,
+          recentConversation: recentChat?.formattedContext,
+          recentMessages: this.getRecentMessagesForStyle(item.userId),
+          messageType: sourceOverride ?? item.type,
+        });
+    if (renderResult.outcome === 'skip') {
+      this.logger.info(
+        { itemId: item.id, userId: item.userId, source: item.source },
+        'Renderer skipped stale or resolved proactive message',
+      );
+      this.db.recordProactiveDecision({
+        userId: item.userId,
+        stage: 'deliver',
+        outcome: 'suppressed',
+        reason: 'renderer_skip',
+        detail: { itemId: item.id, source: item.source },
+      });
+      return 'cancelled';
+    }
+    if (renderResult.outcome === 'failed') {
       this.logger.warn(
         { itemId: item.id, userId: item.userId, source: item.source },
         'Suppressing unsafe proactive message'
@@ -735,10 +973,18 @@ export class UnifiedScheduler {
         reason: 'unsafe_message',
         detail: { itemId: item.id, source: item.source },
       });
-      // A generated reminder that cannot yet be rendered must remain pending;
-      // marking it fired would either leak the draft or silently lose it.
-      return isProvenUserLiteral ? 'suppressed' : 'failed';
+      const sanitizedOriginal = sanitizeProactiveMessage(originalMessage);
+      const hasRelationalHardFailure = sanitizedOriginal
+        ? assessProactiveMessage(sanitizedOriginal).hardFailures.length > 0
+        : false;
+      // Relationally unsafe drafts should not burn a model call every minute.
+      // Instruction-shaped drafts may simply have hit a transient renderer
+      // outage, so they remain pending instead of leaking or being lost.
+      return isProvenUserLiteral || hasRelationalHardFailure
+        ? 'cancelled'
+        : 'render_failed';
     }
+    const safeMessage = renderResult.message;
     message = safeMessage;
     if (message !== originalMessage.trim()) {
       this.db.recordProactiveDecision({
@@ -751,7 +997,7 @@ export class UnifiedScheduler {
     }
 
     // Send-time dedup: skip if a similar message was sent recently to this user
-    if (this.isDuplicateSend(item.userId, message)) {
+    if (item.source === 'agent' && this.isDuplicateSend(item.userId, message)) {
       this.logger.info({ itemId: item.id, userId: item.userId }, 'Skipping proactive message — similar one sent recently');
       this.db.recordProactiveDecision({
         userId: item.userId,
@@ -760,7 +1006,7 @@ export class UnifiedScheduler {
         reason: 'send_dedup',
         detail: { itemId: item.id },
       });
-      return 'suppressed';
+      return 'cancelled';
     }
     this.db.recordProactiveDecision({
       userId: item.userId,
@@ -806,16 +1052,21 @@ export class UnifiedScheduler {
 
         const formatted = formatProactiveMessage((channel ?? 'telegram') as 'telegram' | 'api', formatInput);
         const sent = await this.deliverAndRecordConversation(item, formatted, message);
-        return this.finishDelivery(item, message, sent);
+        return this.finishDelivery(item, message, sent, sourceOverride);
       }
     }
 
     // User-sourced items or unknown channels: send as-is
     const sent = await this.deliverAndRecordConversation(item, message);
-    return this.finishDelivery(item, message, sent);
+    return this.finishDelivery(item, message, sent, sourceOverride);
   }
 
-  private finishDelivery(item: ScheduledItem, message: string, sent: boolean): ProcessOutcome {
+  private finishDelivery(
+    item: ScheduledItem,
+    message: string,
+    sent: boolean,
+    sourceOverride?: 'task_result' | 'inner_thoughts' | 'gap_scanner',
+  ): ProcessOutcome {
     if (!sent) {
       this.db.recordProactiveDecision({
         userId: item.userId,
@@ -824,10 +1075,12 @@ export class UnifiedScheduler {
         reason: 'delivery_failed',
         detail: { itemId: item.id, source: item.source },
       });
-      return 'failed';
+      return 'delivery_failed';
     }
 
-    this.recordSend(item.userId, message, item.source);
+    // A completed task report is useful style/dedup history, but it is not one
+    // of the independently inferred nudges governed by the daily outreach cap.
+    this.recordSend(item.userId, message, sourceOverride === 'task_result' ? 'task_result' : item.source);
     this.db.recordProactiveDecision({
       userId: item.userId,
       stage: 'deliver',
@@ -875,28 +1128,49 @@ export class UnifiedScheduler {
     const recent = this.recentSends.get(userId);
     if (!recent) return false;
 
-    // Prune expired entries. If all expired, drop the user entry entirely so
-    // the outer Map doesn't grow without bound for users who never return.
-    const valid = recent.filter(r => now - r.time < SEND_DEDUP_WINDOW_MS);
-    if (valid.length === 0) {
+    // Retain a longer style history than the hard semantic-dedup window. The
+    // renderer needs to see yesterday's openings even though a legitimate
+    // follow-up about the same topic may be allowed later.
+    const history = recent.filter(r => now - r.time < PROACTIVE_STYLE_HISTORY_MS);
+    if (history.length === 0) {
       this.recentSends.delete(userId);
-    } else if (valid.length !== recent.length) {
-      this.recentSends.set(userId, valid);
+    } else if (history.length !== recent.length) {
+      this.recentSends.set(userId, history);
     }
 
-    return valid.some(r => wordOverlap(r.message, message, { minWordLength: 2 }) >= SEND_DEDUP_THRESHOLD);
+    return history
+      .filter(r => now - r.time < SEND_DEDUP_WINDOW_MS)
+      .some(r => wordOverlap(r.message, message, { minWordLength: 2 }) >= SEND_DEDUP_THRESHOLD);
+  }
+
+  private getRecentMessagesForStyle(userId: string): string[] {
+    const cutoff = Date.now() - PROACTIVE_STYLE_HISTORY_MS;
+    return (this.recentSends.get(userId) ?? [])
+      .filter(entry => entry.time >= cutoff)
+      .slice(-8)
+      .map(entry => entry.message);
+  }
+
+  private hasReachedAgentDailyBudget(userId: string): boolean {
+    const timezone = this.getTimezone(userId);
+    const todayStart = getTodayStartMs(timezone);
+    return this.db.getRecentProactiveSends(todayStart)
+      .filter(entry => entry.userId === userId && entry.source === 'agent')
+      .length >= MAX_AGENT_SENDS_PER_DAY;
   }
 
   /**
    * Has an agent-sourced proactive message been sent to this user within the
    * min-gap window? User-source items are excluded from the check.
    */
-  private isWithinMinAgentGap(userId: string): boolean {
-    if (this.minAgentProactiveGapMs <= 0) return false;
+  private remainingAgentGapMs(userId: string): number {
+    if (this.minAgentProactiveGapMs <= 0) return 0;
     const recent = this.recentSends.get(userId);
-    if (!recent) return false;
-    const cutoff = Date.now() - this.minAgentProactiveGapMs;
-    return recent.some(r => r.source === 'agent' && r.time >= cutoff);
+    if (!recent) return 0;
+    const lastAgentSend = recent
+      .filter(entry => entry.source === 'agent')
+      .reduce((latest, entry) => Math.max(latest, entry.time), 0);
+    return Math.max(0, lastAgentSend + this.minAgentProactiveGapMs - Date.now());
   }
 
   /**
@@ -908,8 +1182,9 @@ export class UnifiedScheduler {
     const now = Date.now();
     const list = this.recentSends.get(userId) || [];
     list.push({ message, time: now, source });
-    // Per-user cap: only the last 20 messages matter for dedup.
-    if (list.length > 20) list.splice(0, list.length - 20);
+    // At three inferred sends/day, 60 entries comfortably covers the 14-day
+    // style window while leaving headroom for task results.
+    if (list.length > 60) list.splice(0, list.length - 60);
     this.recentSends.set(userId, list);
 
     // Persist for restart-time hydration. Best-effort: failure to persist
@@ -1121,11 +1396,15 @@ export class UnifiedScheduler {
         identityCandidates,
       });
       for (const match of matches) {
-        this.db.markScheduledItemActed(match.itemId);
+        if (match.reason === 'negative') {
+          this.db.markScheduledItemDismissed(match.itemId);
+        } else {
+          this.db.markScheduledItemActed(match.itemId);
+        }
         this.db.recordProactiveDecision({
           userId,
           stage: 'feedback',
-          outcome: 'acted',
+          outcome: match.reason === 'negative' ? 'dismissed' : 'acted',
           reason: match.reason,
           detail: { itemId: match.itemId, score: match.score },
         });
@@ -1163,38 +1442,25 @@ export class UnifiedScheduler {
     const unnotified = this.db.getUnnotifiedCompletedItems(userId);
     if (unnotified.length === 0) return 0;
 
-    const lines: string[] = ['While you were away:'];
-
-    for (const item of unnotified) {
+    const deliverable = unnotified.flatMap((item) => {
       const result = item.result;
-      const title = item.message;
-      if (result) {
-        // Sanitize and truncate the result for the digest
-        const clean = sanitizeAgentResponse(result.response);
-        if (clean) {
-          const truncated = clean.length > 200 ? clean.slice(0, 200) + '…' : clean;
-          lines.push(`- ${title}: ${truncated}`);
-        } else {
-          // Result was all internal markup/errors — just show the title
-          lines.push(`- ${title}`);
-        }
-      } else {
-        lines.push(`- ${title}`);
-      }
+      if (!result) return [];
+      const clean = sanitizeAgentResponse(result.response);
+      return clean ? [{ item, result, clean }] : [];
+    });
+    const message = await renderCompletedWorkDigest(
+      deliverable.map(entry => ({ title: entry.item.message, result: entry.clean })),
+      this.router,
+    );
+    if (!message || !(await this.onSendMessage(userId, message))) return 0;
 
-      // Mark as notified
-      if (result) {
-        const updatedResult: BoardItemResult = { ...result, notifiedAt: Date.now() };
-        this.db.updateScheduledItemResult(item.id, updatedResult);
-      }
+    const notifiedAt = Date.now();
+    for (const entry of deliverable) {
+      this.db.updateScheduledItemResult(entry.item.id, { ...entry.result, notifiedAt });
     }
 
-    if (lines.length > 1) {
-      await this.onSendMessage(userId, lines.join('\n'));
-    }
-
-    this.logger.info({ userId, count: unnotified.length }, 'Sent morning digest');
-    return unnotified.length;
+    this.logger.info({ userId, count: deliverable.length }, 'Sent morning digest');
+    return deliverable.length;
   }
 
   /**

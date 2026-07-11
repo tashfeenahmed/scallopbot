@@ -1,8 +1,8 @@
 /**
  * Gap Signal Heuristics (Stage 1)
  *
- * Pure functions that scan existing data for unresolved threads,
- * stale goals, and behavioral anomalies. Returns typed GapSignal[]
+ * Pure functions that scan existing data for explicitly unresolved threads,
+ * stale goals, and stale board items. Returns typed GapSignal[]
  * for downstream LLM triage.
  *
  * No LLM calls — all heuristics are deterministic computation.
@@ -137,92 +137,145 @@ export function scanStaleGoals(goals: GoalItem[], now: number): GapSignal[] {
 // ============ scanBehavioralAnomalies ============
 
 /**
- * Scan behavioral signals for anomalies:
- * - Message frequency drop (decreasing trend + dailyRate < weeklyAvg * 0.5)
- * - Session engagement drop (decreasing trend + avgMessagesPerSession < 3)
- * - Response length decline (decreasing trend)
+ * Passive usage changes are not permission to contact someone.
  *
- * Returns empty array on cold start (null messageFrequency).
+ * Behavioral patterns remain useful for adapting response style and timing, but
+ * fewer messages, shorter replies, or shorter sessions are ambiguous: the user
+ * may simply be busy or finished. Turning those observations into outreach can
+ * feel surveillant and creates a feedback loop where disengagement causes more
+ * notifications. Keep this exported no-op for API compatibility while ensuring
+ * the gap pipeline only acts on user-grounded commitments and tasks.
  */
 export function scanBehavioralAnomalies(
-  signals: BehavioralPatterns,
+  _signals: BehavioralPatterns,
   _now: number,
 ): GapSignal[] {
-  const results: GapSignal[] = [];
-
-  // Cold start guard: if no message frequency data, skip all checks
-  if (!signals.messageFrequency) return [];
-
-  // Check 1: Message frequency drop
-  const mf = signals.messageFrequency;
-  if (mf.trend === 'decreasing' && mf.dailyRate < mf.weeklyAvg * 0.5) {
-    results.push({
-      type: 'behavioral_anomaly',
-      // 'medium' (was 'low'): the guard already requires a *significant* drop
-      // (decreasing trend AND dailyRate below half the weekly average), which is
-      // a strong check-in cue. At 'low' the moderate dial skipped it wholesale.
-      severity: 'medium',
-      description: `Message frequency has dropped significantly (${mf.dailyRate.toFixed(1)}/day vs ${mf.weeklyAvg.toFixed(1)}/week avg)`,
-      context: {
-        dailyRate: mf.dailyRate,
-        weeklyAvg: mf.weeklyAvg,
-        trend: mf.trend,
-      },
-      sourceId: signals.userId,
-    });
-  }
-
-  // Check 2: Session engagement drop
-  const se = signals.sessionEngagement;
-  if (se && se.trend === 'decreasing' && se.avgMessagesPerSession < 3) {
-    results.push({
-      type: 'behavioral_anomaly',
-      // 'medium' (was 'low'): a declining trend AND fewer than 3 messages per
-      // session is a meaningful disengagement cue worth a check-in, not noise.
-      severity: 'medium',
-      description: `Session engagement is declining (avg ${se.avgMessagesPerSession.toFixed(1)} messages per session)`,
-      context: {
-        avgMessagesPerSession: se.avgMessagesPerSession,
-        avgDurationMs: se.avgDurationMs,
-        trend: se.trend,
-      },
-      sourceId: signals.userId,
-    });
-  }
-
-  // Check 3: Response length decline.
-  // Promoted from 'low' to 'medium' — a sustained drop in user response length
-  // is a useful cue for a check-in, and under the moderate dial the evaluator
-  // was silently skipping every 'low' signal, rendering this check inert.
-  const rl = signals.responseLength;
-  if (rl && rl.trend === 'decreasing') {
-    results.push({
-      type: 'behavioral_anomaly',
-      severity: 'medium',
-      description: `Response length is trending shorter (avg ${rl.avgLength.toFixed(0)} chars)`,
-      context: {
-        avgLength: rl.avgLength,
-        trend: rl.trend,
-      },
-      sourceId: signals.userId,
-    });
-  }
-
-  return results;
+  return [];
 }
 
 // ============ scanUnresolvedThreads ============
 
+type OpenLoopKind = 'follow_up' | 'pending' | 'commitment';
+
+interface OpenLoopEvidence {
+  kind: OpenLoopKind;
+  text: string;
+}
+
+/**
+ * Markers that describe a still-open action rather than merely a topic that was
+ * discussed. These intentionally do not include a bare question mark: session
+ * topics often preserve the user's original question even when it was answered.
+ */
+const OPEN_LOOP_PATTERNS: ReadonlyArray<{
+  kind: OpenLoopKind;
+  pattern: RegExp;
+}> = [
+  {
+    kind: 'follow_up',
+    pattern: /\b(?:user|they|we|assistant|bot|i)\s+(?:asked|requested|agreed|planned|plans?|intends?|wanted|wants?|needed|needs?|will|would|should|must)\b[^.!?\n]{0,100}\b(?:follow[\s-]?up|check[\s-]?(?:in|back)|circle back|revisit|return to|pick (?:this|it) up|continue (?:this|it)|remind)\b/i,
+  },
+  {
+    kind: 'follow_up',
+    pattern: /\b(?:follow[\s-]?up|check[\s-]?(?:in|back)|circle back|revisit|return to (?:this|it)|pick (?:this|it) up|reminder)\b[^.!?\n]{0,80}\b(?:needed|required|requested|planned|pending|due|later|tomorrow|next (?:day|week|time|session)|after|when)\b/i,
+  },
+  {
+    kind: 'pending',
+    pattern: /\b(?:pending|unresolved|unfinished|outstanding|awaiting|waiting for|blocked (?:by|on)|left (?:open|to do)|remains? (?:open|pending|unresolved|unfinished|to be)|not yet (?:done|resolved|completed|confirmed|decided|answered)|still (?:needs?|waiting|blocked|open|pending|unresolved|deciding|working))\b/i,
+  },
+  {
+    kind: 'pending',
+    pattern: /\b(?:open question|open loop|next steps? (?:is|are|remain|remains|include)|needs? (?:a |an )?(?:decision|confirmation|response|update|action)|action item(?:s)? (?:is|are|remain|remains|pending|open))\b/i,
+  },
+  {
+    kind: 'commitment',
+    pattern: /\b(?:user|they|we|assistant|bot|i)\s+(?:will|would|plans? to|intends? to|agreed to|promised to|needs? to|has to|must)\s+(?:follow[\s-]?up|check back|return|revisit|send|share|provide|confirm|decide|update|test|try|finish|complete|continue)\b/i,
+  },
+  {
+    kind: 'commitment',
+    pattern: /\b(?:come back to (?:this|it)|pick (?:this|it) up|continue (?:this|it))\s+(?:later|tomorrow|next (?:time|session|day|week))\b/i,
+  },
+];
+
+/** Explicit statements that a superficially similar follow-up is not wanted. */
+const NEGATED_OPEN_LOOP_PATTERNS: ReadonlyArray<RegExp> = [
+  /\b(?:no|not|never|without)\s+(?:further\s+)?(?:follow[\s-]?up|check[\s-]?in|reminder|action|response|decision|update)\s+(?:is\s+|was\s+)?(?:needed|required|pending)?\b/i,
+  /\b(?:follow[\s-]?up|check[\s-]?in|reminder|action item)\s+(?:is|was|has been)?\s*(?:not needed|no longer needed|unnecessary|completed|done|resolved|cancelled|canceled)\b/i,
+];
+
+const RESOLUTION_PATTERNS: ReadonlyArray<RegExp> = [
+  /\b(?:task|issue|question|decision|follow[\s-]?up|work|deployment|problem|request)\s+(?:is|was|has been|had been)\s+(?:complete|completed|resolved|finished|done|answered|confirmed|decided|closed|settled|cancelled|canceled|fixed)\b/i,
+  /\b(?:is|was|were|has been|had been)\s+(?:(?:now|then|already|successfully)\s+)?(?:completed|resolved|finished|done|answered|confirmed|decided|closed|settled|cancelled|canceled|fixed)\b/i,
+  /\b(?:no (?:further )?(?:follow[\s-]?up|action|work|response|decision|reminder) (?:is |was )?(?:needed|required)|all (?:set|done)|nothing (?:else|further) (?:is )?(?:needed|required))\b/i,
+];
+
+const TOPIC_STOP_WORDS = new Set([
+  'about', 'after', 'again', 'also', 'assistant', 'from', 'general', 'into',
+  'session', 'that', 'their', 'there', 'these', 'they', 'this', 'topic', 'user',
+  'were', 'what', 'when', 'where', 'which', 'with', 'would',
+]);
+
+function evidenceSegments(summary: SessionSummaryRow): string[] {
+  return [
+    ...summary.summary.split(/(?<=[.!?])\s+|[\n;]/),
+    ...summary.topics,
+  ]
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+}
+
+function findOpenLoopEvidence(summary: SessionSummaryRow): OpenLoopEvidence | null {
+  for (const segment of evidenceSegments(summary)) {
+    if (NEGATED_OPEN_LOOP_PATTERNS.some((pattern) => pattern.test(segment))) continue;
+
+    for (const candidate of OPEN_LOOP_PATTERNS) {
+      const openMatch = candidate.pattern.exec(segment);
+      if (!openMatch) continue;
+
+      // "Follow-up was pending, then completed" is a closed loop. A resolution
+      // before the open marker can describe a different completed prerequisite,
+      // so only a later resolution cancels this evidence.
+      const laterResolution = RESOLUTION_PATTERNS.some((pattern) => {
+        const resolutionMatch = pattern.exec(segment);
+        return resolutionMatch !== null && resolutionMatch.index > openMatch.index;
+      });
+      if (laterResolution) continue;
+
+      return { kind: candidate.kind, text: openMatch[0].trim() };
+    }
+  }
+
+  return null;
+}
+
+function topicTokens(summary: SessionSummaryRow): Set<string> {
+  const text = summary.topics.join(' ').toLowerCase();
+  const tokens = text.match(/[\p{L}\p{N}]{3,}/gu) ?? [];
+  return new Set(tokens.filter((token) => !TOPIC_STOP_WORDS.has(token)));
+}
+
+function hasTopicOverlap(left: SessionSummaryRow, right: SessionSummaryRow): boolean {
+  const leftTokens = topicTokens(left);
+  if (leftTokens.size === 0) return false;
+  return [...topicTokens(right)].some((token) => leftTokens.has(token));
+}
+
+function hasExplicitResolution(summary: SessionSummaryRow): boolean {
+  return evidenceSegments(summary).some((segment) =>
+    RESOLUTION_PATTERNS.some((pattern) => pattern.test(segment)),
+  );
+}
+
 /**
  * Scan session summaries for unresolved threads:
- * - Sessions with no follow-up session within FOLLOW_UP_WINDOW_MS — treated as
- *   a candidate open thread regardless of whether a topic contained "?".
- *   (The "?" heuristic was too strict: real conversations don't phrase
- *   topics as questions, so the old rule never fired.)
- * - Sessions where a topic contains "?" are flagged as 'medium' severity;
- *   otherwise 'low' so the evaluator can still decide.
+ * - Requires explicit language describing a pending action, commitment, or
+ *   requested follow-up in the generated summary/topics.
+ * - A bare question or the absence of a later session is not evidence that the
+ *   conversation remains unresolved.
+ * - Waits for FOLLOW_UP_WINDOW_MS before surfacing the open loop.
+ * - Suppresses a loop if a later, topically related summary explicitly says it
+ *   was resolved.
  * - Only considers summaries within the last 7 days.
- * - Skips summaries with messageCount < 3 AND age < FOLLOW_UP_WINDOW_MS (too fresh/short).
  */
 export function scanUnresolvedThreads(
   summaries: SessionSummaryRow[],
@@ -237,38 +290,34 @@ export function scanUnresolvedThreads(
     const ageMs = now - summary.createdAt;
     const ageDays = ageMs / DAY_MS;
 
-    // Skip summaries older than 7 days
-    if (ageDays > UNRESOLVED_MAX_AGE_DAYS) continue;
+    // Exclude future timestamps, fresh sessions, and stale historical context.
+    if (ageMs < FOLLOW_UP_WINDOW_MS || ageDays > UNRESOLVED_MAX_AGE_DAYS) continue;
 
-    // Skip too fresh/short summaries (messageCount < 3 AND age < 48h)
-    if (summary.messageCount < 3 && ageMs < FOLLOW_UP_WINDOW_MS) continue;
+    const evidence = findOpenLoopEvidence(summary);
+    if (!evidence) continue;
 
-    // Check if there is a follow-up summary within 48h after this one
-    const hasFollowUp = sorted.some(
+    const wasResolvedLater = sorted.some(
       (other) =>
         other.id !== summary.id &&
         other.createdAt > summary.createdAt &&
-        other.createdAt - summary.createdAt < FOLLOW_UP_WINDOW_MS,
+        hasTopicOverlap(summary, other) &&
+        hasExplicitResolution(other),
     );
-    if (hasFollowUp) continue;
+    if (wasResolvedLater) continue;
 
-    // Unresolved thread candidate. A thread with no follow-up within the window
-    // is "meaningfully unresolved" — exactly the moderate dial's bar — so floor
-    // it at 'medium' (was 'low' for non-question threads, which the dial skipped
-    // wholesale). Question topics still surface in the blurb below.
     const questionTopics = summary.topics.filter((t) => t.includes('?'));
     const severity = 'medium' as const;
-    const topicBlurb = questionTopics.length > 0
-      ? questionTopics.join(', ')
-      : summary.topics.slice(0, 3).join(', ') || summary.summary.slice(0, 80);
+    const topicBlurb = summary.topics.slice(0, 3).join(', ') || evidence.text.slice(0, 80);
 
     results.push({
       type: 'unresolved_thread',
       severity,
-      description: `Thread from ${Math.floor(ageDays)} days ago with no follow-up: ${topicBlurb}`,
+      description: `Explicit open loop from ${Math.floor(ageDays)} days ago: ${topicBlurb}`,
       context: {
         topics: summary.topics,
         questionTopics,
+        openLoopKind: evidence.kind,
+        openLoopEvidence: evidence.text,
         messageCount: summary.messageCount,
         ageDays: Math.floor(ageDays),
         sessionId: summary.sessionId,

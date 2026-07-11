@@ -224,6 +224,34 @@ describe('UnifiedScheduler durable task execution', () => {
     expect(send).toHaveBeenCalledWith('default', expect.stringContaining('EK204'));
   });
 
+  it('completes a task whose already-delivered result is intentionally deduplicated', async () => {
+    const item = db.addScheduledItem({
+      userId: 'default', sessionId: null, source: 'agent', kind: 'task', type: 'event_prep',
+      message: 'Refresh flight EK204 status', context: null, triggerAt: Date.now() - 1,
+      recurring: null, sourceMemoryId: null,
+      taskConfig: { goal: 'Refresh flight EK204 status from real data', tools: [] },
+      maxAttempts: 3,
+    });
+    const spawnAndWait = vi.fn().mockResolvedValue({
+      response: 'Flight EK204 remains on time.',
+      iterationsUsed: 1,
+      taskComplete: true,
+      costUsd: 0.001,
+    });
+    const send = vi.fn().mockResolvedValue(true);
+    const scheduler = makeScheduler('dedup-worker', spawnAndWait, send);
+    (scheduler as any).recentSends.set('default', [{
+      message: 'Flight EK204 remains on time.', time: Date.now(), source: 'task_result',
+    }]);
+
+    await scheduler.evaluate();
+
+    expect(send).not.toHaveBeenCalled();
+    expect(db.getScheduledItem(item.id)).toMatchObject({
+      status: 'fired', boardStatus: 'done', attemptCount: 1,
+    });
+  });
+
   it('preserves the originating session so channel tool policy is re-applied', async () => {
     addDueTask(db, { sessionId: 'telegram-parent-session' });
     const spawnAndWait = vi.fn().mockResolvedValue({

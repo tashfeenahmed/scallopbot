@@ -128,6 +128,16 @@ echo "==> Setting up log directory and PM2 startup..."
 mkdir -p "$LOG_DIR"
 pm2 startup systemd -u root --hp /root 2>/dev/null || true
 
+# PM2 does not rotate application logs by itself. Keep Raspberry Pi / small
+# server disks safe from multi-hundred-megabyte stdout files.
+if ! pm2 describe pm2-logrotate >/dev/null 2>&1; then
+  pm2 install pm2-logrotate >/dev/null 2>&1 || true
+fi
+pm2 set pm2-logrotate:max_size 25M >/dev/null 2>&1 || true
+pm2 set pm2-logrotate:retain 7 >/dev/null 2>&1 || true
+pm2 set pm2-logrotate:compress true >/dev/null 2>&1 || true
+pm2 set pm2-logrotate:rotateInterval '0 0 * * *' >/dev/null 2>&1 || true
+
 # ── 9. Summary ──────────────────────────────────────────────────────
 echo ""
 echo "==> Installation complete!"

@@ -12,9 +12,13 @@ import { auditRetrievalHistory } from './retrieval-audit.js';
 import { archiveLowUtilityMemories, pruneOrphanedRelations } from './utility-score.js';
 import { computeTrustScore } from './trust-score.js';
 import { checkGoalDeadlines } from './goal-deadline-check.js';
-import { evaluateProactive } from './proactive-evaluator.js';
+import {
+  evaluateProactive,
+  parseProactivePreferences,
+  resolveProactiveDial,
+} from './proactive-evaluator.js';
 import { getTodayStartMs } from '../proactive/proactive-utils.js';
-import { DIAL_BUDGETS, PROACTIVE_COOLDOWN_MS } from '../proactive/proactive-config.js';
+import { DEFAULT_QUIET_HOURS, DIAL_BUDGETS, PROACTIVE_COOLDOWN_MS } from '../proactive/proactive-config.js';
 import { getRecentChatContext } from '../proactive/chat-context.js';
 
 // ============ Step functions ============
@@ -297,7 +301,10 @@ export function runTrustScoreUpdate(ctx: GardenerContext): void {
 
     const rawScheduledItems = ctx.db.getScheduledItemsByUser(userId);
     const scheduledItems = rawScheduledItems
-      .filter(i => i.status !== 'expired')
+      // Trust calibration is about inferred conversational nudges. Background
+      // task completion/suppression is a different product and must not train
+      // the outreach dial.
+      .filter(i => i.source === 'agent' && i.kind === 'nudge' && i.status !== 'expired')
       .map(i => ({ status: i.status as 'pending' | 'fired' | 'acted' | 'dismissed', source: i.source, firedAt: i.firedAt ?? undefined }));
     const existingPatterns = profileManager.getBehavioralPatterns(userId);
     const existingTrust = existingPatterns?.responsePreferences?.trustScore as number | undefined;
@@ -329,21 +336,45 @@ export async function runGoalDeadlineCheck(ctx: GardenerContext): Promise<void> 
     const activeGoals = await goalService.listGoals(userId, { status: 'active' });
     const goalsWithDueDates = activeGoals.filter(g => g.metadata.dueDate != null);
     if (goalsWithDueDates.length > 0) {
-      const pendingItems = ctx.db.getDueScheduledItems(Date.now() + 30 * 24 * 60 * 60 * 1000);
-      const existingReminders = pendingItems.map(item => ({ message: item.message }));
+      // Include historical deliveries, not only currently pending rows. Each
+      // deadline stage (warning -> urgent -> overdue) may notify once per due
+      // date; a fired warning must not be recreated every deep tick.
+      const existingReminders = ctx.db.getScheduledItemsByUser(userId)
+        // Only an outstanding candidate or a reminder that actually reached
+        // the user may consume a deadline stage. Expired/suppressed rows are
+        // failed attempts and must not permanently silence that stage.
+        .filter(item => ['pending', 'processing', 'fired', 'acted', 'dismissed'].includes(item.status))
+        .map(item => {
+          let detail: Record<string, unknown> = {};
+          try { detail = item.context ? JSON.parse(item.context) as Record<string, unknown> : {}; } catch { /* legacy */ }
+          const stage = detail.deadlineStage;
+          const urgency: 'warning' | 'urgent' | 'overdue' | undefined =
+            stage === 'warning' || stage === 'urgent' || stage === 'overdue' ? stage : undefined;
+          return {
+            message: item.message,
+            goalId: item.sourceMemoryId,
+            dueDate: typeof detail.dueDate === 'number' ? detail.dueDate : undefined,
+            urgency,
+          };
+        });
       const deadlineResult = checkGoalDeadlines(goalsWithDueDates, existingReminders);
       for (const notification of deadlineResult.notifications) {
         createProactiveItem({
           db: ctx.db,
           userId: notification.userId,
           message: notification.message,
-          context: null,
+          context: JSON.stringify({
+            proactiveKind: 'goal_deadline',
+            goalId: notification.goalId,
+            dueDate: notification.dueDate,
+            deadlineStage: notification.urgency,
+          }),
           type: 'goal_checkin',
           kind: 'nudge',
-          quietHours: ctx.quietHours,
+          quietHours: DEFAULT_QUIET_HOURS,
           activeHours: [],
           lastProactiveAt: null,
-          urgency: 'high',
+          urgency: notification.urgency === 'warning' ? 'medium' : 'high',
           sourceMemoryId: notification.goalId,
           timezone: ctx.getTimezone?.(notification.userId),
         });
@@ -366,19 +397,16 @@ export async function runInnerThoughts(ctx: GardenerContext): Promise<void> {
 
   try {
     const userId = DEFAULT_USER_ID;
-    // Widened from 6h to 48h — between active chat windows the evaluator was
-    // seeing zero session context, which left it with only low-severity
-    // anomaly signals and the LLM always returned empty items.
+    // Context older than this can inform historical comparison but must not be
+    // treated as the current state or used as a fallback trigger.
     const SESSION_CONTEXT_WINDOW_MS = 48 * 60 * 60 * 1000;
     const contextCutoff = Date.now() - SESSION_CONTEXT_WINDOW_MS;
 
     const allSummaries = ctx.db.getSessionSummariesByUser(userId, 20);
     const recentSummaries = allSummaries.filter(s => s.createdAt >= contextCutoff);
-    // Fall back to the most recent summary of any age if the 48h window has
-    // nothing — better stale context than no context when deciding to check in.
     const sessionSummary = recentSummaries.length > 0
       ? recentSummaries[0]
-      : (allSummaries.length > 0 ? allSummaries[0] : null);
+      : null;
 
     const behavioralPatterns = ctx.db.getBehavioralPatterns(userId);
     const affect = behavioralPatterns?.smoothedAffect ?? null;
@@ -405,32 +433,26 @@ export async function runInnerThoughts(ctx: GardenerContext): Promise<void> {
     // Count today's items for budget
     const tz = ctx.getTimezone?.(userId) ?? 'UTC';
     const todayStart = getTodayStartMs(tz);
-    const todayItemCount = existingItems.filter(
-      i => i.source === 'agent' && i.createdAt >= todayStart
-    ).length;
+    const todayItemCount = ctx.db.getRecentProactiveSends(todayStart)
+      .filter(send => send.userId === userId && send.source === 'agent')
+      .length;
 
     const pendingItems = existingItems
-      .filter(i => i.status === 'pending' || i.status === 'fired')
+      .filter(i => i.status === 'pending' || (i.status === 'fired' && (i.firedAt ?? 0) >= Date.now() - 14 * 24 * 60 * 60 * 1000))
       .map(i => ({ message: i.message, context: i.context }));
 
-    // Pull user-stated preferences relevant to proactive behavior so the
-    // evaluator prompt can honor them. Keyword filter is intentional — we only
-    // care about preferences that tell the bot how often to check in, not
-    // generic lifestyle facts.
-    const PROACTIVE_PREF_RE = /\b(proactive|proactively|check in|check-in|remind|follow[- ]?up|ping me|nudge|initiate|reach out)\b/i;
-    const userPreferences = ctx.db
+    // Interpret user-stated outreach preferences deterministically. This
+    // avoids treating a negated preference ("don't remind me") as enthusiasm
+    // merely because it contains the word "remind".
+    const preferenceProfile = parseProactivePreferences(ctx.db
       .getMemoriesByUser(userId, { limit: 100 })
-      .filter(m => PROACTIVE_PREF_RE.test(m.content))
-      .slice(0, 5)
-      .map(m => m.content);
+      .map(m => m.content));
+    const userPreferences = [...new Set(preferenceProfile.rules.map(rule => rule.text))].slice(0, 10);
 
-    // Elevate dial to 'eager' when the user has explicitly asked for more
-    // proactive check-ins — overrides whatever got auto-set in behavioral
-    // patterns. Without this, moderate's "skip low-severity" rule dominates
-    // even though the user's stated preference says otherwise.
-    const dial = (userPreferences.length > 0 && storedDial !== 'eager')
-      ? 'eager'
-      : storedDial;
+    // Explicit positive preferences may elevate the dial, but any negative or
+    // limiting rule wins and prevents that automatic elevation. A global
+    // opt-out is enforced again inside shouldEvaluate() before any LLM call.
+    const dial = resolveProactiveDial(storedDial, preferenceProfile);
 
     const result = await evaluateProactive({
       sessionSummary,
@@ -459,15 +481,21 @@ export async function runInnerThoughts(ctx: GardenerContext): Promise<void> {
         item.severity === 'high' ? 'high' :
         item.severity === 'medium' ? 'medium' : 'low';
 
+      let sourceSessionId: string | null = null;
+      try {
+        const itemContext = JSON.parse(item.context) as Record<string, unknown>;
+        if (typeof itemContext.sourceSessionId === 'string') sourceSessionId = itemContext.sourceSessionId;
+      } catch { /* context was already safety-checked by the evaluator */ }
+
       const proResult = createProactiveItem({
         db: ctx.db,
         userId,
-        sessionId: sessionSummary?.sessionId ?? null,
+        sessionId: sourceSessionId,
         message: item.message,
         context: item.context,
         type: 'follow_up',
         kind: 'nudge',
-        quietHours: ctx.quietHours,
+        quietHours: DEFAULT_QUIET_HOURS,
         activeHours,
         lastProactiveAt,
         urgency: timingUrgency,

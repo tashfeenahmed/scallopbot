@@ -6,6 +6,7 @@ import type { ScallopDatabase, ScallopMemoryEntry } from './db.js';
 import type { LLMProvider } from '../providers/types.js';
 import type { CompletionResponse } from '../providers/types.js';
 import type { GardenerContext } from './gardener-context.js';
+import { GoalService } from '../goals/goal-service.js';
 import {
   runFullDecay,
   runMemoryFusion,
@@ -253,6 +254,41 @@ describe('gardener-deep-steps', () => {
       const ctx = buildCtx(store, db);
       await expect(runGoalDeadlineCheck(ctx)).resolves.not.toThrow();
     });
+
+    it('does not let an expired undelivered reminder consume a deadline stage', async () => {
+      const goalService = new GoalService({ db, logger });
+      const dueDate = Date.now() + 5 * 24 * 60 * 60 * 1000;
+      const goal = await goalService.createGoal('default', {
+        title: 'Submit the public release',
+        status: 'active',
+        dueDate,
+      });
+      const expired = db.addScheduledItem({
+        userId: 'default',
+        sessionId: null,
+        source: 'agent',
+        kind: 'nudge',
+        type: 'goal_checkin',
+        message: 'Goal approaching deadline: Submit the public release — due in 5 days',
+        context: JSON.stringify({
+          proactiveKind: 'goal_deadline',
+          goalId: goal.id,
+          dueDate,
+          deadlineStage: 'warning',
+        }),
+        triggerAt: Date.now() - 1,
+        recurring: null,
+        sourceMemoryId: goal.id,
+      });
+      db.markScheduledItemExpired(expired.id);
+
+      await runGoalDeadlineCheck(buildCtx(store, db, { getTimezone: () => 'UTC' }));
+
+      const reminders = db.getScheduledItemsByUser('default')
+        .filter(item => item.sourceMemoryId === goal.id);
+      expect(reminders).toHaveLength(2);
+      expect(reminders.some(item => item.status === 'pending')).toBe(true);
+    });
   });
 
   describe('runInnerThoughts', () => {
@@ -314,6 +350,87 @@ describe('gardener-deep-steps', () => {
       const ctx = buildCtx(store, db, { fusionProvider: failingProvider });
       // Should not throw
       await expect(runInnerThoughts(ctx)).resolves.not.toThrow();
+    });
+
+    it('does not call the evaluator when the user has globally opted out', async () => {
+      seedMemory(db, {
+        content: "User asked the assistant not to check in or send proactive messages.",
+        category: 'preference',
+        prominence: 0.9,
+      });
+      const session = db.createSession('opt-out-session');
+      db.addSessionSummary({
+        sessionId: session.id,
+        userId: 'default',
+        summary: 'A recent conversation with an open project topic.',
+        topics: ['project'],
+        messageCount: 4,
+        durationMs: 10_000,
+        embedding: null,
+      });
+      const provider = createMockFusionProvider(JSON.stringify({ items: [] }));
+
+      await runInnerThoughts(buildCtx(store, db, { fusionProvider: provider }));
+
+      expect(provider.complete).not.toHaveBeenCalled();
+    });
+
+    it('elevates only an unopposed explicit positive preference', async () => {
+      seedMemory(db, {
+        content: 'User prefers the assistant to be proactive and check in.',
+        category: 'preference',
+        prominence: 0.9,
+      });
+      seedMemory(db, {
+        content: "Don't remind me about medication.",
+        category: 'preference',
+        prominence: 0.85,
+      });
+      const session = db.createSession('scoped-preference-session');
+      const summary = db.addSessionSummary({
+        sessionId: session.id,
+        userId: 'default',
+        summary: 'The user will follow up on the project plan.',
+        topics: ['project plan'],
+        messageCount: 4,
+        durationMs: 10_000,
+        embedding: null,
+      });
+      rawRun(db, 'UPDATE session_summaries SET created_at = ? WHERE id = ?', [Date.now() - 3 * 24 * 60 * 60 * 1000, summary.id]);
+      const provider = createMockFusionProvider(JSON.stringify({ items: [] }));
+
+      await runInnerThoughts(buildCtx(store, db, { fusionProvider: provider }));
+
+      expect(provider.complete).toHaveBeenCalledTimes(1);
+      const request = vi.mocked(provider.complete).mock.calls[0][0];
+      expect(String(request.system)).toContain('Proactiveness dial: moderate');
+      expect(String(request.system)).not.toContain('Proactiveness dial: eager');
+    });
+
+    it('elevates the dial for an explicit positive preference with no negative boundary', async () => {
+      seedMemory(db, {
+        content: 'User prefers the assistant to be proactive and check in.',
+        category: 'preference',
+        prominence: 0.9,
+      });
+      const session = db.createSession('positive-preference-session');
+      const summary = db.addSessionSummary({
+        sessionId: session.id,
+        userId: 'default',
+        summary: 'The user will follow up on the project plan.',
+        topics: ['project plan'],
+        messageCount: 4,
+        durationMs: 10_000,
+        embedding: null,
+      });
+      rawRun(db, 'UPDATE session_summaries SET created_at = ? WHERE id = ?', [Date.now() - 3 * 24 * 60 * 60 * 1000, summary.id]);
+      const provider = createMockFusionProvider(JSON.stringify({ items: [] }));
+
+      await runInnerThoughts(buildCtx(store, db, { fusionProvider: provider }));
+
+      expect(provider.complete).toHaveBeenCalledTimes(1);
+      const request = vi.mocked(provider.complete).mock.calls[0][0];
+      expect(String(request.system)).toContain('Proactiveness dial: eager');
     });
   });
 

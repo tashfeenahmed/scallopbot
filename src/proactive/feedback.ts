@@ -9,12 +9,18 @@
 
 import type { ScheduledItem } from '../memory/db.js';
 import { parseUserIdPrefix } from '../triggers/types.js';
-import { ENGAGEMENT_WINDOW_MS } from './proactive-config.js';
+import { ACKNOWLEDGEMENT_WINDOW_MS, ENGAGEMENT_WINDOW_MS } from './proactive-config.js';
 
 export const DEFAULT_ENGAGEMENT_WINDOW_MS = ENGAGEMENT_WINDOW_MS;
 
 const ACKNOWLEDGEMENT_RE = /^(?:(?:yes|yeah|yep|sure|okay|ok|got it|done|thanks|thank you|helpful|perfect|great|nice|will do|i did|i have|sorted|fixed)[!.\s]*)$/i;
-const DISMISSAL_RE = /\b(?:stop|unsubscribe|don't|do not|not now|leave me alone|no more|irrelevant|wrong person)\b/i;
+const OUTREACH_ACTION = String.raw`(?:remind(?:er|ers|ed|ing|s)?|messag(?:e|es|ed|ing)|check(?:ing)?[- ]?in|notif(?:y|ies|ied|ication|ications)|contact(?:ed|ing|s)?|send(?:ing)?|ask(?:ing|ed|s)?|ping(?:ed|ing|s)?|nudge(?:d|s|ing)?|follow(?:ing|ed)?[- ]?up|reach(?:ing|ed)?\s+out)`;
+const DISMISSAL_RE = new RegExp(
+  String.raw`(?:^\s*(?:please\s+)?stop\s*[.!?]*\s*$|\b(?:stop|no\s+more|don['\u2019]?t|do\s+not)\b.{0,40}\b${OUTREACH_ACTION}\b|\b(?:not\s+now|leave\s+me\s+alone|irrelevant|wrong\s+person|unsubscribe)\b)`,
+  'i',
+);
+const NEGATIVE_FEEDBACK_RE = /\b(?:why are you asking|i (?:already|just) (?:said|told) you|you (?:already )?(?:knew|know) that|that (?:reminder|message) (?:was|is) (?:wrong|irrelevant))\b/i;
+const NEUTRAL_UNCERTAINTY_RE = /\b(?:i\s+(?:do\s+not|don['\u2019]?t)\s+know|i(?:['\u2019]m|\s+am)\s+not\s+sure|i\s+(?:have\s+not|haven['\u2019]?t)\s+decided|i(?:['\u2019]m|\s+am)\s+undecided)\b/i;
 const STOP_WORDS = new Set([
   'about', 'after', 'again', 'also', 'been', 'before', 'being', 'could', 'from',
   'have', 'just', 'more', 'that', 'their', 'them', 'then', 'there', 'these',
@@ -37,7 +43,7 @@ export interface ProactiveEngagementContext {
 export interface ProactiveEngagementMatch {
   itemId: string;
   score: number;
-  reason: 'direct_reply' | 'acknowledgement' | 'topic_overlap';
+  reason: 'direct_reply' | 'acknowledgement' | 'topic_overlap' | 'negative';
 }
 
 /**
@@ -122,7 +128,7 @@ export function attributeProactiveEngagement(
   now: number = Date.now(),
 ): ProactiveEngagementMatch[] {
   const userMessage = context.userMessage?.trim() ?? '';
-  if (!userMessage || DISMISSAL_RE.test(userMessage)) return [];
+  if (!userMessage) return [];
 
   const eligible = recentFiredItems
     .filter(item =>
@@ -136,6 +142,27 @@ export function attributeProactiveEngagement(
     .sort((a, b) => (b.firedAt ?? 0) - (a.firedAt ?? 0));
 
   if (eligible.length === 0) return [];
+
+  // A stop/criticism is feedback, but never positive engagement. Attribute it
+  // to the best matching nudge (or the newest nudge when the user gives a
+  // generic "stop") so the caller can persist the negative outcome.
+  if (DISMISSAL_RE.test(userMessage) || NEGATIVE_FEEDBACK_RE.test(userMessage)) {
+    let best = eligible[0];
+    let bestOverlap = 0;
+    for (const item of eligible) {
+      const overlap = topicOverlap(userMessage, itemText(item));
+      if (overlap > bestOverlap) {
+        best = item;
+        bestOverlap = overlap;
+      }
+    }
+    return [{ itemId: best.id, score: -1, reason: 'negative' }];
+  }
+
+  // Uncertainty is neither approval nor rejection. In particular, a reply
+  // such as "I don't know about the passport" shares a topic word with the
+  // nudge, but it should not train the system that the outreach was useful.
+  if (NEUTRAL_UNCERTAINTY_RE.test(userMessage)) return [];
 
   const acknowledgement = ACKNOWLEDGEMENT_RE.test(userMessage);
   let best: ProactiveEngagementMatch | null = null;
@@ -152,7 +179,12 @@ export function attributeProactiveEngagement(
       candidate = { itemId: item.id, score: 1 + replyOverlap, reason: 'direct_reply' };
     } else if (messageOverlap >= 0.34) {
       candidate = { itemId: item.id, score: messageOverlap, reason: 'topic_overlap' };
-    } else if (acknowledgement && item === eligible[0]) {
+    } else if (
+      acknowledgement &&
+      item === eligible[0] &&
+      item.firedAt != null &&
+      now - item.firedAt < ACKNOWLEDGEMENT_WINDOW_MS
+    ) {
       // A terse acknowledgement contains no topic words, so recency is the
       // evidence. It may only attach to the single newest delivered nudge.
       candidate = { itemId: item.id, score: 0.5, reason: 'acknowledgement' };
@@ -178,5 +210,5 @@ export function detectProactiveEngagement(
     context,
     engagementWindowMs,
     now,
-  ).map(match => match.itemId);
+  ).filter(match => match.reason !== 'negative').map(match => match.itemId);
 }

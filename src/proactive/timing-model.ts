@@ -23,9 +23,6 @@ export { DEFAULT_ACTIVE_HOURS, MIN_GAP_MS, MAX_DEFERRAL_MS, URGENT_DELAY_MS, ACT
 /** Fallback delivery delay: 30 minutes (legacy behavior) */
 const FALLBACK_DELAY_MS = 30 * 60 * 1000;
 
-/** Milliseconds per hour */
-const HOUR_MS = 60 * 60 * 1000;
-
 // ============ Interfaces ============
 
 export interface TimingContext {
@@ -33,8 +30,12 @@ export interface TimingContext {
   quietHours: { start: number; end: number };
   lastProactiveAt: number | null;
   currentHour: number;
+  /** Minute in the same local timezone as currentHour. */
+  currentMinute?: number;
   urgency: 'low' | 'medium' | 'high';
   now: number;
+  /** Stable intent/item seed. When present, adds bounded natural timing jitter. */
+  jitterSeed?: string;
 }
 
 export interface DeliveryTiming {
@@ -71,18 +72,20 @@ export function isInQuietHours(
  *
  * Strategy priority (evaluated in order):
  * 1. urgent_now: urgency === 'high' AND NOT in quiet hours -> now + 5 min
- * 2. next_morning: in quiet hours -> first hour after quiet end, at :00
+ * 2. next_morning: in quiet hours -> first hour after quiet end, with bounded jitter
  * 3. active_hours: currentHour in activeHours -> now + 15 min
  * 4. next_active: outside active hours -> next active hour at :00
  * 5. Fallback: now + 30 min (legacy behavior)
  *
- * Minimum gap enforcement: if lastProactiveAt is set and deliverAt - lastProactiveAt < 2h,
- * push deliverAt to lastProactiveAt + 2h. Exception: high urgency bypasses gap.
+ * Minimum gap enforcement: if lastProactiveAt is set and the candidate is too
+ * close, push to the centralized minimum gap. Inferred urgency does not create
+ * bursts; explicit user reminders bypass this model at delivery.
  *
  * Maximum deferral: if deliverAt > now + 24h, cap at now + 24h.
  */
 export function computeDeliveryTime(context: TimingContext): DeliveryTiming {
   const { now, currentHour, urgency, quietHours, lastProactiveAt } = context;
+  const currentMinute = context.currentMinute ?? 0;
   const activeHours = context.userActiveHours.length > 0
     ? context.userActiveHours
     : DEFAULT_ACTIVE_HOURS;
@@ -98,16 +101,13 @@ export function computeDeliveryTime(context: TimingContext): DeliveryTiming {
       reason: 'High urgency, active hours',
       strategy: 'urgent_now',
     };
-    // High urgency bypasses minimum gap — apply max deferral cap and return
-    result.deliverAt = Math.min(result.deliverAt, now + MAX_DEFERRAL_MS);
-    return result;
   }
 
   // Strategy 2: next_morning (in quiet hours)
-  if (inQuiet) {
-    const hoursUntilEnd = computeHoursUntil(currentHour, quietHours.end);
+  else if (inQuiet) {
+    const minutesUntilEnd = computeMinutesUntil(currentHour, currentMinute, quietHours.end);
     result = {
-      deliverAt: now + hoursUntilEnd * HOUR_MS,
+      deliverAt: now + minutesUntilEnd * 60_000 + deliveryJitterMs(context.jitterSeed, 5, 20),
       reason: 'Deferred past quiet hours',
       strategy: 'next_morning',
     };
@@ -115,17 +115,17 @@ export function computeDeliveryTime(context: TimingContext): DeliveryTiming {
   // Strategy 3: active_hours
   else if (activeHours.includes(currentHour)) {
     result = {
-      deliverAt: now + ACTIVE_DELAY_MS,
+      deliverAt: now + ACTIVE_DELAY_MS + deliveryJitterMs(context.jitterSeed, -5, 10),
       reason: 'Within active hours',
       strategy: 'active_hours',
     };
   }
   // Strategy 4: next_active
   else {
-    const hoursUntilActive = computeNextActiveHoursUntil(currentHour, activeHours);
-    if (hoursUntilActive !== null) {
+    const minutesUntilActive = computeNextActiveMinutesUntil(currentHour, currentMinute, activeHours);
+    if (minutesUntilActive !== null) {
       result = {
-        deliverAt: now + hoursUntilActive * HOUR_MS,
+        deliverAt: now + minutesUntilActive * 60_000 + deliveryJitterMs(context.jitterSeed, 5, 20),
         reason: 'Deferred to next active period',
         strategy: 'next_active',
       };
@@ -139,7 +139,8 @@ export function computeDeliveryTime(context: TimingContext): DeliveryTiming {
     }
   }
 
-  // Minimum gap enforcement (bypassed by high urgency, already returned above)
+  // Minimum gap enforcement applies to inferred outreach at every urgency.
+  // Explicit user reminders bypass this model at the scheduler boundary.
   if (lastProactiveAt != null) {
     const minDeliverAt = lastProactiveAt + MIN_GAP_MS;
     if (result.deliverAt < minDeliverAt) {
@@ -160,20 +161,20 @@ export function computeDeliveryTime(context: TimingContext): DeliveryTiming {
  * Compute hours from currentHour to targetHour, wrapping around midnight.
  * Always returns a positive number (1-24 range for wrap-around).
  */
-function computeHoursUntil(currentHour: number, targetHour: number): number {
-  if (targetHour > currentHour) {
-    return targetHour - currentHour;
-  }
-  // Wrap around midnight
-  return 24 - currentHour + targetHour;
+function computeMinutesUntil(currentHour: number, currentMinute: number, targetHour: number): number {
+  const current = currentHour * 60 + currentMinute;
+  const target = targetHour * 60;
+  const delta = (target - current + 24 * 60) % (24 * 60);
+  return delta === 0 ? 24 * 60 : delta;
 }
 
 /**
  * Find the number of hours until the next active hour.
  * Returns null if activeHours is empty.
  */
-function computeNextActiveHoursUntil(
+function computeNextActiveMinutesUntil(
   currentHour: number,
+  currentMinute: number,
   activeHours: number[],
 ): number | null {
   if (activeHours.length === 0) return null;
@@ -184,10 +185,23 @@ function computeNextActiveHoursUntil(
   // Find the first active hour after currentHour
   for (const hour of sorted) {
     if (hour > currentHour) {
-      return hour - currentHour;
+      return hour * 60 - (currentHour * 60 + currentMinute);
     }
   }
 
   // Wrap around: first active hour tomorrow
-  return 24 - currentHour + sorted[0];
+  return 24 * 60 - (currentHour * 60 + currentMinute) + sorted[0] * 60;
+}
+
+/** Deterministic jitter avoids clockwork sends while remaining testable. */
+function deliveryJitterMs(seed: string | undefined, minMinutes: number, maxMinutes: number): number {
+  if (!seed || maxMinutes < minMinutes) return 0;
+  let hash = 2166136261;
+  for (let i = 0; i < seed.length; i++) {
+    hash ^= seed.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  const span = maxMinutes - minMinutes + 1;
+  const minutes = minMinutes + ((hash >>> 0) % span);
+  return minutes * 60_000;
 }

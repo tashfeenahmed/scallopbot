@@ -132,7 +132,7 @@ describe('E2E Nudge/Task System', () => {
       const nudgeItem = items.find(i => i.kind === 'nudge' && i.message.includes('water'));
       expect(nudgeItem).toBeDefined();
       expect(nudgeItem!.type).toBe('follow_up');
-      expect(nudgeItem!.source).toBe('agent');
+      expect(nudgeItem!.source).toBe('user');
       expect(nudgeItem!.taskConfig).toBeNull();
       expect(nudgeItem!.message).toContain('water');
     });
@@ -157,7 +157,7 @@ describe('E2E Nudge/Task System', () => {
       db.addScheduledItem({
         userId: 'default',
         sessionId: null,
-        source: 'agent',
+        source: 'user',
         kind: 'nudge',
         type: 'follow_up',
         message: 'Time to drink water! Stay hydrated.',
@@ -194,6 +194,11 @@ describe('E2E Nudge/Task System', () => {
       scheduler = new UnifiedScheduler({
         db,
         logger: testLogger,
+        router: {
+          executeWithFallback: async () => ({
+            response: { content: [{ type: 'text' as const, text: 'Time to drink some water.' }] },
+          }),
+        } as any,
         interval: 60000, // long interval so we control evaluation manually
         onSendMessage: async (userId: string, message: string) => {
           sentMessages.push({ userId, message });

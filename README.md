@@ -77,7 +77,9 @@ Nightly composite reflection analyses recent sessions across four dimensions (ex
 
 ### Proactive Intelligence
 
-A gap scanner identifies unresolved questions, approaching deadlines, and behavioural anomalies. Delivery is gated by a configurable proactiveness dial (conservative/moderate/eager) and a **trust feedback loop** that calibrates future proactive behaviour based on user engagement signals.
+A gap scanner identifies explicit open loops, approaching deadlines, and stale/blocked work. Passive usage changes such as shorter replies or fewer sessions never justify outreach on their own. Delivery is gated by explicit positive/negative preferences, a configurable proactiveness dial (conservative/moderate/eager), quiet hours, send-time freshness checks, daily limits, and a **feedback loop** based on actual proactive outcomes rather than general chat frequency.
+
+Generated outreach is realized immediately before delivery using current context and recent message history. Social-quality gates reject internal reasoning, generic check-ins, surveillance language, faux intimacy, pressure, and multi-question interrogations; literal reminders written by the user remain unchanged.
 
 ### Spreading Activation
 

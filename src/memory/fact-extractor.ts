@@ -18,6 +18,7 @@ import {
   type ExistingFact,
 } from './relation-classifier.js';
 import { sanitizeProactiveMessage } from '../proactive/message-safety.js';
+import { assessProactiveMessage } from '../proactive/message-quality.js';
 
 /**
  * Categories for extracted facts
@@ -192,6 +193,7 @@ Format each trigger as:
 {
   "type": "event_prep" | "commitment_check" | "goal_checkin" | "follow_up",
   "kind": "nudge" | "task",
+  "consent": "explicit" | "inferred",
   "description": "Brief description of what to follow up on",
   "trigger_time": "MUST include specific time - use ISO datetime with time (e.g., '2026-02-07T09:00:00') OR relative ('+2h', '+1d 9am', 'tomorrow 10:00')",
   "context": "Context for generating the proactive message",
@@ -207,19 +209,36 @@ KIND RULES:
 - When kind is "task", the "goal" field describes what the sub-agent should do, and "description" is the fallback message if the task fails
 - Default to "nudge" unless the trigger clearly requires the bot to perform research or actions
 
+CONSENT RULES:
+- "explicit": the user directly asked to be reminded, notified, checked in on, or asked for the recurring/task action.
+- "inferred": the user mentioned an event, commitment, deadline, or goal but did not ask for outreach.
+- Create a recurring trigger only when the user explicitly asks for repeating
+  outreach; label that trigger "explicit". A recurring routine or plan by
+  itself never grants consent for recurring messages.
+
 NUDGE TONE — CRITICAL:
-The description for nudges is sent DIRECTLY to the user as a chat message. Write it like a casual, friendly message from a mate — not a robotic notification.
-- Use natural, conversational language. Imagine you're texting a friend.
+The description is a delivery-time intent and safe fallback. Write it as a natural, respectful AI assistant — warm without pretending to be a friend or having human feelings.
+- Use natural, conversational language with one concrete focus.
 - The description must be the exact user-facing text. Do NOT write instructions like "ask the user...", "send a message...", or "check in with the user...".
 - BAD: "Eir fibre appointment tomorrow between 10am and 5pm"
-- GOOD: "Hey, just a heads up — your Eir fibre appointment is tomorrow, they said between 10 and 5."
+- GOOD: "Your Eir fibre appointment is tomorrow between 10 and 5."
 - BAD: "Ask the user how the agent mode proto is going"
-- GOOD: "Hey, how's the agent mode proto coming along?"
+- GOOD: "Did the agent mode prototype review go ahead?"
 - BAD: "Check progress on agent mode proto for Dan"
-- GOOD: "Hey, how's the agent mode proto for Dan coming along? Wanted to check in on that."
+- GOOD: "The agent mode prototype for Dan was due today. Is it still on track?"
 - BAD: "Dentist appointment at 2pm"
-- GOOD: "Just a reminder, you've got the dentist at 2 today."
-- Keep it brief but human. No emojis, no bullet points, no structured formatting.
+- GOOD: "Your dentist appointment is at 2 today."
+- Never default to "Hey", "just checking in", "wanted to check in", or "hope you're well".
+- Do not mention reduced activity, shorter replies, or that the user has been quiet.
+- Do not use guilt, pressure, faux intimacy, diagnosis, or more than one question.
+- Keep it brief and specific. No emojis, bullet points, or structured formatting.
+
+PROACTIVE RESTRAINT — CRITICAL:
+- Silence is correct when there is no concrete reason to interrupt at that time.
+- Do not create a trigger merely because a conversation ended, the user mentioned a vague goal, or a casual plan might be interesting to ask about.
+- A trigger needs a specific event/commitment/deadline, a useful delivery time, and a clear benefit to the user.
+- Do not create generic morning/evening recaps or "how was your day" check-ins unless the user explicitly requested that recurring check-in.
+- Recurring triggers require explicit recurrence language from the user.
 
 RECURRING RULES:
 - If the user says "daily", "every day", "every morning", "every evening", etc. → set recurring with type "daily"
@@ -243,7 +262,7 @@ Respond with JSON only:
     { "content": "fact text", "subject": "user|agent|name", "category": "category", "confidence": 0.0-1.0, "action": "fact|forget|correction|preference_update", "old_value": "optional", "replaces": "optional" }
   ],
   "proactive_triggers": [
-    { "type": "event_prep|commitment_check|goal_checkin|follow_up", "kind": "nudge|task", "description": "text", "trigger_time": "ISO or relative", "context": "text", "guidance": "text or null", "goal": "text or null (required for task)", "tools": ["optional tool names"], "recurring": "null or {type, hour, minute, dayOfWeek?}" }
+    { "type": "event_prep|commitment_check|goal_checkin|follow_up", "kind": "nudge|task", "consent": "explicit|inferred", "description": "text", "trigger_time": "ISO or relative", "context": "text", "guidance": "text or null", "goal": "text or null (required for task)", "tools": ["optional tool names"], "recurring": "null or {type, hour, minute, dayOfWeek?}" }
   ]
 }
 
@@ -314,7 +333,9 @@ export class LLMFactExtractor {
     userId: string,
     context?: string,
     /** Optional source message ID for provenance tracking */
-    sourceMessageId?: string
+    sourceMessageId?: string,
+    /** Conversation that originated any extracted proactive intent. */
+    sourceSessionId?: string,
   ): Promise<FactExtractionResult> {
     const result: FactExtractionResult = {
       facts: [],
@@ -355,7 +376,7 @@ export class LLMFactExtractor {
         this.logger.debug({ response: response.content }, 'No facts extracted');
         // Still process triggers even when no facts found
         if (parsed.proactive_triggers && Array.isArray(parsed.proactive_triggers) && parsed.proactive_triggers.length > 0) {
-          this.processExtractedTriggers(parsed.proactive_triggers, userId);
+          this.processExtractedTriggers(parsed.proactive_triggers, userId, message, null, sourceSessionId);
         }
         return result;
       }
@@ -425,7 +446,7 @@ export class LLMFactExtractor {
 
       // Process triggers from combined extraction (fire-and-forget)
       if (parsed.proactive_triggers && Array.isArray(parsed.proactive_triggers) && parsed.proactive_triggers.length > 0) {
-        this.processExtractedTriggers(parsed.proactive_triggers, userId);
+        this.processExtractedTriggers(parsed.proactive_triggers, userId, message, null, sourceSessionId);
       }
 
       // Process facts with batch classification for efficiency
@@ -461,11 +482,12 @@ export class LLMFactExtractor {
     message: string,
     userId: string,
     context?: string,
-    sourceMessageId?: string
+    sourceMessageId?: string,
+    sourceSessionId?: string,
   ): Promise<FactExtractionResult> {
     const key = `${userId}-${Date.now()}`;
 
-    const promise = this.extractFacts(message, userId, context, sourceMessageId);
+    const promise = this.extractFacts(message, userId, context, sourceMessageId, sourceSessionId);
     this.processingQueue.set(key, promise);
 
     try {
@@ -1337,6 +1359,7 @@ Respond with JSON only:
     triggers: Array<{
       type: 'event_prep' | 'commitment_check' | 'goal_checkin' | 'follow_up';
       kind?: 'nudge' | 'task';
+      consent?: 'explicit' | 'inferred';
       description: string;
       trigger_time: string;
       context: string;
@@ -1348,39 +1371,33 @@ Respond with JSON only:
       priority?: 'urgent' | 'high' | 'medium' | 'low';
     }>,
     userId: string,
+    sourceUserMessage: string,
     sourceMemoryId?: string | null,
+    sourceSessionId?: string,
   ): void {
     if (!this.scallopStore || triggers.length === 0) return;
 
     const db = this.scallopStore.getDatabase();
 
-    // Enforce daily budget: count agent-sourced items created today
-    const MAX_DAILY_TRIGGERS = 5;
-    const tz = this.getTimezone(userId);
-    const now = new Date();
-    const formatter = new Intl.DateTimeFormat('en-US', { timeZone: tz, hour: '2-digit', hour12: false });
-    const hourStr = formatter.formatToParts(now).find(p => p.type === 'hour')?.value ?? '0';
-    const todayStartMs = now.getTime() - (parseInt(hourStr, 10) * 3600000 + now.getMinutes() * 60000 + now.getSeconds() * 1000 + now.getMilliseconds());
-    const existingItems = db.getScheduledItemsByUser(userId);
-    const todayAgentCount = existingItems.filter(
-      i => i.source === 'agent' && i.createdAt >= todayStartMs
-    ).length;
-    let remainingBudget = Math.max(0, MAX_DAILY_TRIGGERS - todayAgentCount);
-
-    if (remainingBudget === 0) {
-      this.logger.debug(
-        { todayAgentCount, max: MAX_DAILY_TRIGGERS },
-        'Daily trigger budget exhausted, skipping all extracted triggers'
-      );
-      return;
-    }
+    // Limit one extraction burst, while leaving the actual interruption budget
+    // to the delivery layer. Counting creation time was wrong for future
+    // reminders (five events next week could exhaust today's budget).
+    const MAX_TRIGGERS_PER_EXTRACTION = 3;
+    let remainingBudget = MAX_TRIGGERS_PER_EXTRACTION;
+    const messageHasExplicitRequest = this.hasExplicitProactiveRequest(sourceUserMessage);
 
     for (const trigger of triggers) {
+      // A single direct request is deterministic. When one message yields
+      // several different intents, also require the model's per-intent label
+      // so "remind me about X; I also mentioned Y" does not privilege Y.
+      const explicitConsent = messageHasExplicitRequest && (
+        triggers.length === 1 || trigger.consent === 'explicit'
+      );
       // Enforce daily budget per trigger
       if (remainingBudget <= 0) {
         this.logger.debug(
           { skipped: trigger.description },
-          'Daily trigger budget exhausted, skipping remaining triggers'
+          'Per-message trigger cap reached, skipping remaining triggers'
         );
         break;
       }
@@ -1397,15 +1414,17 @@ Respond with JSON only:
         );
         continue;
       }
-
-      const triggerAt = this.parseTriggerTime(trigger.trigger_time);
-      if (!triggerAt) {
-        this.logger.debug({ trigger_time: trigger.trigger_time }, 'Invalid trigger time, skipping');
+      if (kind === 'nudge' && !assessProactiveMessage(message).acceptable) {
+        this.logger.debug(
+          { description: message.slice(0, 120) },
+          'Skipping low-quality proactive nudge intent',
+        );
         continue;
       }
 
-      if (db.hasSimilarPendingScheduledItem(userId, message)) {
-        this.logger.debug({ description: message }, 'Similar scheduled item already exists, skipping');
+      const triggerAt = this.parseTriggerTime(trigger.trigger_time, this.getTimezone(userId));
+      if (!triggerAt) {
+        this.logger.debug({ trigger_time: trigger.trigger_time }, 'Invalid trigger time, skipping');
         continue;
       }
 
@@ -1421,10 +1440,28 @@ Respond with JSON only:
       }
 
       // Use recurring schedule directly from LLM structured output
-      // Validate it has required fields; fall back to null if malformed
+      // Validate every wall-clock field; malformed model output must not create
+      // an impossible or silently drifting recurrence.
       let recurring: RecurringSchedule | null = null;
-      if (trigger.recurring && typeof trigger.recurring === 'object' && trigger.recurring.type && typeof trigger.recurring.hour === 'number') {
-        recurring = trigger.recurring;
+      if (trigger.recurring && typeof trigger.recurring === 'object') {
+        const candidate = trigger.recurring;
+        const validType = ['daily', 'weekly', 'weekdays', 'weekends'].includes(candidate.type);
+        const validHour = Number.isInteger(candidate.hour) && candidate.hour >= 0 && candidate.hour <= 23;
+        const validMinute = Number.isInteger(candidate.minute) && candidate.minute >= 0 && candidate.minute <= 59;
+        const validWeekday = candidate.type !== 'weekly'
+          || (Number.isInteger(candidate.dayOfWeek) && candidate.dayOfWeek! >= 0 && candidate.dayOfWeek! <= 6);
+        if (validType && validHour && validMinute && validWeekday) recurring = candidate;
+      }
+
+      // Repeating interruptions always require explicit user consent. Fail
+      // closed if a model invents a recurrence from a routine statement such
+      // as "I take medication every morning" without a reminder request.
+      if (recurring && !explicitConsent) {
+        this.logger.warn(
+          { type: trigger.type },
+          'Skipping recurring proactive trigger without explicit consent',
+        );
+        continue;
       }
 
       // Build taskConfig for task-kind items
@@ -1437,11 +1474,18 @@ Respond with JSON only:
 
       // Extract priority from trigger if available (urgent/high/medium/low)
       const priority = (trigger.priority && ['urgent', 'high', 'medium', 'low'].includes(trigger.priority) ? trigger.priority : 'medium') as 'urgent' | 'high' | 'medium' | 'low';
+      // Consent is derived from the user's own words, not trusted model output.
+      // The structured model field remains useful for evaluation/diagnostics,
+      // but it cannot grant itself a higher delivery privilege.
+      const consent = explicitConsent ? 'explicit' : 'inferred';
 
       db.addScheduledItem({
         userId,
-        sessionId: null,
-        source: 'agent',
+        sessionId: sourceSessionId ?? null,
+        // Explicit user requests keep their requested cadence and are never
+        // counted/deduped as autonomous outreach. The text is still generated,
+        // so messageProvenance remains generated and is rendered safely.
+        source: consent === 'explicit' ? 'user' : 'agent',
         kind,
         type: trigger.type || 'follow_up',
         message,
@@ -1469,13 +1513,29 @@ Respond with JSON only:
     }
   }
 
+  private hasExplicitProactiveRequest(message: string): boolean {
+    const normalized = message.replace(/[\u2018\u2019]/g, "'");
+    return (
+      /\b(?:please\s+)?(?:remind|notify|message|text|ping|nudge)\s+me\b/i.test(normalized) ||
+      /\b(?:can|could|would|will)\s+you\s+(?:please\s+)?(?:remind|notify|message|text|ping|nudge|check|follow|look\s+up|find|send)\b/i.test(normalized) ||
+      /\bplease\s+(?:check|follow\s+up|look\s+up|find|send)\b/i.test(normalized) ||
+      /\b(?:check|follow)\s+(?:in|up)\s+with\s+me\b/i.test(normalized) ||
+      /\b(?:let\s+me\s+know|tell\s+me)\s+(?:at|when|if|about|tomorrow|later)\b/i.test(normalized) ||
+      /\bi(?:'d|\s+would)\s+like\s+(?:a\s+)?(?:reminder|notification|check[- ]?in)\b/i.test(normalized) ||
+      /\bset\s+(?:a\s+)?(?:reminder|notification)\b/i.test(normalized) ||
+      /\b(?:don't\s+let\s+me\s+forget|make\s+sure\s+(?:you\s+)?(?:remind|notify)\s+me)\b/i.test(normalized)
+    );
+  }
+
   /**
    * Parse trigger time from ISO or relative format
    * Supports: ISO datetime with time, '+2h', '+1d', '+1w', 'tomorrow 9am', '+1d morning', 'Monday 10:00', etc.
    * REJECTS: date-only strings like "2026-02-07" or "TODAY" without time
    */
-  private parseTriggerTime(timeStr: string): number | null {
+  private parseTriggerTime(timeStr: string, timezone?: string): number | null {
     const now = Date.now();
+    const tz = timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const localNow = this.getLocalCalendarParts(now, tz);
 
     // Reject "TODAY" without specific time
     if (/^today$/i.test(timeStr.trim())) {
@@ -1485,9 +1545,23 @@ Respond with JSON only:
     // Try ISO format - but ONLY if it includes time component (T or space followed by time)
     // Reject date-only formats like "2026-02-07"
     if (/^\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2}/.test(timeStr)) {
-      const isoDate = new Date(timeStr);
-      if (!isNaN(isoDate.getTime())) {
-        return isoDate.getTime();
+      const match = timeStr.match(/^(\d{4})-(\d{2})-(\d{2})[T\s](\d{2}):(\d{2})/);
+      if (!match || !this.isValidWallClockComponents(
+        Number(match[1]), Number(match[2]), Number(match[3]),
+        Number(match[4]), Number(match[5]),
+      )) {
+        return null;
+      }
+      // Explicit offsets/Z are absolute. Offset-less ISO strings are wall
+      // clock values in the user's timezone, not the server's timezone.
+      if (/(?:z|[+-]\d{2}:?\d{2})$/i.test(timeStr.trim())) {
+        const isoDate = new Date(timeStr);
+        if (!isNaN(isoDate.getTime())) return isoDate.getTime();
+      } else {
+        return this.wallClockToEpoch(
+          Number(match[1]), Number(match[2]), Number(match[3]),
+          Number(match[4]), Number(match[5]), tz,
+        );
       }
     }
 
@@ -1517,52 +1591,57 @@ Respond with JSON only:
       const value = parseInt(amount, 10);
       const daysToAdd = unit.toLowerCase() === 'w' ? value * 7 : value;
 
-      const targetDate = new Date(now);
-      targetDate.setDate(targetDate.getDate() + daysToAdd);
+      const targetDate = new Date(Date.UTC(localNow.year, localNow.month - 1, localNow.day + daysToAdd));
 
       // Parse time of day
       const timeOfDayLower = timeOfDay.toLowerCase().trim();
       if (timeOfDayLower === 'morning') {
-        targetDate.setHours(9, 0, 0, 0);
+        targetDate.setUTCHours(9, 0, 0, 0);
       } else if (timeOfDayLower === 'afternoon') {
-        targetDate.setHours(14, 0, 0, 0);
+        targetDate.setUTCHours(14, 0, 0, 0);
       } else if (timeOfDayLower === 'evening') {
-        targetDate.setHours(18, 0, 0, 0);
+        targetDate.setUTCHours(18, 0, 0, 0);
       } else if (timeOfDayLower === 'night') {
-        targetDate.setHours(20, 0, 0, 0);
+        targetDate.setUTCHours(20, 0, 0, 0);
       } else {
         // Try parsing as specific time (9am, 10:30, etc.)
         const specificTime = this.parseTimeOfDay(timeOfDay);
         if (specificTime) {
-          targetDate.setHours(specificTime.hour, specificTime.minute, 0, 0);
+          targetDate.setUTCHours(specificTime.hour, specificTime.minute, 0, 0);
         } else {
-          targetDate.setHours(9, 0, 0, 0); // Default to morning
+          targetDate.setUTCHours(9, 0, 0, 0); // Default to morning
         }
       }
 
-      return targetDate.getTime();
+      return this.wallClockToEpoch(
+        targetDate.getUTCFullYear(), targetDate.getUTCMonth() + 1, targetDate.getUTCDate(),
+        targetDate.getUTCHours(), targetDate.getUTCMinutes(), tz,
+      );
     }
 
     // Day of week patterns: Monday, next Tuesday, etc.
     const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
     for (let i = 0; i < dayNames.length; i++) {
       if (lowerStr.includes(dayNames[i])) {
-        const targetDate = new Date(now);
-        const currentDay = targetDate.getDay();
+        const targetDate = new Date(Date.UTC(localNow.year, localNow.month - 1, localNow.day));
+        const currentDay = targetDate.getUTCDay();
         let daysUntil = i - currentDay;
         if (daysUntil <= 0) daysUntil += 7; // Next occurrence
 
-        targetDate.setDate(targetDate.getDate() + daysUntil);
+        targetDate.setUTCDate(targetDate.getUTCDate() + daysUntil);
 
         // Try to parse time from the string
         const specificTime = this.parseTimeOfDay(timeStr);
         if (specificTime) {
-          targetDate.setHours(specificTime.hour, specificTime.minute, 0, 0);
+          targetDate.setUTCHours(specificTime.hour, specificTime.minute, 0, 0);
         } else {
-          targetDate.setHours(9, 0, 0, 0); // Default to 9am
+          targetDate.setUTCHours(9, 0, 0, 0); // Default to 9am
         }
 
-        return targetDate.getTime();
+        return this.wallClockToEpoch(
+          targetDate.getUTCFullYear(), targetDate.getUTCMonth() + 1, targetDate.getUTCDate(),
+          targetDate.getUTCHours(), targetDate.getUTCMinutes(), tz,
+        );
       }
     }
 
@@ -1570,12 +1649,12 @@ Respond with JSON only:
     if (lowerStr.includes('today')) {
       const specificTime = this.parseTimeOfDay(timeStr);
       if (specificTime) {
-        const today = new Date(now);
-        today.setHours(specificTime.hour, specificTime.minute, 0, 0);
+        const today = this.wallClockToEpoch(
+          localNow.year, localNow.month, localNow.day,
+          specificTime.hour, specificTime.minute, tz,
+        );
         // Only valid if the time is in the future
-        if (today.getTime() > now) {
-          return today.getTime();
-        }
+        if (today !== null && today > now) return today;
       }
       // "today" without valid future time - reject
       return null;
@@ -1583,18 +1662,102 @@ Respond with JSON only:
 
     // Tomorrow patterns
     if (lowerStr.includes('tomorrow')) {
-      const tomorrow = new Date(now);
-      tomorrow.setDate(tomorrow.getDate() + 1);
+      const tomorrow = new Date(Date.UTC(localNow.year, localNow.month - 1, localNow.day + 1));
       const specificTime = this.parseTimeOfDay(timeStr);
       if (specificTime) {
-        tomorrow.setHours(specificTime.hour, specificTime.minute, 0, 0);
+        tomorrow.setUTCHours(specificTime.hour, specificTime.minute, 0, 0);
       } else {
-        tomorrow.setHours(9, 0, 0, 0);
+        tomorrow.setUTCHours(9, 0, 0, 0);
       }
-      return tomorrow.getTime();
+      return this.wallClockToEpoch(
+        tomorrow.getUTCFullYear(), tomorrow.getUTCMonth() + 1, tomorrow.getUTCDate(),
+        tomorrow.getUTCHours(), tomorrow.getUTCMinutes(), tz,
+      );
     }
 
     return null;
+  }
+
+  private getLocalCalendarParts(epochMs: number, timezone: string): { year: number; month: number; day: number } {
+    try {
+      const parts = new Intl.DateTimeFormat('en-CA', {
+        timeZone: timezone,
+        year: 'numeric', month: '2-digit', day: '2-digit',
+      }).formatToParts(new Date(epochMs));
+      const value = (type: string) => Number(parts.find(part => part.type === type)?.value);
+      const year = value('year');
+      const month = value('month');
+      const day = value('day');
+      if ([year, month, day].every(Number.isFinite)) return { year, month, day };
+    } catch { /* invalid timezone falls back to server calendar */ }
+    const date = new Date(epochMs);
+    return { year: date.getFullYear(), month: date.getMonth() + 1, day: date.getDate() };
+  }
+
+  private isValidWallClockComponents(
+    year: number,
+    month: number,
+    day: number,
+    hour: number,
+    minute: number,
+  ): boolean {
+    if (![year, month, day, hour, minute].every(Number.isInteger)) return false;
+    if (month < 1 || month > 12 || hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+      return false;
+    }
+    const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
+    return day >= 1 && day <= daysInMonth;
+  }
+
+  /**
+   * Convert a user-local wall clock to epoch milliseconds, including DST.
+   * Invalid calendar dates and DST-skipped local times are rejected instead
+   * of being silently normalized to a different date or hour.
+   */
+  private wallClockToEpoch(
+    year: number,
+    month: number,
+    day: number,
+    hour: number,
+    minute: number,
+    timezone: string,
+  ): number | null {
+    if (!this.isValidWallClockComponents(year, month, day, hour, minute)) return null;
+    const desiredAsUtc = Date.UTC(year, month - 1, day, hour, minute);
+    let guess = desiredAsUtc;
+    try {
+      const formatter = new Intl.DateTimeFormat('en-CA', {
+        timeZone: timezone,
+        hourCycle: 'h23',
+        year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit',
+      });
+      // Two passes handle offset changes around DST boundaries.
+      for (let pass = 0; pass < 2; pass++) {
+        const parts = formatter.formatToParts(new Date(guess));
+        const value = (type: string) => Number(parts.find(part => part.type === type)?.value);
+        const renderedAsUtc = Date.UTC(
+          value('year'), value('month') - 1, value('day'),
+          value('hour') % 24, value('minute'),
+        );
+        guess += desiredAsUtc - renderedAsUtc;
+      }
+
+      const finalParts = formatter.formatToParts(new Date(guess));
+      const finalValue = (type: string) => Number(finalParts.find(part => part.type === type)?.value);
+      if (
+        finalValue('year') !== year ||
+        finalValue('month') !== month ||
+        finalValue('day') !== day ||
+        finalValue('hour') % 24 !== hour ||
+        finalValue('minute') !== minute
+      ) {
+        return null;
+      }
+      return guess;
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -1650,6 +1813,7 @@ Respond with JSON only:
     proactive_triggers?: Array<{
       type: 'event_prep' | 'commitment_check' | 'goal_checkin' | 'follow_up';
       kind?: 'nudge' | 'task';
+      consent?: 'explicit' | 'inferred';
       description: string;
       trigger_time: string;
       context: string;

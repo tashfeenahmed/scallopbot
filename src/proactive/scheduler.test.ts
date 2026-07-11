@@ -14,6 +14,16 @@ function middayTimezone(): string {
   return offset >= 0 ? `Etc/GMT-${offset}` : `Etc/GMT+${-offset}`;
 }
 
+function addPreference(db: ScallopDatabase, content: string): void {
+  db.addMemory({
+    userId: 'default', content, category: 'preference', memoryType: 'semantic',
+    importance: 8, confidence: 1, isLatest: true, source: 'user',
+    documentDate: Date.now(), eventDate: null, prominence: 0.9,
+    lastAccessed: null, accessCount: 0, sourceChunk: content,
+    embedding: null, metadata: null,
+  });
+}
+
 describe('UnifiedScheduler proactive delivery safety', () => {
   let db: ScallopDatabase;
   let scheduler: UnifiedScheduler | undefined;
@@ -26,6 +36,251 @@ describe('UnifiedScheduler proactive delivery safety', () => {
     scheduler?.stop();
     scheduler = undefined;
     db.close();
+  });
+
+  it('never fuzzy-deletes intentional user reminders during consolidation', () => {
+    const base = Date.now() + 60_000;
+    const first = db.addScheduledItem({
+      userId: 'default', sessionId: null, source: 'user', messageProvenance: 'user_literal',
+      kind: 'nudge', type: 'reminder', message: 'Take medication with breakfast.',
+      context: null, triggerAt: base, recurring: null, sourceMemoryId: null,
+    });
+    const second = db.addScheduledItem({
+      userId: 'default', sessionId: null, source: 'user', messageProvenance: 'user_literal',
+      kind: 'nudge', type: 'reminder', message: 'Take medication with breakfast.',
+      context: null, triggerAt: base + 12 * 60 * 60 * 1000, recurring: null, sourceMemoryId: null,
+    });
+
+    expect(db.consolidateDuplicateScheduledItems()).toBe(0);
+    expect(db.getScheduledItem(first.id)).not.toBeNull();
+    expect(db.getScheduledItem(second.id)).not.toBeNull();
+  });
+
+  it('cancels a frozen inferred nudge when its source conversation continued', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-07-11T12:00:00Z'));
+      db.createSession('source-session', { userId: 'default' });
+      db.addSessionMessage('source-session', 'user', 'The review is tomorrow.');
+      const item = db.addScheduledItem({
+        userId: 'default', sessionId: 'source-session', source: 'agent', kind: 'nudge',
+        type: 'follow_up', message: 'Did the review go ahead?', context: null,
+        triggerAt: Date.now() - 1, recurring: null, sourceMemoryId: null,
+      });
+      vi.setSystemTime(new Date('2026-07-11T12:01:00Z'));
+      db.addSessionMessage('source-session', 'user', 'It was cancelled, so no follow-up is needed.');
+      const send = vi.fn().mockResolvedValue(true);
+      scheduler = new UnifiedScheduler({ db, logger, onSendMessage: send, getTimezone: () => 'UTC' });
+
+      await scheduler.evaluate();
+
+      expect(send).not.toHaveBeenCalled();
+      expect(db.getScheduledItem(item.id)?.status).toBe('expired');
+      expect(db.getRecentProactiveDecisions(5)).toEqual(expect.arrayContaining([
+        expect.objectContaining({ reason: 'source_conversation_changed' }),
+      ]));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps an inferred nudge when newer source chat is unrelated and gives it to the renderer', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-07-11T12:00:00Z'));
+      db.createSession('source-session', { userId: 'default' });
+      db.addSessionMessage('source-session', 'user', 'The product review is tomorrow.');
+      const item = db.addScheduledItem({
+        userId: 'default', sessionId: 'source-session', source: 'agent', kind: 'nudge',
+        type: 'follow_up', message: 'Did the product review go ahead?',
+        context: 'The product review was planned for today.',
+        triggerAt: Date.now() - 1, recurring: null, sourceMemoryId: null,
+      });
+      vi.setSystemTime(new Date('2026-07-11T12:10:00Z'));
+      db.addSessionMessage('source-session', 'user', 'I finished making lunch and put the dishes away.');
+      vi.setSystemTime(new Date('2026-07-11T12:16:00Z'));
+      const router = {
+        executeWithFallback: vi.fn().mockResolvedValue({
+          response: { content: [{ type: 'text', text: 'Was the product review able to go ahead today?' }] },
+        }),
+      };
+      const send = vi.fn().mockResolvedValue(true);
+      scheduler = new UnifiedScheduler({
+        db, logger, router: router as any, onSendMessage: send,
+        getTimezone: () => 'UTC', minAgentProactiveGapMs: 0,
+      });
+
+      await scheduler.evaluate();
+
+      expect(send).toHaveBeenCalledWith('default', 'Was the product review able to go ahead today?');
+      expect(db.getScheduledItem(item.id)?.status).toBe('fired');
+      expect(router.executeWithFallback.mock.calls[0][0].messages[0].content)
+        .toContain('I finished making lunch and put the dishes away.');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('expires an intentional renderer SKIP instead of retrying it', async () => {
+    const item = db.addScheduledItem({
+      userId: 'default', sessionId: null, source: 'agent', kind: 'nudge',
+      type: 'follow_up', message: 'Did the product review go ahead?', context: null,
+      triggerAt: Date.now() - 1, recurring: null, sourceMemoryId: null,
+    });
+    const router = {
+      executeWithFallback: vi.fn().mockResolvedValue({
+        response: { content: [{ type: 'text', text: 'SKIP' }] },
+      }),
+    };
+    const send = vi.fn().mockResolvedValue(true);
+    scheduler = new UnifiedScheduler({
+      db, logger, router: router as any, onSendMessage: send, getTimezone: () => middayTimezone(),
+    });
+
+    await scheduler.evaluate();
+
+    expect(send).not.toHaveBeenCalled();
+    expect(db.getScheduledItem(item.id)).toEqual(expect.objectContaining({
+      status: 'expired', attemptCount: 0,
+    }));
+    expect(db.getRecentProactiveDecisions(5)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ reason: 'renderer_skip' }),
+    ]));
+  });
+
+  it('defers inferred outreach while the user is actively chatting', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-07-11T12:00:00Z'));
+      const item = db.addScheduledItem({
+        userId: 'default', sessionId: null, source: 'agent', kind: 'nudge',
+        type: 'follow_up', message: 'Did the review go ahead?', context: null,
+        triggerAt: Date.now() - 1, recurring: null, sourceMemoryId: null,
+      });
+      db.createSession('active-session', { userId: 'default' });
+      db.addSessionMessage('active-session', 'user', 'Can you help with this now?');
+      const send = vi.fn().mockResolvedValue(true);
+      scheduler = new UnifiedScheduler({ db, logger, onSendMessage: send, getTimezone: () => 'UTC' });
+
+      await scheduler.evaluate();
+
+      expect(send).not.toHaveBeenCalled();
+      expect(db.getScheduledItem(item.id)).toEqual(expect.objectContaining({
+        status: 'pending',
+        triggerAt: Date.now() + 30 * 60 * 1000,
+      }));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('persists explicit negative feedback instead of counting it as engagement', () => {
+    const item = db.addScheduledItem({
+      userId: 'default', sessionId: null, source: 'agent', kind: 'nudge',
+      type: 'follow_up', message: 'Did the prototype review happen?', context: null,
+      triggerAt: Date.now() - 1, recurring: null, sourceMemoryId: null,
+    });
+    db.markScheduledItemFired(item.id);
+    scheduler = new UnifiedScheduler({ db, logger, onSendMessage: vi.fn().mockResolvedValue(true) });
+
+    scheduler.checkEngagement('default', 'Why are you asking? I already told you that was done.');
+
+    expect(db.getScheduledItem(item.id)?.status).toBe('dismissed');
+    expect(db.getRecentProactiveDecisions(5)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ stage: 'feedback', outcome: 'dismissed', reason: 'negative' }),
+    ]));
+  });
+
+  it('enforces the inferred daily ceiling from actual sends, not created rows', async () => {
+    const now = Date.now();
+    for (let index = 0; index < 3; index++) {
+      db.recordProactiveSend('default', `Delivered inferred message ${index}`, 'agent', now - index * 60_000);
+    }
+    const item = db.addScheduledItem({
+      userId: 'default', sessionId: null, source: 'agent', kind: 'nudge',
+      type: 'follow_up', message: 'Did the prototype review happen?', context: null,
+      triggerAt: now - 1, recurring: null, sourceMemoryId: null,
+    });
+    const send = vi.fn().mockResolvedValue(true);
+    scheduler = new UnifiedScheduler({ db, logger, onSendMessage: send, getTimezone: () => middayTimezone() });
+
+    await scheduler.evaluate();
+
+    expect(send).not.toHaveBeenCalled();
+    expect(db.getScheduledItem(item.id)?.status).toBe('pending');
+    expect(db.getRecentProactiveDecisions(5)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ reason: 'daily_delivery_budget' }),
+    ]));
+  });
+
+  it('re-checks global and topic opt-outs before delivering pending inferred items', async () => {
+    addPreference(db, "Don't remind me about medication.");
+    const blocked = db.addScheduledItem({
+      userId: 'default', sessionId: null, source: 'agent', kind: 'nudge',
+      type: 'follow_up', message: 'Your medication refill is due.', context: 'medication refill',
+      triggerAt: Date.now() - 1, recurring: null, sourceMemoryId: null,
+    });
+    const allowed = db.addScheduledItem({
+      userId: 'default', sessionId: null, source: 'agent', kind: 'nudge',
+      type: 'follow_up', message: 'Did the prototype review happen?', context: 'prototype review',
+      triggerAt: Date.now() - 1, recurring: null, sourceMemoryId: null,
+    });
+    const send = vi.fn().mockResolvedValue(true);
+    const router = {
+      executeWithFallback: vi.fn().mockResolvedValue({
+        response: { content: [{ type: 'text', text: 'Was the prototype review able to go ahead?' }] },
+      }),
+    };
+    scheduler = new UnifiedScheduler({
+      db, logger, router: router as any, onSendMessage: send,
+      getTimezone: () => middayTimezone(), minAgentProactiveGapMs: 0,
+    });
+
+    await scheduler.evaluate();
+
+    expect(db.getScheduledItem(blocked.id)?.status).toBe('expired');
+    expect(db.getScheduledItem(allowed.id)?.status).toBe('fired');
+    expect(send).toHaveBeenCalledOnce();
+
+    addPreference(db, "Don't proactively check in.");
+    const globallyBlocked = db.addScheduledItem({
+      userId: 'default', sessionId: null, source: 'agent', kind: 'nudge',
+      type: 'follow_up', message: 'Did the launch go ahead?', context: 'launch',
+      triggerAt: Date.now() - 1, recurring: null, sourceMemoryId: null,
+    });
+    await scheduler.evaluate();
+    expect(db.getScheduledItem(globallyBlocked.id)?.status).toBe('expired');
+    expect(send).toHaveBeenCalledOnce();
+  });
+
+  it('matches short opt-out topics on token boundaries at delivery time', async () => {
+    addPreference(db, "Don't remind me about IT.");
+    const blocked = db.addScheduledItem({
+      userId: 'default', sessionId: null, source: 'agent', kind: 'nudge',
+      type: 'follow_up', message: 'The IT access request is still blocked.', context: 'IT access request',
+      triggerAt: Date.now() - 1, recurring: null, sourceMemoryId: null,
+    });
+    const allowed = db.addScheduledItem({
+      userId: 'default', sessionId: null, source: 'agent', kind: 'nudge',
+      type: 'follow_up', message: 'Waiting for the passport renewal.', context: 'passport renewal',
+      triggerAt: Date.now() - 1, recurring: null, sourceMemoryId: null,
+    });
+    const router = {
+      executeWithFallback: vi.fn().mockResolvedValue({
+        response: { content: [{ type: 'text', text: 'The passport renewal is ready when you want to review it.' }] },
+      }),
+    };
+    const send = vi.fn().mockResolvedValue(true);
+    scheduler = new UnifiedScheduler({
+      db, logger, router: router as any, onSendMessage: send,
+      getTimezone: () => middayTimezone(), minAgentProactiveGapMs: 0,
+    });
+
+    await scheduler.evaluate();
+
+    expect(db.getScheduledItem(blocked.id)?.status).toBe('expired');
+    expect(db.getScheduledItem(allowed.id)?.status).toBe('fired');
+    expect(send).toHaveBeenCalledOnce();
   });
 
   it('delivers proven literal user text exactly without model rewriting', async () => {
@@ -74,14 +329,14 @@ describe('UnifiedScheduler proactive delivery safety', () => {
     ]));
   });
 
-  it('rewrites a generated source=user schedule description instead of leaking it verbatim', async () => {
+  it('realizes a known generated schedule label instead of leaking it verbatim', async () => {
     const send = vi.fn().mockResolvedValue(true);
     const router = {
       executeWithFallback: vi.fn().mockResolvedValue({
         response: {
           content: [{
             type: 'text',
-            text: 'Hey Alex, how did today go? Is there anything you would like to follow up on?',
+            text: 'Is there one thing from today worth following up tomorrow?',
           }],
         },
       }),
@@ -112,10 +367,10 @@ describe('UnifiedScheduler proactive delivery safety', () => {
     });
     await scheduler.evaluate();
 
-    expect(router.executeWithFallback).toHaveBeenCalledOnce();
+    expect(router.executeWithFallback).not.toHaveBeenCalled();
     expect(send).toHaveBeenCalledWith(
       'api:test-user',
-      'Hey Alex, how did today go? Is there anything you would like to follow up on?',
+      'Anything from today worth carrying forward?',
     );
     expect(send).not.toHaveBeenCalledWith('api:test-user', leakedDraft);
     expect(db.getScheduledItem(item.id)?.status).toBe('fired');
@@ -338,7 +593,7 @@ describe('UnifiedScheduler proactive delivery safety', () => {
     const router = {
       executeWithFallback: vi.fn().mockResolvedValue({
         response: {
-          content: [{ type: 'text', text: 'Hey Alex, how did today go? Any follow-ups for tomorrow?' }],
+          content: [{ type: 'text', text: 'Is there one thing from today worth following up tomorrow?' }],
         },
       }),
     };
@@ -375,6 +630,36 @@ describe('UnifiedScheduler proactive delivery safety', () => {
     }));
   });
 
+  it('re-realizes generated recurrences against prior wording instead of repeating forever', async () => {
+    const send = vi.fn().mockResolvedValue(true);
+    const router = {
+      executeWithFallback: vi.fn()
+        .mockResolvedValueOnce({ response: { content: [{ type: 'text', text: 'Is there one follow-up from today worth carrying into tomorrow?' }] } })
+        .mockResolvedValueOnce({ response: { content: [{ type: 'text', text: 'Which unfinished item, if any, should stay on tomorrow’s list?' }] } }),
+    };
+    const item = db.addScheduledItem({
+      userId: 'default', sessionId: null, source: 'user', kind: 'nudge', type: 'reminder',
+      message: 'Evening check-in with Alex - recap today and identify follow-ups',
+      context: null, triggerAt: Date.now() - 1, recurring: { type: 'daily', hour: 20, minute: 0 },
+      sourceMemoryId: null,
+    });
+    scheduler = new UnifiedScheduler({
+      db, logger, router: router as any, onSendMessage: send, getTimezone: () => middayTimezone(),
+    });
+
+    await scheduler.evaluate();
+    const successor = db.getScheduledItemsByUser('default')
+      .find(candidate => candidate.id !== item.id && candidate.status === 'pending')!;
+    db.updateScheduledItem(successor.id, { triggerAt: Date.now() - 1 });
+    await scheduler.evaluate();
+
+    expect(send.mock.calls.map(call => call[1])).toEqual([
+      'Anything from today worth carrying forward?',
+      'What from today do you want to pick up tomorrow?',
+    ]);
+    expect(router.executeWithFallback).not.toHaveBeenCalled();
+  });
+
   it('retries an unsafe agent draft instead of marking it delivered', async () => {
     const send = vi.fn().mockResolvedValue(true);
     const item = db.addScheduledItem({
@@ -401,6 +686,26 @@ describe('UnifiedScheduler proactive delivery safety', () => {
     expect(send).not.toHaveBeenCalled();
     expect(db.getScheduledItem(item.id)?.status).toBe('pending');
     expect(db.getScheduledItem(item.id)?.triggerAt).toBeGreaterThan(Date.now());
+  });
+
+  it('expires an unrenderable nudge after its bounded retry budget', async () => {
+    const send = vi.fn().mockResolvedValue(true);
+    const item = db.addScheduledItem({
+      userId: 'default', sessionId: null, source: 'agent', kind: 'nudge', type: 'follow_up',
+      message: 'It would be helpful to check whether they completed the task.', context: null,
+      triggerAt: Date.now() - 1, recurring: null, sourceMemoryId: null, maxAttempts: 3,
+    });
+    scheduler = new UnifiedScheduler({ db, logger, onSendMessage: send, getTimezone: () => middayTimezone() });
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      db.updateScheduledItem(item.id, { triggerAt: Date.now() - 1 });
+      await scheduler.evaluate();
+    }
+
+    expect(send).not.toHaveBeenCalled();
+    expect(db.getScheduledItem(item.id)).toEqual(expect.objectContaining({
+      status: 'expired', attemptCount: 3,
+    }));
   });
 
   it('never sends a raw task title when the task executor is unavailable', async () => {
@@ -464,12 +769,82 @@ describe('UnifiedScheduler proactive delivery safety', () => {
     expect(db.getScheduledItem(item.id)?.status).toBe('fired');
   });
 
+  it('does not count a task result or its aliases against the inferred daily nudge cap', async () => {
+    const now = Date.now();
+    db.recordProactiveSend('default', 'Earlier inferred update one.', 'agent', now - 120_000);
+    db.recordProactiveSend('default', 'Earlier inferred update two.', 'agent', now - 60_000);
+    const task = db.addScheduledItem({
+      userId: 'default', sessionId: null, source: 'agent', kind: 'task', type: 'event_prep',
+      message: 'Collect the weekly analytics', context: null, triggerAt: now - 1,
+      recurring: null, sourceMemoryId: null,
+      taskConfig: { goal: 'Collect the weekly analytics from real data', tools: ['analytics'] },
+    });
+    db.updateScheduledItemResult(task.id, {
+      response: 'The weekly analytics are ready: sign-ups increased by 12%.',
+      completedAt: now - 1_000,
+    });
+    const nudge = db.addScheduledItem({
+      userId: 'default', sessionId: null, source: 'agent', kind: 'nudge', type: 'follow_up',
+      message: 'Did the product review go ahead?', context: 'Product review planned for today.',
+      triggerAt: now - 1, recurring: null, sourceMemoryId: null,
+    });
+    const router = {
+      executeWithFallback: vi.fn().mockResolvedValue({
+        response: { content: [{ type: 'text', text: 'Was the product review able to go ahead today?' }] },
+      }),
+    };
+    const send = vi.fn().mockResolvedValue(true);
+    scheduler = new UnifiedScheduler({
+      db, logger, router: router as any, onSendMessage: send,
+      getTimezone: () => middayTimezone(), minAgentProactiveGapMs: 0,
+    });
+
+    await scheduler.evaluate();
+
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(db.getScheduledItem(task.id)?.status).toBe('fired');
+    expect(db.getScheduledItem(nudge.id)?.status).toBe('fired');
+    const sends = db.getRecentProactiveSends(0);
+    expect(sends.filter(entry => entry.source === 'agent')).toHaveLength(3);
+    expect(sends).toEqual(expect.arrayContaining([
+      expect.objectContaining({ source: 'task_result' }),
+    ]));
+  });
+
+  it('delivers a completed task result without waiting behind the inferred nudge gap', async () => {
+    const now = Date.now();
+    db.recordProactiveSend('default', 'An inferred update sent a minute ago.', 'agent', now - 60_000);
+    const task = db.addScheduledItem({
+      userId: 'default', sessionId: null, source: 'agent', kind: 'task', type: 'event_prep',
+      message: 'Collect the release status', context: null, triggerAt: now - 1,
+      recurring: null, sourceMemoryId: null,
+      taskConfig: { goal: 'Collect the release status', tools: ['releases'] },
+    });
+    db.updateScheduledItemResult(task.id, {
+      response: 'Release 1.4 is live and the health checks passed.',
+      completedAt: now - 1_000,
+    });
+    const send = vi.fn().mockResolvedValue(true);
+    scheduler = new UnifiedScheduler({
+      db,
+      logger,
+      onSendMessage: send,
+      getTimezone: () => middayTimezone(),
+    });
+
+    await scheduler.evaluate();
+
+    expect(send).toHaveBeenCalledWith('default', 'Release 1.4 is live and the health checks passed.');
+    expect(db.getScheduledItem(task.id)?.status).toBe('fired');
+  });
+
   it('retries a failed delivery instead of recording or firing it', async () => {
     const send = vi.fn().mockResolvedValue(false);
     const item = db.addScheduledItem({
       userId: 'default',
       sessionId: null,
       source: 'user',
+      messageProvenance: 'user_literal',
       kind: 'nudge',
       type: 'reminder',
       message: 'Quick reminder to submit the report.',
@@ -489,6 +864,35 @@ describe('UnifiedScheduler proactive delivery safety', () => {
     expect(db.getRecentProactiveDecisions(5)).toEqual(expect.arrayContaining([
       expect.objectContaining({ outcome: 'failed', reason: 'delivery_failed' }),
     ]));
+  });
+
+  it('keeps retrying explicit reminder delivery beyond the generated nudge budget', async () => {
+    const send = vi.fn()
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true);
+    const item = db.addScheduledItem({
+      userId: 'default', sessionId: null, source: 'user', messageProvenance: 'user_literal',
+      kind: 'nudge', type: 'reminder', message: 'Submit the report now.', context: null,
+      triggerAt: Date.now() - 1, recurring: null, sourceMemoryId: null, maxAttempts: 3,
+    });
+    scheduler = new UnifiedScheduler({ db, logger, onSendMessage: send, taskRetryDelayMs: 1_000 });
+
+    for (let attempt = 0; attempt < 4; attempt++) {
+      db.updateScheduledItem(item.id, { triggerAt: Date.now() - 1 });
+      await scheduler.evaluate();
+    }
+    expect(db.getScheduledItem(item.id)).toEqual(expect.objectContaining({
+      status: 'pending', attemptCount: 4, maxAttempts: 3,
+    }));
+
+    db.updateScheduledItem(item.id, { triggerAt: Date.now() - 1 });
+    await scheduler.evaluate();
+
+    expect(send).toHaveBeenCalledTimes(5);
+    expect(db.getScheduledItem(item.id)?.status).toBe('fired');
   });
 
   it('keeps a min-gap deferred item pending instead of immediately marking it fired', async () => {
@@ -525,6 +929,44 @@ describe('UnifiedScheduler proactive delivery safety', () => {
     expect(stored?.triggerAt).toBeGreaterThan(Date.now());
   });
 
+  it('defers only for the remaining min-gap instead of restarting the full gap', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-07-11T08:00:00Z'));
+      const send = vi.fn().mockResolvedValue(true);
+      const router = {
+        executeWithFallback: vi.fn()
+          .mockResolvedValueOnce({
+            response: { content: [{ type: 'text', text: 'The first grounded update is ready.' }] },
+          }),
+      };
+      scheduler = new UnifiedScheduler({
+        db, logger, router: router as any, onSendMessage: send, getTimezone: () => 'UTC',
+        minAgentProactiveGapMs: 6 * 60 * 60 * 1000,
+      });
+      db.addScheduledItem({
+        userId: 'default', sessionId: null, source: 'agent', kind: 'nudge', type: 'follow_up',
+        message: 'The first grounded update is ready.', context: null,
+        triggerAt: Date.now() - 1, recurring: null, sourceMemoryId: null,
+      });
+      await scheduler.evaluate();
+
+      vi.setSystemTime(new Date('2026-07-11T13:00:00Z'));
+      const second = db.addScheduledItem({
+        userId: 'default', sessionId: null, source: 'agent', kind: 'nudge', type: 'follow_up',
+        message: 'The second grounded update is ready.', context: null,
+        triggerAt: Date.now() - 1, recurring: null, sourceMemoryId: null,
+      });
+      await scheduler.evaluate();
+
+      expect(db.getScheduledItem(second.id)).toEqual(expect.objectContaining({
+        status: 'pending', triggerAt: Date.parse('2026-07-11T14:00:00Z'),
+      }));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('evaluates quiet hours per user in a mixed-user batch', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-01-15T12:00:00Z'));
@@ -558,18 +1000,59 @@ describe('UnifiedScheduler proactive delivery safety', () => {
       scheduler = new UnifiedScheduler({
         db,
         logger,
+        router: {
+          executeWithFallback: vi.fn().mockResolvedValue({
+            response: { content: [{ type: 'text', text: 'Your afternoon plan is ready. What needs attention first?' }] },
+          }),
+        } as any,
         onSendMessage: send,
         minAgentProactiveGapMs: 0,
         getTimezone: userId => userId === 'quiet-user' ? 'Pacific/Honolulu' : 'UTC',
       });
       await scheduler.evaluate();
 
-      expect(send).toHaveBeenCalledWith('awake-user', 'Hey, how is your day going?');
+      expect(send).toHaveBeenCalledWith(
+        'awake-user',
+        'Your afternoon plan is ready. What needs attention first?',
+      );
       expect(send).not.toHaveBeenCalledWith('quiet-user', expect.any(String));
       expect(db.getScheduledItem(quietItem.id)?.status).toBe('pending');
       expect(db.getScheduledItem(awakeItem.id)?.status).toBe('fired');
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('sends a natural completed-work digest and marks results only after delivery', async () => {
+    const item = db.addScheduledItem({
+      userId: 'default', sessionId: null, source: 'agent', kind: 'task', type: 'event_prep',
+      message: 'INTERNAL TASK: verify release deployment', context: null,
+      triggerAt: Date.now() - 10_000, recurring: null, sourceMemoryId: null,
+      taskConfig: { goal: 'Verify release deployment' },
+    });
+    db.markScheduledItemFired(item.id);
+    db.updateScheduledItemResult(item.id, {
+      response: 'Release 1.4 is live and all health checks passed.',
+      completedAt: Date.now() - 5_000,
+    });
+    const send = vi.fn().mockResolvedValue(false);
+    const router = {
+      executeWithFallback: vi.fn().mockResolvedValue({
+        response: { content: [{ type: 'text', text: 'Release 1.4 is live, and all health checks passed.' }] },
+      }),
+    };
+    scheduler = new UnifiedScheduler({ db, logger, router: router as any, onSendMessage: send });
+
+    await expect(scheduler.sendMorningDigest('default')).resolves.toBe(0);
+    expect(db.getScheduledItem(item.id)?.result?.notifiedAt).toBeUndefined();
+
+    send.mockResolvedValue(true);
+    await expect(scheduler.sendMorningDigest('default')).resolves.toBe(1);
+    expect(send).toHaveBeenLastCalledWith(
+      'default',
+      'Release 1.4 is live, and all health checks passed.',
+    );
+    expect(db.getScheduledItem(item.id)?.result?.notifiedAt).toBeTypeOf('number');
+    expect(send.mock.calls.flat().join(' ')).not.toContain('INTERNAL TASK');
   });
 });

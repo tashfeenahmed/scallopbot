@@ -184,15 +184,18 @@ function seedSessionSummary(
 ) {
   const sessionId = opts?.sessionId ?? `session-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   db.createSession(sessionId);
-  return db.addSessionSummary({
+  const createdAt = Date.now() - 3 * 24 * 60 * 60 * 1000;
+  const row = db.addSessionSummary({
     sessionId,
     userId: opts?.userId ?? 'default',
-    summary: 'User discussed various topics including TypeScript and testing.',
+    summary: 'The user will follow up and confirm the TypeScript generics test result.',
     topics: opts?.topics ?? ['typescript', 'testing'],
     messageCount: opts?.messageCount ?? 8,
     durationMs: 300000,
     embedding: null,
   });
+  db.raw('UPDATE session_summaries SET created_at = ? WHERE id = ? RETURNING id', [createdAt, row.id]);
+  return { ...row, createdAt };
 }
 
 /** Seed a memory so the user appears in queries */

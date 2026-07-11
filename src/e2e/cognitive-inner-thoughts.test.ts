@@ -62,16 +62,20 @@ describe('E2E Inner Thoughts & Proactive Feedback', () => {
       // Create session first (foreign key constraint on session_summaries)
       db.createSession('inner-thoughts-sess-1');
 
-      // Seed session summary with createdAt = now (within 6h window)
-      db.addSessionSummary({
+      // Seed a grounded open loop old enough to warrant a follow-up decision.
+      const summary = db.addSessionSummary({
         sessionId: 'inner-thoughts-sess-1',
         userId: 'default',
-        summary: 'User asked about async/await patterns and error handling',
+        summary: 'The user will follow up and test the pending async/await error-handling example.',
         topics: ['async', 'javascript'],
         messageCount: 5,
         durationMs: 300000,
         embedding: null,
       });
+      db.raw('UPDATE session_summaries SET created_at = ? WHERE id = ? RETURNING id', [
+        Date.now() - 3 * 24 * 60 * 60 * 1000,
+        summary.id,
+      ]);
 
       // Seed behavioral patterns via db.updateBehavioralPatterns
       // proactivenessDial: 'moderate', smoothedAffect: calm (NOT distressed)

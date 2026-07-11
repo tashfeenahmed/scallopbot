@@ -553,7 +553,7 @@ describe('E2E Board System', () => {
       db.addScheduledItem({
         userId: 'default',
         sessionId: null,
-        source: 'agent',
+        source: 'user',
         kind: 'nudge',
         type: 'follow_up',
         message: 'Time to take a break!',
@@ -594,6 +594,11 @@ describe('E2E Board System', () => {
       scheduler = new UnifiedScheduler({
         db,
         logger: testLogger,
+        router: {
+          executeWithFallback: async () => ({
+            response: { content: [{ type: 'text' as const, text: 'Time to take a break.' }] },
+          }),
+        } as any,
         interval: 60000,
         onSendMessage: async (userId, message) => {
           sentMessages.push({ userId, message });

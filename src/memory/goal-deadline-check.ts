@@ -28,6 +28,8 @@ export interface GoalNotification {
   userId: string;
   message: string;
   goalId: string;
+  dueDate: number;
+  urgency: 'warning' | 'urgent' | 'overdue';
 }
 
 export interface GoalDeadlineResult {
@@ -71,9 +73,25 @@ function formatMessage(title: string, daysRemaining: number): string {
  */
 function isDuplicate(
   message: string,
-  existingReminders: Array<{ message: string }>,
+  goalId: string,
+  dueDate: number,
+  urgency: 'warning' | 'urgent' | 'overdue',
+  existingReminders: Array<{
+    message: string;
+    goalId?: string | null;
+    dueDate?: number;
+    urgency?: 'warning' | 'urgent' | 'overdue';
+  }>,
 ): boolean {
   for (const reminder of existingReminders) {
+    if (reminder.goalId) {
+      if (
+        reminder.goalId === goalId &&
+        (reminder.dueDate === undefined || reminder.dueDate === dueDate) &&
+        reminder.urgency === urgency
+      ) return true;
+      continue;
+    }
     if (wordOverlap(message, reminder.message) >= DEDUP_OVERLAP_THRESHOLD) {
       return true;
     }
@@ -93,7 +111,12 @@ function isDuplicate(
  */
 export function checkGoalDeadlines(
   goals: GoalItem[],
-  existingReminders: Array<{ message: string }>,
+  existingReminders: Array<{
+    message: string;
+    goalId?: string | null;
+    dueDate?: number;
+    urgency?: 'warning' | 'urgent' | 'overdue';
+  }>,
   options?: GoalDeadlineOptions,
 ): GoalDeadlineResult {
   const now = options?.now ?? Date.now();
@@ -128,11 +151,13 @@ export function checkGoalDeadlines(
 
     // Generate notification and deduplicate
     const message = formatMessage(goalTitle, daysRemaining);
-    if (!isDuplicate(message, existingReminders)) {
+    if (!isDuplicate(message, goal.id, dueDate, urgency, existingReminders)) {
       notifications.push({
         userId: goal.userId,
         message,
         goalId: goal.id,
+        dueDate,
+        urgency,
       });
     }
   }

@@ -6,7 +6,7 @@
  * (with pre-written message), or task (with goal + tools).
  *
  * Code-level post-processing: dedup against existing items, enforce
- * daily budget cap, hard cap of 3 per tick.
+ * daily budget cap and centralized per-evaluation cap.
  */
 
 import type { GapSignal } from './gap-scanner.js';
@@ -16,6 +16,7 @@ import type { ScheduledItemKind, TaskConfig } from './db.js';
 import { wordOverlap, DEDUP_OVERLAP_THRESHOLD } from '../utils/text-similarity.js';
 import { extractResponseText } from '../proactive/proactive-utils.js';
 import { sanitizeProactiveMessage } from '../proactive/message-safety.js';
+import { assessProactiveMessage } from '../proactive/message-quality.js';
 
 // Re-export for backward compatibility
 export { wordOverlap } from '../utils/text-similarity.js';
@@ -127,7 +128,7 @@ export function buildGapPipelinePrompt(
   const dialGuidance: Record<string, string> = {
     conservative: 'Only act on clearly stale, overdue, or critical items. Skip anything uncertain.',
     moderate: 'Act on items that are meaningfully stale or unresolved. Skip low-severity or uncertain signals.',
-    eager: 'Act on most signals unless they are clearly noise. Be proactive.',
+    eager: 'Act on useful grounded signals more readily, but skip generic, stale, or uncertain reasons.',
   };
 
   const system = `You are a proactive personal assistant deciding which gap signals to act on.
@@ -140,7 +141,9 @@ Rules:
 - User's current mood: ${mood}${topicsLine}
 - Nudge: A short, friendly message delivered directly. Use for check-ins, reminders, encouragement.
 - Task: Background research the bot does before messaging. Use when info lookup would help (flight status, weather, etc).
-- Write nudge messages that feel natural and warm, like a helpful friend. 1-3 sentences max.
+- Write as a natural, respectful AI assistant without imitating friendship or human feelings.
+- Use one concrete focus, 1-2 sentences, and at most one optional question.
+- Avoid canned check-in openings, surveillance language, guilt, pressure, and unsupported concern.
 - The "userFacingMessage" field must be the exact text to send to the user. Do not write instructions like "ask the user..." or "send a message...".
 - If you cannot write a direct user-facing message, choose "skip".
 - For tasks, describe the goal clearly so a sub-agent can execute it.
@@ -215,6 +218,7 @@ export function parseGapPipelineResponse(
         });
       } else {
         // nudge (default for non-skip, non-task)
+        if (!assessProactiveMessage(message).acceptable) continue;
         results.push({
           kind: 'nudge',
           message,
@@ -241,7 +245,7 @@ export function parseGapPipelineResponse(
  * Post-processing (code-level, not LLM-controlled):
  * - Dedup against existing items (word overlap + sourceId)
  * - Enforce daily budget cap per dial setting
- * - Hard cap of 3 items per tick
+ * - Centralized per-evaluation cap
  */
 export async function runGapPipeline(
   input: GapPipelineInput,

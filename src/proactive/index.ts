@@ -37,3 +37,20 @@ export {
   type RecentChatContext,
   type RecentChatContextOptions,
 } from './chat-context.js';
+
+export {
+  assessProactiveMessage,
+  type ProactiveMessageQuality,
+  type ProactiveQualityIssue,
+} from './message-quality.js';
+
+export {
+  sanitizeProactiveMessage,
+  proactiveContextIsResolved,
+  prepareUserFacingProactiveMessage,
+  renderCompletedWorkDigest,
+  renderUserFacingProactiveMessage,
+  summarizeTaskResultForDelivery,
+  type ProactiveRenderOptions,
+  type ProactiveRenderResult,
+} from './message-safety.js';

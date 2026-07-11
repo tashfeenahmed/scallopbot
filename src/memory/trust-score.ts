@@ -6,11 +6,9 @@
  * (conservative/moderate/eager).
  *
  * Signal weights:
- * - sessionReturnRate: 0.25 (sessions per week, sigmoid-normalized)
- * - avgSessionDuration: 0.15 (EMA-smoothed, normalized)
- * - proactiveAcceptRate: 0.30 (direct trust signal)
- * - proactiveDismissRate: -0.20 (active rejection penalty)
- * - explicitFeedback: 0.10 (placeholder at 0.5 neutral)
+ * General chat frequency and duration are observed for diagnostics, but do not
+ * grant permission for unsolicited contact. Only outcomes of inferred
+ * proactive outreach affect the dial.
  */
 
 import { updateEMA } from '../utils/ema.js';
@@ -30,11 +28,11 @@ const EXISTING_SCORE_WEIGHT = 0.7;
 
 /** Signal weights for weighted sum */
 const WEIGHTS = {
-  sessionReturnRate: 0.25,
-  avgSessionDuration: 0.15,
-  proactiveAcceptRate: 0.30,
+  sessionReturnRate: 0,
+  avgSessionDuration: 0,
+  proactiveAcceptRate: 0.80,
   proactiveDismissRate: -0.20,
-  explicitFeedback: 0.10,
+  explicitFeedback: 0.20,
 } as const;
 
 /** Duration normalization: 30 minutes = ~1.0 via sigmoid */
@@ -181,11 +179,10 @@ function computeProactiveDismissRate(items: ScheduledItemInput[]): number {
  * Returns TrustScoreResult with score in [0, 1] range and proactiveness dial.
  *
  * Signal weights:
- * - sessionReturnRate: 0.25
- * - avgSessionDuration: 0.15
- * - proactiveAcceptRate: 0.30
- * - proactiveDismissRate: -0.20 (penalty)
- * - explicitFeedback: 0.10
+ * Session activity cannot raise the dial: frequent or long conversations are
+ * not consent to additional notifications. Proactive accept/dismiss outcomes
+ * carry the score; explicit feedback remains a neutral prior until a richer
+ * persisted feedback signal is available.
  */
 export function computeTrustScore(
   sessions: SessionInput[],

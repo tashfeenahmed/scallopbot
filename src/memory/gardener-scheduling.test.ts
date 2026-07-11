@@ -120,52 +120,30 @@ describe('gardener-scheduling', () => {
       expect(result).toBeNull();
     });
 
-    it('returns most recent firedAt from agent-sourced items', () => {
-      // Add two fired agent items
-      const item1 = db.addScheduledItem({
-        userId: 'user-1',
-        sessionId: null,
-        source: 'agent',
-        type: 'follow_up',
-        message: 'Older item',
-        context: null,
-        triggerAt: Date.now() - 10000,
-        recurring: null,
-        sourceMemoryId: null,
-      });
-      db.markScheduledItemFired(item1.id);
-
-      const item2 = db.addScheduledItem({
-        userId: 'user-1',
-        sessionId: null,
-        source: 'agent',
-        type: 'follow_up',
-        message: 'Newer item',
-        context: null,
-        triggerAt: Date.now() - 5000,
-        recurring: null,
-        sourceMemoryId: null,
-      });
-      db.markScheduledItemFired(item2.id);
+    it('returns the most recent actual inferred delivery', () => {
+      const older = Date.now() - 10_000;
+      const newer = Date.now() - 5_000;
+      db.recordProactiveSend('user-1', 'Older item', 'agent', older);
+      db.recordProactiveSend('user-1', 'Newer item', 'agent', newer);
 
       const result = getLastProactiveAt(db, 'user-1');
-      expect(result).not.toBeNull();
-      expect(result).toBeGreaterThan(0);
+      expect(result).toBe(newer);
+    });
+
+    it('ignores a fired row when no message was actually delivered', () => {
+      const item = db.addScheduledItem({
+        userId: 'user-1', sessionId: null, source: 'agent', type: 'follow_up',
+        message: 'Suppressed item', context: null, triggerAt: Date.now() - 5_000,
+        recurring: null, sourceMemoryId: null,
+      });
+      db.markScheduledItemFired(item.id);
+
+      expect(getLastProactiveAt(db, 'user-1')).toBeNull();
     });
 
     it('ignores non-agent items', () => {
-      const item = db.addScheduledItem({
-        userId: 'user-1',
-        sessionId: null,
-        source: 'user',
-        type: 'reminder',
-        message: 'User reminder',
-        context: null,
-        triggerAt: Date.now() - 5000,
-        recurring: null,
-        sourceMemoryId: null,
-      });
-      db.markScheduledItemFired(item.id);
+      db.recordProactiveSend('user-1', 'User reminder', 'user', Date.now() - 5_000);
+      db.recordProactiveSend('user-1', 'Task report', 'task_result', Date.now() - 2_000);
 
       const result = getLastProactiveAt(db, 'user-1');
       expect(result).toBeNull();

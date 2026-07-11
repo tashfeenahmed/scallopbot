@@ -36,8 +36,8 @@ export const DEFAULT_GARDENER_QUIET_HOURS = { start: 2, end: 5 } as const;
 
 // ============ Delivery ============
 
-/** Minimum gap between proactive messages: 2 hours */
-export const MIN_GAP_MS = envInt('PROACTIVE_MIN_GAP_MS', 2 * 60 * 60 * 1000);
+/** Minimum gap between independently initiated messages: 6 hours. */
+export const MIN_GAP_MS = envInt('PROACTIVE_MIN_GAP_MS', 6 * 60 * 60 * 1000);
 
 /** Maximum deferral: never defer more than 24 hours */
 export const MAX_DEFERRAL_MS = 24 * 60 * 60 * 1000;
@@ -51,20 +51,29 @@ export const ACTIVE_DELAY_MS = 15 * 60 * 1000;
 /** Default active hours when behavioral data is unavailable (9 AM - 9 PM) */
 export const DEFAULT_ACTIVE_HOURS = [9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21];
 
-/** Engagement window: mark proactive items as 'acted' if user responds within this */
-export const ENGAGEMENT_WINDOW_MS = 15 * 60 * 1000;
+/** Topic/direct-reply attribution window. Terse acknowledgements use a shorter window. */
+export const ENGAGEMENT_WINDOW_MS = 2 * 60 * 60 * 1000;
+
+/** Terse "thanks/ok" replies are only attributable while the nudge is very recent. */
+export const ACKNOWLEDGEMENT_WINDOW_MS = 30 * 60 * 1000;
+
+/** Hard delivery ceiling for inferred outreach (explicit user reminders bypass it). */
+export const MAX_AGENT_SENDS_PER_DAY = envInt('PROACTIVE_MAX_AGENT_SENDS_PER_DAY', 3);
+
+/** How long delivered text is retained for repetition-aware rendering. */
+export const PROACTIVE_STYLE_HISTORY_MS = 14 * 24 * 60 * 60 * 1000;
 
 // ============ Budgets ============
 
 /** Per-dial daily notification budget caps */
 export const DIAL_BUDGETS = {
   conservative: envInt('PROACTIVE_BUDGET_CONSERVATIVE', 1),
-  moderate: envInt('PROACTIVE_BUDGET_MODERATE', 3),
-  eager: envInt('PROACTIVE_BUDGET_EAGER', 5),
+  moderate: envInt('PROACTIVE_BUDGET_MODERATE', 2),
+  eager: envInt('PROACTIVE_BUDGET_EAGER', 3),
 } as const;
 
 /** Hard cap: max items per evaluator run */
-export const MAX_ITEMS_PER_EVAL = envInt('PROACTIVE_MAX_ITEMS_PER_EVAL', 3);
+export const MAX_ITEMS_PER_EVAL = envInt('PROACTIVE_MAX_ITEMS_PER_EVAL', 1);
 
 /** Cooldown between proactive evaluations: 6 hours */
 export const PROACTIVE_COOLDOWN_MS = envInt('PROACTIVE_COOLDOWN_MS', 6 * 60 * 60 * 1000);

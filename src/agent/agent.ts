@@ -422,7 +422,9 @@ export class Agent {
       this.factExtractor.queueForExtraction(
         userMessage,
         resolvedUserId,
-        this.lastAssistantResponses.get(sessionId) || undefined
+        this.lastAssistantResponses.get(sessionId) || undefined,
+        undefined,
+        sessionId,
       ).catch((error) => {
         this.logger.warn({ error: (error as Error).message }, 'Async fact extraction failed');
       });
@@ -580,7 +582,9 @@ export class Agent {
             this.factExtractor.queueForExtraction(
               interrupt.text,
               resolvedUserId,
-              this.lastAssistantResponses.get(sessionId) || undefined
+              this.lastAssistantResponses.get(sessionId) || undefined,
+              undefined,
+              sessionId,
             ).catch((error) => {
               this.logger.warn({ error: (error as Error).message }, 'Async fact extraction failed for interrupt');
             });
@@ -1028,7 +1032,9 @@ export class Agent {
       this.factExtractor.queueForExtraction(
         userMessage,
         resolvedUserId,
-        imageContext
+        imageContext,
+        undefined,
+        sessionId,
       ).catch((error) => {
         this.logger.warn({ error: (error as Error).message }, 'Post-image fact extraction failed');
       });

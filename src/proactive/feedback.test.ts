@@ -59,8 +59,8 @@ describe('detectProactiveEngagement', () => {
 
   it('returns empty array when all items outside engagement window', () => {
     const items = [
-      makeItem({ id: 'old-1', firedAt: NOW - 20 * MIN_MS }),
-      makeItem({ id: 'old-2', firedAt: NOW - 30 * MIN_MS }),
+      makeItem({ id: 'old-1', firedAt: NOW - 180 * MIN_MS }),
+      makeItem({ id: 'old-2', firedAt: NOW - 240 * MIN_MS }),
     ];
     const result = detectProactiveEngagement('user-1', items, undefined, NOW, { userMessage: 'How is the project?' });
     expect(result).toEqual([]);
@@ -140,6 +140,56 @@ describe('detectProactiveEngagement', () => {
     })).toEqual([]);
   });
 
+  it('returns explicit negative attribution for persistence by the scheduler', () => {
+    const items = [makeItem({ message: 'Remember to renew your passport before Spain' })];
+    expect(attributeProactiveEngagement('user-1', items, {
+      userMessage: 'Why are you asking? I already told you that was done.',
+    }, undefined, NOW)).toEqual([
+      { itemId: 'item-1', score: -1, reason: 'negative' },
+    ]);
+  });
+
+  it('keeps uncertainty neutral even when it repeats the nudge topic', () => {
+    const items = [makeItem({ message: 'Remember to renew your passport before Spain' })];
+
+    expect(attributeProactiveEngagement('user-1', items, {
+      userMessage: "I don't know yet",
+    }, undefined, NOW)).toEqual([]);
+    expect(attributeProactiveEngagement('user-1', items, {
+      userMessage: "I don't know about the passport",
+    }, undefined, NOW)).toEqual([]);
+    expect(attributeProactiveEngagement('user-1', items, {
+      userMessage: "I'm not sure about the passport",
+    }, undefined, NOW)).toEqual([]);
+  });
+
+  it('does not mistake ordinary uses of "stopped" for dismissal or approval', () => {
+    const items = [makeItem({ message: 'Remember to renew your passport before Spain' })];
+    expect(attributeProactiveEngagement('user-1', items, {
+      userMessage: 'I stopped by the shop',
+    }, undefined, NOW)).toEqual([]);
+  });
+
+  it('still treats a clear request to stop outreach as negative feedback', () => {
+    const items = [makeItem({ message: 'Remember to renew your passport before Spain' })];
+
+    expect(attributeProactiveEngagement('user-1', items, {
+      userMessage: 'Stop reminding me about this',
+    }, undefined, NOW)).toEqual([
+      { itemId: 'item-1', score: -1, reason: 'negative' },
+    ]);
+    expect(attributeProactiveEngagement('user-1', items, {
+      userMessage: 'Stop.',
+    }, undefined, NOW)).toEqual([
+      { itemId: 'item-1', score: -1, reason: 'negative' },
+    ]);
+    expect(attributeProactiveEngagement('user-1', items, {
+      userMessage: 'Please stop.',
+    }, undefined, NOW)).toEqual([
+      { itemId: 'item-1', score: -1, reason: 'negative' },
+    ]);
+  });
+
   it('attributes a terse acknowledgement only to the newest item', () => {
     const items = [
       makeItem({ id: 'older', firedAt: NOW - 8 * MIN_MS }),
@@ -147,6 +197,13 @@ describe('detectProactiveEngagement', () => {
     ];
     const matches = attributeProactiveEngagement('user-1', items, { userMessage: 'Thanks!' }, undefined, NOW);
     expect(matches).toEqual([{ itemId: 'newest', score: 0.5, reason: 'acknowledgement' }]);
+  });
+
+  it('does not treat a context-free acknowledgement much later as approval', () => {
+    const items = [makeItem({ firedAt: NOW - 40 * MIN_MS })];
+    expect(attributeProactiveEngagement('user-1', items, {
+      userMessage: 'Thanks!',
+    }, undefined, NOW)).toEqual([]);
   });
 
   it('requires replied-to text to match before trusting direct-reply metadata', () => {

@@ -73,7 +73,7 @@ describe('buildGapPipelinePrompt', () => {
 
     const eager = buildGapPipelinePrompt([makeSignal()], 'eager', null, []);
     expect(eager.system).toContain('eager');
-    expect(eager.system).toContain('Act on most signals');
+    expect(eager.system).toContain('useful grounded signals');
   });
 
   it('includes user mood from affect', () => {
@@ -169,7 +169,7 @@ describe('parseGapPipelineResponse', () => {
 
   it('extracts JSON from response with surrounding text', () => {
     const response = `Here is my analysis:\n${JSON.stringify({
-      items: [{ index: 1, action: 'nudge', userFacingMessage: 'How are things going?' }],
+      items: [{ index: 1, action: 'nudge', userFacingMessage: 'The TypeScript goal is still pending. Do you want to choose the next step?' }],
     })}\n\nDone.`;
     const result = parseGapPipelineResponse(response, signals);
     expect(result).toHaveLength(1);
@@ -248,7 +248,7 @@ describe('DIAL_THRESHOLDS', () => {
   });
 
   it('eager has highest daily cap', () => {
-    expect(DIAL_THRESHOLDS.eager.maxDailyNotifications).toBe(5);
+    expect(DIAL_THRESHOLDS.eager.maxDailyNotifications).toBe(3);
   });
 
   it('moderate is between conservative and eager', () => {
@@ -334,7 +334,7 @@ describe('runGapPipeline', () => {
     expect(result.length).toBeLessThanOrEqual(1);
   });
 
-  it('enforces hard cap of 3', async () => {
+  it('enforces the centralized per-evaluation cap', async () => {
     const signals = Array.from({ length: 5 }, (_, i) =>
       makeSignal({ sourceId: `goal-${i}`, description: `Stale goal #${i}` }),
     );

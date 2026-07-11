@@ -124,6 +124,32 @@ describe('computeDeliveryTime', () => {
     expect(result.deliverAt).toBe(NOW + 3 * HOUR_MS);
   });
 
+  it('is minute-accurate when selecting the next active hour', () => {
+    const ctx = makeContext({
+      currentHour: 6,
+      currentMinute: 45,
+      urgency: 'medium',
+    });
+    const result = computeDeliveryTime(ctx);
+
+    expect(result.deliverAt).toBe(NOW + 2 * HOUR_MS + 15 * MIN_MS);
+  });
+
+  it('adds stable bounded jitter only when an intent seed is supplied', () => {
+    const ctx = makeContext({
+      currentHour: 6,
+      currentMinute: 45,
+      jitterSeed: 'user:goal-123',
+    });
+    const first = computeDeliveryTime(ctx);
+    const second = computeDeliveryTime(ctx);
+    const base = NOW + 2 * HOUR_MS + 15 * MIN_MS;
+
+    expect(first.deliverAt).toBe(second.deliverAt);
+    expect(first.deliverAt).toBeGreaterThanOrEqual(base + 5 * MIN_MS);
+    expect(first.deliverAt).toBeLessThanOrEqual(base + 20 * MIN_MS);
+  });
+
   it('empty activeHours -> uses defaults (9-21)', () => {
     const ctx = makeContext({
       userActiveHours: [],
@@ -137,7 +163,7 @@ describe('computeDeliveryTime', () => {
     expect(result.deliverAt).toBe(NOW + 15 * MIN_MS);
   });
 
-  it('minimum gap enforced (pushes to lastProactive + 2h)', () => {
+  it('minimum gap enforced (pushes to lastProactive + 6h)', () => {
     const ctx = makeContext({
       currentHour: 14,
       urgency: 'medium',
@@ -146,12 +172,12 @@ describe('computeDeliveryTime', () => {
     const result = computeDeliveryTime(ctx);
 
     // Without gap: would be NOW + 15 min (active_hours)
-    // With gap enforcement: must be at least lastProactiveAt + 2h
-    const expectedMinGap = ctx.lastProactiveAt! + 2 * HOUR_MS;
+    // With gap enforcement: must be at least lastProactiveAt + 6h
+    const expectedMinGap = ctx.lastProactiveAt! + 6 * HOUR_MS;
     expect(result.deliverAt).toBe(expectedMinGap);
   });
 
-  it('high urgency bypasses minimum gap', () => {
+  it('high urgency still respects the inferred-outreach minimum gap', () => {
     const ctx = makeContext({
       currentHour: 14,
       urgency: 'high',
@@ -160,9 +186,7 @@ describe('computeDeliveryTime', () => {
     const result = computeDeliveryTime(ctx);
 
     expect(result.strategy).toBe('urgent_now');
-    expect(result.deliverAt).toBe(NOW + 5 * MIN_MS);
-    // Should NOT be pushed to lastProactiveAt + 2h
-    expect(result.deliverAt).toBeLessThan(ctx.lastProactiveAt! + 2 * HOUR_MS);
+    expect(result.deliverAt).toBe(ctx.lastProactiveAt! + 6 * HOUR_MS);
   });
 
   it('maximum deferral caps at now + 24h', () => {
