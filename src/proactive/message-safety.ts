@@ -311,7 +311,7 @@ function realizeRequestedReflection(
  * over-conservative SKIP—just to turn "just checking in" into a direct
  * question. Generic/socially unsafe drafts still fail the quality gate.
  */
-function realizeGroundedCannedCheckIn(raw: string, context?: string): string | null {
+function realizeGroundedCannedCheckIn(raw: string, context?: string | null): string | null {
   if (!context?.trim() || proactiveContextIsResolved(context)) return null;
   const safe = sanitizeProactiveMessage(raw);
   if (!safe) return null;
