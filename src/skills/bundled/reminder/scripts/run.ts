@@ -440,7 +440,7 @@ function setReminder(args: ReminderArgs): SkillResult {
   }
 
   const id = nanoid(8);
-  const userId = process.env.SKILL_USER_ID || 'default';
+  const userId = process.env.SKILL_STATE_USER_ID || process.env.SKILL_USER_ID || 'default';
   const sessionId = process.env.SKILL_SESSION_ID || null;
 
   // Save to SQLite
@@ -448,9 +448,9 @@ function setReminder(args: ReminderArgs): SkillResult {
   try {
     const stmt = db.prepare(`
       INSERT INTO scheduled_items (
-        id, user_id, session_id, source, type, message, context,
-        trigger_at, recurring, status, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        id, user_id, session_id, source, kind, type, message, message_provenance, context,
+        trigger_at, recurring, status, board_status, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     stmt.run(
@@ -458,12 +458,15 @@ function setReminder(args: ReminderArgs): SkillResult {
       userId,
       sessionId,
       'user',
+      'nudge',
       'reminder',
       args.message,
+      'generated',
       null,
       triggerAt,
       recurring ? JSON.stringify(recurring) : null,
       'pending',
+      'scheduled',
       now,
       now
     );
@@ -492,7 +495,7 @@ function setReminder(args: ReminderArgs): SkillResult {
 
 // List reminders (shows both user reminders AND agent triggers)
 function listReminders(): SkillResult {
-  const userId = process.env.SKILL_USER_ID || 'default';
+  const userId = process.env.SKILL_STATE_USER_ID || process.env.SKILL_USER_ID || 'default';
   const now = Date.now();
 
   const db = openDb();
@@ -556,7 +559,7 @@ function cancelReminder(args: ReminderArgs): SkillResult {
     };
   }
 
-  const userId = process.env.SKILL_USER_ID || 'default';
+  const userId = process.env.SKILL_STATE_USER_ID || process.env.SKILL_USER_ID || 'default';
 
   const db = openDb();
   try {
@@ -579,10 +582,10 @@ function cancelReminder(args: ReminderArgs): SkillResult {
     // Mark as dismissed
     const updateStmt = db.prepare(`
       UPDATE scheduled_items
-      SET status = 'dismissed', updated_at = ?
-      WHERE id = ?
+      SET status = 'dismissed', board_status = 'archived', updated_at = ?
+      WHERE id = ? AND user_id = ? AND status = 'pending'
     `);
-    updateStmt.run(Date.now(), args.reminder_id);
+    updateStmt.run(Date.now(), args.reminder_id, userId);
 
     const typeLabel = item.source === 'agent' ? `auto-scheduled ${item.type}` : 'reminder';
     return {

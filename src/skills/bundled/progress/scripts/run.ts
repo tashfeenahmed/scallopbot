@@ -49,6 +49,8 @@ function getDbPath(): string {
   return path.join(workspace, 'memories.db');
 }
 
+const USER_ID = process.env.SKILL_STATE_USER_ID || process.env.SKILL_USER_ID || 'default';
+
 // Output result and exit
 function outputResult(result: SkillResult): void {
   console.log(JSON.stringify(result));
@@ -57,7 +59,8 @@ function outputResult(result: SkillResult): void {
 
 // Get goal by ID
 function getGoal(db: Database.Database, id: string): GoalItem | null {
-  const row = db.prepare('SELECT * FROM memories WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+  const row = db.prepare('SELECT * FROM memories WHERE id = ? AND user_id = ?')
+    .get(id, USER_ID) as Record<string, unknown> | undefined;
   if (!row) return null;
 
   const metadata = row.metadata ? JSON.parse(row.metadata as string) : {};
@@ -195,7 +198,7 @@ function main(): void {
     }
   }
 
-  const userId = process.env.SKILL_USER_ID || 'default';
+  const userId = USER_ID;
 
   // Open database
   const dbPath = getDbPath();

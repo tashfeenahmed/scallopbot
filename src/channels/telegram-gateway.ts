@@ -9,6 +9,7 @@
  */
 
 import type { TelegramChannel } from './telegram.js';
+import { messageWasDelivered } from '../triggers/types.js';
 
 // Module-level singleton instance
 let instance: TelegramGateway | null = null;
@@ -61,8 +62,7 @@ export class TelegramGateway {
     if (!this.channel) {
       throw new Error('Telegram channel not initialized. Call setChannel() first.');
     }
-    await this.channel.sendMessage(chatId, message);
-    return true;
+    return messageWasDelivered(await this.channel.sendMessage(chatId, message));
   }
 
   /**

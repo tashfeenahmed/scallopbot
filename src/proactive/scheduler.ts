@@ -19,15 +19,26 @@ import type { GoalService } from '../goals/index.js';
 import type { SessionManager } from '../agent/session.js';
 import type { SubAgentExecutor } from '../subagent/index.js';
 import type { Router } from '../routing/router.js';
-import { parseUserIdPrefix } from '../triggers/types.js';
+import {
+  isMessageDeliveryReceipt,
+  isMessageDeliverySuppressed,
+  messageWasDelivered,
+  parseUserIdPrefix,
+  type MessageDeliveryHandler,
+  type MessageDeliveryMetadata,
+  type MessageDeliveryResult,
+} from '../triggers/types.js';
 import { formatProactiveMessage, type ProactiveFormatInput } from './proactive-format.js';
 import {
   attributeProactiveEngagement,
+  parseProactiveReplyAction,
   proactiveIdentityCandidates,
+  type ProactiveFeedbackResult,
   type ProactiveEngagementContext,
 } from './feedback.js';
 import { getRecentChatContext } from './chat-context.js';
 import { wordOverlap } from '../utils/text-similarity.js';
+import { resolveStateUserId } from '../utils/state-user-id.js';
 import {
   prepareUserFacingProactiveMessage,
   renderCompletedWorkDigest,
@@ -157,7 +168,7 @@ function sanitizeAgentResponse(raw: string): string {
 /**
  * Handler for sending messages to users
  */
-export type MessageHandler = (userId: string, message: string) => Promise<boolean>;
+export type MessageHandler = MessageDeliveryHandler;
 type ProcessOutcome =
   | 'sent'
   | 'suppressed'
@@ -219,6 +230,9 @@ export interface UnifiedSchedulerOptions {
   taskHeartbeatMs?: number;
   /** Delay before retrying execution or delivery failures (default 60 seconds). */
   taskRetryDelayMs?: number;
+  /** Age after which an uncompleted nudge claim is treated as abandoned
+   *  (default 15 minutes; minimum 60 seconds). */
+  nudgeClaimTimeoutMs?: number;
   /** Explicit deployment-owned IDs that map to the single-user `default` record. */
   canonicalSingleUserIds?: string[];
 }
@@ -239,7 +253,8 @@ export class UnifiedScheduler {
   private getTimezone: (userId: string) => string;
 
   private boardService: BoardService;
-  private schedulerSessionId: string | null = null;
+  /** Owner-scoped fallback parents for unattended scheduled sub-agents. */
+  private schedulerSessionIds = new Map<string, string>();
   private intervalHandle: ReturnType<typeof setInterval> | null = null;
   private pendingImmediateHandle: ReturnType<typeof setImmediate> | null = null;
   private isRunning = false;
@@ -257,6 +272,7 @@ export class UnifiedScheduler {
   private taskLeaseMs: number;
   private taskHeartbeatMs: number;
   private taskRetryDelayMs: number;
+  private nudgeClaimTimeoutMs: number;
   private canonicalSingleUserIds: string[];
   private static readonly MAX_RECENT_SEND_USERS = 500;
   private static readonly MAX_TASKS_PER_EVALUATION = 100;
@@ -282,21 +298,35 @@ export class UnifiedScheduler {
       Math.min(this.taskLeaseMs - 1, Math.floor(options.taskHeartbeatMs ?? this.taskLeaseMs / 3)),
     );
     this.taskRetryDelayMs = Math.max(1_000, Math.floor(options.taskRetryDelayMs ?? 60_000));
+    this.nudgeClaimTimeoutMs = Math.max(
+      60_000,
+      Math.floor(options.nudgeClaimTimeoutMs ?? 15 * 60_000),
+    );
     this.canonicalSingleUserIds = [...new Set(options.canonicalSingleUserIds ?? [])];
     this.boardService = new BoardService(this.db, this.logger);
   }
 
-  private async ensureSchedulerSession(): Promise<string | null> {
-    if (this.schedulerSessionId) return this.schedulerSessionId;
+  private async ensureSchedulerSession(userId: string = 'default'): Promise<string | null> {
+    const stateUserId = resolveStateUserId(userId, this.canonicalSingleUserIds);
+    const existing = this.schedulerSessionIds.get(stateUserId);
+    if (existing) return existing;
     if (!this.sessionManager) return null;
     try {
-      const session = await this.sessionManager.createSession({ source: 'scheduler' });
-      this.schedulerSessionId = session.id;
-      this.logger.debug({ sessionId: session.id }, 'Scheduler session created');
+      const { channel } = parseUserIdPrefix(userId);
+      const session = await this.sessionManager.createSession({
+        source: 'scheduler',
+        userId: stateUserId,
+        ...(channel ? { channelId: channel } : {}),
+      });
+      this.schedulerSessionIds.set(stateUserId, session.id);
+      this.logger.debug({ sessionId: session.id, userId: stateUserId }, 'Owner-scoped scheduler session created');
     } catch (err) {
-      this.logger.warn({ error: (err as Error).message }, 'Failed to create scheduler session — scheduled tasks will be suppressed');
+      this.logger.warn(
+        { error: (err as Error).message, userId: stateUserId },
+        'Failed to create owner-scoped scheduler session — scheduled tasks will be suppressed',
+      );
     }
-    return this.schedulerSessionId;
+    return this.schedulerSessionIds.get(stateUserId) ?? null;
   }
 
   /**
@@ -400,6 +430,14 @@ export class UnifiedScheduler {
       const expiredCount = this.db.expireOldScheduledItems(this.maxItemAge);
       if (expiredCount > 0) {
         this.logger.debug({ count: expiredCount }, 'Expired old scheduled items');
+      }
+
+      // A process can die after atomically claiming a nudge but before it can
+      // send/reset/complete it. Reclaim only claims older than the conservative
+      // timeout; fresh in-flight work remains exclusively owned.
+      const reclaimedNudges = this.db.reclaimStaleProcessingNudges(this.nudgeClaimTimeoutMs);
+      if (reclaimedNudges > 0) {
+        this.logger.warn({ count: reclaimedNudges }, 'Recovered stale processing nudge claims');
       }
 
       // Periodic dedup consolidation (~every 10 minutes)
@@ -538,12 +576,25 @@ export class UnifiedScheduler {
         return 'cancelled';
       }
 
+      const invalidSourceReason = this.invalidLinkedSourceReason(item);
+      if (invalidSourceReason) {
+        this.db.recordProactiveDecision({
+          userId: item.userId,
+          stage: 'deliver',
+          outcome: 'suppressed',
+          reason: invalidSourceReason,
+          detail: { itemId: item.id },
+        });
+        return 'cancelled';
+      }
+
       // Cancel only when a newer user turn actually resolves this intent.
       // Unrelated conversation should refresh the renderer, not silently erase
       // a future follow-up.
-      if (item.sessionId) {
+      const ownedSourceSessionId = this.getOwnedSessionId(item.sessionId, item.userId);
+      if (ownedSourceSessionId) {
         const itemText = `${item.message}\n${item.context ?? ''}`;
-        const resolvingMessage = this.db.getSessionMessages(item.sessionId)
+        const resolvingMessage = this.db.getSessionMessages(ownedSourceSessionId)
           .filter(message => message.role === 'user' && message.createdAt > item.createdAt)
           .find(message => messageResolvesScheduledIntent(message.content, itemText));
         if (resolvingMessage) {
@@ -560,7 +611,11 @@ export class UnifiedScheduler {
 
       // Avoid dropping a separate notification into an active exchange. This
       // is a deferral, not a cancellation: the current chat may be unrelated.
-      const recent = this.db.getRecentMessagesByUserId(item.userId, 4);
+      const recent = this.db.getRecentMessagesByUserId(
+        item.userId,
+        4,
+        [...this.ownedIdentityCandidates(item.userId)],
+      );
       const latest = recent.at(-1);
       if (latest && Date.now() - latest.createdAt < ACTIVE_CONVERSATION_WINDOW_MS) {
         this.db.updateScheduledItemBoard(item.id, {
@@ -579,6 +634,60 @@ export class UnifiedScheduler {
     }
 
     return this.sendFormattedMessage(item, item.message);
+  }
+
+  /**
+   * Resolve first-class source provenance, retaining a context fallback for
+   * wrapper rows created before scheduled_items.source_item_id existed.
+   */
+  private linkedSourceItemId(item: ScheduledItem): string | null {
+    if (item.sourceItemId) return item.sourceItemId;
+    if (!item.context) return null;
+    try {
+      const context = JSON.parse(item.context) as Record<string, unknown>;
+      if (typeof context.sourceId !== 'string' || !context.sourceId.trim()) return null;
+      if (context.gapType === 'stale_board_item' || context.gapType === 'blocked_item') {
+        return context.sourceId;
+      }
+      // Some legacy rows omitted gapType. Accept the fallback only when it
+      // resolves to a real scheduled item; summary/memory IDs remain untouched.
+      return this.db.getScheduledItem(context.sourceId) ? context.sourceId : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private getOwnedLinkedSourceItem(item: ScheduledItem): ScheduledItem | null {
+    const sourceItemId = this.linkedSourceItemId(item);
+    if (!sourceItemId || sourceItemId === item.id) return null;
+    const source = this.db.getScheduledItem(sourceItemId);
+    if (!source || source.userId !== item.userId) return null;
+    return source;
+  }
+
+  /** Return a delivery-suppression reason when the originating board state changed. */
+  private invalidLinkedSourceReason(item: ScheduledItem): string | null {
+    const sourceItemId = this.linkedSourceItemId(item);
+    if (!sourceItemId) return null;
+    if (sourceItemId === item.id) return 'source_item_invalid';
+    const source = this.db.getScheduledItem(sourceItemId);
+    if (!source) return 'source_item_missing';
+    if (source.userId !== item.userId) return 'source_item_owner_mismatch';
+    const boardStatus = computeBoardStatus(source);
+    if (
+      source.status === 'fired'
+      || source.status === 'acted'
+      || source.status === 'dismissed'
+      || source.status === 'expired'
+      || boardStatus === 'done'
+      || boardStatus === 'archived'
+    ) {
+      return 'source_item_resolved';
+    }
+    // A user/worker touched the source after the wrapper was generated. The old
+    // wording is no longer grounded even if the item remains active.
+    if (source.updatedAt > item.createdAt) return 'source_item_changed';
+    return null;
   }
 
   private retryGeneratedNudge(item: ScheduledItem, error: string): void {
@@ -631,11 +740,7 @@ export class UnifiedScheduler {
 
   /** Claim and drain the currently due task users through durable worker leases. */
   private async processDueTasks(): Promise<void> {
-    const dueUsers = new Set(
-      this.db.getDueScheduledItems()
-        .filter(item => item.kind === 'task')
-        .map(item => item.userId),
-    );
+    const dueUsers = this.db.getReadyBoardTaskUserIds();
     let processed = 0;
 
     for (const userId of dueUsers) {
@@ -707,9 +812,7 @@ export class UnifiedScheduler {
       }
 
       if (processed.outcome === 'deferred' || (isFailureOutcome(processed.outcome) && processed.result)) {
-        const delay = processed.outcome === 'deferred'
-          ? Math.max(1_000, this.remainingAgentGapMs(item.userId))
-          : this.taskRetryDelayMs;
+        const delay = this.taskRetryDelayMs;
         this.boardService.deferLeasedTask(
           item.id,
           leaseToken,
@@ -747,8 +850,9 @@ export class UnifiedScheduler {
     }
 
     const config = item.taskConfig;
-    const schedulerSessionId = await this.ensureSchedulerSession();
-    const executionParentSessionId = item.sessionId ?? schedulerSessionId;
+    const schedulerSessionId = await this.ensureSchedulerSession(item.userId);
+    const executionParentSessionId = this.getOwnedSessionId(item.sessionId, item.userId)
+      ?? schedulerSessionId;
     if (!config || !this.subAgentExecutor || !executionParentSessionId) {
       this.logger.warn({ itemId: item.id }, 'Scheduled task cannot run; suppressing raw task description');
       this.db.recordProactiveDecision({
@@ -776,7 +880,9 @@ export class UnifiedScheduler {
 
     try {
       // Fetch recent chat context so the sub-agent is aware of ongoing conversations
-      const chatContext = getRecentChatContext(this.db, item.userId);
+      const chatContext = getRecentChatContext(this.db, item.userId, {
+        identityCandidates: [...this.ownedIdentityCandidates(item.userId)],
+      });
 
       // Grounding directive: scheduled tasks run unattended, so a sub-agent that
       // skips its data tools and improvises output goes unnoticed (e.g. the daily
@@ -864,57 +970,7 @@ export class UnifiedScheduler {
     sourceOverride?: 'task_result' | 'inner_thoughts' | 'gap_scanner',
     leaseManaged: boolean = false,
   ): Promise<ProcessOutcome> {
-    // Delivery budgets are based on actual sends, not candidates created by a
-    // background evaluator. Explicit reminders and completed task results are
-    // separate products and retain their requested cadence.
-    if (
-      item.source === 'agent' &&
-      sourceOverride !== 'task_result' &&
-      this.hasReachedAgentDailyBudget(item.userId)
-    ) {
-      const now = new Date();
-      const timezone = this.getTimezone(item.userId);
-      if (!leaseManaged) {
-        this.db.updateScheduledItemBoard(item.id, {
-          triggerAt: now.getTime() + millisecondsUntilLocalMorning(now, timezone, item.id),
-        });
-        this.db.resetScheduledItemToPending(item.id);
-      }
-      this.db.recordProactiveDecision({
-        userId: item.userId,
-        stage: 'deliver',
-        outcome: 'deferred',
-        reason: 'daily_delivery_budget',
-        detail: { itemId: item.id, cap: MAX_AGENT_SENDS_PER_DAY },
-      });
-      return 'deferred';
-    }
-
-    // Hard min-gap throttle applies to inferred conversational outreach.
-    // Explicit reminders and completed task results are time-sensitive
-    // products, so they do not wait behind an earlier nudge.
     const gapApplies = item.source === 'agent' && sourceOverride !== 'task_result';
-    const remainingGapMs = gapApplies ? this.remainingAgentGapMs(item.userId) : 0;
-    if (gapApplies && remainingGapMs > 0) {
-      this.logger.info({ itemId: item.id, userId: item.userId }, 'Suppressing agent proactive — within min-gap of last agent send');
-      this.db.recordProactiveDecision({
-        userId: item.userId,
-        stage: 'deliver',
-        outcome: 'suppressed',
-        reason: 'min_gap',
-        detail: { itemId: item.id },
-      });
-      // Push trigger forward so it can fire after the gap window.
-      if (!leaseManaged) {
-        try {
-          this.db.updateScheduledItemBoard(item.id, { triggerAt: Date.now() + remainingGapMs });
-          this.db.resetScheduledItemToPending(item.id);
-        } catch (err) {
-          this.logger.warn({ err: (err as Error).message, itemId: item.id }, 'Failed to defer min-gap-throttled item');
-        }
-      }
-      return 'deferred';
-    }
 
     if (sourceOverride === 'task_result') {
       message = await summarizeTaskResultForDelivery(
@@ -936,6 +992,7 @@ export class UnifiedScheduler {
           maxMessages: 8,
           maxCharsPerMessage: 350,
           stalenessMs: 7 * 24 * 60 * 60 * 1000,
+          identityCandidates: [...this.ownedIdentityCandidates(item.userId)],
         })
       : null;
     const renderResult = isProvenUserLiteral
@@ -1008,6 +1065,74 @@ export class UnifiedScheduler {
       });
       return 'cancelled';
     }
+
+    // Rendering is asynchronous. Re-read the linked board source immediately
+    // before transport so a completion/archive/update that raced the model call
+    // cannot escape as a stale notification.
+    if (item.source === 'agent' && sourceOverride === undefined) {
+      const invalidSourceReason = this.invalidLinkedSourceReason(item);
+      if (invalidSourceReason) {
+        this.db.recordProactiveDecision({
+          userId: item.userId,
+          stage: 'deliver',
+          outcome: 'suppressed',
+          reason: invalidSourceReason,
+          detail: { itemId: item.id, phase: 'post_render' },
+        });
+        return 'cancelled';
+      }
+    }
+
+    // Reserve cross-process capacity at the last safe point before transport.
+    // Explicit reminders and completed task results retain their requested
+    // cadence and deliberately bypass inferred-outreach budgets.
+    let deliveryReservationToken: string | null = null;
+    if (gapApplies) {
+      const now = new Date();
+      const timezone = this.getTimezone(item.userId);
+      const todayStart = getTodayStartMs(timezone);
+      const nextBudgetAt = now.getTime() + millisecondsUntilLocalMorning(now, timezone, item.id);
+      const reservation = this.db.reserveProactiveDelivery({
+        itemId: item.id,
+        userId: item.userId,
+        dayStart: todayStart,
+        nextDayStart: nextBudgetAt,
+        dailyCap: MAX_AGENT_SENDS_PER_DAY,
+        minGapMs: this.minAgentProactiveGapMs,
+        now: now.getTime(),
+      });
+      if (reservation.outcome === 'daily_cap') {
+        if (!leaseManaged) {
+          this.db.updateScheduledItemBoard(item.id, { triggerAt: reservation.retryAt });
+          this.db.resetScheduledItemToPending(item.id);
+        }
+        this.db.recordProactiveDecision({
+          userId: item.userId,
+          stage: 'deliver',
+          outcome: 'deferred',
+          reason: 'daily_delivery_budget',
+          detail: { itemId: item.id, cap: MAX_AGENT_SENDS_PER_DAY },
+        });
+        return 'deferred';
+      }
+      if (reservation.outcome === 'min_gap') {
+        const remainingGapMs = Math.max(1_000, reservation.retryAt - now.getTime());
+        this.logger.info({ itemId: item.id, userId: item.userId }, 'Suppressing agent proactive — within reserved min-gap');
+        if (!leaseManaged) {
+          this.db.updateScheduledItemBoard(item.id, { triggerAt: now.getTime() + remainingGapMs });
+          this.db.resetScheduledItemToPending(item.id);
+        }
+        this.db.recordProactiveDecision({
+          userId: item.userId,
+          stage: 'deliver',
+          outcome: 'suppressed',
+          reason: 'min_gap',
+          detail: { itemId: item.id },
+        });
+        return 'deferred';
+      }
+      deliveryReservationToken = reservation.token;
+    }
     this.db.recordProactiveDecision({
       userId: item.userId,
       stage: 'deliver',
@@ -1051,23 +1176,57 @@ export class UnifiedScheduler {
         };
 
         const formatted = formatProactiveMessage((channel ?? 'telegram') as 'telegram' | 'api', formatInput);
-        const sent = await this.deliverAndRecordConversation(item, formatted, message);
-        return this.finishDelivery(item, message, sent, sourceOverride);
+        let delivery: MessageDeliveryResult;
+        try {
+          delivery = await this.deliverAndRecordConversation(item, formatted, message);
+        } catch (error) {
+          if (deliveryReservationToken) {
+            this.db.releaseProactiveDeliveryReservation(deliveryReservationToken);
+          }
+          throw error;
+        }
+        return this.finishDelivery(item, message, delivery, sourceOverride, deliveryReservationToken);
       }
     }
 
     // User-sourced items or unknown channels: send as-is
-    const sent = await this.deliverAndRecordConversation(item, message);
-    return this.finishDelivery(item, message, sent, sourceOverride);
+    let delivery: MessageDeliveryResult;
+    try {
+      delivery = await this.deliverAndRecordConversation(item, message);
+    } catch (error) {
+      if (deliveryReservationToken) {
+        this.db.releaseProactiveDeliveryReservation(deliveryReservationToken);
+      }
+      throw error;
+    }
+    return this.finishDelivery(item, message, delivery, sourceOverride, deliveryReservationToken);
   }
 
   private finishDelivery(
     item: ScheduledItem,
     message: string,
-    sent: boolean,
+    delivery: MessageDeliveryResult,
     sourceOverride?: 'task_result' | 'inner_thoughts' | 'gap_scanner',
+    deliveryReservationToken: string | null = null,
   ): ProcessOutcome {
-    if (!sent) {
+    if (isMessageDeliverySuppressed(delivery)) {
+      if (deliveryReservationToken) {
+        this.db.releaseProactiveDeliveryReservation(deliveryReservationToken);
+      }
+      this.db.recordProactiveDecision({
+        userId: item.userId,
+        stage: 'deliver',
+        outcome: 'suppressed',
+        reason: delivery.reason,
+        detail: { itemId: item.id, source: item.source, phase: 'pre_transport' },
+      });
+      return 'cancelled';
+    }
+
+    if (!messageWasDelivered(delivery)) {
+      if (deliveryReservationToken) {
+        this.db.releaseProactiveDeliveryReservation(deliveryReservationToken);
+      }
       this.db.recordProactiveDecision({
         userId: item.userId,
         stage: 'deliver',
@@ -1078,9 +1237,41 @@ export class UnifiedScheduler {
       return 'delivery_failed';
     }
 
+    const sendSource = sourceOverride === 'task_result' ? 'task_result' : item.source;
+    let finalizedReservation = false;
+    if (deliveryReservationToken) {
+      try {
+        finalizedReservation = this.db.finalizeProactiveDeliveryReservation(
+          deliveryReservationToken,
+          message,
+          sendSource,
+        );
+      } catch (err) {
+        this.logger.warn({ err: (err as Error).message, itemId: item.id }, 'Failed to finalize proactive delivery reservation');
+      }
+      if (!finalizedReservation) {
+        this.db.releaseProactiveDeliveryReservation(deliveryReservationToken);
+      }
+    }
+
+    // Persist the exact rendered nudge the channel received. Telegram reply
+    // attribution can then match reply_to_message text even when the stored
+    // draft was substantially rewritten; sourceItemId remains the authoritative
+    // provenance link. Task rows keep their task title rather than a report.
+    if (
+      sourceOverride === undefined
+      && item.messageProvenance === 'generated'
+      && message !== item.message.trim()
+    ) {
+      this.db.updateScheduledItem(item.id, {
+        message,
+        messageProvenance: 'generated',
+      });
+    }
+
     // A completed task report is useful style/dedup history, but it is not one
     // of the independently inferred nudges governed by the daily outreach cap.
-    this.recordSend(item.userId, message, sourceOverride === 'task_result' ? 'task_result' : item.source);
+    this.recordSend(item.userId, message, sendSource, !finalizedReservation);
     this.db.recordProactiveDecision({
       userId: item.userId,
       stage: 'deliver',
@@ -1102,22 +1293,93 @@ export class UnifiedScheduler {
     item: ScheduledItem,
     deliveredMessage: string,
     conversationMessage: string = deliveredMessage,
-  ): Promise<boolean> {
-    const sent = await this.onSendMessage(item.userId, deliveredMessage);
-    if (!sent) return false;
-    if (!item.sessionId || !this.sessionManager) return true;
+  ): Promise<MessageDeliveryResult> {
+    const metadata: MessageDeliveryMetadata = {
+      scheduledItemId: item.id,
+      ownerUserId: item.userId,
+      ...(this.linkedSourceItemId(item)
+        ? {
+            validate: () => {
+              const reason = this.invalidLinkedSourceReason(item);
+              return reason ? { valid: false, reason } : { valid: true };
+            },
+          }
+        : {}),
+    };
+    const delivery = this.onSendMessage.supportsDeliveryMetadata
+      ? await this.onSendMessage(item.userId, deliveredMessage, metadata)
+      : await this.onSendMessage(item.userId, deliveredMessage);
+    if (!messageWasDelivered(delivery)) return delivery;
+
+    if (isMessageDeliveryReceipt(delivery)) {
+      try {
+        this.db.recordProactiveDeliveryReceipt({
+          channel: delivery.channel,
+          channelMessageIds: delivery.messageIds,
+          scheduledItemId: item.id,
+          ownerUserId: item.userId,
+          ambiguous: delivery.combined === true,
+        });
+      } catch (error) {
+        // Transport already succeeded. A provenance write failure must not
+        // retry and duplicate the user-visible message; it merely removes
+        // source-mutation authority from any later reply.
+        this.logger.warn(
+          { itemId: item.id, error: (error as Error).message },
+          'Failed to persist proactive delivery receipt',
+        );
+      }
+    }
+
+    if (!this.sessionManager) return delivery;
+
+    // Fact/gap generated wrappers historically had no session_id. Attach the
+    // delivered assistant turn to the user's latest durable conversation so a
+    // later reply has provenance without exposing internal item IDs in text.
+    const conversationSessionId = this.getOwnedSessionId(item.sessionId, item.userId)
+      ?? this.findLatestOwnedConversationSessionId(item.userId)
+      ?? this.getOwnedSessionId(this.getOwnedLinkedSourceItem(item)?.sessionId, item.userId);
+    if (!conversationSessionId) return delivery;
 
     try {
-      await this.sessionManager.addMessage(item.sessionId, {
+      await this.sessionManager.addMessage(conversationSessionId, {
         role: 'assistant',
         content: conversationMessage,
       });
-      this.logger.debug({ itemId: item.id, sessionId: item.sessionId }, 'Recorded proactive message in source conversation');
+      this.logger.debug({ itemId: item.id, sessionId: conversationSessionId }, 'Recorded proactive message in source conversation');
     } catch (err) {
       // A missing/deleted source session must not make delivery fail.
-      this.logger.warn({ itemId: item.id, sessionId: item.sessionId, error: (err as Error).message }, 'Failed to record proactive message in source conversation');
+      this.logger.warn({ itemId: item.id, sessionId: conversationSessionId, error: (err as Error).message }, 'Failed to record proactive message in source conversation');
     }
-    return true;
+    return delivery;
+  }
+
+  /** Resolve only explicitly owned/canonical identities, never arbitrary users. */
+  private findLatestOwnedConversationSessionId(userId: string): string | null {
+    const sessions = [...this.ownedIdentityCandidates(userId)]
+      .map(candidate => this.db.findSessionByUserId(candidate))
+      .filter((session): session is NonNullable<typeof session> => session != null)
+      .sort((a, b) => b.updatedAt - a.updatedAt);
+    return sessions[0]?.id ?? null;
+  }
+
+  /** Exact channel/session identities authorized for one durable state owner. */
+  private ownedIdentityCandidates(userId: string): Set<string> {
+    const candidates = new Set(proactiveIdentityCandidates(userId, this.canonicalSingleUserIds));
+    if (resolveStateUserId(userId, this.canonicalSingleUserIds) === 'default') {
+      candidates.add('default');
+      for (const alias of this.canonicalSingleUserIds) candidates.add(alias);
+    }
+    return candidates;
+  }
+
+  /** Reject stale/corrupt cross-owner session references before any read/write. */
+  private getOwnedSessionId(sessionId: string | null | undefined, userId: string): string | null {
+    if (!sessionId) return null;
+    const session = this.db.getSession(sessionId);
+    const sessionUserId = session?.metadata?.userId;
+    if (typeof sessionUserId !== 'string') return null;
+    return this.ownedIdentityCandidates(userId).has(sessionUserId) ? sessionId : null;
   }
 
   /**
@@ -1151,34 +1413,17 @@ export class UnifiedScheduler {
       .map(entry => entry.message);
   }
 
-  private hasReachedAgentDailyBudget(userId: string): boolean {
-    const timezone = this.getTimezone(userId);
-    const todayStart = getTodayStartMs(timezone);
-    return this.db.getRecentProactiveSends(todayStart)
-      .filter(entry => entry.userId === userId && entry.source === 'agent')
-      .length >= MAX_AGENT_SENDS_PER_DAY;
-  }
-
-  /**
-   * Has an agent-sourced proactive message been sent to this user within the
-   * min-gap window? User-source items are excluded from the check.
-   */
-  private remainingAgentGapMs(userId: string): number {
-    if (this.minAgentProactiveGapMs <= 0) return 0;
-    const recent = this.recentSends.get(userId);
-    if (!recent) return 0;
-    const lastAgentSend = recent
-      .filter(entry => entry.source === 'agent')
-      .reduce((latest, entry) => Math.max(latest, entry.time), 0);
-    return Math.max(0, lastAgentSend + this.minAgentProactiveGapMs - Date.now());
-  }
-
   /**
    * Record a message as sent for future dedup checks. Caps the per-user list
    * and the top-level user count to prevent unbounded growth. Also persists
    * to SQLite so the dedup state survives a restart.
    */
-  private recordSend(userId: string, message: string, source: string = 'agent'): void {
+  private recordSend(
+    userId: string,
+    message: string,
+    source: string = 'agent',
+    persist: boolean = true,
+  ): void {
     const now = Date.now();
     const list = this.recentSends.get(userId) || [];
     list.push({ message, time: now, source });
@@ -1189,10 +1434,12 @@ export class UnifiedScheduler {
 
     // Persist for restart-time hydration. Best-effort: failure to persist
     // shouldn't block the send.
-    try {
-      this.db.recordProactiveSend(userId, message, source, now);
-    } catch (err) {
-      this.logger.warn({ err: (err as Error).message }, 'Failed to persist proactive send log entry');
+    if (persist) {
+      try {
+        this.db.recordProactiveSend(userId, message, source, now);
+      } catch (err) {
+        this.logger.warn({ err: (err as Error).message }, 'Failed to persist proactive send log entry');
+      }
     }
 
     // Global cap: evict the oldest user entry (Map iteration order is
@@ -1236,6 +1483,7 @@ export class UnifiedScheduler {
           triggerAt: nextTriggerAt,
           recurring: item.recurring,
           sourceMemoryId: item.sourceMemoryId,
+          sourceItemId: item.sourceItemId,
           taskConfig: item.taskConfig,
           boardStatus: 'scheduled',
           priority: item.priority,
@@ -1379,7 +1627,8 @@ export class UnifiedScheduler {
     userId: string,
     userMessage?: string,
     context: Omit<ProactiveEngagementContext, 'userMessage'> = {},
-  ): void {
+  ): ProactiveFeedbackResult {
+    const feedbackResult: ProactiveFeedbackResult = { matched: false };
     try {
       const seen = new Set<string>();
       const identityCandidates = proactiveIdentityCandidates(userId, this.canonicalSingleUserIds);
@@ -1390,24 +1639,77 @@ export class UnifiedScheduler {
           seen.add(item.id);
           return true;
         });
-      const matches = attributeProactiveEngagement(userId, items, {
+      let matches = attributeProactiveEngagement(userId, items, {
         ...context,
         userMessage,
         identityCandidates,
       });
+      const exactReplyAction = (
+        context.directReply
+        && context.allowSourceAction !== false
+        && typeof userMessage === 'string'
+      ) ? parseProactiveReplyAction(userMessage) : null;
+      const exactWrapper = exactReplyAction
+        ? this.resolveExactReplyWrapper(userId, context, items)
+        : null;
+      if (exactWrapper && exactReplyAction) {
+        // Exact channel provenance wins over fuzzy/newest text attribution.
+        // This also prevents one reply from marking a similar newer wrapper as
+        // acted when Telegram says the user replied to the earlier delivery.
+        matches = [{
+          itemId: exactWrapper.id,
+          score: 2,
+          reason: 'direct_reply',
+          replyAction: exactReplyAction,
+        }];
+      }
       for (const match of matches) {
-        if (match.reason === 'negative') {
-          this.db.markScheduledItemDismissed(match.itemId);
-        } else {
-          this.db.markScheduledItemActed(match.itemId);
+        feedbackResult.matched = true;
+        const wrapper = items.find(item => item.id === match.itemId);
+        let sourceAction: ProactiveFeedbackResult['sourceAction'] | null = null;
+        let feedbackPersistedAtomically = false;
+        if (
+          wrapper
+          && exactWrapper?.id === wrapper.id
+          && match.reason === 'direct_reply'
+          && match.replyAction
+        ) {
+          const sourceItemId = this.linkedSourceItemId(wrapper);
+          if (sourceItemId) {
+            const atomic = this.db.applyLinkedSourceReplyAndAcknowledge({
+              wrapperId: wrapper.id,
+              sourceItemId,
+              ownerUserId: wrapper.userId,
+              feedbackUserId: userId,
+              action: match.replyAction.type,
+              delayMs: match.replyAction.type === 'snooze' ? match.replyAction.delayMs : undefined,
+              score: match.score,
+            });
+            feedbackPersistedAtomically = atomic.acknowledged;
+            sourceAction = atomic.sourceAction;
+          }
         }
-        this.db.recordProactiveDecision({
-          userId,
-          stage: 'feedback',
-          outcome: match.reason === 'negative' ? 'dismissed' : 'acted',
-          reason: match.reason,
-          detail: { itemId: match.itemId, score: match.score },
-        });
+        if (sourceAction) feedbackResult.sourceAction = sourceAction;
+        if (!feedbackPersistedAtomically) {
+          if (match.reason === 'negative') {
+            this.db.markScheduledItemDismissed(match.itemId);
+          } else {
+            this.db.markScheduledItemActed(match.itemId);
+          }
+          this.db.recordProactiveDecision({
+            userId,
+            stage: 'feedback',
+            outcome: match.reason === 'negative' ? 'dismissed' : 'acted',
+            reason: match.reason,
+            detail: {
+              itemId: match.itemId,
+              score: match.score,
+              ...(match.replyAction
+                ? { replyAction: match.replyAction.type, sourceActionApplied: sourceAction?.applied ?? false }
+                : {}),
+            },
+          });
+        }
       }
       if (matches.length > 0) {
         this.logger.debug(
@@ -1418,6 +1720,45 @@ export class UnifiedScheduler {
     } catch (err) {
       this.logger.warn({ error: (err as Error).message, userId }, 'Engagement detection failed');
     }
+    return feedbackResult;
+  }
+
+  /**
+   * Resolve source-action authority from append-only channel delivery
+   * provenance. Text, recency, and newest-item fallback are intentionally not
+   * consulted here: they remain engagement signals only.
+   */
+  private resolveExactReplyWrapper(
+    feedbackUserId: string,
+    context: Omit<ProactiveEngagementContext, 'userMessage'>,
+    items: ScheduledItem[],
+  ): ScheduledItem | null {
+    const messageId = context.repliedToMessageId?.trim();
+    const { channel } = parseUserIdPrefix(feedbackUserId);
+    if (!context.directReply || !messageId || !channel) return null;
+
+    const identities = new Set(
+      proactiveIdentityCandidates(feedbackUserId, this.canonicalSingleUserIds),
+    );
+    const receipts = this.db.getProactiveDeliveryReceipts(channel, messageId)
+      .filter(receipt => identities.has(receipt.ownerUserId));
+    if (receipts.length === 0 || receipts.some(receipt => receipt.ambiguous)) return null;
+
+    const wrapperIds = new Set(receipts.map(receipt => receipt.scheduledItemId));
+    if (wrapperIds.size !== 1) return null;
+    const [wrapperId] = wrapperIds;
+    const wrapper = items.find(item => item.id === wrapperId);
+    if (!wrapper || !identities.has(wrapper.userId)) return null;
+    if (!receipts.some(receipt => (
+      receipt.scheduledItemId === wrapper.id
+      && receipt.ownerUserId === wrapper.userId
+    ))) return null;
+
+    if (
+      wrapper.source !== 'agent'
+      || !['processing', 'fired', 'acted'].includes(wrapper.status)
+    ) return null;
+    return wrapper;
   }
 
   /**

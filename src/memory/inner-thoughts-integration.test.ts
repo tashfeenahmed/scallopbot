@@ -29,6 +29,7 @@ import type { LLMProvider, CompletionResponse } from '../providers/types.js';
 
 const TEST_DB_PATH = '/tmp/inner-thoughts-integration-test.db';
 const logger = pino({ level: 'silent' });
+const OWNER_ALIASES = ['owner-example', 'telegram:owner-example'] as const;
 
 function cleanupTestDb() {
   for (const suffix of ['', '-wal', '-shm']) {
@@ -183,7 +184,11 @@ function seedSessionSummary(
   },
 ) {
   const sessionId = opts?.sessionId ?? `session-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  db.createSession(sessionId);
+  const stateUserId = opts?.userId ?? 'default';
+  db.createSession(sessionId, {
+    userId: stateUserId === 'default' ? 'telegram:owner-example' : stateUserId,
+    channelId: 'telegram',
+  });
   const createdAt = Date.now() - 3 * 24 * 60 * 60 * 1000;
   const row = db.addSessionSummary({
     sessionId,
@@ -294,6 +299,7 @@ describe('Inner thoughts integration', () => {
       scallopStore: store,
       logger,
       fusionProvider: mockProvider,
+      canonicalSingleUserIds: OWNER_ALIASES,
       workspace,
     });
 
@@ -341,6 +347,7 @@ describe('Inner thoughts integration', () => {
       scallopStore: store,
       logger,
       fusionProvider: mockProvider,
+      canonicalSingleUserIds: OWNER_ALIASES,
       workspace,
     });
 
@@ -401,6 +408,7 @@ describe('Inner thoughts integration', () => {
       scallopStore: store,
       logger,
       fusionProvider: mockProvider,
+      canonicalSingleUserIds: OWNER_ALIASES,
       workspace,
     });
 
@@ -472,6 +480,7 @@ describe('Inner thoughts integration', () => {
       scallopStore: store,
       logger,
       fusionProvider: mockProvider,
+      canonicalSingleUserIds: OWNER_ALIASES,
       workspace,
     });
 

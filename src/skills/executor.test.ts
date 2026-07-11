@@ -4,7 +4,13 @@ import * as path from 'path';
 import * as os from 'os';
 import { pino } from 'pino';
 import type { Skill, SkillFrontmatter } from './types.js';
-import { SkillExecutor, createSkillExecutor } from './executor.js';
+import { ScallopDatabase } from '../memory/db.js';
+import {
+  SkillExecutor,
+  buildSkillSubprocessEnv,
+  createSkillExecutor,
+  resolveSkillStateUserId,
+} from './executor.js';
 
 /**
  * Creates a mock skill for testing
@@ -180,6 +186,124 @@ describe('SkillExecutor', () => {
   });
 
   describe('execute', () => {
+    it('maps an explicitly configured Telegram owner to canonical state without replacing channel identity', async () => {
+      const script = `console.log(JSON.stringify({ channel: process.env.SKILL_USER_ID, state: process.env.SKILL_STATE_USER_ID }));`;
+      await fs.writeFile(path.join(scriptsDir, 'run.js'), script);
+      const skill = createMockSkill({ scriptsDir });
+      const ownerExecutor = createSkillExecutor(createMockLogger(), undefined, {
+        canonicalSingleUserIds: ['owner-123', 'telegram:owner-123'],
+      });
+
+      const result = await ownerExecutor.execute(skill, {
+        skillName: skill.name,
+        cwd: testDir,
+        userId: 'telegram:owner-123',
+      });
+
+      expect(result.success).toBe(true);
+      expect(JSON.parse(result.output!.trim())).toEqual({
+        channel: 'telegram:owner-123',
+        state: 'default',
+      });
+    });
+
+    it('lets the board read default-owned rows from an aliased Telegram session', async () => {
+      const dbPath = path.join(testDir, 'memories.db');
+      const db = new ScallopDatabase(dbPath);
+      db.addScheduledItem({
+        userId: 'default',
+        sessionId: 'source-session',
+        source: 'user',
+        kind: 'nudge',
+        type: 'reminder',
+        message: 'Canonical owner board item',
+        context: null,
+        triggerAt: 0,
+        recurring: null,
+        sourceMemoryId: null,
+        boardStatus: 'backlog',
+      });
+      db.close();
+
+      const boardScriptsDir = path.join(process.cwd(), 'src', 'skills', 'bundled', 'board', 'scripts');
+      const boardSkill = createMockSkill({
+        name: 'board',
+        scriptsDir: boardScriptsDir,
+        path: path.join(boardScriptsDir, '..', 'SKILL.md'),
+        frontmatter: { name: 'board', description: 'Board test' },
+      });
+      const ownerExecutor = createSkillExecutor(createMockLogger(), undefined, {
+        canonicalSingleUserIds: ['owner-123', 'telegram:owner-123'],
+      });
+
+      const ownerResult = await ownerExecutor.execute(boardSkill, {
+        skillName: 'board',
+        args: { action: 'view' },
+        cwd: testDir,
+        userId: 'telegram:owner-123',
+        sessionId: 'telegram-session',
+      });
+      const unrelatedResult = await ownerExecutor.execute(boardSkill, {
+        skillName: 'board',
+        args: { action: 'view' },
+        cwd: testDir,
+        userId: 'telegram:someone-else',
+        sessionId: 'other-session',
+      });
+
+      expect(ownerResult.success).toBe(true);
+      expect(ownerResult.output).toContain('Canonical owner board item');
+      expect(unrelatedResult.success).toBe(true);
+      expect(unrelatedResult.output).not.toContain('Canonical owner board item');
+    }, 30_000);
+
+    it('lets memory search read default-owned facts from an aliased Telegram session', async () => {
+      const dbPath = path.join(testDir, 'memories.db');
+      const db = new ScallopDatabase(dbPath);
+      db.addMemory({
+        userId: 'default',
+        content: 'The canonical owner prefers cardamom coffee.',
+        category: 'preference',
+        memoryType: 'regular',
+        importance: 6,
+        confidence: 1,
+        isLatest: true,
+        source: 'user',
+        documentDate: Date.now(),
+        eventDate: null,
+        prominence: 1,
+        lastAccessed: null,
+        accessCount: 0,
+        sourceChunk: null,
+        embedding: null,
+        metadata: null,
+      });
+      db.close();
+
+      const memoryScriptsDir = path.join(process.cwd(), 'src', 'skills', 'bundled', 'memory_search', 'scripts');
+      const memorySkill = createMockSkill({
+        name: 'memory_search',
+        scriptsDir: memoryScriptsDir,
+        path: path.join(memoryScriptsDir, '..', 'SKILL.md'),
+        frontmatter: { name: 'memory_search', description: 'Memory search test' },
+      });
+      const ownerExecutor = createSkillExecutor(createMockLogger(), undefined, {
+        canonicalSingleUserIds: ['owner-123', 'telegram:owner-123'],
+      });
+
+      const result = await ownerExecutor.execute(memorySkill, {
+        skillName: 'memory_search',
+        args: { query: 'cardamom coffee' },
+        cwd: testDir,
+        userId: 'telegram:owner-123',
+        sessionId: 'telegram-session',
+      });
+
+      expect(result.success).toBe(true);
+      const payload = JSON.parse(result.output!.trim()) as { output: string };
+      expect(payload.output).toContain('The canonical owner prefers cardamom coffee.');
+    }, 30_000);
+
     it('should execute .ts scripts with tsx', async () => {
       // Arrange
       const script = `console.log("Hello from TypeScript");`;
@@ -589,6 +713,29 @@ describe('SkillExecutor', () => {
       expect(events.map(event => event.success)).toEqual([true, false]);
       expect(events.every(event => event.name === 'measured-skill')).toBe(true);
       expect(events.every(event => event.durationMs >= 0)).toBe(true);
+    });
+  });
+
+  describe('state identity resolution', () => {
+    it('only canonicalizes default or explicitly configured aliases', () => {
+      const aliases = ['owner-123', 'telegram:owner-123'];
+      expect(resolveSkillStateUserId('telegram:owner-123', aliases)).toBe('default');
+      expect(resolveSkillStateUserId('owner-123', aliases)).toBe('default');
+      expect(resolveSkillStateUserId('api:default', [])).toBe('default');
+      expect(resolveSkillStateUserId('telegram:someone-else', aliases)).toBe('telegram:someone-else');
+      expect(resolveSkillStateUserId('api:someone-else', aliases)).toBe('api:someone-else');
+    });
+
+    it('exports both channel and state identities to subprocesses', () => {
+      const skill = createMockSkill();
+      const env = buildSkillSubprocessEnv(
+        skill,
+        { skillName: skill.name, userId: 'telegram:owner-123' },
+        undefined,
+        ['owner-123', 'telegram:owner-123'],
+      );
+      expect(env.SKILL_USER_ID).toBe('telegram:owner-123');
+      expect(env.SKILL_STATE_USER_ID).toBe('default');
     });
   });
 });

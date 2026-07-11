@@ -416,4 +416,45 @@ describe('SubAgentExecutor integration', () => {
 
     expect(hasMemorySearch).toBe(true);
   }, 30_000);
+
+  it('inherits the parent state owner without exposing another channel user', async () => {
+    const profiles = ctx.scallopStore.getProfileManager();
+    profiles.setStaticValue('telegram:isolated-alpha', 'name', 'Alpha Example');
+    profiles.setStaticValue('telegram:isolated-beta', 'name', 'Beta Example');
+    await ctx.scallopStore.add({
+      content: 'Alpha Example keeps the synthetic Juniper roadmap private.',
+      userId: 'telegram:isolated-alpha',
+      category: 'fact',
+      importance: 9,
+      confidence: 1,
+    });
+    await ctx.scallopStore.add({
+      content: 'Beta Example keeps the synthetic Magnolia roadmap private.',
+      userId: 'telegram:isolated-beta',
+      category: 'fact',
+      importance: 9,
+      confidence: 1,
+    });
+
+    const provider = createTrackingProvider(['The Juniper roadmap belongs to Alpha Example. [DONE]']);
+    const { executor } = await buildExecutor(provider);
+    const parentSession = await ctx.sessionManager.createSession({
+      label: 'isolated-parent',
+      userId: 'telegram:isolated-alpha',
+      channelId: 'telegram',
+    });
+
+    await executor.spawnAndWait(parentSession.id, {
+      task: 'Summarize the synthetic Juniper roadmap.',
+      label: 'state-owner-inheritance',
+    });
+
+    const systemPrompt = provider.allRequests[0].system
+      ? flattenSystem(provider.allRequests[0].system)
+      : '';
+    expect(systemPrompt).toContain('Alpha Example');
+    expect(systemPrompt).toContain('Juniper');
+    expect(systemPrompt).not.toContain('Beta Example');
+    expect(systemPrompt).not.toContain('Magnolia');
+  }, 30_000);
 });

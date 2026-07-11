@@ -141,8 +141,33 @@ function openDb(): Database.Database {
 }
 
 const USER_TIMEZONE = process.env.SKILL_USER_TIMEZONE || 'UTC';
-const USER_ID = process.env.SKILL_USER_ID || 'default';
+const USER_ID = process.env.SKILL_STATE_USER_ID || process.env.SKILL_USER_ID || 'default';
 const SESSION_ID = process.env.SKILL_SESSION_ID || null;
+
+interface OwnedItemLookup {
+  row?: ScheduledItemRow;
+  error?: string;
+}
+
+/**
+ * Resolve a full or abbreviated board ID without crossing the state owner's
+ * boundary. Abbreviations must identify exactly one owned row; SQLite's
+ * arbitrary first match is not safe for mutations.
+ */
+function findOwnedItem(db: Database.Database, itemId: string): OwnedItemLookup {
+  const rows = db.prepare(`
+    SELECT * FROM scheduled_items
+    WHERE user_id = ?
+      AND (id = ? OR substr(id, 1, length(?)) = ?)
+    ORDER BY CASE WHEN id = ? THEN 0 ELSE 1 END, id ASC
+    LIMIT 2
+  `).all(USER_ID, itemId, itemId, itemId, itemId) as ScheduledItemRow[];
+
+  if (rows.length === 0) return { error: `Item not found: ${itemId}` };
+  if (rows[0].id === itemId) return { row: rows[0] };
+  if (rows.length > 1) return { error: `Item ID is ambiguous: ${itemId}` };
+  return { row: rows[0] };
+}
 
 function outputResult(result: SkillResult): void {
   console.log(JSON.stringify(result));
@@ -480,7 +505,8 @@ function formatRecurringDescription(recurring: RecurringSchedule): string {
 // ─── Goal Lookup ─────────────────────────────────────────────────────
 
 function getGoalTitle(db: Database.Database, goalId: string): string | undefined {
-  const row = db.prepare('SELECT content FROM memories WHERE id = ?').get(goalId) as { content: string } | undefined;
+  const row = db.prepare('SELECT content FROM memories WHERE id = ? AND user_id = ?')
+    .get(goalId, USER_ID) as { content: string } | undefined;
   return row?.content;
 }
 
@@ -623,6 +649,16 @@ function addItem(args: BoardArgs): SkillResult {
   const priority = args.priority || 'medium';
   const type = kind === 'task' ? 'event_prep' : 'reminder';
 
+  if (args.goal_id && !getGoalTitle(db, args.goal_id)) {
+    db.close();
+    return {
+      success: false,
+      output: '',
+      error: `Goal not found for this user: ${args.goal_id}`,
+      exitCode: 1,
+    };
+  }
+
   // Recurring items live forever, so a concrete date baked into the title goes
   // stale immediately ("Daily Report - March 8, 2026" still firing in June).
   // Strip trailing date suffixes from recurring titles.
@@ -678,11 +714,11 @@ function moveItem(args: BoardArgs): SkillResult {
   }
 
   const db = openDb();
-  const row = db.prepare('SELECT * FROM scheduled_items WHERE id = ? OR id LIKE ?')
-    .get(args.item_id, `${args.item_id}%`) as ScheduledItemRow | undefined;
+  const lookup = findOwnedItem(db, args.item_id);
+  const row = lookup.row;
   if (!row) {
     db.close();
-    return { success: false, output: '', error: `Item not found: ${args.item_id}`, exitCode: 1 };
+    return { success: false, output: '', error: lookup.error, exitCode: 1 };
   }
 
   // Map to underlying status
@@ -692,8 +728,8 @@ function moveItem(args: BoardArgs): SkillResult {
   else if (targetStatus === 'in_progress') underlyingStatus = 'processing';
   else underlyingStatus = 'pending';
 
-  db.prepare('UPDATE scheduled_items SET board_status = ?, status = ?, updated_at = ? WHERE id = ?')
-    .run(targetStatus, underlyingStatus, Date.now(), row.id);
+  db.prepare('UPDATE scheduled_items SET board_status = ?, status = ?, updated_at = ? WHERE id = ? AND user_id = ?')
+    .run(targetStatus, underlyingStatus, Date.now(), row.id, USER_ID);
 
   const from = computeBoardStatus(row);
   db.close();
@@ -706,11 +742,11 @@ function updateItem(args: BoardArgs): SkillResult {
   }
 
   const db = openDb();
-  const row = db.prepare('SELECT * FROM scheduled_items WHERE id = ? OR id LIKE ?')
-    .get(args.item_id, `${args.item_id}%`) as ScheduledItemRow | undefined;
+  const lookup = findOwnedItem(db, args.item_id);
+  const row = lookup.row;
   if (!row) {
     db.close();
-    return { success: false, output: '', error: `Item not found: ${args.item_id}`, exitCode: 1 };
+    return { success: false, output: '', error: lookup.error, exitCode: 1 };
   }
 
   const sets: string[] = ['updated_at = ?'];
@@ -744,12 +780,14 @@ function updateItem(args: BoardArgs): SkillResult {
       sets.push('recurring = ?'); params.push(JSON.stringify(inferredRecurring));
       sets.push('trigger_at = ?'); params.push(getNextOccurrence(inferredRecurring).getTime());
       sets.push('board_status = ?'); params.push('scheduled');
+      sets.push('status = ?'); params.push('pending');
       changes.push(`recurring → ${formatRecurringDescription(inferredRecurring)}`);
     } else {
       const parsed = parseTriggerTime(args.trigger_time);
       if (parsed) {
         sets.push('trigger_at = ?'); params.push(parsed.triggerAt);
         sets.push('board_status = ?'); params.push('scheduled');
+        sets.push('status = ?'); params.push('pending');
         changes.push(`scheduled → ${parsed.description}`);
         // If item currently has a recurring rule and the new trigger_time is a
         // plain time like "9am", realign recurring.hour/minute so future
@@ -775,8 +813,8 @@ function updateItem(args: BoardArgs): SkillResult {
     }
   }
 
-  params.push(row.id);
-  db.prepare(`UPDATE scheduled_items SET ${sets.join(', ')} WHERE id = ?`).run(...params);
+  params.push(row.id, USER_ID);
+  db.prepare(`UPDATE scheduled_items SET ${sets.join(', ')} WHERE id = ? AND user_id = ?`).run(...params);
 
   db.close();
   return { success: true, output: `Updated "${row.message}": ${changes.join(', ') || 'no changes'}`, exitCode: 0 };
@@ -788,11 +826,11 @@ function markDone(args: BoardArgs): SkillResult {
   }
 
   const db = openDb();
-  const row = db.prepare('SELECT * FROM scheduled_items WHERE id = ? OR id LIKE ?')
-    .get(args.item_id, `${args.item_id}%`) as ScheduledItemRow | undefined;
+  const lookup = findOwnedItem(db, args.item_id);
+  const row = lookup.row;
   if (!row) {
     db.close();
-    return { success: false, output: '', error: `Item not found: ${args.item_id}`, exitCode: 1 };
+    return { success: false, output: '', error: lookup.error, exitCode: 1 };
   }
 
   const now = Date.now();
@@ -805,8 +843,8 @@ function markDone(args: BoardArgs): SkillResult {
     params.push(JSON.stringify(result));
   }
 
-  params.push(row.id);
-  db.prepare(`UPDATE scheduled_items SET ${updates.join(', ')} WHERE id = ?`).run(...params);
+  params.push(row.id, USER_ID);
+  db.prepare(`UPDATE scheduled_items SET ${updates.join(', ')} WHERE id = ? AND user_id = ?`).run(...params);
 
   db.close();
   return { success: true, output: `Marked done: "${row.message}"${args.result ? ' with note' : ''}`, exitCode: 0 };
@@ -818,15 +856,15 @@ function archiveItem(args: BoardArgs): SkillResult {
   }
 
   const db = openDb();
-  const row = db.prepare('SELECT * FROM scheduled_items WHERE id = ? OR id LIKE ?')
-    .get(args.item_id, `${args.item_id}%`) as ScheduledItemRow | undefined;
+  const lookup = findOwnedItem(db, args.item_id);
+  const row = lookup.row;
   if (!row) {
     db.close();
-    return { success: false, output: '', error: `Item not found: ${args.item_id}`, exitCode: 1 };
+    return { success: false, output: '', error: lookup.error, exitCode: 1 };
   }
 
-  db.prepare('UPDATE scheduled_items SET board_status = ?, status = ?, updated_at = ? WHERE id = ?')
-    .run('archived', 'dismissed', Date.now(), row.id);
+  db.prepare('UPDATE scheduled_items SET board_status = ?, status = ?, updated_at = ? WHERE id = ? AND user_id = ?')
+    .run('archived', 'dismissed', Date.now(), row.id, USER_ID);
 
   db.close();
   return { success: true, output: `Archived: "${row.message}"`, exitCode: 0 };
@@ -838,11 +876,11 @@ function showDetail(args: BoardArgs): SkillResult {
   }
 
   const db = openDb();
-  const row = db.prepare('SELECT * FROM scheduled_items WHERE id = ? OR id LIKE ?')
-    .get(args.item_id, `${args.item_id}%`) as ScheduledItemRow | undefined;
+  const lookup = findOwnedItem(db, args.item_id);
+  const row = lookup.row;
   if (!row) {
     db.close();
-    return { success: false, output: '', error: `Item not found: ${args.item_id}`, exitCode: 1 };
+    return { success: false, output: '', error: lookup.error, exitCode: 1 };
   }
 
   const item = rowToBoardItem(row, row.goal_id ? getGoalTitle(db, row.goal_id) : undefined);
@@ -889,11 +927,11 @@ function snoozeItem(args: BoardArgs): SkillResult {
   }
 
   const db = openDb();
-  const row = db.prepare('SELECT * FROM scheduled_items WHERE id = ? OR id LIKE ?')
-    .get(args.item_id, `${args.item_id}%`) as ScheduledItemRow | undefined;
+  const lookup = findOwnedItem(db, args.item_id);
+  const row = lookup.row;
   if (!row) {
     db.close();
-    return { success: false, output: '', error: `Item not found: ${args.item_id}`, exitCode: 1 };
+    return { success: false, output: '', error: lookup.error, exitCode: 1 };
   }
 
   const parsed = parseTriggerTime(timeStr);
@@ -902,8 +940,8 @@ function snoozeItem(args: BoardArgs): SkillResult {
     return { success: false, output: '', error: `Could not parse time: "${timeStr}"`, exitCode: 1 };
   }
 
-  db.prepare('UPDATE scheduled_items SET trigger_at = ?, board_status = ?, status = ?, updated_at = ? WHERE id = ?')
-    .run(parsed.triggerAt, 'scheduled', 'pending', Date.now(), row.id);
+  db.prepare('UPDATE scheduled_items SET trigger_at = ?, board_status = ?, status = ?, updated_at = ? WHERE id = ? AND user_id = ?')
+    .run(parsed.triggerAt, 'scheduled', 'pending', Date.now(), row.id, USER_ID);
 
   db.close();
   return { success: true, output: `Snoozed "${row.message}" → ${parsed.description}`, exitCode: 0 };

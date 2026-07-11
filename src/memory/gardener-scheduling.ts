@@ -22,6 +22,8 @@ export interface ScheduleProactiveItemInput {
   lastProactiveAt: number | null;
   urgency: 'low' | 'medium' | 'high';
   sourceMemoryId?: string | null;
+  /** Board item whose stale/blocked state caused this generated nudge. */
+  sourceItemId?: string | null;
   /** Injectable now for deterministic timing in tests */
   now?: number;
   /** IANA timezone for the user (e.g. 'Europe/Dublin'). Falls back to server local time. */
@@ -51,6 +53,21 @@ export function scheduleProactiveItem(input: ScheduleProactiveItemInput): Schedu
     jitterSeed: `${input.userId}:${input.sourceMemoryId ?? input.type}:${input.message}`,
   });
 
+  let sourceItemId = input.sourceItemId ?? null;
+  if (!sourceItemId && input.context) {
+    try {
+      const context = JSON.parse(input.context) as Record<string, unknown>;
+      if (
+        (context.gapType === 'stale_board_item' || context.gapType === 'blocked_item')
+        && typeof context.sourceId === 'string'
+      ) {
+        sourceItemId = context.sourceId;
+      }
+    } catch {
+      // Legacy/free-form context has no first-class source-item provenance.
+    }
+  }
+
   const item = input.db.addScheduledItem({
     userId: input.userId,
     sessionId: input.sessionId ?? null,
@@ -62,6 +79,7 @@ export function scheduleProactiveItem(input: ScheduleProactiveItemInput): Schedu
     triggerAt: timing.deliverAt,
     recurring: null,
     sourceMemoryId: input.sourceMemoryId ?? null,
+    sourceItemId,
     taskConfig: input.taskConfig ?? null,
     boardStatus: 'scheduled',
   });

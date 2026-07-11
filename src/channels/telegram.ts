@@ -12,6 +12,12 @@ import { resolveTimezone } from '../utils/country-timezone.js';
 import type { ProviderRegistry } from '../providers/registry.js';
 import type { LLMProvider } from '../providers/types.js';
 import type { InterruptQueue } from '../agent/interrupt-queue.js';
+import type { MessageDeliveryResult } from '../triggers/types.js';
+import {
+  parseProactiveReplyAction,
+  type ProactiveFeedbackResult,
+  type ProactiveSourceActionOutcome,
+} from '../proactive/feedback.js';
 
 const MAX_MESSAGE_LENGTH = 4096;
 const TYPING_INTERVAL = 5000; // 5 seconds
@@ -30,6 +36,13 @@ interface QueuedMessage {
   execute: () => Promise<void>;
 }
 
+interface TelegramEngagementContext {
+  directReply?: boolean;
+  repliedToText?: string;
+  repliedToMessageId?: string;
+  allowSourceAction?: boolean;
+}
+
 export interface TelegramChannelOptions {
   botToken: string;
   agent: Agent;
@@ -45,8 +58,8 @@ export interface TelegramChannelOptions {
   onUserMessage?: (
     prefixedUserId: string,
     userMessage?: string,
-    context?: { directReply?: boolean; repliedToText?: string },
-  ) => void;
+    context?: TelegramEngagementContext,
+  ) => ProactiveFeedbackResult | void | Promise<ProactiveFeedbackResult | void>;
   /** Interrupt queue for mid-loop user message injection */
   interruptQueue?: InterruptQueue;
 }
@@ -926,14 +939,19 @@ export class TelegramChannel {
         return;
       }
 
-      this.onUserMessage?.(
-        `telegram:${userId}`,
-        transcription.text,
-        this.getReplyAttributionContext(ctx),
-      );
-
       // Process transcribed text as regular message (don't echo transcription back)
       const sessionId = await this.getOrCreateSession(userId);
+      const fullMessage = this.buildMessageWithReplyContext(ctx, transcription.text);
+      if (await this.handleProactiveReplyAction(
+        ctx,
+        userId,
+        transcription.text,
+        fullMessage,
+        sessionId,
+      )) {
+        clearInterval(typingInterval);
+        return;
+      }
 
       // Thinking stays enabled in the agent but is not surfaced to Telegram users
       const onProgress = this.buildOnProgress(userId, ctx);
@@ -998,10 +1016,10 @@ export class TelegramChannel {
     this.logger.info({ userId, fileName: document.file_name, mimeType: document.mime_type }, 'Received document');
 
     const caption = ctx.message?.caption || '';
-    this.onUserMessage?.(
+    await this.notifyUserMessage(
       `telegram:${userId}`,
       caption || document.file_name || undefined,
-      this.getReplyAttributionContext(ctx),
+      { ...this.getReplyAttributionContext(ctx), allowSourceAction: false },
     );
 
     const typingInterval = this.startTypingIndicator(ctx);
@@ -1091,10 +1109,10 @@ export class TelegramChannel {
 
     this.logger.info({ userId, width: photo.width, height: photo.height, mediaGroupId }, 'Received photo');
 
-    this.onUserMessage?.(
+    await this.notifyUserMessage(
       `telegram:${userId}`,
       caption || undefined,
-      this.getReplyAttributionContext(ctx),
+      { ...this.getReplyAttributionContext(ctx), allowSourceAction: false },
     );
 
     try {
@@ -1330,6 +1348,17 @@ export class TelegramChannel {
     }
 
     if (this.activeProcessing.has(userId)) {
+      // A trusted standalone source action must not mutate or append transcript
+      // rows while the preceding agent turn is still in flight. Queue the whole
+      // operation so confirmation follows the response already being produced.
+      if (
+        this.getReplyAttributionContext(ctx).directReply
+        && parseProactiveReplyAction(messageText)
+      ) {
+        this.enqueue(userId, { type: 'text', execute: () => this.processTextCore(ctx) });
+        return;
+      }
+
       // Inject text messages into the running agent loop via interrupt queue
       if (this.interruptQueue) {
         const sessionId = await this.getOrCreateSession(userId);
@@ -1359,17 +1388,14 @@ export class TelegramChannel {
 
     this.logger.info({ userId, message: messageText.substring(0, 100), hasReply: fullMessage !== messageText }, 'Received message');
 
-    this.onUserMessage?.(
-      `telegram:${userId}`,
-      messageText,
-      this.getReplyAttributionContext(ctx),
-    );
+    const sessionId = await this.getOrCreateSession(userId);
+    if (await this.handleProactiveReplyAction(ctx, userId, messageText, fullMessage, sessionId)) {
+      return;
+    }
 
     const typingInterval = this.startTypingIndicator(ctx);
 
     try {
-      const sessionId = await this.getOrCreateSession(userId);
-
       // Thinking stays enabled in the agent but is not surfaced to Telegram users
       const onProgress = this.buildOnProgress(userId, ctx);
 
@@ -1433,13 +1459,70 @@ export class TelegramChannel {
   }
 
   /** Return trusted reply metadata only for replies to this bot. */
-  private getReplyAttributionContext(ctx: Context): { directReply?: boolean; repliedToText?: string } {
+  private getReplyAttributionContext(ctx: Context): TelegramEngagementContext {
     const reply = ctx.message?.reply_to_message;
     if (!reply) return {};
     const repliedToText = reply.text || reply.caption || '';
     const isThisBot = Boolean(reply.from?.is_bot && reply.from?.id === this.bot.botInfo?.id);
     if (!isThisBot || !repliedToText) return {};
-    return { directReply: true, repliedToText };
+    return {
+      directReply: true,
+      repliedToText,
+      ...(reply.message_id != null ? { repliedToMessageId: String(reply.message_id) } : {}),
+    };
+  }
+
+  private proactiveActionConfirmation(outcome: ProactiveSourceActionOutcome): string {
+    const title = outcome.title.replace(/\s+/g, ' ').trim().slice(0, 160);
+    if (outcome.action === 'archive') return `Archived “${title}”.`;
+    if (outcome.action === 'done') return `Marked “${title}” done.`;
+    return `Snoozed “${title}” for later.`;
+  }
+
+  /** Await engagement hooks without allowing analytics failures to break chat. */
+  private async notifyUserMessage(
+    prefixedUserId: string,
+    userMessage?: string,
+    context?: TelegramEngagementContext,
+  ): Promise<ProactiveFeedbackResult | void> {
+    try {
+      return await this.onUserMessage?.(prefixedUserId, userMessage, context);
+    } catch (error) {
+      this.logger.warn(
+        { prefixedUserId, error: (error as Error).message },
+        'User-message engagement hook failed',
+      );
+      return undefined;
+    }
+  }
+
+  /**
+   * A standalone action in a trusted Telegram reply is complete without another
+   * model turn. Persist both turns so the durable conversation remains coherent.
+   */
+  private async handleProactiveReplyAction(
+    ctx: Context,
+    userId: string,
+    messageText: string,
+    fullMessage: string,
+    sessionId: string,
+  ): Promise<boolean> {
+    const feedback = await this.notifyUserMessage(
+      `telegram:${userId}`,
+      messageText,
+      this.getReplyAttributionContext(ctx),
+    );
+    if (!feedback?.sourceAction?.applied) return false;
+
+    const confirmation = this.proactiveActionConfirmation(feedback.sourceAction);
+    await this.sessionManager.addMessage(sessionId, { role: 'user', content: fullMessage });
+    await this.sessionManager.addMessage(sessionId, { role: 'assistant', content: confirmation });
+    await ctx.reply(confirmation);
+    this.logger.info(
+      { userId, action: feedback.sourceAction.action },
+      'Applied direct proactive source action without a model turn',
+    );
+    return true;
   }
 
   /**
@@ -1647,28 +1730,45 @@ export class TelegramChannel {
    * Send a proactive message to a user (not as a reply)
    * Used for reminders and scheduled notifications
    */
-  async sendMessage(chatId: string | number, message: string): Promise<boolean> {
+  async sendMessage(chatId: string | number, message: string): Promise<MessageDeliveryResult> {
     if (!this.isRunning) {
       this.logger.warn({ chatId }, 'Cannot send message - bot not running');
       return false;
     }
 
-    // Single-user bot safety net: resolve 'default' to the configured allowed user
-    if (chatId === 'default' && this.allowedUsers.size > 0) {
+    // `default` is safe only when the deployment has exactly one configured
+    // Telegram owner. Never select an arbitrary recipient in a public/multi-user
+    // allow-list, and never send the literal string "default" to Telegram.
+    if (chatId === 'default') {
+      if (this.allowedUsers.size !== 1) {
+        this.logger.warn(
+          { allowedUserCount: this.allowedUsers.size },
+          'Cannot resolve default Telegram recipient unambiguously',
+        );
+        return false;
+      }
       chatId = this.allowedUsers.values().next().value!;
-      this.logger.debug({ resolvedChatId: chatId }, 'Resolved default chatId to allowed user');
+      this.logger.debug({ resolvedChatId: chatId }, 'Resolved default chatId to sole allowed user');
+    }
+
+    const normalizedChatId = String(chatId);
+    if (this.allowedUsers.size > 0 && !this.allowedUsers.has(normalizedChatId)) {
+      this.logger.warn({ chatId }, 'Refusing proactive delivery outside the Telegram allowlist');
+      return false;
     }
 
     try {
       const htmlMessage = formatMarkdownToHtml(message);
       const chunks = splitMessage(htmlMessage);
+      const messageIds: string[] = [];
 
       for (const chunk of chunks) {
-        await this.bot.api.sendMessage(chatId, chunk, { parse_mode: 'HTML' });
+        const sent = await this.bot.api.sendMessage(chatId, chunk, { parse_mode: 'HTML' });
+        messageIds.push(String(sent.message_id));
       }
 
       this.logger.debug({ chatId, length: message.length }, 'Sent proactive message');
-      return true;
+      return { sent: true, channel: 'telegram', messageIds };
     } catch (error) {
       this.logger.error({ chatId, error: (error as Error).message }, 'Failed to send proactive message');
       return false;

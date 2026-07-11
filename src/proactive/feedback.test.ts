@@ -12,6 +12,7 @@ import { describe, it, expect } from 'vitest';
 import {
   attributeProactiveEngagement,
   detectProactiveEngagement,
+  parseProactiveReplyAction,
   proactiveIdentityCandidates,
 } from './feedback.js';
 import type { ScheduledItem } from '../memory/db.js';
@@ -52,6 +53,48 @@ function makeItem(overrides?: Partial<ScheduledItem>): ScheduledItem {
 // ============ detectProactiveEngagement ============
 
 describe('detectProactiveEngagement', () => {
+  it('parses only explicit standalone source-item reply actions', () => {
+    expect(parseProactiveReplyAction('Archive')).toEqual({ type: 'archive' });
+    expect(parseProactiveReplyAction('Mark it done.')).toEqual({ type: 'done' });
+    expect(parseProactiveReplyAction('Snooze')).toEqual({ type: 'snooze', delayMs: 24 * 60 * 60 * 1000 });
+    expect(parseProactiveReplyAction('Snooze for 2 hours')).toEqual({ type: 'snooze', delayMs: 2 * 60 * 60 * 1000 });
+    expect(parseProactiveReplyAction('The archive is done')).toBeNull();
+    expect(parseProactiveReplyAction('Do not archive this')).toBeNull();
+    expect(parseProactiveReplyAction('Snooze for 90 days')).toBeNull();
+  });
+
+  it('attaches a parsed action only to trusted direct-reply attribution', () => {
+    const item = makeItem({ message: 'Should I keep the Project Atlas launch task open?' });
+    expect(attributeProactiveEngagement('user-1', [item], {
+      userMessage: 'Archive',
+      directReply: true,
+      repliedToText: item.message,
+    }, undefined, NOW)).toEqual([expect.objectContaining({
+      itemId: item.id,
+      reason: 'direct_reply',
+      replyAction: { type: 'archive' },
+    })]);
+    expect(attributeProactiveEngagement('user-1', [item], {
+      userMessage: 'Archive',
+    }, undefined, NOW)).toEqual([]);
+  });
+
+  it('records a media-caption direct reply without authorizing its standalone action', () => {
+    const item = makeItem({ message: 'Should I keep the Project Atlas launch task open?' });
+
+    const [match] = attributeProactiveEngagement('user-1', [item], {
+      userMessage: 'Archive',
+      directReply: true,
+      repliedToText: item.message,
+      allowSourceAction: false,
+    }, undefined, NOW);
+    expect(match).toEqual(expect.objectContaining({
+      itemId: item.id,
+      reason: 'direct_reply',
+    }));
+    expect(match).not.toHaveProperty('replyAction');
+  });
+
   it('returns empty array when no fired items', () => {
     const result = detectProactiveEngagement('user-1', [], undefined, NOW, { userMessage: 'How is the project?' });
     expect(result).toEqual([]);

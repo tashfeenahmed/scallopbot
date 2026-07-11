@@ -15,6 +15,14 @@
 
 import type { Logger } from 'pino';
 import type { Router } from '../routing/router.js';
+import {
+  isMessageDeliveryReceipt,
+  messageWasDelivered,
+  type MessageDeliveryHandler,
+  type MessageDeliveryMetadata,
+  type MessageDeliveryResult,
+  type MessageDeliverySuppressed,
+} from '../triggers/types.js';
 
 import { DRAIN_INTERVAL_MS, MAX_QUEUE_SIZE } from './proactive-config.js';
 import { sanitizeProactiveMessage } from './message-safety.js';
@@ -39,7 +47,7 @@ Rules:
 
 export interface OutboundQueueOptions {
   /** The underlying message-send handler */
-  sendMessage: (userId: string, message: string) => Promise<boolean>;
+  sendMessage: (userId: string, message: string) => Promise<MessageDeliveryResult>;
   /** Logger instance */
   logger: Logger;
   /** LLM router for message combining (optional — falls back to join if missing) */
@@ -50,13 +58,14 @@ interface QueuedMessage {
   userId: string;
   message: string;
   enqueuedAt: number;
-  resolve?: (sent: boolean) => void;
+  metadata?: MessageDeliveryMetadata;
+  resolve?: (result: MessageDeliveryResult) => void;
 }
 
 // ============ Class ============
 
 export class OutboundQueue {
-  private sendMessage: (userId: string, message: string) => Promise<boolean>;
+  private sendMessage: (userId: string, message: string) => Promise<MessageDeliveryResult>;
   private logger: Logger;
   private router: Router | undefined;
 
@@ -127,9 +136,13 @@ export class OutboundQueue {
    * Create a wrapped sendMessage handler that routes through the queue.
    * Drop-in replacement for the raw sendMessage callback.
    */
-  createHandler(): (userId: string, message: string) => Promise<boolean> {
-    return (userId: string, message: string): Promise<boolean> => new Promise((resolve) => {
-      const queued = this.enqueueInternal({ userId, message, enqueuedAt: Date.now(), resolve });
+  createHandler(): MessageDeliveryHandler {
+    const handler: MessageDeliveryHandler = (
+      userId: string,
+      message: string,
+      metadata?: MessageDeliveryMetadata,
+    ): Promise<MessageDeliveryResult> => new Promise((resolve) => {
+      const queued = this.enqueueInternal({ userId, message, enqueuedAt: Date.now(), metadata, resolve });
       if (!queued) {
         resolve(false);
         return;
@@ -139,6 +152,8 @@ export class OutboundQueue {
         resolve(false);
       });
     });
+    handler.supportsDeliveryMetadata = true;
+    return handler;
   }
 
   /**
@@ -173,27 +188,84 @@ export class OutboundQueue {
   }
 
   private async deliverUserBatch(userId: string, messages: QueuedMessage[]): Promise<void> {
-    let sent = false;
+    let active = await this.filterValidMessages(userId, messages);
+    if (active.length === 0) return;
+
     try {
-      const finalMessage = messages.length === 1
-        ? messages[0].message
-        : await this.combineMessages(messages);
+      while (active.length > 0) {
+        const combined = active.length > 1;
+        const finalMessage = combined
+          ? await this.combineMessages(active)
+          : active[0].message;
 
-      if (messages.length > 1) {
-        this.logger.info({ userId, messageCount: messages.length }, 'Combined multiple proactive messages via LLM');
-      }
+        if (combined) {
+          this.logger.info({ userId, messageCount: active.length }, 'Combined multiple proactive messages via LLM');
+        }
 
-      sent = await this.sendMessage(userId, finalMessage);
-      if (sent) {
-        this.logger.debug({ userId, combined: messages.length > 1 }, 'Proactive message delivered');
-      } else {
-        this.logger.warn({ userId, combined: messages.length > 1 }, 'Proactive message delivery returned false');
+        // Combining is asynchronous. Source state may change while the model
+        // writes, so validate membership again at the last await boundary. If
+        // anything changed, discard that combined text and recompute from only
+        // the still-valid messages.
+        const revalidated = await this.filterValidMessages(userId, active);
+        if (revalidated.length !== active.length) {
+          active = revalidated;
+          continue;
+        }
+
+        let result = await this.sendMessage(userId, finalMessage);
+        if (combined && isMessageDeliveryReceipt(result)) {
+          result = { ...result, combined: true };
+        }
+        if (messageWasDelivered(result)) {
+          this.logger.debug({ userId, combined }, 'Proactive message delivered');
+        } else {
+          this.logger.warn({ userId, combined }, 'Proactive message delivery returned false');
+        }
+        for (const item of active) item.resolve?.(result);
+        return;
       }
     } catch (err) {
       this.logger.error({ userId, error: (err as Error).message }, 'Failed to deliver queued message');
-    } finally {
-      for (const item of messages) item.resolve?.(sent);
+      for (const item of active) item.resolve?.(false);
     }
+  }
+
+  private async filterValidMessages(userId: string, messages: QueuedMessage[]): Promise<QueuedMessage[]> {
+    const valid: QueuedMessage[] = [];
+    for (const item of messages) {
+      if (!item.metadata?.validate) {
+        valid.push(item);
+        continue;
+      }
+
+      let validation: Awaited<ReturnType<NonNullable<MessageDeliveryMetadata['validate']>>>;
+      try {
+        validation = await item.metadata.validate();
+      } catch (error) {
+        this.logger.warn(
+          { userId, itemId: item.metadata.scheduledItemId, error: (error as Error).message },
+          'Pre-transport validation failed',
+        );
+        validation = { valid: false, reason: 'source_validation_failed' };
+      }
+
+      const isValid = typeof validation === 'boolean' ? validation : validation.valid;
+      if (isValid) {
+        valid.push(item);
+        continue;
+      }
+
+      const reason = typeof validation === 'boolean'
+        ? 'source_invalidated'
+        : validation.reason ?? 'source_invalidated';
+      const suppressed: MessageDeliverySuppressed = { sent: false, suppressed: true, reason };
+      item.resolve?.(suppressed);
+      this.logger.info(
+        { userId, itemId: item.metadata.scheduledItemId, reason },
+        'Suppressed invalidated proactive message before transport',
+      );
+    }
+    return valid;
   }
 
   /**

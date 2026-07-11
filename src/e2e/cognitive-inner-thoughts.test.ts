@@ -17,6 +17,7 @@ import { detectProactiveEngagement } from '../proactive/feedback.js';
 import type { ScheduledItem } from '../memory/db.js';
 
 const testLogger = pino({ level: 'silent' });
+const OWNER_ALIASES = ['owner-example', 'telegram:owner-example'] as const;
 
 // ---------------------------------------------------------------------------
 // Suite 1: Inner thoughts creates proactive scheduled item via deepTick
@@ -60,7 +61,10 @@ describe('E2E Inner Thoughts & Proactive Feedback', () => {
       const db = scallopStore.getDatabase();
 
       // Create session first (foreign key constraint on session_summaries)
-      db.createSession('inner-thoughts-sess-1');
+      db.createSession('inner-thoughts-sess-1', {
+        userId: 'telegram:owner-example',
+        channelId: 'telegram',
+      });
 
       // Seed a grounded open loop old enough to warrant a follow-up decision.
       const summary = db.addSessionSummary({
@@ -104,6 +108,7 @@ describe('E2E Inner Thoughts & Proactive Feedback', () => {
         scallopStore,
         logger: testLogger,
         fusionProvider,
+        canonicalSingleUserIds: OWNER_ALIASES,
       });
     }, 30000);
 
@@ -181,7 +186,10 @@ describe('E2E Inner Thoughts & Proactive Feedback', () => {
       const db = scallopStore.getDatabase();
 
       // Create session
-      db.createSession('distressed-sess-1');
+      db.createSession('distressed-sess-1', {
+        userId: 'telegram:owner-example',
+        channelId: 'telegram',
+      });
 
       // Seed session summary (same as Suite 1)
       db.addSessionSummary({
@@ -218,6 +226,7 @@ describe('E2E Inner Thoughts & Proactive Feedback', () => {
         scallopStore,
         logger: testLogger,
         fusionProvider,
+        canonicalSingleUserIds: OWNER_ALIASES,
       });
     }, 30000);
 

@@ -292,12 +292,11 @@ export class ScallopMemoryStore {
       }
     }
 
-    // Update user profiles (both per-session and canonical "default" for cross-session access)
+    // Update only the durable state owner supplied by the caller. Channel aliases
+    // are canonicalized before reaching the store; mirroring every other user
+    // into `default` leaks profiles in open/multi-user deployments.
     this.profileManager.updateDynamicFromConversation(userId, content);
     this.profileManager.updateStaticFromFacts(userId, [memory]);
-    if (userId !== 'default') {
-      this.profileManager.updateStaticFromFacts('default', [memory]);
-    }
 
     return memory;
   }
@@ -311,6 +310,18 @@ export class ScallopMemoryStore {
       // Record access for decay system
       this.db.recordAccess(id);
     }
+    return memory;
+  }
+
+  /**
+   * Retrieve by opaque ID only when it belongs to the authenticated state
+   * owner. The ownership check happens before access counters are updated, so
+   * guessing another user's ID cannot reveal or perturb their memory.
+   */
+  getForUser(id: string, userId: string): ScallopMemoryEntry | null {
+    const memory = this.db.getMemory(id);
+    if (!memory || memory.userId !== userId) return null;
+    this.db.recordAccess(id);
     return memory;
   }
 
@@ -859,32 +870,53 @@ export class ScallopMemoryStore {
     return this.db;
   }
 
-  /**
-   * Backfill the "default" user profile from existing facts across all sessions.
-   * Should be called once on startup to populate the profile for pre-existing data.
-   */
-  backfillDefaultProfile(): { fieldsPopulated: number } {
-    const existing = this.profileManager.getStaticProfile('default');
-    if (Object.keys(existing).length > 0) {
-      this.logger.debug({ existingFields: Object.keys(existing) }, 'Default profile already exists, skipping backfill');
-      return { fieldsPopulated: 0 };
+  /** Backfill each user's profile only from facts owned by that same user. */
+  backfillProfiles(): { fieldsPopulated: number; usersPopulated: number } {
+    const allFacts = this.db.getAllMemories({ minProminence: 0.1 });
+    const factsByUser = new Map<string, ScallopMemoryEntry[]>();
+    for (const memory of allFacts) {
+      if (
+        memory.category !== 'fact'
+        || (memory.metadata?.subject && memory.metadata.subject !== 'user')
+      ) continue;
+      const facts = factsByUser.get(memory.userId) ?? [];
+      facts.push(memory);
+      factsByUser.set(memory.userId, facts);
     }
 
-    // Scan all fact memories for profile-worthy content
-    const allFacts = this.db.getAllMemories({ minProminence: 0.1 });
-    const userFacts = allFacts.filter(
-      (m) => m.category === 'fact' && (!m.metadata?.subject || m.metadata.subject === 'user')
-    );
+    let fieldsPopulated = 0;
+    let usersPopulated = 0;
+    for (const [userId, facts] of factsByUser) {
+      const before = this.profileManager.getStaticProfile(userId);
+      if (Object.keys(before).length > 0) continue;
+      this.profileManager.updateStaticFromFacts(userId, facts);
+      const populated = this.profileManager.getStaticProfile(userId);
+      const count = Object.keys(populated).length;
+      if (count > 0) {
+        fieldsPopulated += count;
+        usersPopulated++;
+        this.logger.info({ userId, fieldsPopulated: count }, 'User profile backfilled');
+      }
+    }
+    return { fieldsPopulated, usersPopulated };
+  }
 
-    this.logger.info({ totalMemories: allFacts.length, userFacts: userFacts.length }, 'Backfilling default profile from existing facts');
-
-    this.profileManager.updateStaticFromFacts('default', userFacts);
-    const populated = this.profileManager.getStaticProfile('default');
-    const count = Object.keys(populated).length;
-
-    this.logger.info({ profile: populated, fieldsPopulated: count }, 'Default profile backfill complete');
-
-    return { fieldsPopulated: count };
+  /** Backward-compatible, safely scoped default-owner backfill. */
+  backfillDefaultProfile(): { fieldsPopulated: number } {
+    const existing = this.profileManager.getStaticProfile('default');
+    if (Object.keys(existing).length > 0) return { fieldsPopulated: 0 };
+    const facts = this.db.getMemoriesByUser('default', {
+      minProminence: 0.1,
+      isLatest: true,
+      includeAllSources: true,
+    }).filter(memory => (
+      memory.category === 'fact'
+      && (!memory.metadata?.subject || memory.metadata.subject === 'user')
+    ));
+    this.profileManager.updateStaticFromFacts('default', facts);
+    return {
+      fieldsPopulated: Object.keys(this.profileManager.getStaticProfile('default')).length,
+    };
   }
 
   /**

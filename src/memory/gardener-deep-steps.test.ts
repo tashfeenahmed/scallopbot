@@ -20,6 +20,7 @@ import {
 
 const TEST_DB_PATH = '/tmp/gardener-deep-steps-test.db';
 const logger = pino({ level: 'silent' });
+const OWNER_ALIASES = ['owner-example', 'telegram:owner-example'] as const;
 
 /** Run a raw SQL write (UPDATE/DELETE) — db.raw() only supports SELECT */
 function rawRun(db: ScallopDatabase, sql: string, params: unknown[]): void {
@@ -93,6 +94,7 @@ function buildCtx(
     logger: logger.child({ component: 'gardener' }),
     quietHours: { start: 2, end: 5 },
     disableArchival: false,
+    canonicalSingleUserIds: OWNER_ALIASES,
     ...overrides,
   };
 }
@@ -168,7 +170,10 @@ describe('gardener-deep-steps', () => {
       seedMemory(db, { userId: 'telegram:123', content: 'test', category: 'fact', prominence: 0.5 });
 
       // Create a session with old updated_at
-      const session = db.createSession('old-session-1');
+      const session = db.createSession('old-session-1', {
+        userId: 'telegram:owner-example',
+        channelId: 'telegram',
+      });
       const twoDaysAgo = Date.now() - 2 * 24 * 60 * 60 * 1000;
       rawRun(db, 'UPDATE sessions SET updated_at = ? WHERE id = ?', [twoDaysAgo, session.id]);
 
@@ -206,7 +211,10 @@ describe('gardener-deep-steps', () => {
       seedMemory(db, { userId: 'telegram:123', content: 'test', category: 'fact', prominence: 0.5 });
 
       // Create a session with user messages
-      const session = db.createSession('session-1');
+      const session = db.createSession('session-1', {
+        userId: 'telegram:owner-example',
+        channelId: 'telegram',
+      });
       db.addSessionMessage(session.id, 'user', 'Hello, how are you?');
       db.addSessionMessage(session.id, 'assistant', 'I am fine!');
       db.addSessionMessage(session.id, 'user', 'Tell me about AI');
@@ -358,7 +366,10 @@ describe('gardener-deep-steps', () => {
         category: 'preference',
         prominence: 0.9,
       });
-      const session = db.createSession('opt-out-session');
+      const session = db.createSession('opt-out-session', {
+        userId: 'telegram:owner-example',
+        channelId: 'telegram',
+      });
       db.addSessionSummary({
         sessionId: session.id,
         userId: 'default',
@@ -386,7 +397,10 @@ describe('gardener-deep-steps', () => {
         category: 'preference',
         prominence: 0.85,
       });
-      const session = db.createSession('scoped-preference-session');
+      const session = db.createSession('scoped-preference-session', {
+        userId: 'telegram:owner-example',
+        channelId: 'telegram',
+      });
       const summary = db.addSessionSummary({
         sessionId: session.id,
         userId: 'default',
@@ -413,7 +427,10 @@ describe('gardener-deep-steps', () => {
         category: 'preference',
         prominence: 0.9,
       });
-      const session = db.createSession('positive-preference-session');
+      const session = db.createSession('positive-preference-session', {
+        userId: 'telegram:owner-example',
+        channelId: 'telegram',
+      });
       const summary = db.addSessionSummary({
         sessionId: session.id,
         userId: 'default',
@@ -459,7 +476,10 @@ describe('gardener-deep-steps', () => {
         summarize: vi.fn(),
       };
 
-      const session = db.createSession('fail-session');
+      const session = db.createSession('fail-session', {
+        userId: 'telegram:owner-example',
+        channelId: 'telegram',
+      });
       const twoDaysAgo = Date.now() - 2 * 24 * 60 * 60 * 1000;
       rawRun(db, 'UPDATE sessions SET updated_at = ? WHERE id = ?', [twoDaysAgo, session.id]);
 

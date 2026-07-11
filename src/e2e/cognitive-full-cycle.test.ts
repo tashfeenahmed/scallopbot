@@ -37,6 +37,12 @@ import {
 } from '../proactive/proactive-format.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+const SYNTHETIC_OWNER_ID = 'api:project-atlas-owner';
+const SYNTHETIC_OWNER_ALIASES = ['project-atlas-owner', SYNTHETIC_OWNER_ID] as const;
+const SYNTHETIC_SESSION_METADATA = {
+  userId: SYNTHETIC_OWNER_ID,
+  channelId: 'api',
+} as const;
 
 // ---------------------------------------------------------------------------
 // Suite 1: Full cognitive cycle: chat -> deepTick -> sleepTick
@@ -76,7 +82,7 @@ describe('E2E Cognitive Full Cycle', () => {
       // Seed 6+ session summaries with recent createdAt (for trust, inner thoughts, reflection)
       for (let i = 0; i < 7; i++) {
         const sessionId = `full-cycle-sess-${i}`;
-        db.createSession(sessionId);
+        db.createSession(sessionId, SYNTHETIC_SESSION_METADATA);
         db.addSessionMessage(sessionId, 'user', `Test message about async patterns ${i}`);
         db.addSessionSummary({
           sessionId,
@@ -219,6 +225,7 @@ describe('E2E Cognitive Full Cycle', () => {
         logger: testLogger,
         fusionProvider,
         workspace,
+        canonicalSingleUserIds: SYNTHETIC_OWNER_ALIASES,
       });
     }, 30000);
 

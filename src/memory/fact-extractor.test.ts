@@ -1073,4 +1073,51 @@ describe('Combined fact + trigger extraction', () => {
     const recurring = mockDb.addScheduledItem.mock.calls[0][0].recurring;
     expect(recurring).toBeNull();
   });
+
+  it('reads and writes profiles through the resolved state owner without crossing users', async () => {
+    const profiles: Record<string, Record<string, string>> = {
+      default: { name: 'Configured Owner' },
+      'telegram:user-alpha': { name: 'Alpha User' },
+      'telegram:user-beta': { name: 'Beta User' },
+      agent: {},
+    };
+    const profileManager = {
+      getStaticProfile: vi.fn((userId: string) => ({ ...(profiles[userId] ?? {}) })),
+      setStaticValue: vi.fn((userId: string, key: string, value: string) => {
+        profiles[userId] = { ...(profiles[userId] ?? {}), [key]: value };
+      }),
+      addRecentTopic: vi.fn(),
+    };
+    const store = createMockScallopStore();
+    (store.getProfileManager as any).mockReturnValue(profileManager);
+
+    const provider = createMockProvider(JSON.stringify({
+      superseded: [],
+      user_profile: { location: 'Owner City' },
+      agent_profile: {},
+      preferences_learned: [],
+      recent_topics: [],
+    }));
+    const extractor = new LLMFactExtractor({
+      provider,
+      scallopStore: store,
+      logger,
+      useRelationshipClassifier: false,
+      canonicalSingleUserIds: ['owner-1', 'telegram:owner-1'],
+    });
+
+    await (extractor as unknown as {
+      consolidateMemory(
+        memoryIds: string[], userId: string, facts: string[], source?: string,
+      ): Promise<void>;
+    }).consolidateMemory([], 'telegram:owner-1', [], 'Synthetic profile update');
+
+    const prompt = ((provider.complete as any).mock.calls[0][0].messages[0].content) as string;
+    expect(prompt).toContain('Configured Owner');
+    expect(prompt).not.toContain('Alpha User');
+    expect(profiles.default).toMatchObject({ name: 'Configured Owner', location: 'Owner City' });
+    expect(profiles['telegram:user-alpha']).toEqual({ name: 'Alpha User' });
+    expect(profiles['telegram:user-beta']).toEqual({ name: 'Beta User' });
+    expect(profileManager.setStaticValue).toHaveBeenCalledWith('default', 'location', 'Owner City');
+  });
 });

@@ -5,13 +5,22 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ScallopDatabase } from '../memory/db.js';
+import { SessionManager } from '../agent/session.js';
 import { UnifiedScheduler } from './scheduler.js';
+import { getTodayStartMs } from './proactive-utils.js';
+import { OutboundQueue } from './outbound-queue.js';
 
 const logger = pino({ level: 'silent' });
 
 function middayTimezone(): string {
   const offset = 12 - new Date().getUTCHours();
   return offset >= 0 ? `Etc/GMT-${offset}` : `Etc/GMT+${-offset}`;
+}
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>(res => { resolve = res; });
+  return { promise, resolve };
 }
 
 function addPreference(db: ScallopDatabase, content: string): void {
@@ -56,6 +65,77 @@ describe('UnifiedScheduler proactive delivery safety', () => {
     expect(db.getScheduledItem(second.id)).not.toBeNull();
   });
 
+  it('recovers a stale processing nudge after restart without reclaiming it early', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'scheduled-nudge-recovery-'));
+    const dbPath = join(dir, 'memories.sqlite');
+    let claimedDb: ScallopDatabase | null = null;
+    let reopenedDb: ScallopDatabase | null = null;
+    let earlyScheduler: UnifiedScheduler | null = null;
+    let recoveryScheduler: UnifiedScheduler | null = null;
+    const send = vi.fn().mockResolvedValue(true);
+
+    try {
+      claimedDb = new ScallopDatabase(dbPath);
+      const reminder = claimedDb.addScheduledItem({
+        userId: 'default', sessionId: null, source: 'user', messageProvenance: 'user_literal',
+        kind: 'nudge', type: 'reminder', message: 'Bring the Atlas follow-up notes.',
+        context: null, triggerAt: Date.now() - 1, recurring: null, sourceMemoryId: null,
+      });
+      expect(claimedDb.claimDueScheduledItems(Date.now(), 'nudge')).toEqual([
+        expect.objectContaining({ id: reminder.id, status: 'processing', boardStatus: 'in_progress' }),
+      ]);
+
+      earlyScheduler = new UnifiedScheduler({
+        db: claimedDb,
+        logger,
+        onSendMessage: send,
+        getTimezone: () => 'UTC',
+        nudgeClaimTimeoutMs: 60_000,
+      });
+      await earlyScheduler.evaluate();
+
+      expect(send).not.toHaveBeenCalled();
+      expect(claimedDb.getScheduledItem(reminder.id)).toMatchObject({
+        status: 'processing',
+        boardStatus: 'in_progress',
+      });
+
+      earlyScheduler.stop();
+      earlyScheduler = null;
+      claimedDb.close();
+      claimedDb = null;
+
+      const raw = new Database(dbPath);
+      raw.prepare('UPDATE scheduled_items SET updated_at = ? WHERE id = ?')
+        .run(Date.now() - 2 * 60_000, reminder.id);
+      raw.close();
+
+      reopenedDb = new ScallopDatabase(dbPath);
+      recoveryScheduler = new UnifiedScheduler({
+        db: reopenedDb,
+        logger,
+        onSendMessage: send,
+        getTimezone: () => 'UTC',
+        nudgeClaimTimeoutMs: 60_000,
+      });
+      await recoveryScheduler.evaluate();
+
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(send).toHaveBeenCalledWith('default', 'Bring the Atlas follow-up notes.');
+      expect(reopenedDb.getScheduledItem(reminder.id)).toMatchObject({
+        status: 'fired',
+        boardStatus: 'done',
+        lastError: 'Recovered stale scheduler nudge claim',
+      });
+    } finally {
+      earlyScheduler?.stop();
+      recoveryScheduler?.stop();
+      claimedDb?.close();
+      reopenedDb?.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('cancels a frozen inferred nudge when its source conversation continued', async () => {
     vi.useFakeTimers();
     try {
@@ -82,6 +162,716 @@ describe('UnifiedScheduler proactive delivery safety', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('revalidates the Atlas source item and suppresses its stale wrapper after completion', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-07-11T12:00:00Z'));
+      const atlas = db.addScheduledItem({
+        userId: 'default', sessionId: null, source: 'user', kind: 'task',
+        type: 'reminder', message: 'Publish Atlas launch update', context: null,
+        triggerAt: Date.now() + 7 * 24 * 60 * 60 * 1000, recurring: null,
+        sourceMemoryId: null, boardStatus: 'in_progress', status: 'processing',
+      });
+      const wrapper = db.addScheduledItem({
+        userId: 'default', sessionId: null, source: 'agent', kind: 'nudge',
+        type: 'follow_up', message: 'Do you still want to publish the Atlas launch update?',
+        context: JSON.stringify({ gapType: 'stale_board_item', sourceId: atlas.id }),
+        sourceItemId: atlas.id, triggerAt: Date.now() + 5 * 60_000, recurring: null,
+        sourceMemoryId: null,
+      });
+      vi.setSystemTime(new Date('2026-07-11T12:01:00Z'));
+      db.updateScheduledItemBoard(atlas.id, { boardStatus: 'done', status: 'fired' });
+      vi.setSystemTime(new Date('2026-07-11T12:06:00Z'));
+      const send = vi.fn().mockResolvedValue(true);
+      scheduler = new UnifiedScheduler({ db, logger, onSendMessage: send, getTimezone: () => 'UTC' });
+
+      await scheduler.evaluate();
+
+      expect(send).not.toHaveBeenCalled();
+      expect(db.getScheduledItem(wrapper.id)?.status).toBe('expired');
+      expect(db.getRecentProactiveDecisions(5)).toEqual(expect.arrayContaining([
+        expect.objectContaining({ reason: 'source_item_resolved' }),
+      ]));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('revalidates the linked source after a pending render before transport', async () => {
+    const atlas = db.addScheduledItem({
+      userId: 'default', sessionId: null, source: 'user', kind: 'task',
+      type: 'reminder', message: 'Publish Atlas launch update', context: null,
+      triggerAt: Date.now() + 7 * 24 * 60 * 60 * 1000, recurring: null,
+      sourceMemoryId: null, boardStatus: 'waiting',
+    });
+    const wrapper = db.addScheduledItem({
+      userId: 'default', sessionId: null, source: 'agent', kind: 'nudge',
+      type: 'follow_up', message: 'Ask the user whether the Atlas launch task should stay open',
+      context: JSON.stringify({ gapType: 'stale_board_item', sourceId: atlas.id }),
+      sourceItemId: atlas.id, triggerAt: Date.now() - 1, recurring: null, sourceMemoryId: null,
+    });
+
+    let rendererEntered!: () => void;
+    const entered = new Promise<void>(resolve => { rendererEntered = resolve; });
+    let finishRender!: (value: unknown) => void;
+    const pendingRender = new Promise(resolve => { finishRender = resolve; });
+    const router = {
+      executeWithFallback: vi.fn().mockImplementation(() => {
+        rendererEntered();
+        return pendingRender;
+      }),
+    };
+    const send = vi.fn().mockResolvedValue(true);
+    scheduler = new UnifiedScheduler({
+      db, logger, router: router as any, onSendMessage: send,
+      getTimezone: () => middayTimezone(), minAgentProactiveGapMs: 0,
+    });
+
+    const evaluation = scheduler.evaluate();
+    await entered;
+    db.updateScheduledItemBoard(atlas.id, { boardStatus: 'done', status: 'fired' });
+    finishRender({
+      response: { content: [{ type: 'text', text: 'Should we keep the Atlas launch task open?' }] },
+    });
+    await evaluation;
+
+    expect(send).not.toHaveBeenCalled();
+    expect(db.getScheduledItem(wrapper.id)?.status).toBe('expired');
+    expect(db.getRecentProactiveDecisions(10)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        stage: 'deliver', outcome: 'suppressed', reason: 'source_item_resolved',
+        detail: expect.objectContaining({ phase: 'post_render' }),
+      }),
+    ]));
+  });
+
+  it.each([
+    ['Archive', 'archived', 'dismissed'],
+    ['Done', 'done', 'fired'],
+    ['Snooze', 'scheduled', 'pending'],
+  ] as const)('routes a direct %s reply through the Atlas wrapper to its source task', (reply, boardStatus, status) => {
+    const atlas = db.addScheduledItem({
+      userId: 'default', sessionId: null, source: 'user', kind: 'task',
+      type: 'reminder', message: 'Publish Atlas launch update', context: null,
+      triggerAt: Date.now() + 7 * 24 * 60 * 60 * 1000, recurring: null,
+      sourceMemoryId: null, boardStatus: 'in_progress', status: 'processing',
+    });
+    const wrapper = db.addScheduledItem({
+      userId: 'default', sessionId: null, source: 'agent', kind: 'nudge',
+      type: 'follow_up', message: 'Do you still want to keep the Atlas launch task open?',
+      context: JSON.stringify({ gapType: 'stale_board_item', sourceId: atlas.id }),
+      sourceItemId: atlas.id, triggerAt: Date.now() - 1, recurring: null,
+      sourceMemoryId: null,
+    });
+    db.markScheduledItemFired(wrapper.id);
+    db.recordProactiveDeliveryReceipt({
+      channel: 'telegram', channelMessageIds: ['101'], scheduledItemId: wrapper.id,
+      ownerUserId: 'default',
+    });
+    scheduler = new UnifiedScheduler({
+      db, logger, onSendMessage: vi.fn().mockResolvedValue(true),
+      canonicalSingleUserIds: ['telegram:42'],
+    });
+
+    const feedback = scheduler.checkEngagement('telegram:42', reply, {
+      directReply: true,
+      repliedToText: wrapper.message,
+      repliedToMessageId: '101',
+    });
+
+    expect(feedback).toEqual(expect.objectContaining({
+      matched: true,
+      sourceAction: expect.objectContaining({
+        action: reply.toLowerCase(), title: 'Publish Atlas launch update', applied: true,
+      }),
+    }));
+    expect(db.getScheduledItem(wrapper.id)?.status).toBe('acted');
+    expect(db.getScheduledItem(atlas.id)).toEqual(expect.objectContaining({ boardStatus, status }));
+    if (reply === 'Snooze') {
+      expect(db.getScheduledItem(atlas.id)!.triggerAt).toBeGreaterThan(Date.now() + 23 * 60 * 60 * 1000);
+    }
+  });
+
+  it('uses the exact first delivery ID when two recent wrappers have similar text', () => {
+    const firstSource = db.addScheduledItem({
+      userId: 'default', sessionId: null, source: 'user', kind: 'task', type: 'reminder',
+      message: 'Publish the first Project Atlas launch update', context: null,
+      triggerAt: Date.now() + 60_000, recurring: null, sourceMemoryId: null,
+      boardStatus: 'waiting', status: 'pending',
+    });
+    const secondSource = db.addScheduledItem({
+      userId: 'default', sessionId: null, source: 'user', kind: 'task', type: 'reminder',
+      message: 'Publish the second Project Atlas launch update', context: null,
+      triggerAt: Date.now() + 60_000, recurring: null, sourceMemoryId: null,
+      boardStatus: 'waiting', status: 'pending',
+    });
+    const firstWrapper = db.addScheduledItem({
+      userId: 'default', sessionId: null, source: 'agent', kind: 'nudge', type: 'follow_up',
+      message: 'Should the Project Atlas launch update stay open?', context: null,
+      sourceItemId: firstSource.id, triggerAt: Date.now() - 1, recurring: null, sourceMemoryId: null,
+    });
+    const secondWrapper = db.addScheduledItem({
+      userId: 'default', sessionId: null, source: 'agent', kind: 'nudge', type: 'follow_up',
+      message: 'Should the Project Atlas launch update stay open?', context: null,
+      sourceItemId: secondSource.id, triggerAt: Date.now() - 1, recurring: null, sourceMemoryId: null,
+    });
+    db.markScheduledItemFired(firstWrapper.id);
+    db.markScheduledItemFired(secondWrapper.id);
+    db.recordProactiveDeliveryReceipt({
+      channel: 'telegram', channelMessageIds: ['201'], scheduledItemId: firstWrapper.id,
+      ownerUserId: 'default',
+    });
+    db.recordProactiveDeliveryReceipt({
+      channel: 'telegram', channelMessageIds: ['202'], scheduledItemId: secondWrapper.id,
+      ownerUserId: 'default',
+    });
+    scheduler = new UnifiedScheduler({
+      db, logger, onSendMessage: vi.fn().mockResolvedValue(true),
+      canonicalSingleUserIds: ['telegram:42'],
+    });
+
+    const feedback = scheduler.checkEngagement('telegram:42', 'Archive', {
+      directReply: true,
+      repliedToText: firstWrapper.message,
+      repliedToMessageId: '201',
+    });
+
+    expect(feedback.sourceAction).toEqual({
+      action: 'archive', title: firstSource.message, applied: true,
+    });
+    expect(db.getScheduledItem(firstSource.id)).toEqual(expect.objectContaining({
+      boardStatus: 'archived', status: 'dismissed',
+    }));
+    expect(db.getScheduledItem(secondSource.id)).toEqual(expect.objectContaining({
+      boardStatus: 'waiting', status: 'pending',
+    }));
+    expect(db.getScheduledItem(firstWrapper.id)?.status).toBe('acted');
+    expect(db.getScheduledItem(secondWrapper.id)?.status).toBe('fired');
+  });
+
+  it('treats an exact action with no persisted delivery mapping as engagement only', () => {
+    const source = db.addScheduledItem({
+      userId: 'default', sessionId: null, source: 'user', kind: 'task', type: 'reminder',
+      message: 'Publish the Project Atlas launch update', context: null,
+      triggerAt: Date.now() + 60_000, recurring: null, sourceMemoryId: null,
+      boardStatus: 'waiting', status: 'pending',
+    });
+    const wrapper = db.addScheduledItem({
+      userId: 'default', sessionId: null, source: 'agent', kind: 'nudge', type: 'follow_up',
+      message: 'Should the Project Atlas launch update stay open?', context: null,
+      sourceItemId: source.id, triggerAt: Date.now() - 1, recurring: null, sourceMemoryId: null,
+    });
+    db.markScheduledItemFired(wrapper.id);
+    scheduler = new UnifiedScheduler({
+      db, logger, onSendMessage: vi.fn().mockResolvedValue(true),
+      canonicalSingleUserIds: ['telegram:42'],
+    });
+
+    const feedback = scheduler.checkEngagement('telegram:42', 'Archive', {
+      directReply: true,
+      repliedToText: wrapper.message,
+      repliedToMessageId: 'unmapped-203',
+    });
+
+    expect(feedback).toEqual({ matched: true });
+    expect(db.getScheduledItem(wrapper.id)?.status).toBe('acted');
+    expect(db.getScheduledItem(source.id)).toEqual(expect.objectContaining({
+      boardStatus: 'waiting', status: 'pending',
+    }));
+  });
+
+  it('rejects an exact delivery mapping owned by another user', () => {
+    const source = db.addScheduledItem({
+      userId: 'default', sessionId: null, source: 'user', kind: 'task', type: 'reminder',
+      message: 'Publish the Project Atlas launch update', context: null,
+      triggerAt: Date.now() + 60_000, recurring: null, sourceMemoryId: null,
+      boardStatus: 'waiting', status: 'pending',
+    });
+    const wrapper = db.addScheduledItem({
+      userId: 'default', sessionId: null, source: 'agent', kind: 'nudge', type: 'follow_up',
+      message: 'Should the Project Atlas launch update stay open?', context: null,
+      sourceItemId: source.id, triggerAt: Date.now() - 1, recurring: null, sourceMemoryId: null,
+    });
+    db.markScheduledItemFired(wrapper.id);
+    db.recordProactiveDeliveryReceipt({
+      channel: 'telegram', channelMessageIds: ['204'], scheduledItemId: wrapper.id,
+      ownerUserId: 'another-user',
+    });
+    scheduler = new UnifiedScheduler({
+      db, logger, onSendMessage: vi.fn().mockResolvedValue(true),
+      canonicalSingleUserIds: ['telegram:42'],
+    });
+
+    const feedback = scheduler.checkEngagement('telegram:42', 'Archive', {
+      directReply: true, repliedToText: wrapper.message, repliedToMessageId: '204',
+    });
+
+    expect(feedback).toEqual({ matched: true });
+    expect(db.getScheduledItem(source.id)).toEqual(expect.objectContaining({
+      boardStatus: 'waiting', status: 'pending',
+    }));
+  });
+
+  it('rejects a combined delivery ID as ambiguous source-action authority', () => {
+    const sources = [1, 2].map(index => db.addScheduledItem({
+      userId: 'default', sessionId: null, source: 'user' as const, kind: 'task' as const,
+      type: 'reminder' as const, message: `Publish Project Atlas update ${index}`, context: null,
+      triggerAt: Date.now() + 60_000, recurring: null, sourceMemoryId: null,
+      boardStatus: 'waiting' as const, status: 'pending' as const,
+    }));
+    const wrappers = sources.map(source => db.addScheduledItem({
+      userId: 'default', sessionId: null, source: 'agent' as const, kind: 'nudge' as const,
+      type: 'follow_up' as const, message: 'Should the Project Atlas update stay open?', context: null,
+      sourceItemId: source.id, triggerAt: Date.now() - 1, recurring: null, sourceMemoryId: null,
+    }));
+    for (const wrapper of wrappers) {
+      db.markScheduledItemFired(wrapper.id);
+      db.recordProactiveDeliveryReceipt({
+        channel: 'telegram', channelMessageIds: ['205'], scheduledItemId: wrapper.id,
+        ownerUserId: 'default', ambiguous: true,
+      });
+    }
+    scheduler = new UnifiedScheduler({
+      db, logger, onSendMessage: vi.fn().mockResolvedValue(true),
+      canonicalSingleUserIds: ['telegram:42'],
+    });
+
+    const feedback = scheduler.checkEngagement('telegram:42', 'Archive', {
+      directReply: true, repliedToText: wrappers[0].message, repliedToMessageId: '205',
+    });
+
+    expect(feedback).toEqual({ matched: true });
+    for (const source of sources) {
+      expect(db.getScheduledItem(source.id)).toEqual(expect.objectContaining({
+        boardStatus: 'waiting', status: 'pending',
+      }));
+    }
+  });
+
+  it('honors an exact persisted reply after the fuzzy engagement window', () => {
+    const source = db.addScheduledItem({
+      userId: 'default', sessionId: null, source: 'user', kind: 'task', type: 'reminder',
+      message: 'Publish the delayed Project Atlas update', context: null,
+      triggerAt: Date.now() + 60_000, recurring: null, sourceMemoryId: null,
+      boardStatus: 'waiting', status: 'pending',
+    });
+    const wrapper = db.addScheduledItem({
+      userId: 'default', sessionId: null, source: 'agent', kind: 'nudge', type: 'follow_up',
+      message: 'Should the delayed Project Atlas update stay open?', context: null,
+      sourceItemId: source.id, triggerAt: Date.now() - 1, recurring: null, sourceMemoryId: null,
+    });
+    db.markScheduledItemFired(wrapper.id);
+    const rawDb = (db as unknown as { db: Database.Database }).db;
+    rawDb.prepare('UPDATE scheduled_items SET fired_at = ? WHERE id = ?')
+      .run(Date.now() - 7 * 24 * 60 * 60 * 1000, wrapper.id);
+    db.recordProactiveDeliveryReceipt({
+      channel: 'telegram', channelMessageIds: ['206'], scheduledItemId: wrapper.id,
+      ownerUserId: 'default',
+    });
+    scheduler = new UnifiedScheduler({
+      db, logger, onSendMessage: vi.fn().mockResolvedValue(true),
+      canonicalSingleUserIds: ['telegram:42'],
+    });
+
+    const feedback = scheduler.checkEngagement('telegram:42', 'Archive', {
+      directReply: true, repliedToText: wrapper.message, repliedToMessageId: '206',
+    });
+
+    expect(feedback.sourceAction).toEqual({
+      action: 'archive', title: source.message, applied: true,
+    });
+  });
+
+  it('allows an exact Archive after an earlier acknowledgement marked the wrapper acted', () => {
+    const source = db.addScheduledItem({
+      userId: 'default', sessionId: null, source: 'user', kind: 'task', type: 'reminder',
+      message: 'Publish the acknowledged Project Atlas update', context: null,
+      triggerAt: Date.now() + 60_000, recurring: null, sourceMemoryId: null,
+      boardStatus: 'waiting', status: 'pending',
+    });
+    const wrapper = db.addScheduledItem({
+      userId: 'default', sessionId: null, source: 'agent', kind: 'nudge', type: 'follow_up',
+      message: 'Should the acknowledged Project Atlas update stay open?', context: null,
+      sourceItemId: source.id, triggerAt: Date.now() - 1, recurring: null, sourceMemoryId: null,
+    });
+    db.markScheduledItemFired(wrapper.id);
+    db.recordProactiveDeliveryReceipt({
+      channel: 'telegram', channelMessageIds: ['207'], scheduledItemId: wrapper.id,
+      ownerUserId: 'default',
+    });
+    scheduler = new UnifiedScheduler({
+      db, logger, onSendMessage: vi.fn().mockResolvedValue(true),
+      canonicalSingleUserIds: ['telegram:42'],
+    });
+
+    scheduler.checkEngagement('telegram:42', 'Thanks!', {
+      directReply: true, repliedToText: wrapper.message, repliedToMessageId: '207',
+    });
+    expect(db.getScheduledItem(wrapper.id)?.status).toBe('acted');
+
+    const feedback = scheduler.checkEngagement('telegram:42', 'Archive', {
+      directReply: true, repliedToText: wrapper.message, repliedToMessageId: '207',
+    });
+    expect(feedback.sourceAction).toEqual({
+      action: 'archive', title: source.message, applied: true,
+    });
+  });
+
+  it('accepts an exact receipt before the scheduler flips a delivered wrapper from processing to fired', () => {
+    const source = db.addScheduledItem({
+      userId: 'default', sessionId: null, source: 'user', kind: 'task', type: 'reminder',
+      message: 'Publish the fast-reply Project Atlas update', context: null,
+      triggerAt: Date.now() + 60_000, recurring: null, sourceMemoryId: null,
+      boardStatus: 'waiting', status: 'pending',
+    });
+    const wrapper = db.addScheduledItem({
+      userId: 'default', sessionId: null, source: 'agent', kind: 'nudge', type: 'follow_up',
+      message: 'Should the fast-reply Project Atlas update stay open?', context: null,
+      sourceItemId: source.id, triggerAt: Date.now() - 1, recurring: null, sourceMemoryId: null,
+    });
+    db.updateScheduledItemBoard(wrapper.id, { status: 'processing', boardStatus: 'in_progress' });
+    db.recordProactiveDeliveryReceipt({
+      channel: 'telegram', channelMessageIds: ['208'], scheduledItemId: wrapper.id,
+      ownerUserId: 'default',
+    });
+    scheduler = new UnifiedScheduler({
+      db, logger, onSendMessage: vi.fn().mockResolvedValue(true),
+      canonicalSingleUserIds: ['telegram:42'],
+    });
+
+    const feedback = scheduler.checkEngagement('telegram:42', 'Archive', {
+      directReply: true, repliedToText: wrapper.message, repliedToMessageId: '208',
+    });
+
+    expect(feedback.sourceAction).toEqual({
+      action: 'archive', title: source.message, applied: true,
+    });
+    expect(db.getScheduledItem(wrapper.id)?.status).toBe('acted');
+    expect(db.markScheduledItemFired(wrapper.id)).toBe(false);
+    expect(db.getScheduledItem(wrapper.id)?.status).toBe('acted');
+  });
+
+  it('persists every channel receipt chunk returned by the delivery handler', async () => {
+    const reminder = db.addScheduledItem({
+      userId: 'default', sessionId: null, source: 'user', messageProvenance: 'user_literal',
+      kind: 'nudge', type: 'reminder', message: 'Review the Project Atlas launch notes.',
+      context: null, triggerAt: Date.now() - 1, recurring: null, sourceMemoryId: null,
+    });
+    const send = vi.fn().mockResolvedValue({
+      sent: true,
+      channel: 'telegram',
+      messageIds: ['301', '302'],
+    });
+    scheduler = new UnifiedScheduler({ db, logger, onSendMessage: send });
+
+    await scheduler.evaluate();
+
+    expect(db.getScheduledItem(reminder.id)?.status).toBe('fired');
+    for (const messageId of ['301', '302']) {
+      expect(db.getProactiveDeliveryReceipts('telegram', messageId)).toEqual([
+        expect.objectContaining({
+          scheduledItemId: reminder.id,
+          ownerUserId: 'default',
+          ambiguous: false,
+        }),
+      ]);
+    }
+  });
+
+  it('expires a source-invalidated wrapper while combine is pending and never transports its stale text', async () => {
+    const source = db.addScheduledItem({
+      userId: 'default', sessionId: null, source: 'user', kind: 'task', type: 'reminder',
+      message: 'Publish the queued Project Atlas update', context: null,
+      triggerAt: Date.now() + 60_000, recurring: null, sourceMemoryId: null,
+      boardStatus: 'waiting', status: 'pending',
+    });
+    const wrapper = db.addScheduledItem({
+      userId: 'default', sessionId: null, source: 'agent', kind: 'nudge', type: 'follow_up',
+      message: 'Ask whether the queued Project Atlas update should stay open', context: null,
+      sourceItemId: source.id, triggerAt: Date.now() - 1, recurring: null, sourceMemoryId: null,
+    });
+    const combineEntered = deferred<void>();
+    const combineResult = deferred<any>();
+    const rawTransport = vi.fn().mockResolvedValue(true);
+    const outboundQueue = new OutboundQueue({
+      sendMessage: rawTransport,
+      logger,
+      router: {
+        executeWithFallback: vi.fn().mockImplementation(() => {
+          combineEntered.resolve();
+          return combineResult.promise;
+        }),
+      } as any,
+    });
+    outboundQueue.enqueue('default', 'Safe Project Atlas planning note');
+    const renderRouter = {
+      executeWithFallback: vi.fn().mockResolvedValue({
+        response: {
+          content: [{ type: 'text', text: 'Should the queued Project Atlas update stay open?' }],
+        },
+      }),
+    };
+    scheduler = new UnifiedScheduler({
+      db,
+      logger,
+      router: renderRouter as any,
+      onSendMessage: outboundQueue.createHandler(),
+      getTimezone: () => middayTimezone(),
+      minAgentProactiveGapMs: 0,
+    });
+
+    try {
+      const evaluation = scheduler.evaluate();
+      await combineEntered.promise;
+      db.updateScheduledItemBoard(source.id, { status: 'dismissed', boardStatus: 'archived' });
+      combineResult.resolve({
+        response: {
+          content: [{ type: 'text', text: 'Unsafe combined Project Atlas text with a stale follow-up' }],
+        },
+      });
+      await evaluation;
+      await vi.waitFor(() => expect(rawTransport).toHaveBeenCalledTimes(1));
+
+      expect(rawTransport).toHaveBeenCalledWith('default', 'Safe Project Atlas planning note');
+      expect(rawTransport).not.toHaveBeenCalledWith(
+        'default',
+        expect.stringContaining('stale follow-up'),
+      );
+      expect(db.getScheduledItem(wrapper.id)?.status).toBe('expired');
+      expect(db.getRecentProactiveDecisions(10)).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          stage: 'deliver', outcome: 'suppressed', reason: 'source_item_resolved',
+          detail: expect.objectContaining({ itemId: wrapper.id, phase: 'pre_transport' }),
+        }),
+      ]));
+    } finally {
+      outboundQueue.stop();
+    }
+  });
+
+  it('routes Archive through the exact rendered Atlas message, not the internal draft', async () => {
+    const atlas = db.addScheduledItem({
+      userId: 'default', sessionId: null, source: 'user', kind: 'task',
+      type: 'reminder', message: 'Publish Atlas launch update', context: null,
+      triggerAt: Date.now() + 7 * 24 * 60 * 60 * 1000, recurring: null,
+      sourceMemoryId: null, boardStatus: 'waiting',
+    });
+    const wrapper = db.addScheduledItem({
+      userId: 'default', sessionId: null, source: 'agent', kind: 'nudge',
+      type: 'follow_up', message: 'Ask the user whether the Atlas launch task should stay open',
+      context: JSON.stringify({ gapType: 'stale_board_item', sourceId: atlas.id }),
+      sourceItemId: atlas.id, triggerAt: Date.now() - 1, recurring: null, sourceMemoryId: null,
+    });
+    const delivered = 'Should we keep the Atlas launch task open, or archive it?';
+    const router = {
+      executeWithFallback: vi.fn().mockResolvedValue({
+        response: { content: [{ type: 'text', text: delivered }] },
+      }),
+    };
+    const send = vi.fn().mockResolvedValue(true);
+    scheduler = new UnifiedScheduler({
+      db, logger, router: router as any, onSendMessage: send,
+      getTimezone: () => middayTimezone(), minAgentProactiveGapMs: 0,
+    });
+
+    await scheduler.evaluate();
+    expect(send).toHaveBeenCalledWith('default', delivered);
+    expect(db.getScheduledItem(wrapper.id)?.message).toBe(delivered);
+    db.recordProactiveDeliveryReceipt({
+      channel: 'telegram', channelMessageIds: ['102'], scheduledItemId: wrapper.id,
+      ownerUserId: 'default',
+    });
+
+    scheduler.stop();
+    scheduler = new UnifiedScheduler({
+      db, logger, onSendMessage: send, canonicalSingleUserIds: ['telegram:42'],
+    });
+    const feedback = scheduler.checkEngagement('telegram:42', 'Archive', {
+      directReply: true, repliedToText: delivered, repliedToMessageId: '102',
+    });
+    expect(feedback.sourceAction).toEqual({
+      action: 'archive', title: 'Publish Atlas launch update', applied: true,
+    });
+    expect(db.getScheduledItem(atlas.id)).toEqual(expect.objectContaining({
+      boardStatus: 'archived', status: 'dismissed',
+    }));
+    expect(db.getScheduledItem(wrapper.id)?.status).toBe('acted');
+  });
+
+  it('uses legacy context provenance for Archive but never crosses source ownership', () => {
+    const legacySource = db.addScheduledItem({
+      userId: 'other-user', sessionId: null, source: 'user', kind: 'task',
+      type: 'reminder', message: 'Publish Atlas launch update', context: null,
+      triggerAt: Date.now() + 60_000, recurring: null, sourceMemoryId: null,
+      boardStatus: 'waiting', status: 'pending',
+    });
+    const wrapper = db.addScheduledItem({
+      userId: 'default', sessionId: null, source: 'agent', kind: 'nudge',
+      type: 'follow_up', message: 'Should the Atlas launch task stay open?',
+      context: JSON.stringify({ gapType: 'stale_board_item', sourceId: legacySource.id }),
+      triggerAt: Date.now() - 1, recurring: null, sourceMemoryId: null,
+    });
+    db.markScheduledItemFired(wrapper.id);
+    scheduler = new UnifiedScheduler({ db, logger, onSendMessage: vi.fn().mockResolvedValue(true) });
+
+    scheduler.checkEngagement('default', 'Archive', {
+      directReply: true,
+      repliedToText: wrapper.message,
+    });
+
+    expect(db.getScheduledItem(wrapper.id)?.status).toBe('acted');
+    expect(db.getScheduledItem(legacySource.id)).toEqual(expect.objectContaining({
+      boardStatus: 'waiting', status: 'pending',
+    }));
+  });
+
+  it('treats Archive on a legacy expired source as idempotent without rewriting history', () => {
+    const legacySource = db.addScheduledItem({
+      userId: 'default', sessionId: null, source: 'user', kind: 'task',
+      type: 'reminder', message: 'Publish Atlas launch update', context: null,
+      triggerAt: Date.now() + 60_000, recurring: null, sourceMemoryId: null,
+      boardStatus: 'in_progress', status: 'processing',
+    });
+    const rawDb = (db as unknown as { db: Database.Database }).db;
+    rawDb.exec('DROP TRIGGER IF EXISTS trg_scheduled_items_state_guard_update');
+    rawDb.prepare("UPDATE scheduled_items SET status = 'expired', board_status = 'in_progress' WHERE id = ?")
+      .run(legacySource.id);
+    const wrapper = db.addScheduledItem({
+      userId: 'default', sessionId: null, source: 'agent', kind: 'nudge',
+      type: 'follow_up', message: 'Should the Atlas launch task stay open?',
+      context: JSON.stringify({ gapType: 'stale_board_item', sourceId: legacySource.id }),
+      triggerAt: Date.now() - 1, recurring: null, sourceMemoryId: null,
+    });
+    db.markScheduledItemFired(wrapper.id);
+    db.recordProactiveDeliveryReceipt({
+      channel: 'telegram', channelMessageIds: ['103'], scheduledItemId: wrapper.id,
+      ownerUserId: 'default',
+    });
+    scheduler = new UnifiedScheduler({
+      db, logger, onSendMessage: vi.fn().mockResolvedValue(true),
+      canonicalSingleUserIds: ['telegram:42'],
+    });
+
+    const feedback = scheduler.checkEngagement('telegram:42', 'Archive', {
+      directReply: true,
+      repliedToText: wrapper.message,
+      repliedToMessageId: '103',
+    });
+
+    expect(feedback.sourceAction).toEqual({
+      action: 'archive', title: 'Publish Atlas launch update', applied: true,
+    });
+    expect(db.getScheduledItem(wrapper.id)?.status).toBe('acted');
+    expect(db.getScheduledItem(legacySource.id)).toEqual(expect.objectContaining({
+      boardStatus: 'in_progress', status: 'expired',
+    }));
+  });
+
+  it('confirms an idempotent Done reply without rewriting an already-done source', () => {
+    const source = db.addScheduledItem({
+      userId: 'default', sessionId: null, source: 'user', kind: 'task',
+      type: 'reminder', message: 'Publish Atlas launch update', context: null,
+      triggerAt: Date.now() - 60_000, recurring: null, sourceMemoryId: null,
+      boardStatus: 'done', status: 'fired',
+    });
+    const before = db.getScheduledItem(source.id)!;
+    const wrapper = db.addScheduledItem({
+      userId: 'default', sessionId: null, source: 'agent', kind: 'nudge',
+      type: 'follow_up', message: 'Should the Atlas launch task stay open?', context: null,
+      sourceItemId: source.id, triggerAt: Date.now() - 1, recurring: null, sourceMemoryId: null,
+    });
+    db.markScheduledItemFired(wrapper.id);
+    db.recordProactiveDeliveryReceipt({
+      channel: 'telegram', channelMessageIds: ['104'], scheduledItemId: wrapper.id,
+      ownerUserId: 'default',
+    });
+    scheduler = new UnifiedScheduler({
+      db, logger, onSendMessage: vi.fn().mockResolvedValue(true),
+      canonicalSingleUserIds: ['telegram:42'],
+    });
+
+    const feedback = scheduler.checkEngagement('telegram:42', 'Done', {
+      directReply: true, repliedToText: wrapper.message, repliedToMessageId: '104',
+    });
+
+    expect(feedback.sourceAction).toEqual({
+      action: 'done', title: 'Publish Atlas launch update', applied: true,
+    });
+    expect(db.getScheduledItem(source.id)).toEqual(before);
+    expect(db.getScheduledItem(wrapper.id)?.status).toBe('acted');
+  });
+
+  it('records a sessionless default wrapper in the explicitly configured Telegram owner session', async () => {
+    db.createSession('telegram-owner-session', { userId: 'telegram:42', channelId: 'telegram' });
+    const sessionManager = new SessionManager(db);
+    const wrapper = db.addScheduledItem({
+      userId: 'default', sessionId: null, source: 'agent', kind: 'nudge',
+      type: 'follow_up', message: 'Check whether the Atlas launch task should stay open.',
+      context: null, triggerAt: Date.now() - 1, recurring: null, sourceMemoryId: null,
+    });
+    const router = {
+      executeWithFallback: vi.fn().mockResolvedValue({
+        response: { content: [{ type: 'text', text: 'Should we keep the Atlas launch task open?' }] },
+      }),
+    };
+    const send = vi.fn().mockResolvedValue(true);
+    scheduler = new UnifiedScheduler({
+      db, logger, sessionManager, router: router as any, onSendMessage: send,
+      getTimezone: () => middayTimezone(), canonicalSingleUserIds: ['42', 'telegram:42'],
+      minAgentProactiveGapMs: 0,
+    });
+
+    await scheduler.evaluate();
+
+    expect(db.getScheduledItem(wrapper.id)?.status).toBe('fired');
+    expect(db.getSessionMessages('telegram-owner-session')).toEqual(expect.arrayContaining([
+      expect.objectContaining({ role: 'assistant', content: 'Should we keep the Atlas launch task open?' }),
+    ]));
+  });
+
+  it('never reads from or records delivery into a cross-owner source session', async () => {
+    db.createSession('foreign-source-session', {
+      userId: 'telegram:owner-beta', channelId: 'telegram',
+    });
+    db.addSessionMessage(
+      'foreign-source-session',
+      'user',
+      'The Project Atlas follow-up is resolved and should be cancelled.',
+    );
+    const beforeForeign = db.getSessionMessages('foreign-source-session');
+    const wrapper = db.addScheduledItem({
+      userId: 'telegram:owner-alpha',
+      sessionId: 'foreign-source-session',
+      source: 'agent',
+      kind: 'nudge',
+      type: 'follow_up',
+      message: 'Would you like to review the synthetic launch notes?',
+      context: null,
+      triggerAt: Date.now() - 1,
+      recurring: null,
+      sourceMemoryId: null,
+    });
+    const send = vi.fn().mockResolvedValue(true);
+    scheduler = new UnifiedScheduler({
+      db,
+      logger,
+      onSendMessage: send,
+      router: {
+        executeWithFallback: vi.fn().mockResolvedValue({
+          response: { content: [{ type: 'text', text: 'Would you like to review the synthetic launch notes?' }] },
+        }),
+      } as any,
+      getTimezone: () => middayTimezone(),
+      minAgentProactiveGapMs: 0,
+    });
+
+    await scheduler.evaluate();
+
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(db.getScheduledItem(wrapper.id)?.status).toBe('fired');
+    expect(db.getSessionMessages('foreign-source-session')).toEqual(beforeForeign);
   });
 
   it('keeps an inferred nudge when newer source chat is unrelated and gives it to the renderer', async () => {
@@ -202,7 +992,14 @@ describe('UnifiedScheduler proactive delivery safety', () => {
       triggerAt: now - 1, recurring: null, sourceMemoryId: null,
     });
     const send = vi.fn().mockResolvedValue(true);
-    scheduler = new UnifiedScheduler({ db, logger, onSendMessage: send, getTimezone: () => middayTimezone() });
+    const router = {
+      executeWithFallback: vi.fn().mockResolvedValue({
+        response: { content: [{ type: 'text', text: 'Did the prototype review happen?' }] },
+      }),
+    };
+    scheduler = new UnifiedScheduler({
+      db, logger, router: router as any, onSendMessage: send, getTimezone: () => middayTimezone(),
+    });
 
     await scheduler.evaluate();
 
@@ -211,6 +1008,122 @@ describe('UnifiedScheduler proactive delivery safety', () => {
     expect(db.getRecentProactiveDecisions(5)).toEqual(expect.arrayContaining([
       expect.objectContaining({ reason: 'daily_delivery_budget' }),
     ]));
+  });
+
+  it.each([
+    { gate: 'min-gap', minGapMs: 6 * 60 * 60 * 1000, prefilledSends: 0 },
+    { gate: 'daily budget', minGapMs: 0, prefilledSends: 2 },
+  ])('reserves $gate capacity across two simultaneous scheduler connections', async ({ minGapMs, prefilledSends }) => {
+    const dir = mkdtempSync(join(tmpdir(), 'proactive-reservation-race-'));
+    const dbPath = join(dir, 'memories.sqlite');
+    const firstDb = new ScallopDatabase(dbPath);
+    const secondDb = new ScallopDatabase(dbPath);
+    let firstScheduler: UnifiedScheduler | null = null;
+    let secondScheduler: UnifiedScheduler | null = null;
+    let releaseTransport!: (sent: boolean) => void;
+    const transport = new Promise<boolean>(resolve => { releaseTransport = resolve; });
+    const send = vi.fn().mockReturnValue(transport);
+
+    try {
+      const now = Date.now();
+      for (let index = 0; index < prefilledSends; index++) {
+        firstDb.recordProactiveSend('default', `Earlier delivery ${index}`, 'agent', now - index * 60_000);
+      }
+      const firstItem = firstDb.addScheduledItem({
+        userId: 'default', sessionId: null, source: 'agent', kind: 'nudge', type: 'follow_up',
+        message: 'Prepare an Atlas deployment follow-up', context: null,
+        triggerAt: now - 1, recurring: null, sourceMemoryId: null,
+      });
+      const secondItem = firstDb.addScheduledItem({
+        userId: 'default', sessionId: null, source: 'agent', kind: 'nudge', type: 'goal_checkin',
+        message: 'Prepare a quarterly planning follow-up', context: null,
+        triggerAt: now - 1, recurring: null, sourceMemoryId: null,
+      });
+      firstDb.updateScheduledItemBoard(firstItem.id, { status: 'processing', boardStatus: 'in_progress' });
+      firstDb.updateScheduledItemBoard(secondItem.id, { status: 'processing', boardStatus: 'in_progress' });
+      const router = (text: string) => ({
+        executeWithFallback: vi.fn().mockResolvedValue({
+          response: { content: [{ type: 'text', text }] },
+        }),
+      });
+      firstScheduler = new UnifiedScheduler({
+        db: firstDb, logger, router: router('Is the Atlas deployment ready for review?') as any,
+        onSendMessage: send, getTimezone: () => 'UTC', minAgentProactiveGapMs: minGapMs,
+      });
+      secondScheduler = new UnifiedScheduler({
+        db: secondDb, logger, router: router('Is quarterly planning ready to continue?') as any,
+        onSendMessage: send, getTimezone: () => 'UTC', minAgentProactiveGapMs: minGapMs,
+      });
+      const sendFormatted = (instance: UnifiedScheduler, item: NonNullable<ReturnType<ScallopDatabase['getScheduledItem']>>) => (
+        instance as unknown as {
+          sendFormattedMessage: (scheduled: typeof item, message: string) => Promise<string>;
+        }
+      ).sendFormattedMessage(item, item.message);
+
+      const firstAttempt = sendFormatted(firstScheduler, firstDb.getScheduledItem(firstItem.id)!);
+      const secondAttempt = sendFormatted(secondScheduler, secondDb.getScheduledItem(secondItem.id)!);
+      await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+      releaseTransport(true);
+      const outcomes = await Promise.all([firstAttempt, secondAttempt]);
+
+      expect(outcomes.sort()).toEqual(['deferred', 'sent']);
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(secondDb.getRecentProactiveSends(getTodayStartMs('UTC'))
+        .filter(entry => entry.source === 'agent')).toHaveLength(prefilledSends + 1);
+    } finally {
+      firstScheduler?.stop();
+      secondScheduler?.stop();
+      firstDb.close();
+      secondDb.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('releases a delivery reservation after transport failure', async () => {
+    const now = Date.now();
+    const failedItem = db.addScheduledItem({
+      userId: 'default', sessionId: null, source: 'agent', kind: 'nudge', type: 'follow_up',
+      message: 'Prepare the first Atlas follow-up', context: null,
+      triggerAt: now - 1, recurring: null, sourceMemoryId: null,
+    });
+    const retryItem = db.addScheduledItem({
+      userId: 'default', sessionId: null, source: 'agent', kind: 'nudge', type: 'goal_checkin',
+      message: 'Prepare the replacement planning follow-up', context: null,
+      triggerAt: now - 1, recurring: null, sourceMemoryId: null,
+    });
+    db.updateScheduledItemBoard(failedItem.id, { status: 'processing', boardStatus: 'in_progress' });
+    db.updateScheduledItemBoard(retryItem.id, { status: 'processing', boardStatus: 'in_progress' });
+    const router = (text: string) => ({
+      executeWithFallback: vi.fn().mockResolvedValue({
+        response: { content: [{ type: 'text', text }] },
+      }),
+    });
+    const failedScheduler = new UnifiedScheduler({
+      db, logger, router: router('Is the first Atlas follow-up ready?') as any,
+      onSendMessage: vi.fn().mockResolvedValue(false), getTimezone: () => 'UTC',
+      minAgentProactiveGapMs: 6 * 60 * 60 * 1000,
+    });
+    const successfulSend = vi.fn().mockResolvedValue(true);
+    const retryScheduler = new UnifiedScheduler({
+      db, logger, router: router('Is the replacement planning follow-up ready?') as any,
+      onSendMessage: successfulSend, getTimezone: () => 'UTC',
+      minAgentProactiveGapMs: 6 * 60 * 60 * 1000,
+    });
+    const call = (instance: UnifiedScheduler, itemId: string) => {
+      const item = db.getScheduledItem(itemId)!;
+      return (instance as unknown as {
+        sendFormattedMessage: (scheduled: typeof item, message: string) => Promise<string>;
+      }).sendFormattedMessage(item, item.message);
+    };
+
+    try {
+      expect(await call(failedScheduler, failedItem.id)).toBe('delivery_failed');
+      expect(await call(retryScheduler, retryItem.id)).toBe('sent');
+      expect(successfulSend).toHaveBeenCalledTimes(1);
+    } finally {
+      failedScheduler.stop();
+      retryScheduler.stop();
+    }
   });
 
   it('re-checks global and topic opt-outs before delivering pending inferred items', async () => {
@@ -374,6 +1287,7 @@ describe('UnifiedScheduler proactive delivery safety', () => {
     );
     expect(send).not.toHaveBeenCalledWith('api:test-user', leakedDraft);
     expect(db.getScheduledItem(item.id)?.status).toBe('fired');
+    expect(db.getScheduledItem(item.id)?.message).toBe('Anything from today worth carrying forward?');
   });
 
   it('does not require a router for proven literal user text', async () => {
@@ -500,6 +1414,83 @@ describe('UnifiedScheduler proactive delivery safety', () => {
       migrated?.close();
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it('adds and losslessly backfills source_item_id on an existing legacy schema', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'scheduled-source-item-'));
+    const dbPath = join(dir, 'legacy.sqlite');
+    let migrated: ScallopDatabase | undefined;
+    try {
+      const seed = new ScallopDatabase(dbPath);
+      const source = seed.addScheduledItem({
+        userId: 'default', sessionId: null, source: 'user', kind: 'task', type: 'reminder',
+        message: 'Publish Atlas', context: null, triggerAt: Date.now() + 60_000,
+        recurring: null, sourceMemoryId: null, boardStatus: 'waiting',
+      });
+      const wrapper = seed.addScheduledItem({
+        userId: 'default', sessionId: null, source: 'agent', kind: 'nudge', type: 'follow_up',
+        message: 'Should the Atlas task stay open?',
+        context: JSON.stringify({ gapType: 'stale_board_item', sourceId: source.id }),
+        triggerAt: Date.now() + 120_000, recurring: null, sourceMemoryId: null,
+      });
+      const unrelated = seed.addScheduledItem({
+        userId: 'default', sessionId: null, source: 'agent', kind: 'nudge', type: 'follow_up',
+        message: 'How did the unrelated conversation go?',
+        context: JSON.stringify({ gapType: 'unresolved_thread', sourceId: 'session-summary-id' }),
+        triggerAt: Date.now() + 180_000, recurring: null, sourceMemoryId: null,
+      });
+      const malformed = seed.addScheduledItem({
+        userId: 'default', sessionId: null, source: 'agent', kind: 'nudge', type: 'follow_up',
+        message: 'A distinct legacy plain-context nudge', context: 'legacy context is not JSON',
+        triggerAt: Date.now() + 240_000, recurring: null, sourceMemoryId: null,
+      });
+      seed.close();
+
+      const legacy = new Database(dbPath);
+      legacy.exec('DROP INDEX IF EXISTS idx_scheduled_source_item');
+      legacy.exec('ALTER TABLE scheduled_items DROP COLUMN source_item_id');
+      legacy.close();
+
+      migrated = new ScallopDatabase(dbPath);
+      expect(migrated.getScheduledItem(wrapper.id)?.sourceItemId).toBe(source.id);
+      expect(migrated.getScheduledItem(unrelated.id)?.sourceItemId).toBeNull();
+      expect(migrated.getScheduledItem(malformed.id)?.sourceItemId).toBeNull();
+      const reopened = new Database(dbPath, { readonly: true });
+      expect(reopened.prepare("SELECT name FROM pragma_table_info('scheduled_items') WHERE name = 'source_item_id'").get())
+        .toEqual({ name: 'source_item_id' });
+      expect(reopened.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_scheduled_source_item'").get())
+        .toEqual({ name: 'idx_scheduled_source_item' });
+      reopened.close();
+    } finally {
+      migrated?.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('never reuses a similar wrapper from a different source item', () => {
+    const firstSource = db.addScheduledItem({
+      userId: 'default', sessionId: null, source: 'user', kind: 'task', type: 'reminder',
+      message: 'Atlas task one', context: null, triggerAt: Date.now() + 60_000,
+      recurring: null, sourceMemoryId: null,
+    });
+    const secondSource = db.addScheduledItem({
+      userId: 'default', sessionId: null, source: 'user', kind: 'task', type: 'reminder',
+      message: 'Atlas task two', context: null, triggerAt: Date.now() + 60_000,
+      recurring: null, sourceMemoryId: null,
+    });
+    const input = {
+      userId: 'default', sessionId: null, source: 'agent' as const, kind: 'nudge' as const,
+      type: 'follow_up' as const, message: 'Should the Atlas task stay open?', context: null,
+      triggerAt: Date.now() + 120_000, recurring: null, sourceMemoryId: null,
+    };
+    const first = db.addScheduledItem({ ...input, sourceItemId: firstSource.id });
+    const second = db.addScheduledItem({ ...input, sourceItemId: secondSource.id });
+    const duplicateFirst = db.addScheduledItem({ ...input, sourceItemId: firstSource.id });
+
+    expect(second.id).not.toBe(first.id);
+    expect(second.sourceItemId).toBe(secondSource.id);
+    expect(duplicateFirst.id).toBe(first.id);
+    expect(duplicateFirst.sourceItemId).toBe(firstSource.id);
   });
 
   it('fails startup closed when a legacy provenance column is incompatible', () => {
@@ -938,6 +1929,9 @@ describe('UnifiedScheduler proactive delivery safety', () => {
         executeWithFallback: vi.fn()
           .mockResolvedValueOnce({
             response: { content: [{ type: 'text', text: 'The first grounded update is ready.' }] },
+          })
+          .mockResolvedValueOnce({
+            response: { content: [{ type: 'text', text: 'The second grounded update is ready.' }] },
           }),
       };
       scheduler = new UnifiedScheduler({

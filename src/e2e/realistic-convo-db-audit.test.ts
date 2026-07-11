@@ -30,6 +30,8 @@ import { parseEvaluatorResponse } from '../memory/proactive-evaluator.js';
 import type { GapSignal } from '../memory/gap-scanner.js';
 
 const testLogger = pino({ level: 'silent' });
+const TEST_OWNER_ID = 'owner-example';
+const TEST_OWNER_ALIASES = [TEST_OWNER_ID, `telegram:${TEST_OWNER_ID}`] as const;
 
 // ---------------------------------------------------------------------------
 // Suite 1: Realistic multi-turn WebSocket conversation
@@ -354,8 +356,8 @@ describe('E2E Realistic Conversation + DB Audit', () => {
         .run(staleDate, staleDate, goalMem.id);
 
       // Seed session summaries
-      db.createSession('audit-sess-1');
-      db.createSession('audit-sess-2');
+      db.createSession('audit-sess-1', { userId: TEST_OWNER_ID });
+      db.createSession('audit-sess-2', { userId: TEST_OWNER_ID });
       db.addSessionSummary({
         sessionId: 'audit-sess-1',
         userId: 'default',
@@ -416,6 +418,7 @@ describe('E2E Realistic Conversation + DB Audit', () => {
         scallopStore,
         logger: testLogger,
         fusionProvider,
+        canonicalSingleUserIds: TEST_OWNER_ALIASES,
       });
     }, 30000);
 
@@ -672,7 +675,7 @@ describe('E2E Realistic Conversation + DB Audit', () => {
   });
 
   // -----------------------------------------------------------------------
-  // Sub-suite 8: expireOldScheduledItems also expires 'processing' items
+  // Sub-suite 8: generic age cleanup never expires in-flight work
   // -----------------------------------------------------------------------
   describe('expire old items behavior', () => {
     let dbPath: string;
@@ -694,7 +697,7 @@ describe('E2E Realistic Conversation + DB Audit', () => {
       }
     });
 
-    it('expireOldScheduledItems expires processing items without recovery', () => {
+    it('expireOldScheduledItems leaves processing items to explicit recovery', () => {
       const db = scallopStore.getDatabase();
       const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -714,20 +717,13 @@ describe('E2E Realistic Conversation + DB Audit', () => {
       const claimed = db.claimDueScheduledItems();
       expect(claimed.length).toBe(1);
 
-      // Simulate a crash: item is stuck in 'processing' state
-      // Now expire old items (default maxAge = 24h)
+      // Generic age cleanup must not race an active delivery/worker lifecycle.
       const expired = db.expireOldScheduledItems();
 
-      // The processing item gets expired because:
-      //   WHERE status IN ('pending', 'processing') AND trigger_at < cutoff
-      // This is correct behavior — prevents items from being stuck forever.
-      // But there's no explicit recovery mechanism for processing items.
-      // If the process restarts, items stuck in 'processing' stay stuck
-      // until the next expireOldScheduledItems run (24h+ after trigger_at).
-      expect(expired).toBe(1);
+      expect(expired).toBe(0);
 
       const item = db.getScheduledItem(claimed[0].id);
-      expect(item!.status).toBe('expired');
+      expect(item).toMatchObject({ status: 'processing', boardStatus: 'in_progress' });
     });
   });
 });

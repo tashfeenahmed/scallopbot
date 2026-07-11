@@ -12,6 +12,7 @@ import { constants } from 'fs';
 import type { Logger } from 'pino';
 import type { Skill, SkillExecutionRequest, SkillExecutionResult } from './types.js';
 import { redactSensitiveText } from '../security/redaction.js';
+import { resolveStateUserId } from '../utils/state-user-id.js';
 
 /** Default timeout for script execution (120 seconds for browser/screenshot operations) */
 const DEFAULT_TIMEOUT_MS = 120000;
@@ -23,8 +24,25 @@ const MAX_OUTPUT_BYTES = 1024 * 1024;
 export interface SkillExecutorOptions {
   timeoutMs?: number;
   maxOutputBytes?: number;
+  /**
+   * Explicit deployment-owned identities that share the canonical single-user
+   * state record. Arbitrary channel users are never collapsed implicitly.
+   */
+  canonicalSingleUserIds?: readonly string[];
   /** Best-effort telemetry hook used by the skill curator/evolution layer. */
   onSkillExecuted?: (name: string, success: boolean, durationMs: number) => void | Promise<void>;
+}
+
+/**
+ * Resolve the identity stateful bundled skills should use without discarding
+ * the original channel identity. `default` is canonical by definition; any
+ * other mapping must be explicitly authorized by deployment configuration.
+ */
+export function resolveSkillStateUserId(
+  userId: string,
+  canonicalSingleUserIds: readonly string[] = [],
+): string {
+  return resolveStateUserId(userId, canonicalSingleUserIds);
 }
 
 /** Non-secret process settings needed to locate runtimes and temporary files. */
@@ -59,6 +77,7 @@ export function buildSkillSubprocessEnv(
   skill: Skill,
   request: SkillExecutionRequest,
   timezone?: string,
+  canonicalSingleUserIds: readonly string[] = [],
 ): Record<string, string> {
   const env: Record<string, string> = {};
   copyDefinedEnv(env, SAFE_BASE_ENV_KEYS);
@@ -74,7 +93,12 @@ export function buildSkillSubprocessEnv(
   env.SKILL_ARGS = JSON.stringify(request.args || {});
   env.SKILL_WORKSPACE = process.env.AGENT_WORKSPACE || request.cwd || process.cwd();
   env.SKILL_CWD = request.cwd || env.SKILL_WORKSPACE;
-  if (request.userId) env.SKILL_USER_ID = request.userId;
+  if (request.userId) {
+    // Keep channel identity intact for communication/integration skills. Only
+    // stateful bundled skills opt into the separately resolved state identity.
+    env.SKILL_USER_ID = request.userId;
+    env.SKILL_STATE_USER_ID = resolveSkillStateUserId(request.userId, canonicalSingleUserIds);
+  }
   if (request.sessionId) env.SKILL_SESSION_ID = request.sessionId;
   if (request.userId && timezone) env.SKILL_USER_TIMEZONE = timezone;
   return env;
@@ -88,12 +112,14 @@ export class SkillExecutor {
   private scriptPathCache = new Map<string, string | null>();
   private timeoutMs: number;
   private maxOutputBytes: number;
+  private canonicalSingleUserIds: readonly string[];
   private onSkillExecuted?: SkillExecutorOptions['onSkillExecuted'];
 
   constructor(private logger?: Logger, getTimezone?: (userId: string) => string, options?: SkillExecutorOptions) {
     this.getTimezone = getTimezone;
     this.timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.maxOutputBytes = options?.maxOutputBytes ?? MAX_OUTPUT_BYTES;
+    this.canonicalSingleUserIds = [...(options?.canonicalSingleUserIds ?? [])];
     this.onSkillExecuted = options?.onSkillExecuted;
   }
 
@@ -297,7 +323,7 @@ export class SkillExecutor {
     const timezone = request.userId && this.getTimezone
       ? this.getTimezone(request.userId)
       : undefined;
-    const env = buildSkillSubprocessEnv(skill, request, timezone);
+    const env = buildSkillSubprocessEnv(skill, request, timezone, this.canonicalSingleUserIds);
 
     // Working directory: use request.cwd, or AGENT_WORKSPACE, or process.cwd()
     const cwd = request.cwd || process.env.AGENT_WORKSPACE || process.cwd();

@@ -21,6 +21,8 @@ export interface RecentChatContextOptions {
   maxCharsPerMessage?: number;
   /** Staleness threshold in ms — returns null if last message is older (default: 48h) */
   stalenessMs?: number;
+  /** Exact channel identities authorized to contribute to this state owner's context. */
+  identityCandidates?: readonly string[];
 }
 
 const DEFAULT_MAX_MESSAGES = 10;
@@ -66,7 +68,9 @@ export function getRecentChatContext(
   const stalenessMs = options?.stalenessMs ?? DEFAULT_STALENESS_MS;
 
   const messages = userId
-    ? db.getRecentMessagesByUserId(userId, maxMessages)
+    ? (options?.identityCandidates
+        ? db.getRecentMessagesByUserId(userId, maxMessages, options.identityCandidates)
+        : db.getRecentMessagesByUserId(userId, maxMessages))
     : db.getAllMessagesPaginated(maxMessages).messages;
 
   if (messages.length === 0) return null;

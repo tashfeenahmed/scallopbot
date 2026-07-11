@@ -32,6 +32,12 @@ function createMockRouter(response = 'Combined message from LLM') {
   } as any;
 }
 
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>(res => { resolve = res; });
+  return { promise, resolve };
+}
+
 function createQueue(overrides: Partial<OutboundQueueOptions> = {}) {
   const sendMessage = vi.fn().mockResolvedValue(true);
   const logger = createMockLogger();
@@ -138,6 +144,65 @@ describe('OutboundQueue', () => {
       expect(sendMessage).toHaveBeenCalledWith('user1', 'Combined message from LLM');
       expect(sendMessage).toHaveBeenCalledWith('user2', 'Message for two');
       expect(router.executeWithFallback).toHaveBeenCalledTimes(1);
+    });
+
+    it('marks a channel receipt ambiguous when one transport combines multiple intents', async () => {
+      const sendMessage = vi.fn().mockResolvedValue({
+        sent: true, channel: 'telegram', messageIds: ['901', '902'],
+      });
+      const { queue } = createQueue({ sendMessage });
+      queue.enqueue('user1', 'Project Atlas planning note');
+
+      const result = await queue.createHandler()(
+        'user1',
+        'Project Atlas launch follow-up',
+        { scheduledItemId: 'wrapper-1', ownerUserId: 'user1' },
+      );
+
+      expect(result).toEqual({
+        sent: true,
+        channel: 'telegram',
+        messageIds: ['901', '902'],
+        combined: true,
+      });
+    });
+
+    it('discards combined text and suppresses an item invalidated while combine is pending', async () => {
+      const combineEntered = deferred<void>();
+      const combinedResult = deferred<any>();
+      const router = {
+        executeWithFallback: vi.fn().mockImplementation(() => {
+          combineEntered.resolve();
+          return combinedResult.promise;
+        }),
+      } as any;
+      const sendMessage = vi.fn().mockResolvedValue(true);
+      const { queue } = createQueue({ sendMessage, router });
+      let valid = true;
+      queue.enqueue('user1', 'Safe Project Atlas planning note');
+
+      const pending = queue.createHandler()(
+        'user1',
+        'Stale Project Atlas source follow-up',
+        {
+          scheduledItemId: 'wrapper-1',
+          ownerUserId: 'user1',
+          validate: () => valid || { valid: false, reason: 'source_item_resolved' },
+        },
+      );
+      await combineEntered.promise;
+      valid = false;
+      combinedResult.resolve({
+        response: {
+          content: [{ type: 'text', text: 'Unsafe combined text containing stale follow-up' }],
+        },
+      });
+
+      await expect(pending).resolves.toEqual({
+        sent: false, suppressed: true, reason: 'source_item_resolved',
+      });
+      expect(sendMessage).toHaveBeenCalledTimes(1);
+      expect(sendMessage).toHaveBeenCalledWith('user1', 'Safe Project Atlas planning note');
     });
   });
 

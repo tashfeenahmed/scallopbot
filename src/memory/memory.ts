@@ -60,6 +60,8 @@ export interface BackgroundGardenerOptions {
   disableArchival?: boolean;
   /** Resolve IANA timezone for a user (defaults to server timezone) */
   getTimezone?: (userId: string) => string;
+  /** Explicit aliases for this deployment's single canonical state owner. */
+  canonicalSingleUserIds?: readonly string[];
   /** Callback fired once when transitioning out of quiet hours (morning digest) */
   onMorningDigest?: (userId: string) => Promise<void>;
   /** Optional hook fired at the end of each deep tick (e.g. evolution rollback watchdog). */
@@ -98,6 +100,7 @@ export class BackgroundGardener {
   private workspace?: string;
   private disableArchival: boolean;
   private getTimezone: (userId: string) => string;
+  private canonicalSingleUserIds: readonly string[];
   private onMorningDigest?: (userId: string) => Promise<void>;
   private onDeepTick?: () => Promise<void>;
   private onSleepTick?: () => Promise<void>;
@@ -125,6 +128,7 @@ export class BackgroundGardener {
     this.workspace = options.workspace;
     this.disableArchival = options.disableArchival ?? false;
     this.getTimezone = options.getTimezone ?? (() => Intl.DateTimeFormat().resolvedOptions().timeZone);
+    this.canonicalSingleUserIds = [...(options.canonicalSingleUserIds ?? [])];
     this.onMorningDigest = options.onMorningDigest;
     this.onDeepTick = options.onDeepTick;
     this.onSleepTick = options.onSleepTick;
@@ -240,7 +244,12 @@ export class BackgroundGardener {
 
     // Detect quiet-hours → active-hours transition for morning digest
     const currentlyQuiet = this.isQuietHours();
-    if (this.wasInQuietHours && !currentlyQuiet && this.onMorningDigest) {
+    if (
+      this.wasInQuietHours
+      && !currentlyQuiet
+      && this.onMorningDigest
+      && this.canonicalSingleUserIds.length > 0
+    ) {
       this.onMorningDigest(DEFAULT_USER_ID).catch(err => {
         this.logger.warn({ error: (err as Error).message }, 'Morning digest failed');
       });
@@ -259,6 +268,7 @@ export class BackgroundGardener {
       workspace: this.workspace,
       disableArchival: this.disableArchival,
       getTimezone: this.getTimezone,
+      canonicalSingleUserIds: this.canonicalSingleUserIds,
     };
   }
 

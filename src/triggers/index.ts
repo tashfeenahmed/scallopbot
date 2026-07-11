@@ -6,7 +6,16 @@
  */
 
 export {
+  type MessageDeliveryMetadata,
+  type MessageDeliveryHandler,
+  type MessageDeliveryReceipt,
+  type MessageDeliveryResult,
+  type MessageDeliverySuppressed,
+  type MessageDeliveryValidation,
   type TriggerSource,
   type TriggerSourceRegistry,
+  isMessageDeliveryReceipt,
+  isMessageDeliverySuppressed,
+  messageWasDelivered,
   parseUserIdPrefix,
 } from './types.js';

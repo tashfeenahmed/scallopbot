@@ -24,6 +24,7 @@ import { Agent } from '../agent/agent.js';
 import { SubAgentRegistry } from './registry.js';
 import { AnnounceQueue } from './announce-queue.js';
 import { enqueueInLane } from '../agent/command-queue.js';
+import { resolveStateUserId } from '../utils/state-user-id.js';
 import type {
   SubAgentConfig,
   SubAgentResult,
@@ -84,6 +85,8 @@ export interface SubAgentExecutorOptions {
     skillName: string,
     context: SubAgentSkillPolicyContext,
   ) => boolean | Promise<boolean>;
+  /** Explicit aliases for this deployment's single canonical state owner. */
+  canonicalSingleUserIds?: readonly string[];
 }
 
 export class SubAgentExecutor {
@@ -100,6 +103,7 @@ export class SubAgentExecutor {
   private logger: Logger;
   private config: SubAgentConfig;
   private skillPolicyResolver: SubAgentExecutorOptions['skillPolicyResolver'];
+  private canonicalSingleUserIds: readonly string[];
   private activeAbortControllers: Map<string, AbortController> = new Map();
 
   constructor(options: SubAgentExecutorOptions) {
@@ -116,6 +120,7 @@ export class SubAgentExecutor {
     this.logger = options.logger.child({ module: 'subagent-executor' });
     this.config = { ...DEFAULT_SUBAGENT_CONFIG, ...options.config };
     this.skillPolicyResolver = options.skillPolicyResolver;
+    this.canonicalSingleUserIds = [...(options.canonicalSingleUserIds ?? [])];
   }
 
   /**
@@ -134,10 +139,13 @@ export class SubAgentExecutor {
     input: SpawnAgentInput,
     parentOnProgress?: ProgressCallback,
   ): Promise<{ runId: string; childSessionId: string }> {
+    const parent = await this.sessionManager.getSession(parentSessionId);
     const session = await this.sessionManager.createSession({
       isSubAgent: true,
       parentSessionId,
       label: input.label || 'sub-agent',
+      ...(typeof parent?.metadata?.userId === 'string' ? { userId: parent.metadata.userId } : {}),
+      ...(typeof parent?.metadata?.channelId === 'string' ? { channelId: parent.metadata.channelId } : {}),
     });
 
     const run = this.registry.createRun(parentSessionId, input, session.id);
@@ -158,10 +166,13 @@ export class SubAgentExecutor {
     input: SpawnAgentInput,
     parentOnProgress?: ProgressCallback,
   ): Promise<SubAgentResult> {
+    const parent = await this.sessionManager.getSession(parentSessionId);
     const session = await this.sessionManager.createSession({
       isSubAgent: true,
       parentSessionId,
       label: input.label || 'sub-agent',
+      ...(typeof parent?.metadata?.userId === 'string' ? { userId: parent.metadata.userId } : {}),
+      ...(typeof parent?.metadata?.channelId === 'string' ? { channelId: parent.metadata.channelId } : {}),
     });
 
     const run = this.registry.createRun(parentSessionId, input, session.id);
@@ -229,7 +240,17 @@ export class SubAgentExecutor {
     const allowedSkills = await this.resolveAllowedSkills(run.allowedSkills, run.task, run);
 
     // 5. Build enriched prompt and filtered registry from the same allowlist.
-    const systemPrompt = await this.buildSubAgentPrompt(run.task, run.recentChatContext, allowedSkills);
+    const childSession = await this.sessionManager.getSession(run.childSessionId);
+    const stateUserId = resolveStateUserId(
+      typeof childSession?.metadata?.userId === 'string' ? childSession.metadata.userId : undefined,
+      this.canonicalSingleUserIds,
+    );
+    const systemPrompt = await this.buildSubAgentPrompt(
+      run.task,
+      run.recentChatContext,
+      allowedSkills,
+      stateUserId,
+    );
     const filteredRegistry = this.createFilteredSkillRegistry(allowedSkills);
 
     // 6. Create dedicated ContextManager with tight limits for sub-agents
@@ -258,6 +279,7 @@ export class SubAgentExecutor {
       logger: this.logger,
       maxIterations: this.config.maxIterations,
       systemPrompt,
+      canonicalSingleUserIds: this.canonicalSingleUserIds,
     });
 
     // 8. Set up timeout via AbortController
@@ -369,6 +391,7 @@ export class SubAgentExecutor {
     task: string,
     recentChatContext?: string,
     allowedSkills: ReadonlySet<string> = new Set(),
+    userId: string = 'default',
   ): Promise<string> {
     const lines = [
       'You are a focused sub-agent assigned a specific task.',
@@ -389,7 +412,7 @@ export class SubAgentExecutor {
 
     // Inject user profile context
     if (this.scallopStore) {
-      const userProfile = this.scallopStore.getProfileManager().getStaticProfile('default');
+      const userProfile = this.scallopStore.getProfileManager().getStaticProfile(userId);
       if (userProfile && Object.keys(userProfile).length > 0) {
         lines.push('## USER CONTEXT');
         for (const [key, value] of Object.entries(userProfile)) {
@@ -412,7 +435,7 @@ export class SubAgentExecutor {
     if (this.scallopStore) {
       try {
         const results = await this.scallopStore.search(task, {
-          userId: 'default',
+          userId,
           limit: 5,
           minProminence: 0.2,
         });

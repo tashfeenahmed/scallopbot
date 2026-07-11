@@ -18,6 +18,12 @@ import { createMockLLMProvider, createMockEmbeddingProvider } from './helpers.js
 
 const testLogger = pino({ level: 'silent' });
 const DAY_MS = 24 * 60 * 60 * 1000;
+const SYNTHETIC_OWNER_ID = 'api:project-atlas-owner';
+const SYNTHETIC_OWNER_ALIASES = ['project-atlas-owner', SYNTHETIC_OWNER_ID] as const;
+const SYNTHETIC_SESSION_METADATA = {
+  userId: SYNTHETIC_OWNER_ID,
+  channelId: 'api',
+} as const;
 
 // ---------------------------------------------------------------------------
 // Suite 1: Self-reflection via sleepTick
@@ -79,8 +85,8 @@ describe('E2E Cognitive Reflection & Gaps', () => {
       const db = scallopStore.getDatabase();
 
       // Create sessions first (foreign key constraint on session_summaries)
-      db.createSession('sess-1');
-      db.createSession('sess-2');
+      db.createSession('sess-1', SYNTHETIC_SESSION_METADATA);
+      db.createSession('sess-2', SYNTHETIC_SESSION_METADATA);
 
       // Seed 2 session summaries within last 24 hours (qualify for reflection)
       db.addSessionSummary({
@@ -119,6 +125,7 @@ describe('E2E Cognitive Reflection & Gaps', () => {
         logger: testLogger,
         fusionProvider,
         workspace,
+        canonicalSingleUserIds: SYNTHETIC_OWNER_ALIASES,
       });
     }, 30000);
 
@@ -255,8 +262,8 @@ describe('E2E Cognitive Reflection & Gaps', () => {
         .run(staleDate, staleDate, goalMem.id);
 
       // Seed 2 session summaries (needed for scanForGaps input)
-      db.createSession('gap-sess-1');
-      db.createSession('gap-sess-2');
+      db.createSession('gap-sess-1', SYNTHETIC_SESSION_METADATA);
+      db.createSession('gap-sess-2', SYNTHETIC_SESSION_METADATA);
       db.addSessionSummary({
         sessionId: 'gap-sess-1',
         userId: 'default',
@@ -288,6 +295,7 @@ describe('E2E Cognitive Reflection & Gaps', () => {
         scallopStore,
         logger: testLogger,
         fusionProvider,
+        canonicalSingleUserIds: SYNTHETIC_OWNER_ALIASES,
       });
     }, 30000);
 
@@ -404,8 +412,8 @@ describe('E2E Cognitive Reflection & Gaps', () => {
         .run(staleDate, staleDate, goalMem.id);
 
       // Seed 2 session summaries
-      db.createSession('cons-sess-1');
-      db.createSession('cons-sess-2');
+      db.createSession('cons-sess-1', SYNTHETIC_SESSION_METADATA);
+      db.createSession('cons-sess-2', SYNTHETIC_SESSION_METADATA);
       db.addSessionSummary({
         sessionId: 'cons-sess-1',
         userId: 'default',
@@ -437,6 +445,7 @@ describe('E2E Cognitive Reflection & Gaps', () => {
         scallopStore,
         logger: testLogger,
         fusionProvider,
+        canonicalSingleUserIds: SYNTHETIC_OWNER_ALIASES,
       });
     }, 30000);
 

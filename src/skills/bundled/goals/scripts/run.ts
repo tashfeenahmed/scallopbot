@@ -57,6 +57,8 @@ function getDbPath(): string {
   return path.join(workspace, 'memories.db');
 }
 
+const USER_ID = process.env.SKILL_STATE_USER_ID || process.env.SKILL_USER_ID || 'default';
+
 // Parse due date string
 function parseDueDate(dateStr: string): number | null {
   const lower = dateStr.toLowerCase().trim();
@@ -126,7 +128,8 @@ function outputResult(result: SkillResult): void {
 
 // Get goal by ID
 function getGoal(db: Database.Database, id: string): GoalItem | null {
-  const row = db.prepare('SELECT * FROM memories WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+  const row = db.prepare('SELECT * FROM memories WHERE id = ? AND user_id = ?')
+    .get(id, USER_ID) as Record<string, unknown> | undefined;
   if (!row) return null;
 
   const metadata = row.metadata ? JSON.parse(row.metadata as string) : {};
@@ -183,8 +186,8 @@ function updateProgress(db: Database.Database, id: string): void {
   const progress = calculateProgress(db, id);
   const newMetadata = { ...item.metadata, progress };
 
-  db.prepare('UPDATE memories SET metadata = ?, updated_at = ? WHERE id = ?')
-    .run(JSON.stringify(newMetadata), Date.now(), id);
+  db.prepare('UPDATE memories SET metadata = ?, updated_at = ? WHERE id = ? AND user_id = ?')
+    .run(JSON.stringify(newMetadata), Date.now(), id, USER_ID);
 }
 
 // Schedule check-in
@@ -225,20 +228,26 @@ function scheduleCheckin(db: Database.Database, goal: GoalItem): void {
   }
 
   db.prepare(`
-    INSERT INTO scheduled_items (id, user_id, session_id, source, type, message, context, trigger_at, recurring, status, source_memory_id, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO scheduled_items (
+      id, user_id, session_id, source, kind, type, message, message_provenance,
+      context, trigger_at, recurring, status, source_memory_id, board_status,
+      created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     nanoid(),
     goal.userId,
     null,
     'agent',
+    'nudge',
     'goal_checkin',
     message,
+    'generated',
     JSON.stringify({ goalId: goal.id, goalTitle: goal.content, progress: goal.metadata.progress ?? 0 }),
     triggerAt,
     null,
     'pending',
     goal.id,
+    'scheduled',
     now,
     now
   );
@@ -288,7 +297,7 @@ function formatGoalTree(db: Database.Database, goalId: string): string {
 // Actions
 
 function createItem(db: Database.Database, args: GoalArgs): SkillResult {
-  const userId = process.env.SKILL_USER_ID || 'default';
+  const userId = USER_ID;
 
   if (!args.type) {
     return { success: false, output: '', error: 'Missing required parameter: type', exitCode: 1 };
@@ -387,7 +396,7 @@ function createItem(db: Database.Database, args: GoalArgs): SkillResult {
 }
 
 function listItems(db: Database.Database, args: GoalArgs): SkillResult {
-  const userId = process.env.SKILL_USER_ID || 'default';
+  const userId = USER_ID;
 
   const rows = db.prepare(`
     SELECT * FROM memories
@@ -466,8 +475,8 @@ function activateItem(db: Database.Database, args: GoalArgs): SkillResult {
   }
 
   const newMetadata = { ...item.metadata, status: 'active' as const };
-  db.prepare('UPDATE memories SET metadata = ?, updated_at = ? WHERE id = ?')
-    .run(JSON.stringify(newMetadata), Date.now(), args.id);
+  db.prepare('UPDATE memories SET metadata = ?, updated_at = ? WHERE id = ? AND user_id = ?')
+    .run(JSON.stringify(newMetadata), Date.now(), args.id, USER_ID);
 
   // Schedule check-in for goals
   if (item.metadata.goalType === 'goal' && item.metadata.checkinFrequency) {
@@ -494,8 +503,8 @@ function completeItem(db: Database.Database, args: GoalArgs): SkillResult {
 
   const now = Date.now();
   const newMetadata = { ...item.metadata, status: 'completed' as const, completedAt: now };
-  db.prepare('UPDATE memories SET metadata = ?, updated_at = ? WHERE id = ?')
-    .run(JSON.stringify(newMetadata), now, args.id);
+  db.prepare('UPDATE memories SET metadata = ?, updated_at = ? WHERE id = ? AND user_id = ?')
+    .run(JSON.stringify(newMetadata), now, args.id, USER_ID);
 
   // Update parent progress
   if (item.metadata.parentId) {
@@ -525,8 +534,8 @@ function reopenItem(db: Database.Database, args: GoalArgs): SkillResult {
   }
 
   const newMetadata = { ...item.metadata, status: 'active' as const, completedAt: undefined };
-  db.prepare('UPDATE memories SET metadata = ?, updated_at = ? WHERE id = ?')
-    .run(JSON.stringify(newMetadata), Date.now(), args.id);
+  db.prepare('UPDATE memories SET metadata = ?, updated_at = ? WHERE id = ? AND user_id = ?')
+    .run(JSON.stringify(newMetadata), Date.now(), args.id, USER_ID);
 
   // Update parent progress
   if (item.metadata.parentId) {
@@ -592,8 +601,8 @@ function updateItem(db: Database.Database, args: GoalArgs): SkillResult {
     updates.push(`tags: [${args.tags.join(', ')}]`);
   }
 
-  db.prepare('UPDATE memories SET content = ?, metadata = ?, updated_at = ? WHERE id = ?')
-    .run(content, JSON.stringify(newMetadata), now, args.id);
+  db.prepare('UPDATE memories SET content = ?, metadata = ?, updated_at = ? WHERE id = ? AND user_id = ?')
+    .run(content, JSON.stringify(newMetadata), now, args.id, USER_ID);
 
   return {
     success: true,
@@ -622,7 +631,7 @@ function deleteItem(db: Database.Database, args: GoalArgs): SkillResult {
   db.prepare('DELETE FROM memory_relations WHERE source_id = ? OR target_id = ?').run(args.id, args.id);
 
   // Delete the item
-  db.prepare('DELETE FROM memories WHERE id = ?').run(args.id);
+  db.prepare('DELETE FROM memories WHERE id = ? AND user_id = ?').run(args.id, USER_ID);
 
   // Update parent progress
   if (item.metadata.parentId) {

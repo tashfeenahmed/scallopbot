@@ -112,6 +112,28 @@ describe('gardener-scheduling', () => {
 
       expect(db.getScheduledItemsByUser('telegram:123')[0].sessionId).toBe('conversation-1');
     });
+
+    it('promotes stale-board context provenance to sourceItemId', () => {
+      const source = db.addScheduledItem({
+        userId: 'user-1', sessionId: null, source: 'user', kind: 'task',
+        type: 'reminder', message: 'Publish Atlas', context: null,
+        triggerAt: Date.now() + 60_000, recurring: null, sourceMemoryId: null,
+        boardStatus: 'waiting',
+      });
+      const result = scheduleProactiveItem({
+        db,
+        userId: 'user-1',
+        message: 'Should the Atlas task stay open?',
+        context: JSON.stringify({ gapType: 'stale_board_item', sourceId: source.id }),
+        type: 'follow_up',
+        quietHours: { start: 2, end: 5 },
+        activeHours: [],
+        lastProactiveAt: null,
+        urgency: 'medium',
+      });
+
+      expect(db.getScheduledItem(result.itemId)?.sourceItemId).toBe(source.id);
+    });
   });
 
   describe('getLastProactiveAt', () => {

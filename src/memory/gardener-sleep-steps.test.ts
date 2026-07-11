@@ -16,6 +16,7 @@ import {
 
 const TEST_DB_PATH = '/tmp/gardener-sleep-steps-test.db';
 const logger = pino({ level: 'silent' });
+const OWNER_ALIASES = ['owner-example', 'telegram:owner-example'] as const;
 
 function cleanupTestDb() {
   try { fs.unlinkSync(TEST_DB_PATH); } catch { /* ignore */ }
@@ -102,6 +103,7 @@ function buildCtx(
     logger: logger.child({ component: 'gardener' }),
     quietHours: { start: 2, end: 5 },
     disableArchival: false,
+    canonicalSingleUserIds: OWNER_ALIASES,
     ...overrides,
   };
 }
@@ -202,11 +204,14 @@ describe('gardener-sleep-steps', () => {
       const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'gardener-reflection-'));
 
       // Create a session and session summary from today
-      const session = db.createSession('reflect-session');
+      const session = db.createSession('reflect-session', {
+        userId: 'telegram:owner-example',
+        channelId: 'telegram',
+      });
       db.addSessionMessage(session.id, 'user', 'I have been thinking about my career change');
       db.addSessionSummary({
         sessionId: session.id,
-        userId: 'user-1',
+        userId: 'default',
         summary: 'User discussed career change plans',
         topics: ['career'],
         messageCount: 1,
@@ -241,10 +246,13 @@ describe('gardener-sleep-steps', () => {
         complete: vi.fn().mockRejectedValue(new Error('reflection error')),
       };
 
-      const session = db.createSession('fail-session');
+      const session = db.createSession('fail-session', {
+        userId: 'telegram:owner-example',
+        channelId: 'telegram',
+      });
       db.addSessionSummary({
         sessionId: session.id,
-        userId: 'user-1',
+        userId: 'default',
         summary: 'Test',
         topics: [],
         messageCount: 1,

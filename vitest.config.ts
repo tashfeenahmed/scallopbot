@@ -5,6 +5,12 @@ export default defineConfig({
     globals: true,
     environment: 'node',
     testTimeout: 15000,
+    // Several E2E suites spawn real subprocesses, SQLite connections, and
+    // loopback servers. Unbounded file-level parallelism can starve those
+    // processes until their behavioral timeout expires, producing unrelated
+    // one-off failures on high-core hosts. Four workers retains parallelism
+    // while keeping the public suite deterministic under load.
+    maxWorkers: 4,
     include: ['src/**/*.test.ts'],
     exclude: ['src/eval/**'],
     coverage: {

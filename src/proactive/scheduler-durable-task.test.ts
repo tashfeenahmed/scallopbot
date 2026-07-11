@@ -14,9 +14,9 @@ function middayTimezone(): string {
   return offset >= 0 ? `Etc/GMT-${offset}` : `Etc/GMT+${-offset}`;
 }
 
-function sessionManager(id: string): SessionManager {
+function sessionManager(db: ScallopDatabase, id: string): SessionManager {
   return {
-    createSession: vi.fn().mockResolvedValue({ id }),
+    createSession: vi.fn().mockImplementation(async (metadata) => db.createSession(id, metadata)),
   } as unknown as SessionManager;
 }
 
@@ -63,7 +63,7 @@ describe('UnifiedScheduler durable task execution', () => {
       taskLeaseMs: 2_000,
       taskHeartbeatMs: 250,
       taskRetryDelayMs: 1_000,
-      sessionManager: sessionManager(`session:${workerId}`),
+      sessionManager: sessionManager(db, `session:${workerId}`),
       subAgentExecutor: { spawnAndWait } as unknown as SubAgentExecutor,
       router,
       onSendMessage: send,
@@ -118,6 +118,47 @@ describe('UnifiedScheduler durable task execution', () => {
       leaseToken: null,
     });
     expect(stored?.result).toMatchObject({ taskComplete: true, costUsd: 0.0042 });
+  });
+
+  it('executes a zero-time durable task without delivering a zero-time nudge', async () => {
+    const task = addDueTask(db, {
+      triggerAt: 0,
+      message: 'Ready whenever a worker is available',
+    });
+    const unscheduledNudge = db.addScheduledItem({
+      userId: 'default',
+      sessionId: null,
+      source: 'user',
+      kind: 'nudge',
+      type: 'reminder',
+      message: 'Inbox note with no delivery time',
+      context: null,
+      triggerAt: 0,
+      recurring: null,
+      sourceMemoryId: null,
+      boardStatus: 'inbox',
+    });
+    const spawnAndWait = vi.fn().mockResolvedValue({
+      response: 'The zero-time board task is complete.',
+      iterationsUsed: 1,
+      taskComplete: true,
+      costUsd: 0.001,
+    });
+    const send = vi.fn().mockResolvedValue(true);
+    const scheduler = makeScheduler('zero-time-worker', spawnAndWait, send);
+
+    await scheduler.evaluate();
+
+    expect(spawnAndWait).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(db.getScheduledItem(task.id)).toMatchObject({
+      status: 'fired',
+      boardStatus: 'done',
+    });
+    expect(db.getScheduledItem(unscheduledNudge.id)).toMatchObject({
+      status: 'pending',
+      boardStatus: 'inbox',
+    });
   });
 
   it('reclaims a crashed lease and succeeds on the next durable attempt', async () => {
@@ -253,6 +294,7 @@ describe('UnifiedScheduler durable task execution', () => {
   });
 
   it('preserves the originating session so channel tool policy is re-applied', async () => {
+    db.createSession('telegram-parent-session', { userId: 'default', channelId: 'telegram' });
     addDueTask(db, { sessionId: 'telegram-parent-session' });
     const spawnAndWait = vi.fn().mockResolvedValue({
       response: 'Policy-scoped result.',
@@ -268,6 +310,45 @@ describe('UnifiedScheduler durable task execution', () => {
       'telegram-parent-session',
       expect.any(Object),
     );
+  });
+
+  it('creates a sessionless scheduled sub-agent parent for the task owner', async () => {
+    addDueTask(db, { userId: 'telegram:owner-alpha' });
+    const spawnAndWait = vi.fn().mockResolvedValue({
+      response: 'Owner-scoped result.',
+      iterationsUsed: 1,
+      taskComplete: true,
+      costUsd: 0.001,
+    });
+    const scheduler = makeScheduler('owner-worker', spawnAndWait);
+
+    await scheduler.evaluate();
+
+    const parentSessionId = spawnAndWait.mock.calls[0][0] as string;
+    expect(db.getSession(parentSessionId)?.metadata).toMatchObject({
+      source: 'scheduler',
+      userId: 'telegram:owner-alpha',
+      channelId: 'telegram',
+    });
+  });
+
+  it('rejects a cross-owner source session and uses an owner-scoped fallback parent', async () => {
+    db.createSession('foreign-parent', { userId: 'telegram:owner-beta', channelId: 'telegram' });
+    addDueTask(db, { userId: 'telegram:owner-alpha', sessionId: 'foreign-parent' });
+    const spawnAndWait = vi.fn().mockResolvedValue({
+      response: 'Safely isolated result.',
+      iterationsUsed: 1,
+      taskComplete: true,
+      costUsd: 0.001,
+    });
+    const scheduler = makeScheduler('isolated-worker', spawnAndWait);
+
+    await scheduler.evaluate();
+
+    const parentSessionId = spawnAndWait.mock.calls[0][0] as string;
+    expect(parentSessionId).not.toBe('foreign-parent');
+    expect(db.getSession(parentSessionId)?.metadata?.userId).toBe('telegram:owner-alpha');
+    expect(db.getSessionMessages('foreign-parent')).toEqual([]);
   });
 
   it('rewrites a scheduled worker internal plan before user delivery', async () => {

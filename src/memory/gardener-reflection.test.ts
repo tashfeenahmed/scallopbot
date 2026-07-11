@@ -29,6 +29,7 @@ import type { LLMProvider, CompletionResponse } from '../providers/types.js';
 
 const TEST_DB_PATH = '/tmp/gardener-reflection-test.db';
 const logger = pino({ level: 'silent' });
+const OWNER_ALIASES = ['owner-example', 'telegram:owner-example'] as const;
 
 function cleanupTestDb() {
   for (const suffix of ['', '-wal', '-shm']) {
@@ -208,7 +209,10 @@ function seedRecentSessionSummary(
 ) {
   const sessionId = opts?.sessionId ?? `session-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   // Create session first (foreign key constraint)
-  db.createSession(sessionId);
+  db.createSession(sessionId, {
+    userId: 'telegram:owner-example',
+    channelId: 'telegram',
+  });
   return db.addSessionSummary({
     sessionId,
     userId: opts?.userId ?? 'default',
@@ -231,7 +235,10 @@ function seedOldSessionSummary(
 ) {
   const sessionId = opts?.sessionId ?? `session-old-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   // Create session first (foreign key constraint)
-  db.createSession(sessionId);
+  db.createSession(sessionId, {
+    userId: 'telegram:owner-example',
+    channelId: 'telegram',
+  });
 
   // Temporarily mock Date.now to return a timestamp from 2 days ago
   const twoDaysAgo = Date.now() - 2 * 24 * 60 * 60 * 1000;
@@ -290,6 +297,7 @@ describe('BackgroundGardener self-reflection integration', () => {
       scallopStore: store,
       logger,
       fusionProvider,
+      canonicalSingleUserIds: OWNER_ALIASES,
       workspace,
     });
 
@@ -355,6 +363,7 @@ describe('BackgroundGardener self-reflection integration', () => {
       scallopStore: store,
       logger,
       fusionProvider,
+      canonicalSingleUserIds: OWNER_ALIASES,
       workspace,
     });
 
@@ -399,6 +408,7 @@ describe('BackgroundGardener self-reflection integration', () => {
       scallopStore: store,
       logger,
       fusionProvider,
+      canonicalSingleUserIds: OWNER_ALIASES,
       workspace,
     });
 
@@ -440,6 +450,7 @@ describe('BackgroundGardener self-reflection integration', () => {
       scallopStore: store,
       logger,
       fusionProvider,
+      canonicalSingleUserIds: OWNER_ALIASES,
       workspace,
     });
 
@@ -482,6 +493,7 @@ describe('BackgroundGardener self-reflection integration', () => {
       scallopStore: store,
       logger,
       fusionProvider,
+      canonicalSingleUserIds: OWNER_ALIASES,
       workspace,
     });
 
@@ -535,6 +547,7 @@ describe('BackgroundGardener self-reflection integration', () => {
       scallopStore: store,
       logger,
       fusionProvider,
+      canonicalSingleUserIds: OWNER_ALIASES,
       // No workspace option
     });
 

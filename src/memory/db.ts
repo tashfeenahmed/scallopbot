@@ -339,6 +339,33 @@ export type ScheduledItemType =
  */
 export type ScheduledItemStatus = 'pending' | 'processing' | 'fired' | 'dismissed' | 'expired' | 'acted';
 
+export type ProactiveSourceReplyAction = 'archive' | 'done' | 'snooze';
+
+export interface ProactiveSourceReplyTransactionResult {
+  acknowledged: boolean;
+  replayed: boolean;
+  sourceAction: {
+    action: ProactiveSourceReplyAction;
+    title: string;
+    applied: boolean;
+  } | null;
+}
+
+export type ProactiveDeliveryReservationResult =
+  | { outcome: 'reserved'; token: string }
+  | { outcome: 'daily_cap'; retryAt: number }
+  | { outcome: 'min_gap'; retryAt: number };
+
+export interface ProactiveDeliveryReceiptRow {
+  id: number;
+  channel: string;
+  channelMessageId: string;
+  scheduledItemId: string;
+  ownerUserId: string;
+  ambiguous: boolean;
+  createdAt: number;
+}
+
 // ============ Board (Kanban) Types ============
 
 /**
@@ -416,6 +443,8 @@ export interface ScheduledItem {
 
   // Metadata
   sourceMemoryId: string | null; // For agent-created items
+  /** Board item whose state caused this generated wrapper/nudge. */
+  sourceItemId: string | null;
 
   // Board (kanban) fields
   boardStatus: BoardStatus | null;   // null = legacy item, compute from status
@@ -664,6 +693,7 @@ export class ScallopDatabase {
 
         -- Metadata
         source_memory_id TEXT,             -- For agent-created items
+        source_item_id TEXT,               -- Board item that caused a generated wrapper/nudge
 
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
@@ -809,6 +839,53 @@ export class ScallopDatabase {
       CREATE INDEX IF NOT EXISTS idx_proactive_send_log_user_time
         ON proactive_send_log(user_id, sent_at DESC);
 
+      -- Cross-process delivery slots. A short-lived reservation closes the
+      -- check-then-send race between scheduler instances; successful delivery
+      -- atomically becomes a proactive_send_log row.
+      CREATE TABLE IF NOT EXISTS proactive_delivery_reservations (
+        token TEXT PRIMARY KEY,
+        item_id TEXT NOT NULL UNIQUE,
+        user_id TEXT NOT NULL,
+        reserved_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_proactive_delivery_reservation_user
+        ON proactive_delivery_reservations(user_id, expires_at);
+
+      -- Append-only provenance for channel deliveries. Message IDs are scoped
+      -- by channel and owner because (for example) Telegram message_id values
+      -- are chat-local. Multiple rows for one channel message deliberately
+      -- represent ambiguity after queue combining and must never be collapsed.
+      CREATE TABLE IF NOT EXISTS proactive_delivery_receipts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        channel TEXT NOT NULL,
+        channel_message_id TEXT NOT NULL,
+        scheduled_item_id TEXT NOT NULL,
+        owner_user_id TEXT NOT NULL,
+        ambiguous INTEGER NOT NULL DEFAULT 0 CHECK (ambiguous IN (0, 1)),
+        created_at INTEGER NOT NULL,
+        UNIQUE(channel, channel_message_id, scheduled_item_id, owner_user_id, ambiguous)
+      );
+      CREATE INDEX IF NOT EXISTS idx_proactive_delivery_receipt_lookup
+        ON proactive_delivery_receipts(channel, channel_message_id, owner_user_id);
+      CREATE INDEX IF NOT EXISTS idx_proactive_delivery_receipt_item
+        ON proactive_delivery_receipts(scheduled_item_id, created_at);
+
+      -- One trusted direct-reply action per delivered wrapper. This ledger is
+      -- the idempotency key that prevents a retry from extending Snooze again.
+      CREATE TABLE IF NOT EXISTS proactive_source_reply_actions (
+        wrapper_id TEXT PRIMARY KEY,
+        source_item_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        action TEXT NOT NULL CHECK (action IN ('archive', 'done', 'snooze')),
+        source_title TEXT NOT NULL,
+        applied INTEGER NOT NULL,
+        source_trigger_at INTEGER,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_proactive_source_reply_source
+        ON proactive_source_reply_actions(source_item_id, created_at);
+
       -- Observability log of proactive DECISIONS (not just sends): every time
       -- the evaluator or scheduler decides to create / skip / suppress / deliver
       -- a proactive message, it records why here. Powers the why-no-proact
@@ -923,13 +1000,6 @@ export class ScallopDatabase {
     // Migration: Add timezone column to bot_config
     this.migrateAddTimezoneColumn();
 
-    // Migration: Consolidate all memory user_ids to 'default' (single-user bot)
-    this.migrateConsolidateMemoryUserIds();
-
-    // Migration: Consolidate session_summaries and scheduled_items user_ids to 'default'
-    this.migrateConsolidateSessionSummaryUserIds();
-    this.migrateConsolidateScheduledItemUserIds();
-
     // Migration: Add source memory columns (learned_from, times_confirmed, contradiction_ids)
     this.migrateAddSourceMemoryColumns();
 
@@ -945,8 +1015,15 @@ export class ScallopDatabase {
     // Migration: Add board (kanban) columns to scheduled_items
     this.migrateAddBoardColumns();
 
+    // Migration: Link generated wrapper nudges to the board item that caused them.
+    this.migrateAddScheduledSourceItem();
+
     // Migration: Add durable task lease/retry/handoff columns
     this.migrateAddBoardExecutionColumns();
+
+    // Migration: Preserve and repair legacy rows whose lifecycle and board
+    // columns disagree, then enforce the invariant for every future writer.
+    this.migrateReconcileScheduledItemStates();
 
     // Migration: Create FTS5 virtual table for transcript chunk search
     this.migrateCreateTranscriptFTS();
@@ -1115,70 +1192,6 @@ export class ScallopDatabase {
     } catch (error) {
       if (error instanceof Error && !error.message.includes('duplicate column')) {
         console.warn(`[migration] migrateAddTimezoneColumn: ${error.message}`);
-      }
-    }
-  }
-
-  /**
-   * Consolidate all memory user_ids to 'default' (single-user bot).
-   * Memories may have been stored under channel-prefixed userIds like
-   * "telegram:12345" or "api:ws-xxx" — merge them all to 'default'.
-   */
-  private migrateConsolidateMemoryUserIds(): void {
-    try {
-      const result = this.db.prepare(
-        "UPDATE memories SET user_id = 'default' WHERE user_id != 'default'"
-      ).run();
-      if (result.changes > 0) {
-        // Keep denormalized LSH lookup keys aligned with their source rows.
-        this.db.prepare(
-          "UPDATE memory_embedding_lsh SET user_id = 'default' WHERE user_id != 'default'"
-        ).run();
-        // Also consolidate user_profiles
-        this.db.prepare(
-          "DELETE FROM user_profiles WHERE user_id != 'default' AND key IN (SELECT key FROM user_profiles WHERE user_id = 'default')"
-        ).run();
-        this.db.prepare(
-          "UPDATE user_profiles SET user_id = 'default' WHERE user_id != 'default'"
-        ).run();
-      }
-    } catch (error) {
-      if (error instanceof Error) {
-        console.warn(`[migration] migrateConsolidateMemoryUserIds: ${error.message}`);
-      }
-    }
-  }
-
-  /**
-   * Consolidate all session_summaries user_ids to 'default' (single-user bot).
-   * Session summaries may have been stored under channel-prefixed userIds like
-   * "telegram:12345" — merge them all to 'default'.
-   */
-  private migrateConsolidateSessionSummaryUserIds(): void {
-    try {
-      this.db.prepare(
-        "UPDATE session_summaries SET user_id = 'default' WHERE user_id != 'default'"
-      ).run();
-    } catch (error) {
-      if (error instanceof Error) {
-        console.warn(`[migration] migrateConsolidateSessionSummaryUserIds: ${error.message}`);
-      }
-    }
-  }
-
-  /**
-   * Consolidate all scheduled_items user_ids to 'default' (single-user bot).
-   * Scheduled items may have been stored under channel-prefixed userIds like
-   * "telegram:12345" — merge them all to 'default'.
-   */
-  private migrateConsolidateScheduledItemUserIds(): void {
-    try {
-      this.db.prepare(
-        "UPDATE scheduled_items SET user_id = 'default' WHERE user_id != 'default'"
-      ).run();
-    } catch (error) {
-      if (error instanceof Error) {
-        console.warn(`[migration] migrateConsolidateScheduledItemUserIds: ${error.message}`);
       }
     }
   }
@@ -1388,12 +1401,57 @@ export class ScallopDatabase {
             WHEN status = 'pending' AND trigger_at > 0 THEN 'scheduled'
             WHEN status = 'pending' THEN 'inbox'
             WHEN status = 'processing' THEN 'in_progress'
-            WHEN status IN ('fired', 'acted') THEN 'done'
+            -- A row old enough to lack a board projection is historical. Keep
+            -- its delivered lifecycle, but do not surface it as newly done or
+            -- include it in a post-upgrade completion digest.
+            WHEN status IN ('fired', 'acted') THEN 'archived'
             WHEN status IN ('dismissed', 'expired') THEN 'archived'
             ELSE 'inbox'
           END
           WHERE board_status IS NULL
         `);
+      },
+    );
+  }
+
+  /** Add first-class provenance from a generated nudge to its source board item. */
+  private migrateAddScheduledSourceItem(): void {
+    this.runRequiredScheduledItemsMigration(
+      'migrateAddScheduledSourceItem',
+      [['source_item_id', 'TEXT DEFAULT NULL']],
+      () => {
+        // Lossless legacy backfill: only board-gap wrappers whose JSON sourceId
+        // resolves to a same-owner scheduled item are linked. Memory/session IDs
+        // and cross-owner references are deliberately ignored.
+        this.db.exec(`
+          UPDATE scheduled_items AS wrapper
+          SET source_item_id = json_extract(
+            CASE WHEN json_valid(wrapper.context) THEN wrapper.context ELSE '{}' END,
+            '$.sourceId'
+          )
+          WHERE wrapper.source_item_id IS NULL
+            AND wrapper.source = 'agent'
+            AND json_valid(wrapper.context)
+            AND json_extract(
+              CASE WHEN json_valid(wrapper.context) THEN wrapper.context ELSE '{}' END,
+              '$.gapType'
+            ) IN ('stale_board_item', 'blocked_item')
+            AND typeof(json_extract(
+              CASE WHEN json_valid(wrapper.context) THEN wrapper.context ELSE '{}' END,
+              '$.sourceId'
+            )) = 'text'
+            AND EXISTS (
+              SELECT 1
+              FROM scheduled_items AS source
+              WHERE source.id = json_extract(
+                  CASE WHEN json_valid(wrapper.context) THEN wrapper.context ELSE '{}' END,
+                  '$.sourceId'
+                )
+                AND source.id != wrapper.id
+                AND source.user_id = wrapper.user_id
+            )
+        `);
+        this.db.exec('CREATE INDEX IF NOT EXISTS idx_scheduled_source_item ON scheduled_items(source_item_id)');
       },
     );
   }
@@ -1436,6 +1494,165 @@ export class ScallopDatabase {
         }
       },
     );
+  }
+
+  /**
+   * Reconcile the two scheduled-item state projections without deleting or
+   * reviving anything. The full pre-repair row is retained as JSON so an
+   * operator can audit or restore every historical value.
+   *
+   * `status` is canonical. Terminal lifecycle rows can therefore never look
+   * active to the board/proactive scanner. Conversely, a pending row already
+   * marked terminal by the board is quarantined as expired instead of being
+   * made executable again.
+   */
+  private migrateReconcileScheduledItemStates(): void {
+    const migrate = this.db.transaction(() => {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS scheduled_item_state_reconciliation_audit (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          item_id TEXT NOT NULL,
+          previous_status TEXT NOT NULL,
+          previous_board_status TEXT,
+          reconciled_status TEXT NOT NULL,
+          reconciled_board_status TEXT NOT NULL,
+          reason TEXT NOT NULL,
+          item_snapshot TEXT NOT NULL,
+          reconciled_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_scheduled_state_audit_item
+          ON scheduled_item_state_reconciliation_audit(item_id, reconciled_at);
+      `);
+
+      const rows = this.db.prepare(`
+        SELECT * FROM scheduled_items
+        WHERE NOT (
+          (status = 'pending' AND board_status IN ('inbox', 'backlog', 'scheduled', 'waiting'))
+          OR (status = 'processing' AND board_status = 'in_progress')
+          OR (status IN ('fired', 'acted') AND board_status IN ('done', 'archived'))
+          OR (status IN ('dismissed', 'expired') AND board_status = 'archived')
+        )
+      `).all() as Record<string, unknown>[];
+
+      const audit = this.db.prepare(`
+        INSERT INTO scheduled_item_state_reconciliation_audit (
+          item_id, previous_status, previous_board_status,
+          reconciled_status, reconciled_board_status,
+          reason, item_snapshot, reconciled_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      const repair = this.db.prepare(`
+        UPDATE scheduled_items
+        SET status = ?, board_status = ?,
+            last_error = CASE
+              WHEN ? = 'quarantined_terminal_board_conflict'
+                THEN COALESCE(last_error, 'Quarantined during scheduled-item state reconciliation')
+              ELSE last_error
+            END
+        WHERE id = ?
+      `);
+      const now = Date.now();
+
+      for (const row of rows) {
+        const status = String(row.status);
+        const boardStatus = row.board_status == null ? null : String(row.board_status);
+        let reconciledStatus: ScheduledItemStatus;
+        let reconciledBoardStatus: BoardStatus;
+        let reason: string;
+
+        if (status === 'processing' && boardStatus === 'done') {
+          // A terminal board projection records a user/worker completion that
+          // must win over a stale processing flag. Archive the historical row
+          // so startup cannot execute or digest-notify it again.
+          reconciledStatus = 'fired';
+          reconciledBoardStatus = 'archived';
+          reason = 'quarantined_processing_done_conflict';
+        } else if (status === 'processing' && boardStatus === 'archived') {
+          reconciledStatus = 'dismissed';
+          reconciledBoardStatus = 'archived';
+          reason = 'quarantined_processing_archived_conflict';
+        } else if (status === 'pending' && (boardStatus === 'done' || boardStatus === 'archived')) {
+          // A terminal board action must never be undone by making the row live.
+          reconciledStatus = 'expired';
+          reconciledBoardStatus = 'archived';
+          reason = 'quarantined_terminal_board_conflict';
+        } else if (status === 'pending') {
+          reconciledStatus = 'pending';
+          reconciledBoardStatus = Number(row.trigger_at) > 0 ? 'scheduled' : 'inbox';
+          reason = 'repaired_pending_board_projection';
+        } else if (status === 'processing') {
+          // Keep in-flight/leased work in-flight; never expire or requeue it here.
+          reconciledStatus = 'processing';
+          reconciledBoardStatus = 'in_progress';
+          reason = 'repaired_processing_board_projection';
+        } else if (status === 'fired' || status === 'acted') {
+          reconciledStatus = status;
+          // A legacy completed row in an active-looking column is historical,
+          // not newly completed. Archive it so startup cannot re-notify it in
+          // a morning digest. The fired/acted delivery record remains intact.
+          reconciledBoardStatus = 'archived';
+          reason = 'quarantined_completed_board_conflict';
+        } else {
+          // Includes the real-world expired+in_progress ghost. Preserve its
+          // lifecycle meaning and archive only its misleading board projection.
+          reconciledStatus = status === 'dismissed' ? 'dismissed' : 'expired';
+          reconciledBoardStatus = 'archived';
+          reason = 'repaired_terminal_board_projection';
+        }
+
+        audit.run(
+          String(row.id),
+          status,
+          boardStatus,
+          reconciledStatus,
+          reconciledBoardStatus,
+          reason,
+          JSON.stringify(row),
+          now,
+        );
+        repair.run(reconciledStatus, reconciledBoardStatus, reason, row.id);
+      }
+
+      // Persisted triggers protect direct SQLite writers, including bundled
+      // skills running in their own process. Completion history may be moved
+      // from done to archived, but no terminal row may look active.
+      this.db.exec(`
+        DROP TRIGGER IF EXISTS trg_scheduled_items_state_guard_insert;
+        DROP TRIGGER IF EXISTS trg_scheduled_items_state_guard_update;
+
+        CREATE TRIGGER trg_scheduled_items_state_guard_insert
+        BEFORE INSERT ON scheduled_items
+        WHEN CASE NEW.status
+          WHEN 'pending' THEN COALESCE(NEW.board_status, '') NOT IN ('inbox', 'backlog', 'scheduled', 'waiting')
+          WHEN 'processing' THEN COALESCE(NEW.board_status, '') != 'in_progress'
+          WHEN 'fired' THEN COALESCE(NEW.board_status, '') NOT IN ('done', 'archived')
+          WHEN 'acted' THEN COALESCE(NEW.board_status, '') NOT IN ('done', 'archived')
+          WHEN 'dismissed' THEN COALESCE(NEW.board_status, '') != 'archived'
+          WHEN 'expired' THEN COALESCE(NEW.board_status, '') != 'archived'
+          ELSE 1
+        END
+        BEGIN
+          SELECT RAISE(ABORT, 'scheduled_items status/board_status invariant violation');
+        END;
+
+        CREATE TRIGGER trg_scheduled_items_state_guard_update
+        BEFORE UPDATE OF status, board_status ON scheduled_items
+        WHEN CASE NEW.status
+          WHEN 'pending' THEN COALESCE(NEW.board_status, '') NOT IN ('inbox', 'backlog', 'scheduled', 'waiting')
+          WHEN 'processing' THEN COALESCE(NEW.board_status, '') != 'in_progress'
+          WHEN 'fired' THEN COALESCE(NEW.board_status, '') NOT IN ('done', 'archived')
+          WHEN 'acted' THEN COALESCE(NEW.board_status, '') NOT IN ('done', 'archived')
+          WHEN 'dismissed' THEN COALESCE(NEW.board_status, '') != 'archived'
+          WHEN 'expired' THEN COALESCE(NEW.board_status, '') != 'archived'
+          ELSE 1
+        END
+        BEGIN
+          SELECT RAISE(ABORT, 'scheduled_items status/board_status invariant violation');
+        END;
+      `);
+    });
+
+    migrate.immediate();
   }
 
   /**
@@ -2520,21 +2737,30 @@ export class ScallopDatabase {
    * Get recent messages belonging to one user across their sessions.
    *
    * Session messages do not carry a user_id themselves; the owning session
-   * does. Keeping the join here avoids accidental cross-user chat context in
-   * background tasks and proactive evaluation. `default` remains a backwards-
-   * compatible single-user alias for installations created before channel IDs
-   * were recorded on sessions.
+   * does. Callers may supply an explicit set of channel aliases belonging to
+   * the same durable state owner. `default` is never a wildcard.
    */
-  getRecentMessagesByUserId(userId: string, limit: number): SessionMessageRow[] {
+  getRecentMessagesByUserId(
+    userId: string,
+    limit: number,
+    identityCandidates?: readonly string[],
+  ): SessionMessageRow[] {
+    const candidates = [...new Set(
+      (identityCandidates?.length ? identityCandidates : [userId])
+        .map(candidate => candidate.trim())
+        .filter(Boolean),
+    )];
+    if (candidates.length === 0) return [];
+    const placeholders = candidates.map(() => '?').join(', ');
     const stmt = this.db.prepare(`
       SELECT sm.*
       FROM session_messages sm
       INNER JOIN sessions s ON s.id = sm.session_id
-      WHERE (? = 'default' OR json_extract(s.metadata, '$.userId') = ?)
+      WHERE json_extract(s.metadata, '$.userId') IN (${placeholders})
       ORDER BY sm.id DESC
       LIMIT ?
     `);
-    const rows = stmt.all(userId, userId, limit) as Record<string, unknown>[];
+    const rows = stmt.all(...candidates, limit) as Record<string, unknown>[];
     rows.reverse();
     return rows.map(row => this.rowToSessionMessage(row));
   }
@@ -2739,10 +2965,21 @@ export class ScallopDatabase {
    * Add a scheduled item (trigger or reminder)
    * Status defaults to 'pending' if not specified
    */
-  addScheduledItem(item: Omit<ScheduledItem, 'id' | 'status' | 'createdAt' | 'updatedAt' | 'firedAt' | 'kind' | 'taskConfig' | 'boardStatus' | 'priority' | 'labels' | 'result' | 'dependsOn' | 'goalId' | 'workerId' | 'preferredWorkerId' | 'leaseToken' | 'leasedAt' | 'leaseExpiresAt' | 'attemptCount' | 'maxAttempts' | 'lastError' | 'handedOffFrom' | 'messageProvenance'> & { status?: ScheduledItemStatus; kind?: ScheduledItemKind; taskConfig?: TaskConfig | null; boardStatus?: BoardStatus | null; priority?: Priority; labels?: string[] | null; dependsOn?: string[] | null; goalId?: string | null; preferredWorkerId?: string | null; maxAttempts?: number; messageProvenance?: ScheduledMessageProvenance }): ScheduledItem {
+  addScheduledItem(item: Omit<ScheduledItem, 'id' | 'status' | 'createdAt' | 'updatedAt' | 'firedAt' | 'kind' | 'taskConfig' | 'boardStatus' | 'priority' | 'labels' | 'result' | 'dependsOn' | 'goalId' | 'workerId' | 'preferredWorkerId' | 'leaseToken' | 'leasedAt' | 'leaseExpiresAt' | 'attemptCount' | 'maxAttempts' | 'lastError' | 'handedOffFrom' | 'messageProvenance' | 'sourceItemId'> & { status?: ScheduledItemStatus; kind?: ScheduledItemKind; taskConfig?: TaskConfig | null; boardStatus?: BoardStatus | null; priority?: Priority; labels?: string[] | null; dependsOn?: string[] | null; goalId?: string | null; preferredWorkerId?: string | null; maxAttempts?: number; messageProvenance?: ScheduledMessageProvenance; sourceItemId?: string | null }): ScheduledItem {
     const id = nanoid();
     const now = Date.now();
-    const status = item.status ?? 'pending';
+    const status = item.status ?? (
+      item.boardStatus === 'in_progress' ? 'processing'
+        : item.boardStatus === 'done' ? 'fired'
+          : item.boardStatus === 'archived' ? 'dismissed'
+            : 'pending'
+    );
+    const boardStatus = item.boardStatus ?? (
+      status === 'processing' ? 'in_progress'
+        : status === 'fired' || status === 'acted' ? 'done'
+          : status === 'dismissed' || status === 'expired' ? 'archived'
+            : item.triggerAt > 0 ? 'scheduled' : 'inbox'
+    );
     const messageProvenance: ScheduledMessageProvenance = item.source === 'user'
       && item.messageProvenance === 'user_literal'
       ? 'user_literal'
@@ -2753,7 +2990,12 @@ export class ScallopDatabase {
     // the most common cause of duplicate proactive messages. User-source
     // items (explicit reminders the user set) are never blocked here.
     if (item.source === 'agent') {
-      const existing = this.findSimilarAgentScheduledItem(item.userId, item.message, item.triggerAt);
+      const existing = this.findSimilarAgentScheduledItem(
+        item.userId,
+        item.message,
+        item.triggerAt,
+        item.sourceItemId ?? null,
+      );
       if (existing) {
         return existing;
       }
@@ -2762,12 +3004,12 @@ export class ScallopDatabase {
     const stmt = this.db.prepare(`
       INSERT INTO scheduled_items (
         id, user_id, session_id, source, kind, type, message, message_provenance, context,
-        trigger_at, recurring, status, source_memory_id, fired_at,
+        trigger_at, recurring, status, source_memory_id, source_item_id, fired_at,
         task_config, board_status, priority, labels, depends_on, goal_id,
         worker_id, preferred_worker_id, lease_token, leased_at, lease_expires_at,
         attempt_count, max_attempts, last_error, handed_off_from,
         created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     stmt.run(
@@ -2784,9 +3026,10 @@ export class ScallopDatabase {
       item.recurring ? JSON.stringify(item.recurring) : null,
       status,
       item.sourceMemoryId ?? null,
+      item.sourceItemId ?? null,
       null,
       item.taskConfig ? JSON.stringify(item.taskConfig) : null,
-      item.boardStatus ?? (item.triggerAt > 0 ? 'scheduled' : 'inbox'),
+      boardStatus,
       item.priority ?? 'medium',
       item.labels ? JSON.stringify(item.labels) : null,
       item.dependsOn ? JSON.stringify(item.dependsOn) : null,
@@ -2808,9 +3051,10 @@ export class ScallopDatabase {
       ...item,
       id,
       messageProvenance,
+      sourceItemId: item.sourceItemId ?? null,
       kind: item.kind ?? 'nudge',
       taskConfig: item.taskConfig ?? null,
-      boardStatus: item.boardStatus ?? (item.triggerAt > 0 ? 'scheduled' : 'inbox'),
+      boardStatus,
       priority: item.priority ?? 'medium',
       labels: item.labels ?? null,
       result: null,
@@ -2847,11 +3091,31 @@ export class ScallopDatabase {
   getDueScheduledItems(now: number = Date.now()): ScheduledItem[] {
     const stmt = this.db.prepare(`
       SELECT * FROM scheduled_items
-      WHERE status = 'pending' AND trigger_at <= ?
+      WHERE status = 'pending' AND trigger_at > 0 AND trigger_at <= ?
       ORDER BY trigger_at ASC
     `);
     const rows = stmt.all(now) as Record<string, unknown>[];
     return rows.map(row => this.rowToScheduledItem(row));
+  }
+
+  /**
+   * Users with durable board tasks eligible for leasing now. Unlike nudges,
+   * task rows intentionally use trigger_at=0 to mean "ready whenever a worker
+   * is available". Keeping this query separate prevents unscheduled inbox
+   * nudges from crossing the delivery boundary.
+   */
+  getReadyBoardTaskUserIds(now: number = Date.now()): string[] {
+    const rows = this.db.prepare(`
+      SELECT DISTINCT user_id
+      FROM scheduled_items
+      WHERE kind = 'task' AND status = 'pending'
+        AND board_status IN ('inbox', 'backlog', 'scheduled', 'waiting')
+        AND (trigger_at = 0 OR trigger_at <= ?)
+        AND (result IS NOT NULL OR attempt_count < max_attempts)
+        AND lease_token IS NULL
+      ORDER BY user_id
+    `).all(now) as Array<{ user_id: string }>;
+    return rows.map(row => row.user_id);
   }
 
   /**
@@ -2861,13 +3125,13 @@ export class ScallopDatabase {
   claimDueScheduledItems(now: number = Date.now(), kind?: ScheduledItemKind): ScheduledItem[] {
     const selectStmt = this.db.prepare(`
       SELECT * FROM scheduled_items
-      WHERE status = 'pending' AND trigger_at <= ?
+      WHERE status = 'pending' AND trigger_at > 0 AND trigger_at <= ?
         AND (? IS NULL OR kind = ?)
       ORDER BY trigger_at ASC
     `);
     const updateStmt = this.db.prepare(`
       UPDATE scheduled_items
-      SET status = 'processing', updated_at = ?
+      SET status = 'processing', board_status = 'in_progress', updated_at = ?
       WHERE id = ? AND status = 'pending'
     `);
 
@@ -2884,6 +3148,8 @@ export class ScallopDatabase {
           // Override status to reflect the UPDATE we just performed
           const item = this.rowToScheduledItem(row);
           item.status = 'processing';
+          item.boardStatus = 'in_progress';
+          item.updatedAt = now;
           claimed.push(item);
         }
       }
@@ -2895,13 +3161,39 @@ export class ScallopDatabase {
   }
 
   /**
+   * Recover nudge claims abandoned by a crashed scheduler. `updated_at` is the
+   * atomic claim timestamp written by claimDueScheduledItems; a generous
+   * timeout keeps a live renderer/delivery safely owned while allowing a
+   * genuinely stranded row to become claimable again after restart.
+   *
+   * Task-kind rows are deliberately excluded because their lease/token
+   * lifecycle is reclaimed separately by BoardService.
+   */
+  reclaimStaleProcessingNudges(
+    staleAfterMs: number,
+    now: number = Date.now(),
+  ): number {
+    const cutoff = now - Math.max(1_000, Math.floor(staleAfterMs));
+    const result = this.db.prepare(`
+      UPDATE scheduled_items
+      SET status = 'pending', board_status = 'waiting',
+          worker_id = NULL, lease_token = NULL, leased_at = NULL,
+          lease_expires_at = NULL,
+          last_error = COALESCE(last_error, 'Recovered stale scheduler nudge claim'),
+          updated_at = ?
+      WHERE kind = 'nudge' AND status = 'processing' AND updated_at <= ?
+    `).run(now, cutoff);
+    return result.changes;
+  }
+
+  /**
    * Reset an item back to pending (e.g. after a processing failure)
    */
   resetScheduledItemToPending(id: string): boolean {
     const now = Date.now();
     const stmt = this.db.prepare(`
       UPDATE scheduled_items
-      SET status = 'pending', updated_at = ?
+      SET status = 'pending', board_status = 'waiting', updated_at = ?
       WHERE id = ? AND status = 'processing'
     `);
     const result = stmt.run(now, id);
@@ -3325,6 +3617,256 @@ export class ScallopDatabase {
   }
 
   /**
+   * Append exact channel delivery provenance for every transport chunk.
+   * Rows are never updated or deleted; duplicate retries are idempotently
+   * ignored while an ambiguity marker may be appended conservatively later.
+   */
+  recordProactiveDeliveryReceipt(input: {
+    channel: string;
+    channelMessageIds: string[];
+    scheduledItemId: string;
+    ownerUserId: string;
+    ambiguous?: boolean;
+    createdAt?: number;
+  }): number {
+    const channel = input.channel.trim().toLowerCase();
+    const scheduledItemId = input.scheduledItemId.trim();
+    const ownerUserId = input.ownerUserId.trim();
+    const channelMessageIds = [...new Set(
+      input.channelMessageIds.map(messageId => messageId.trim()).filter(Boolean),
+    )];
+    if (!channel || !scheduledItemId || !ownerUserId || channelMessageIds.length === 0) return 0;
+
+    const insert = this.db.prepare(`
+      INSERT OR IGNORE INTO proactive_delivery_receipts (
+        channel, channel_message_id, scheduled_item_id, owner_user_id, ambiguous, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?)
+    `);
+    const createdAt = input.createdAt ?? Date.now();
+    const append = this.db.transaction(() => {
+      let inserted = 0;
+      for (const messageId of channelMessageIds) {
+        inserted += insert.run(
+          channel,
+          messageId,
+          scheduledItemId,
+          ownerUserId,
+          input.ambiguous ? 1 : 0,
+          createdAt,
+        ).changes;
+      }
+      return inserted;
+    });
+    return append.immediate();
+  }
+
+  /** Return all append-only claims for one channel-scoped message ID. */
+  getProactiveDeliveryReceipts(
+    channel: string,
+    channelMessageId: string,
+  ): ProactiveDeliveryReceiptRow[] {
+    const rows = this.db.prepare(`
+      SELECT id, channel, channel_message_id, scheduled_item_id,
+             owner_user_id, ambiguous, created_at
+      FROM proactive_delivery_receipts
+      WHERE channel = ? AND channel_message_id = ?
+      ORDER BY id ASC
+    `).all(channel.trim().toLowerCase(), channelMessageId.trim()) as Array<{
+      id: number;
+      channel: string;
+      channel_message_id: string;
+      scheduled_item_id: string;
+      owner_user_id: string;
+      ambiguous: number;
+      created_at: number;
+    }>;
+    return rows.map(row => ({
+      id: row.id,
+      channel: row.channel,
+      channelMessageId: row.channel_message_id,
+      scheduledItemId: row.scheduled_item_id,
+      ownerUserId: row.owner_user_id,
+      ambiguous: row.ambiguous === 1,
+      createdAt: row.created_at,
+    }));
+  }
+
+  /**
+   * Atomically apply a trusted direct-reply action to a linked source, close
+   * the delivered wrapper, and write both feedback decisions. The wrapper ID
+   * is the idempotency key: retries return the first deterministic outcome and
+   * can never extend a Snooze twice.
+   */
+  applyLinkedSourceReplyAndAcknowledge(input: {
+    wrapperId: string;
+    sourceItemId: string;
+    ownerUserId: string;
+    feedbackUserId: string;
+    action: ProactiveSourceReplyAction;
+    delayMs?: number;
+    score: number;
+    now?: number;
+  }): ProactiveSourceReplyTransactionResult {
+    const now = input.now ?? Date.now();
+    const transaction = this.db.transaction((): ProactiveSourceReplyTransactionResult => {
+      const existing = this.db.prepare(`
+        SELECT action, source_title, applied
+        FROM proactive_source_reply_actions
+        WHERE wrapper_id = ?
+      `).get(input.wrapperId) as {
+        action: ProactiveSourceReplyAction;
+        source_title: string;
+        applied: number;
+      } | undefined;
+      if (existing) {
+        return {
+          acknowledged: true,
+          replayed: true,
+          sourceAction: existing.applied === 1
+            ? { action: existing.action, title: existing.source_title, applied: true }
+            : null,
+        };
+      }
+
+      const wrapper = this.db.prepare(`
+        SELECT id, user_id, status
+        FROM scheduled_items
+        WHERE id = ? AND user_id = ?
+      `).get(input.wrapperId, input.ownerUserId) as {
+        id: string;
+        user_id: string;
+        status: string;
+      } | undefined;
+      if (!wrapper) {
+        return { acknowledged: false, replayed: false, sourceAction: null };
+      }
+
+      const source = this.db.prepare(`
+        SELECT * FROM scheduled_items
+        WHERE id = ? AND id != ? AND user_id = ?
+      `).get(input.sourceItemId, input.wrapperId, input.ownerUserId) as Record<string, unknown> | undefined;
+
+      let applied = false;
+      const sourceTitle = source ? String(source.message) : '';
+      let resultingTriggerAt: number | null = source ? Number(source.trigger_at) : null;
+
+      // Exact delivery provenance may arrive before the scheduler flips a
+      // processing wrapper to fired, and a conversational acknowledgement may
+      // mark it acted before a later explicit Archive/Done/Snooze. The action
+      // ledger remains the idempotency gate; dismissed/expired wrappers stay
+      // terminal and cannot acquire a new side effect retroactively.
+      if (source && ['processing', 'fired', 'acted'].includes(wrapper.status)) {
+        const status = String(source.status);
+        const boardStatus = source.board_status == null ? null : String(source.board_status);
+        const terminal = status === 'fired' || status === 'acted'
+          || status === 'dismissed' || status === 'expired';
+        const hasLiveLease = status === 'processing'
+          && source.lease_token != null
+          && Number(source.lease_expires_at ?? 0) > now;
+
+        if (input.action === 'archive' && (
+          boardStatus === 'archived' || status === 'dismissed' || status === 'expired'
+        )) {
+          applied = true;
+        } else if (input.action === 'done' && (
+          boardStatus === 'done' || status === 'fired' || status === 'acted'
+        )) {
+          applied = true;
+        } else if (!hasLiveLease && boardStatus !== 'done' && boardStatus !== 'archived') {
+          if (input.action === 'archive') {
+            // Preserve legacy terminal history; otherwise atomically archive.
+            if (terminal) {
+              applied = status === 'dismissed' || status === 'expired';
+            } else {
+              applied = this.db.prepare(`
+                UPDATE scheduled_items
+                SET status = 'dismissed', board_status = 'archived',
+                    worker_id = NULL, lease_token = NULL, leased_at = NULL,
+                    lease_expires_at = NULL, updated_at = ?
+                WHERE id = ? AND user_id = ?
+              `).run(now, input.sourceItemId, input.ownerUserId).changes === 1;
+            }
+          } else if (input.action === 'done' && !terminal) {
+            applied = this.db.prepare(`
+              UPDATE scheduled_items
+              SET status = 'fired', board_status = 'done', fired_at = COALESCE(fired_at, ?),
+                  worker_id = NULL, lease_token = NULL, leased_at = NULL,
+                  lease_expires_at = NULL, updated_at = ?
+              WHERE id = ? AND user_id = ?
+            `).run(now, now, input.sourceItemId, input.ownerUserId).changes === 1;
+          } else if (input.action === 'snooze' && !terminal) {
+            resultingTriggerAt = now + Math.max(60_000, Math.floor(input.delayMs ?? 24 * 60 * 60 * 1000));
+            applied = this.db.prepare(`
+              UPDATE scheduled_items
+              SET status = 'pending', board_status = 'scheduled', trigger_at = ?,
+                  worker_id = NULL, lease_token = NULL, leased_at = NULL,
+                  lease_expires_at = NULL, updated_at = ?
+              WHERE id = ? AND user_id = ?
+            `).run(resultingTriggerAt, now, input.sourceItemId, input.ownerUserId).changes === 1;
+          }
+        }
+      }
+
+      this.db.prepare(`
+        INSERT INTO proactive_source_reply_actions (
+          wrapper_id, source_item_id, user_id, action, source_title,
+          applied, source_trigger_at, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        input.wrapperId,
+        input.sourceItemId,
+        input.ownerUserId,
+        input.action,
+        sourceTitle,
+        applied ? 1 : 0,
+        resultingTriggerAt,
+        now,
+      );
+
+      this.db.prepare(`
+        UPDATE scheduled_items
+        SET status = 'acted', board_status = 'done', updated_at = ?
+        WHERE id = ? AND user_id = ? AND status IN ('processing', 'fired')
+      `).run(now, input.wrapperId, input.ownerUserId);
+
+      if (applied && source) {
+        this.db.prepare(`
+          INSERT INTO proactive_decisions (user_id, at, stage, outcome, reason, detail)
+          VALUES (?, ?, 'feedback', 'source_updated', ?, ?)
+        `).run(
+          input.feedbackUserId,
+          now,
+          `reply_${input.action}`,
+          JSON.stringify({ itemId: input.wrapperId, sourceItemId: input.sourceItemId }),
+        );
+      }
+      this.db.prepare(`
+        INSERT INTO proactive_decisions (user_id, at, stage, outcome, reason, detail)
+        VALUES (?, ?, 'feedback', 'acted', 'direct_reply', ?)
+      `).run(
+        input.feedbackUserId,
+        now,
+        JSON.stringify({
+          itemId: input.wrapperId,
+          score: input.score,
+          replyAction: input.action,
+          sourceActionApplied: applied,
+        }),
+      );
+
+      return {
+        acknowledged: true,
+        replayed: false,
+        sourceAction: applied && source
+          ? { action: input.action, title: sourceTitle, applied: true }
+          : null,
+      };
+    });
+
+    return transaction.immediate();
+  }
+
+  /**
    * Update a scheduled item (e.g., reschedule)
    */
   updateScheduledItem(id: string, updates: Partial<Pick<ScheduledItem, 'triggerAt' | 'message' | 'messageProvenance' | 'status'>>): boolean {
@@ -3345,6 +3887,19 @@ export class ScallopDatabase {
     if (updates.status !== undefined) {
       sets.push('status = ?');
       params.push(updates.status);
+      sets.push(`board_status = CASE ?
+        WHEN 'processing' THEN 'in_progress'
+        WHEN 'fired' THEN 'done'
+        WHEN 'acted' THEN 'done'
+        WHEN 'dismissed' THEN 'archived'
+        WHEN 'expired' THEN 'archived'
+        ELSE CASE
+          WHEN board_status IN ('inbox', 'backlog', 'scheduled', 'waiting') THEN board_status
+          WHEN COALESCE(?, trigger_at) > 0 THEN 'scheduled'
+          ELSE 'inbox'
+        END
+      END`);
+      params.push(updates.status, updates.triggerAt ?? null);
     }
 
     params.push(id);
@@ -3410,6 +3965,21 @@ export class ScallopDatabase {
     if (updates.status !== undefined) {
       sets.push('status = ?');
       params.push(updates.status);
+      if (updates.boardStatus === undefined) {
+        sets.push(`board_status = CASE ?
+          WHEN 'processing' THEN 'in_progress'
+          WHEN 'fired' THEN 'done'
+          WHEN 'acted' THEN 'done'
+          WHEN 'dismissed' THEN 'archived'
+          WHEN 'expired' THEN 'archived'
+          ELSE CASE
+            WHEN board_status IN ('inbox', 'backlog', 'scheduled', 'waiting') THEN board_status
+            WHEN COALESCE(?, trigger_at) > 0 THEN 'scheduled'
+            ELSE 'inbox'
+          END
+        END`);
+        params.push(updates.status, updates.triggerAt ?? null);
+      }
     }
 
     params.push(id);
@@ -3500,17 +4070,30 @@ export class ScallopDatabase {
 
   /**
    * Consolidate duplicate pending scheduled items.
-   * Groups pending items by user, then removes duplicates using word-overlap similarity.
-   * Keeps the earliest-created item in each duplicate group.
-   * Returns the number of duplicates removed.
+   * Groups pending items by user, then archives duplicates using word-overlap similarity.
+   * Keeps the earliest-created item live in each duplicate group while preserving
+   * every duplicate row for audit/history.
+   * Returns the number of duplicates archived.
    */
   consolidateDuplicateScheduledItems(): number {
     const stmt = this.db.prepare(`
-      SELECT id, user_id, message, trigger_at, created_at FROM scheduled_items
+      SELECT id, user_id, kind, type, source_item_id, source_memory_id,
+             message, trigger_at, created_at
+      FROM scheduled_items
       WHERE status = 'pending' AND source = 'agent'
       ORDER BY user_id, created_at ASC
     `);
-    const rows = stmt.all() as Array<{ id: string; user_id: string; message: string; trigger_at: number; created_at: number }>;
+    const rows = stmt.all() as Array<{
+      id: string;
+      user_id: string;
+      kind: string;
+      type: string;
+      source_item_id: string | null;
+      source_memory_id: string | null;
+      message: string;
+      trigger_at: number;
+      created_at: number;
+    }>;
 
     const isSimilar = (a: Set<string>, b: Set<string>): boolean => {
       if (a.size === 0 || b.size === 0) return false;
@@ -3522,40 +4105,57 @@ export class ScallopDatabase {
       return (overlap / smaller) >= DEDUP_SIMILARITY_STRICT || (overlap / a.size) >= DEDUP_SIMILARITY_LENIENT || (overlap / b.size) >= DEDUP_SIMILARITY_LENIENT;
     };
 
-    // Group by user
-    const byUser = new Map<string, typeof rows>();
+    // Provenance and execution shape are part of duplicate identity. Two
+    // wrappers can have nearly identical wording while referring to different
+    // board tasks; collapsing them would sever reply routing and hide work.
+    const byIdentity = new Map<string, typeof rows>();
     for (const row of rows) {
-      const list = byUser.get(row.user_id) || [];
+      const identity = JSON.stringify([
+        row.user_id,
+        row.kind,
+        row.type,
+        row.source_item_id,
+        row.source_memory_id,
+      ]);
+      const list = byIdentity.get(identity) || [];
       list.push(row);
-      byUser.set(row.user_id, list);
+      byIdentity.set(identity, list);
     }
 
-    const toDelete = new Set<string>();
-    const deleteStmt = this.db.prepare('DELETE FROM scheduled_items WHERE id = ?');
+    const toArchive = new Set<string>();
+    const archiveStmt = this.db.prepare(`
+      UPDATE scheduled_items
+      SET status = 'expired', board_status = 'archived',
+          last_error = COALESCE(last_error, 'Archived as a duplicate scheduled item'),
+          updated_at = ?
+      WHERE id = ? AND status = 'pending'
+    `);
 
-    for (const items of byUser.values()) {
+    for (const items of byIdentity.values()) {
       const kept = new Set<number>(); // indices we've already decided to keep
       for (let i = 0; i < items.length; i++) {
-        if (toDelete.has(items[i].id)) continue;
+        if (toArchive.has(items[i].id)) continue;
         kept.add(i);
         const wordsI = normalizeForSimilarity(items[i].message);
         for (let j = i + 1; j < items.length; j++) {
-          if (toDelete.has(items[j].id)) continue;
+          if (toArchive.has(items[j].id)) continue;
           // Only compare items within 7 days of each other
           if (Math.abs(items[i].trigger_at - items[j].trigger_at) > 7 * 24 * 60 * 60 * 1000) continue;
           const wordsJ = normalizeForSimilarity(items[j].message);
           if (isSimilar(wordsI, wordsJ)) {
-            toDelete.add(items[j].id); // keep earlier (i), remove later (j)
+            toArchive.add(items[j].id); // keep earlier (i), quarantine later (j)
           }
         }
       }
     }
 
-    for (const id of toDelete) {
-      deleteStmt.run(id);
+    const now = Date.now();
+    let archived = 0;
+    for (const id of toArchive) {
+      archived += archiveStmt.run(now, id).changes;
     }
 
-    return toDelete.size;
+    return archived;
   }
 
   /**
@@ -3631,6 +4231,104 @@ export class ScallopDatabase {
       INSERT INTO proactive_send_log (user_id, message, source, sent_at)
       VALUES (?, ?, ?, ?)
     `).run(userId, message, source, sentAt);
+  }
+
+  /**
+   * Atomically reserve one inferred-delivery slot across every process sharing
+   * this SQLite database. Active reservations count toward the daily budget and
+   * serialize the min-gap window until delivery is finalized or released.
+   */
+  reserveProactiveDelivery(input: {
+    itemId: string;
+    userId: string;
+    dayStart: number;
+    nextDayStart: number;
+    dailyCap: number;
+    minGapMs: number;
+    reservationTtlMs?: number;
+    now?: number;
+  }): ProactiveDeliveryReservationResult {
+    const now = input.now ?? Date.now();
+    const ttlMs = Math.max(60_000, Math.floor(input.reservationTtlMs ?? 15 * 60_000));
+    const transaction = this.db.transaction((): ProactiveDeliveryReservationResult => {
+      this.db.prepare('DELETE FROM proactive_delivery_reservations WHERE expires_at <= ?').run(now);
+
+      const existingItem = this.db.prepare(`
+        SELECT expires_at FROM proactive_delivery_reservations
+        WHERE item_id = ? AND expires_at > ?
+      `).get(input.itemId, now) as { expires_at: number } | undefined;
+      if (existingItem) return { outcome: 'min_gap', retryAt: existingItem.expires_at };
+
+      const sentToday = this.db.prepare(`
+        SELECT COUNT(*) AS count
+        FROM proactive_send_log
+        WHERE user_id = ? AND source = 'agent' AND sent_at >= ?
+      `).get(input.userId, input.dayStart) as { count: number };
+      const heldToday = this.db.prepare(`
+        SELECT COUNT(*) AS count
+        FROM proactive_delivery_reservations
+        WHERE user_id = ? AND reserved_at >= ? AND expires_at > ?
+      `).get(input.userId, input.dayStart, now) as { count: number };
+      if (sentToday.count + heldToday.count >= Math.max(1, Math.floor(input.dailyCap))) {
+        return { outcome: 'daily_cap', retryAt: input.nextDayStart };
+      }
+
+      if (input.minGapMs > 0) {
+        const lastSend = this.db.prepare(`
+          SELECT MAX(sent_at) AS sent_at
+          FROM proactive_send_log
+          WHERE user_id = ? AND source = 'agent'
+        `).get(input.userId) as { sent_at: number | null };
+        const held = this.db.prepare(`
+          SELECT MAX(expires_at) AS expires_at
+          FROM proactive_delivery_reservations
+          WHERE user_id = ? AND expires_at > ?
+        `).get(input.userId, now) as { expires_at: number | null };
+        const retryAt = Math.max(
+          (lastSend.sent_at ?? 0) + input.minGapMs,
+          held.expires_at ?? 0,
+        );
+        if (retryAt > now) return { outcome: 'min_gap', retryAt };
+      }
+
+      const token = nanoid();
+      this.db.prepare(`
+        INSERT INTO proactive_delivery_reservations (
+          token, item_id, user_id, reserved_at, expires_at
+        ) VALUES (?, ?, ?, ?, ?)
+      `).run(token, input.itemId, input.userId, now, now + ttlMs);
+      return { outcome: 'reserved', token };
+    });
+    return transaction.immediate();
+  }
+
+  /** Release capacity after transport fails or is abandoned before a send. */
+  releaseProactiveDeliveryReservation(token: string): boolean {
+    return this.db.prepare(`
+      DELETE FROM proactive_delivery_reservations WHERE token = ?
+    `).run(token).changes === 1;
+  }
+
+  /** Convert a held slot into the authoritative send record atomically. */
+  finalizeProactiveDeliveryReservation(
+    token: string,
+    message: string,
+    source: string,
+    sentAt: number = Date.now(),
+  ): boolean {
+    const transaction = this.db.transaction(() => {
+      const reservation = this.db.prepare(`
+        SELECT user_id FROM proactive_delivery_reservations WHERE token = ?
+      `).get(token) as { user_id: string } | undefined;
+      if (!reservation) return false;
+      this.db.prepare(`
+        INSERT INTO proactive_send_log (user_id, message, source, sent_at)
+        VALUES (?, ?, ?, ?)
+      `).run(reservation.user_id, message, source, sentAt);
+      this.db.prepare('DELETE FROM proactive_delivery_reservations WHERE token = ?').run(token);
+      return true;
+    });
+    return transaction.immediate();
   }
 
   /**
@@ -4027,7 +4725,9 @@ export class ScallopDatabase {
   }
 
   /**
-   * Expire old pending items (older than maxAgeMs past their trigger time)
+   * Expire old pending nudges (older than maxAgeMs past their trigger time).
+   * Unscheduled board work (`trigger_at = 0`), task-kind work, and anything
+   * already processing/leased are owned by their explicit worker lifecycle.
    */
   expireOldScheduledItems(maxAgeMs: number = 24 * 60 * 60 * 1000): number {
     const now = Date.now();
@@ -4036,8 +4736,9 @@ export class ScallopDatabase {
     // will be picked up by the scheduler and rescheduled after firing.
     const stmt = this.db.prepare(`
       UPDATE scheduled_items
-      SET status = 'expired', updated_at = ?
-      WHERE status IN ('pending', 'processing') AND trigger_at < ?
+      SET status = 'expired', board_status = 'archived', updated_at = ?
+      WHERE status = 'pending' AND kind = 'nudge'
+        AND trigger_at > 0 AND trigger_at < ?
         AND recurring IS NULL
     `);
     const result = stmt.run(now, cutoff);
@@ -4053,7 +4754,12 @@ export class ScallopDatabase {
    * hasSimilarPendingScheduledItem so legitimately distinct items at different
    * times of day still go through.
    */
-  findSimilarAgentScheduledItem(userId: string, message: string, triggerAt: number): ScheduledItem | null {
+  findSimilarAgentScheduledItem(
+    userId: string,
+    message: string,
+    triggerAt: number,
+    sourceItemId: string | null = null,
+  ): ScheduledItem | null {
     const WINDOW_MS = 2 * 60 * 60 * 1000;
     const newWords = normalizeForSimilarity(message);
     if (newWords.size === 0) return null;
@@ -4062,8 +4768,15 @@ export class ScallopDatabase {
       SELECT * FROM scheduled_items
       WHERE user_id = ? AND source = 'agent' AND status IN ('pending', 'processing')
         AND trigger_at BETWEEN ? AND ?
+        AND ((? IS NULL AND source_item_id IS NULL) OR source_item_id = ?)
     `);
-    const rows = stmt.all(userId, triggerAt - WINDOW_MS, triggerAt + WINDOW_MS) as Record<string, unknown>[];
+    const rows = stmt.all(
+      userId,
+      triggerAt - WINDOW_MS,
+      triggerAt + WINDOW_MS,
+      sourceItemId,
+      sourceItemId,
+    ) as Record<string, unknown>[];
 
     for (const row of rows) {
       const existingMessage = (row.message ?? '') as string;
@@ -4136,7 +4849,8 @@ export class ScallopDatabase {
    */
   cancelScheduledItemsBySourceMemory(memoryId: string): number {
     const stmt = this.db.prepare(`
-      UPDATE scheduled_items SET status = 'expired', updated_at = ?
+      UPDATE scheduled_items
+      SET status = 'expired', board_status = 'archived', updated_at = ?
       WHERE source_memory_id = ? AND status IN ('pending', 'processing')
     `);
     const result = stmt.run(Date.now(), memoryId);
@@ -4220,7 +4934,9 @@ export class ScallopDatabase {
 
     let cancelled = 0;
     const updateStmt = this.db.prepare(`
-      UPDATE scheduled_items SET status = 'expired', updated_at = ? WHERE id = ?
+      UPDATE scheduled_items
+      SET status = 'expired', board_status = 'archived', updated_at = ?
+      WHERE id = ?
     `);
     const now = Date.now();
 
@@ -4266,6 +4982,7 @@ export class ScallopDatabase {
       status: row.status as ScheduledItemStatus,
       firedAt: row.fired_at as number | null,
       sourceMemoryId: row.source_memory_id as string | null,
+      sourceItemId: row.source_item_id as string | null,
       boardStatus: (row.board_status as BoardStatus) ?? null,
       priority: (row.priority as Priority) ?? 'medium',
       labels: row.labels ? JSON.parse(row.labels as string) : null,

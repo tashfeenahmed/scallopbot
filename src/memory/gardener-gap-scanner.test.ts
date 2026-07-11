@@ -29,6 +29,7 @@ import type { LLMProvider, CompletionResponse } from '../providers/types.js';
 
 const TEST_DB_PATH = '/tmp/gardener-gap-scanner-test.db';
 const logger = pino({ level: 'silent' });
+const OWNER_ALIASES = ['owner-example', 'telegram:owner-example'] as const;
 
 function cleanupTestDb() {
   for (const suffix of ['', '-wal', '-shm']) {
@@ -285,7 +286,10 @@ function seedRecentSessionSummary(
   },
 ) {
   const sessionId = opts?.sessionId ?? `session-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  db.createSession(sessionId);
+  db.createSession(sessionId, {
+    userId: 'telegram:owner-example',
+    channelId: 'telegram',
+  });
   return db.addSessionSummary({
     sessionId,
     userId: opts?.userId ?? 'default',
@@ -335,6 +339,7 @@ describe('BackgroundGardener gap scanner integration', () => {
       scallopStore: store,
       logger,
       fusionProvider,
+      canonicalSingleUserIds: OWNER_ALIASES,
       workspace,
     });
 
@@ -386,6 +391,7 @@ describe('BackgroundGardener gap scanner integration', () => {
     gardener = new BackgroundGardener({
       scallopStore: store,
       logger,
+      canonicalSingleUserIds: OWNER_ALIASES,
     });
 
     const db = store.getDatabase();
@@ -419,6 +425,7 @@ describe('BackgroundGardener gap scanner integration', () => {
       scallopStore: store,
       logger,
       fusionProvider,
+      canonicalSingleUserIds: OWNER_ALIASES,
       workspace,
     });
 
@@ -466,6 +473,7 @@ describe('BackgroundGardener gap scanner integration', () => {
       scallopStore: store,
       logger,
       fusionProvider,
+      canonicalSingleUserIds: OWNER_ALIASES,
       workspace,
     });
 
@@ -527,6 +535,7 @@ describe('BackgroundGardener gap scanner integration', () => {
       scallopStore: store,
       logger,
       fusionProvider,
+      canonicalSingleUserIds: OWNER_ALIASES,
       workspace,
     });
 

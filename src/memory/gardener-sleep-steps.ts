@@ -6,7 +6,11 @@
 import * as path from 'node:path';
 import * as fsPromises from 'node:fs/promises';
 import type { GardenerContext } from './gardener-context.js';
-import { DEFAULT_USER_ID } from './gardener-context.js';
+import {
+  DEFAULT_USER_ID,
+  hasExplicitSingleOwner,
+  sessionBelongsToStateUser,
+} from './gardener-context.js';
 import { storeFusedMemory } from './gardener-fusion-storage.js';
 import { dream } from './dream.js';
 import type { DreamResult } from './dream.js';
@@ -166,7 +170,7 @@ export async function runDreamCycle(ctx: GardenerContext): Promise<void> {
  * C2: Self-reflection (composite reflection -> SOUL.md re-distillation)
  */
 export async function runSelfReflection(ctx: GardenerContext): Promise<void> {
-  if (!ctx.fusionProvider || !ctx.workspace) return;
+  if (!ctx.fusionProvider || !ctx.workspace || !hasExplicitSingleOwner(ctx)) return;
 
   try {
     const userId = DEFAULT_USER_ID;
@@ -179,7 +183,13 @@ export async function runSelfReflection(ctx: GardenerContext): Promise<void> {
       sourceSessionIds: string[];
     }> = [];
 
-    const allSummaries = ctx.db.getSessionSummariesByUser(userId, 50);
+    const allSummaries = ctx.db.getSessionSummariesByUser(userId, 50)
+      .filter(summary => sessionBelongsToStateUser(
+        ctx.db,
+        summary.sessionId,
+        userId,
+        ctx.canonicalSingleUserIds,
+      ));
     const oneDayAgo = Date.now() - 24 * 60 * 60 * 1000;
     const todaySummaries = allSummaries.filter(s => s.createdAt >= oneDayAgo);
 

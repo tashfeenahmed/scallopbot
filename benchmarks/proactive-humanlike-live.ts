@@ -173,11 +173,13 @@ const agentLeakPattern = /<(?:think|thinking|function_calls|invoke)\b|^\s*(?:ana
 
 const db = new ScallopDatabase(':memory:');
 const delivered: string[] = [];
+const deliveredMessageIds: string[] = [];
 const scheduler = new UnifiedScheduler({
   db,
   logger,
   router,
   minAgentProactiveGapMs: 0,
+  canonicalSingleUserIds: ['synthetic-owner', 'telegram:synthetic-owner'],
   // Keep the isolated scheduler outside quiet hours regardless of host clock.
   getTimezone: () => {
     const offset = 12 - new Date().getUTCHours();
@@ -185,7 +187,9 @@ const scheduler = new UnifiedScheduler({
   },
   onSendMessage: async (_userId, message) => {
     delivered.push(message);
-    return true;
+    const messageId = `synthetic-message-${delivered.length}`;
+    deliveredMessageIds.push(messageId);
+    return { sent: true as const, channel: 'telegram', messageIds: [messageId] };
   },
 });
 
@@ -214,6 +218,46 @@ await new Promise(resolve => setTimeout(resolve, 5));
 db.addSessionMessage('stale-source', 'user', 'It was cancelled; no follow-up is needed.');
 const deliveredBeforeStale = delivered.length;
 await scheduler.evaluate();
+const staleConversationCancelled =
+  delivered.length === deliveredBeforeStale && db.getScheduledItem(staleItem.id)?.status === 'expired';
+
+// Exact reply authority: a rendered proactive wrapper is linked to its source
+// by first-class DB provenance and to the Telegram delivery by message ID. A
+// terse Archive reply must update that one source without another model turn.
+const linkedSource = db.addScheduledItem({
+  // Use an independent synthetic owner so the deliberately active source
+  // conversation above cannot defer this separate receipt-routing probe.
+  userId: 'telegram:reply-owner', sessionId: null, source: 'user', kind: 'task',
+  type: 'reminder', message: 'Publish the synthetic Project Atlas update', context: null,
+  triggerAt: Date.now() + 24 * 60 * 60 * 1000, recurring: null, sourceMemoryId: null,
+  boardStatus: 'waiting',
+});
+const linkedWrapper = db.addScheduledItem({
+  userId: 'telegram:reply-owner', sessionId: null, source: 'agent', kind: 'nudge',
+  type: 'follow_up', message: 'Ask whether the synthetic Project Atlas item should stay open',
+  context: JSON.stringify({ gapType: 'stale_board_item', sourceId: linkedSource.id }),
+  sourceItemId: linkedSource.id, triggerAt: Date.now() - 1, recurring: null,
+  sourceMemoryId: null,
+});
+const deliveredBeforeLinked = delivered.length;
+await scheduler.evaluate();
+const linkedRendered = db.getScheduledItem(linkedWrapper.id)?.message ?? '';
+const linkedMessageId = deliveredMessageIds[deliveredBeforeLinked];
+const linkedFeedback = scheduler.checkEngagement('telegram:reply-owner', 'Archive', {
+  directReply: true,
+  repliedToText: linkedRendered,
+  repliedToMessageId: linkedMessageId,
+});
+
+// Backlog notes are board state, not due reminders. trigger_at=0 nudges must
+// stay pending and never leak out as proactive text.
+const zeroTimeNudge = db.addScheduledItem({
+  userId: 'default', sessionId: null, source: 'user', kind: 'nudge',
+  type: 'reminder', message: 'Synthetic backlog note', context: null,
+  triggerAt: 0, recurring: null, sourceMemoryId: null, boardStatus: 'backlog',
+});
+const deliveredBeforeZeroTime = delivered.length;
+await scheduler.evaluate();
 
 const allMessages = [...rendered, ...delivered];
 const qualities = allMessages.map(assessProactiveMessage);
@@ -229,8 +273,16 @@ const metrics = {
   casualConversationSkipped: casualSkip.items.length === 0 && !casualSkip.llmCalled,
   globalOptOutSkipped: optOutSkip.items.length === 0 && !optOutSkip.llmCalled,
   groundedOpenLoopCreated: openLoop.items.length === 1,
-  staleConversationCancelled:
-    delivered.length === deliveredBeforeStale && db.getScheduledItem(staleItem.id)?.status === 'expired',
+  staleConversationCancelled,
+  exactReplyArchivedLinkedSource:
+    linkedFeedback.sourceAction?.action === 'archive'
+    && linkedFeedback.sourceAction.applied
+    && db.getScheduledItem(linkedSource.id)?.status === 'dismissed'
+    && db.getScheduledItem(linkedSource.id)?.boardStatus === 'archived'
+    && db.getScheduledItem(linkedWrapper.id)?.status === 'acted',
+  zeroTimeNudgeSuppressed:
+    delivered.length === deliveredBeforeZeroTime
+    && db.getScheduledItem(zeroTimeNudge.id)?.status === 'pending',
   realAgentTurns: 2,
   realAgentInternalLeaks: agentResponses.filter(response => agentLeakPattern.test(response)).length,
   vagueAgentTurnCreatedNoTrigger: vagueTriggerCount === 0,
@@ -251,6 +303,8 @@ const passed =
   metrics.globalOptOutSkipped &&
   metrics.groundedOpenLoopCreated &&
   metrics.staleConversationCancelled &&
+  metrics.exactReplyArchivedLinkedSource &&
+  metrics.zeroTimeNudgeSuppressed &&
   metrics.realAgentInternalLeaks === 0 &&
   metrics.vagueAgentTurnCreatedNoTrigger &&
   metrics.explicitAgentReminderCreated &&

@@ -38,7 +38,13 @@ import {
 import { ContextManager } from '../routing/context.js';
 import { MediaProcessor } from '../media/index.js';
 import { VoiceManager } from '../voice/index.js';
-import { type TriggerSource, type TriggerSourceRegistry, parseUserIdPrefix } from '../triggers/index.js';
+import {
+  type MessageDeliveryResult,
+  type TriggerSource,
+  type TriggerSourceRegistry,
+  messageWasDelivered,
+  parseUserIdPrefix,
+} from '../triggers/index.js';
 import { UnifiedScheduler } from '../proactive/index.js';
 import { OutboundQueue } from '../proactive/outbound-queue.js';
 import { BotConfigManager } from '../channels/bot-config.js';
@@ -51,6 +57,7 @@ import { setHookLogger } from '../hooks/hooks.js';
 import { registerWebhookEventRelay } from '../hooks/webhook-relay.js';
 import { SafeWorkflowExecutor, createExecuteWorkflowSkill } from '../workflow/index.js';
 import { matchesPolicy } from '../skills/tool-policy.js';
+import { resolveStateUserId } from '../utils/state-user-id.js';
 
 export interface GatewayOptions {
   config: Config;
@@ -87,6 +94,8 @@ export class Gateway {
   private announceQueue: AnnounceQueue | null = null;
   private interruptQueue: InterruptQueue | null = null;
   private outboundQueue: OutboundQueue | null = null;
+  /** Explicit aliases for this deployment's single canonical state owner. */
+  private canonicalSingleUserIds: string[] = [];
 
   /** Registry of active trigger sources for multi-channel message dispatch */
   private triggerSources: TriggerSourceRegistry = new Map();
@@ -128,6 +137,14 @@ export class Gateway {
 
     this.logger.info('Initializing gateway...');
     this.configureLifecycleEventRelay();
+
+    // A single configured Telegram owner may safely share the canonical
+    // `default` memory/board state across channel-prefixed sessions. Empty or
+    // multi-user allow-lists stay isolated for public multi-user deployments.
+    const allowedTelegramUsers = this.config.channels.telegram.allowedUsers ?? [];
+    this.canonicalSingleUserIds = allowedTelegramUsers.length === 1
+      ? [allowedTelegramUsers[0], `telegram:${allowedTelegramUsers[0]}`]
+      : [];
 
     // Initialize provider registry
     this.providerRegistry = new ProviderRegistry();
@@ -232,10 +249,10 @@ export class Gateway {
     // Initialize config manager early (needed by fact extractor and agent for timezone)
     this.configManager = new BotConfigManager(this.scallopMemoryStore.getDatabase(), this.logger);
 
-    // Backfill default user profile from existing facts (one-time, idempotent)
-    const backfillResult = this.scallopMemoryStore.backfillDefaultProfile();
+    // Backfill profiles without mixing facts between durable state owners.
+    const backfillResult = this.scallopMemoryStore.backfillProfiles();
     if (backfillResult.fieldsPopulated > 0) {
-      this.logger.info({ fieldsPopulated: backfillResult.fieldsPopulated }, 'Default user profile backfilled');
+      this.logger.info(backfillResult, 'User profiles backfilled');
     }
 
     // Backfill embeddings for old memories (runs in background, non-blocking)
@@ -279,6 +296,7 @@ export class Gateway {
         costTracker: this.costTracker || undefined,
         deduplicationThreshold: 0.95, // Higher threshold - only skip true duplicates
         getTimezone: (userId: string) => this.configManager!.getUserTimezone(userId),
+        canonicalSingleUserIds: this.canonicalSingleUserIds,
       });
       this.logger.debug({ provider: factExtractionProvider.name }, 'LLM fact extractor initialized');
     }
@@ -305,6 +323,7 @@ export class Gateway {
       sessionSummarizer,
       workspace: this.config.agent.workspace,
       getTimezone: (userId: string) => this.configManager!.getUserTimezone(userId),
+      canonicalSingleUserIds: this.canonicalSingleUserIds,
       onMorningDigest: async (userId: string) => {
         await (this.unifiedScheduler?.sendMorningDigest(userId) ?? Promise.resolve(0));
       },
@@ -358,6 +377,7 @@ export class Gateway {
       {
         timeoutMs: this.config.tuning?.skills?.timeoutMs,
         maxOutputBytes: this.config.tuning?.skills?.maxOutputBytes,
+        canonicalSingleUserIds: this.canonicalSingleUserIds,
         onSkillExecuted: async (name: string, success: boolean) => {
           if (success) await this.evolutionEngine?.recordSkillUse(name);
         },
@@ -466,6 +486,7 @@ export class Gateway {
       workspace: this.config.agent.workspace,
       logger: this.logger,
       config: subagentConfig,
+      canonicalSingleUserIds: this.canonicalSingleUserIds,
       skillPolicyResolver: async (skillName, context) => {
         if (this.config.tools?.policy && !matchesPolicy(skillName, this.config.tools.policy)) return false;
         const parent = await this.sessionManager!.getSession(context.parentSessionId);
@@ -533,6 +554,7 @@ export class Gateway {
       bestOfN: this.config.tuning?.critic?.bestOfN,
       bestOfNThreshold: this.config.tuning?.critic?.bestOfNThreshold,
       enableComplexityAnalysis: this.config.routing.enableComplexityAnalysis,
+      canonicalSingleUserIds: this.canonicalSingleUserIds,
       evolutionRecorder,
       announceQueue: this.announceQueue,
       subAgentExecutor: this.subAgentExecutor,
@@ -559,12 +581,7 @@ export class Gateway {
         interval: 30 * 1000, // Check every 30 seconds
         onSendMessage: this.outboundQueue.createHandler(),
         getTimezone: (userId: string) => this.configManager!.getUserTimezone(userId),
-        canonicalSingleUserIds: (this.config.channels.telegram.allowedUsers?.length ?? 0) === 1
-          ? [
-              this.config.channels.telegram.allowedUsers![0],
-              `telegram:${this.config.channels.telegram.allowedUsers![0]}`,
-            ]
-          : [],
+        canonicalSingleUserIds: this.canonicalSingleUserIds,
       });
       this.logger.debug('Unified scheduler initialized');
     }
@@ -745,7 +762,7 @@ export class Gateway {
         providerRegistry: this.providerRegistry || undefined,
         interruptQueue: this.interruptQueue || undefined,
         onUserMessage: (prefixedUserId: string, userMessage?: string, context?) => {
-          this.unifiedScheduler?.checkEngagement(prefixedUserId, userMessage, context);
+          return this.unifiedScheduler?.checkEngagement(prefixedUserId, userMessage, context);
         },
       });
       await this.telegramChannel.start();
@@ -818,7 +835,7 @@ export class Gateway {
    */
   private registerTelegramTriggerSource(channel: TelegramChannel): void {
     const triggerSource: TriggerSource = {
-      sendMessage: async (userId: string, message: string): Promise<boolean> => {
+      sendMessage: async (userId: string, message: string): Promise<MessageDeliveryResult> => {
         return channel.sendMessage(userId, message);
       },
       sendFile: async (userId: string, filePath: string, caption?: string): Promise<boolean> => {
@@ -1099,6 +1116,7 @@ export class Gateway {
         const sessionId = ctx.args.sessionId as string | undefined;
         const type = ctx.args.type as string | undefined;
         const recent = ctx.args.recent as number | undefined;
+        const stateUserId = resolveStateUserId(ctx.userId, this.canonicalSingleUserIds);
 
         try {
           if (!scallopStore) {
@@ -1113,22 +1131,28 @@ export class Gateway {
 
           let entries: any[] = [];
           if (id) {
-            const entry = scallopStore.get(id);
-            if (!entry) return { success: false, output: '', error: `Memory not found with ID: ${id}` };
+            const entry = scallopStore.getForUser(id, stateUserId);
+            // Treat another user's ID exactly like an unknown ID. Object IDs
+            // must never bypass the durable owner boundary.
+            if (!entry) {
+              return { success: false, output: '', error: `Memory not found with ID: ${id}` };
+            }
             entries = [entry];
           } else if (sessionId) {
-            entries = scallopStore.getByUser(sessionId, { category: mapCategory(type), limit: 100 });
+            // Legacy callers pass a session selector even though facts have no
+            // session foreign key. Keep retrieval useful, but scope it to the
+            // authenticated state owner instead of treating a caller-supplied
+            // session string as a user ID.
+            entries = scallopStore.getByUser(stateUserId, { category: mapCategory(type), limit: 100 });
           } else if (recent) {
-            // 'default' is the canonical store user (agent.ts resolvedUserId) —
-            // '' matched nothing, so recent/type lookups always came back empty.
-            entries = scallopStore.getByUser('default', { category: mapCategory(type), limit: Math.min(recent, 100) });
+            entries = scallopStore.getByUser(stateUserId, { category: mapCategory(type), limit: Math.min(recent, 100) });
           } else if (type) {
-            entries = scallopStore.getByUser('default', { category: mapCategory(type), limit: 50 });
+            entries = scallopStore.getByUser(stateUserId, { category: mapCategory(type), limit: 50 });
           } else {
-            entries = scallopStore.getByUser('default', { limit: 10 });
+            entries = scallopStore.getByUser(stateUserId, { limit: 10 });
           }
 
-          logger.debug({ id, sessionId, type, recent, count: entries.length }, 'Memory get completed');
+          logger.debug({ id, sessionId, type, recent, stateUserId, count: entries.length }, 'Memory get completed');
 
           if (entries.length === 0) return { success: true, output: 'No memories found matching the criteria.' };
           const format = (mem: any) => [
@@ -1378,47 +1402,75 @@ export class Gateway {
    */
   private resolveTriggerSource(userId: string): { source: TriggerSource | null; rawUserId: string } {
     const { channel, rawUserId } = parseUserIdPrefix(userId);
+    const allowedTelegramUsers = this.config.channels.telegram.allowedUsers ?? [];
 
-    // Single-user bot: patch canonical 'default' userId to actual telegram user
-    let resolvedRawUserId = rawUserId;
-    if (resolvedRawUserId === 'default') {
-      const allowedUsers = this.config.channels.telegram.allowedUsers;
-      if (allowedUsers && allowedUsers.length > 0) {
-        resolvedRawUserId = allowedUsers[0];
-        this.logger.debug({ from: 'default', to: resolvedRawUserId }, 'Resolved default userId to configured telegram user');
-      }
-    }
-
-    // If a specific channel is requested, try to use it
+    // An explicit channel is an authorization boundary, not a preference. If
+    // that transport is unavailable, never fall through to another person's
+    // Telegram chat merely because Telegram happens to be running.
     if (channel) {
       const source = this.triggerSources.get(channel);
-      if (source) {
-        this.logger.debug({ channel, userId: resolvedRawUserId }, 'Using prefixed trigger source');
-        return { source, rawUserId: resolvedRawUserId };
+      if (!source) {
+        this.logger.warn({ channel, userId: rawUserId }, 'Requested trigger source is unavailable; refusing cross-channel fallback');
+        return { source: null, rawUserId };
       }
-      this.logger.warn({ channel, userId: resolvedRawUserId }, 'Requested trigger source not available, falling back');
+
+      if (channel === 'telegram') {
+        if (rawUserId === 'default') {
+          if (allowedTelegramUsers.length !== 1) {
+            this.logger.warn(
+              { allowedUserCount: allowedTelegramUsers.length },
+              'Cannot resolve default Telegram recipient unambiguously',
+            );
+            return { source: null, rawUserId };
+          }
+          return { source, rawUserId: allowedTelegramUsers[0] };
+        }
+        if (allowedTelegramUsers.length > 0 && !allowedTelegramUsers.includes(rawUserId)) {
+          this.logger.warn({ userId: rawUserId }, 'Refusing Telegram delivery outside the configured allowlist');
+          return { source: null, rawUserId };
+        }
+      }
+
+      this.logger.debug({ channel, userId: rawUserId }, 'Using prefixed trigger source');
+      return { source, rawUserId };
     }
 
-    // Fall back to first available trigger source (prefer telegram for backward compat)
+    // Canonical default can route to Telegram only for one explicit owner. An
+    // API-only deployment may safely keep its own default identity.
+    if (rawUserId === 'default') {
+      const telegram = this.triggerSources.get('telegram');
+      if (telegram && allowedTelegramUsers.length === 1) {
+        return { source: telegram, rawUserId: allowedTelegramUsers[0] };
+      }
+      const api = this.triggerSources.get('api');
+      if (api && !telegram) return { source: api, rawUserId };
+      this.logger.warn(
+        { allowedUserCount: allowedTelegramUsers.length, sourceCount: this.triggerSources.size },
+        'Cannot resolve unprefixed default recipient unambiguously',
+      );
+      return { source: null, rawUserId };
+    }
+
+    // A bare legacy owner ID is safe only when it is an explicitly configured
+    // single-owner alias, or when exactly one transport exists.
     const telegram = this.triggerSources.get('telegram');
-    if (telegram) {
-      return { source: telegram, rawUserId: resolvedRawUserId };
+    if (telegram && this.canonicalSingleUserIds.includes(rawUserId)) {
+      return { source: telegram, rawUserId };
+    }
+    if (this.triggerSources.size === 1) {
+      const source = this.triggerSources.values().next().value as TriggerSource;
+      return { source, rawUserId };
     }
 
-    const api = this.triggerSources.get('api');
-    if (api) {
-      return { source: api, rawUserId: resolvedRawUserId };
-    }
-
-    // No trigger sources available
-    return { source: null, rawUserId: resolvedRawUserId };
+    this.logger.warn({ userId: rawUserId }, 'Cannot resolve unprefixed recipient across multiple transports');
+    return { source: null, rawUserId };
   }
 
   /**
    * Handle sending a proactive message to a user
    * Used by TriggerEvaluator for agent-initiated messages
    */
-  private async handleProactiveMessage(userId: string, message: string): Promise<boolean> {
+  private async handleProactiveMessage(userId: string, message: string): Promise<MessageDeliveryResult> {
     this.logger.debug({ userId, messageLength: message.length }, 'Sending proactive message');
 
     const { source: triggerSource, rawUserId } = this.resolveTriggerSource(userId);
@@ -1436,7 +1488,6 @@ export class Gateway {
     }
   }
 
-  /**
   /**
    * Handle sending a file to a user
    * Uses trigger source abstraction for multi-channel support
@@ -1467,7 +1518,7 @@ export class Gateway {
 
     if (triggerSource) {
       this.logger.debug({ triggerSource: triggerSource.getName(), userId: rawUserId }, 'Using trigger source for message send');
-      return await triggerSource.sendMessage(rawUserId, message);
+      return messageWasDelivered(await triggerSource.sendMessage(rawUserId, message));
     }
 
     this.logger.warn({ userId }, 'No trigger source available to send message');

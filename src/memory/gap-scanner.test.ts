@@ -14,6 +14,7 @@ import {
   scanStaleGoals,
   scanBehavioralAnomalies,
   scanUnresolvedThreads,
+  scanStaleBoardItems,
   scanForGaps,
   type GapSignal,
   type GapScanInput,
@@ -491,6 +492,45 @@ describe('scanUnresolvedThreads', () => {
 
     expect(scanUnresolvedThreads(summaries, NOW)).toEqual([]);
   });
+});
+
+// ============ scanStaleBoardItems ============
+
+describe('scanStaleBoardItems', () => {
+  const staleAt = NOW - 4 * DAY_MS;
+
+  it('reports stale work only when the canonical lifecycle status is live', () => {
+    const result = scanStaleBoardItems([
+      {
+        id: 'live-task',
+        title: 'Live task',
+        status: 'processing',
+        boardStatus: 'in_progress',
+        updatedAt: staleAt,
+        priority: 'medium',
+      },
+    ], NOW);
+
+    expect(result.map(signal => signal.sourceId)).toEqual(['live-task']);
+  });
+
+  it.each(['expired', 'dismissed', 'fired', 'acted'] as const)(
+    'ignores a terminal %s row even when its legacy board column looks active',
+    status => {
+      const result = scanStaleBoardItems([
+        {
+          id: `ghost-${status}`,
+          title: 'Historical task',
+          status,
+          boardStatus: 'in_progress',
+          updatedAt: staleAt,
+          priority: 'high',
+        },
+      ], NOW);
+
+      expect(result).toEqual([]);
+    },
+  );
 });
 
 // ============ scanForGaps (orchestrator) ============

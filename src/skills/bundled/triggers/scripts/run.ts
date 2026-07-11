@@ -32,6 +32,10 @@ interface SkillInput {
   trigger_id?: string;
 }
 
+// Stateful bundled skills use the canonical storage identity while preserving
+// SKILL_USER_ID for channel-specific communication and integrations.
+const USER_ID = process.env.SKILL_STATE_USER_ID || process.env.SKILL_USER_ID || 'default';
+
 function findDatabasePath(): string {
   // Check common locations
   const possiblePaths = [
@@ -76,20 +80,20 @@ function formatTriggerTime(timestamp: number): string {
   }
 }
 
-function listTriggers(db: Database.Database): string {
+function listTriggers(db: Database.Database, userId: string): string {
   const stmt = db.prepare(`
     SELECT * FROM scheduled_items
-    WHERE status = 'pending'
+    WHERE user_id = ? AND source = 'agent' AND status = 'pending'
     ORDER BY trigger_at ASC
   `);
 
-  const triggers = stmt.all() as TriggerEntry[];
+  const triggers = stmt.all(userId) as TriggerEntry[];
 
   if (triggers.length === 0) {
-    return 'No pending scheduled items.\n\nScheduled items are created when you set reminders or mention events, commitments, or goals in conversation.';
+    return 'No pending automatic triggers.\n\nAutomatic triggers are created when you mention events, commitments, or goals in conversation.';
   }
 
-  const lines = ['**Pending scheduled items:**\n'];
+  const lines = ['**Pending automatic triggers:**\n'];
 
   for (const trigger of triggers) {
     const timeStr = formatTriggerTime(trigger.trigger_at);
@@ -105,22 +109,32 @@ function listTriggers(db: Database.Database): string {
   return lines.join('\n');
 }
 
-function cancelTrigger(db: Database.Database, triggerId: string): string {
-  // Support partial ID matching
+function cancelTrigger(db: Database.Database, userId: string, triggerId: string): string {
+  // Support partial IDs only when they identify one owned automatic trigger.
   const stmt = db.prepare(`
     SELECT * FROM scheduled_items
-    WHERE id LIKE ? AND status = 'pending'
-    LIMIT 1
+    WHERE user_id = ? AND source = 'agent' AND status = 'pending'
+      AND (id = ? OR substr(id, 1, length(?)) = ?)
+    ORDER BY CASE WHEN id = ? THEN 0 ELSE 1 END, id ASC
+    LIMIT 2
   `);
 
-  const trigger = stmt.get(`${triggerId}%`) as TriggerEntry | undefined;
+  const matches = stmt.all(userId, triggerId, triggerId, triggerId, triggerId) as TriggerEntry[];
+  const trigger = matches[0];
 
   if (!trigger) {
     return `No pending trigger found matching ID "${triggerId}".`;
   }
+  if (trigger.id !== triggerId && matches.length > 1) {
+    return `Trigger ID "${triggerId}" is ambiguous. Use a longer ID from the list.`;
+  }
 
-  const deleteStmt = db.prepare('DELETE FROM scheduled_items WHERE id = ?');
-  const result = deleteStmt.run(trigger.id);
+  const dismissStmt = db.prepare(`
+    UPDATE scheduled_items
+    SET status = 'dismissed', board_status = 'archived', updated_at = ?
+    WHERE id = ? AND user_id = ? AND source = 'agent' AND status = 'pending'
+  `);
+  const result = dismissStmt.run(Date.now(), trigger.id, userId);
 
   if (result.changes > 0) {
     return `Cancelled: "${trigger.message}"`;
@@ -129,18 +143,17 @@ function cancelTrigger(db: Database.Database, triggerId: string): string {
   }
 }
 
-function cancelAllTriggers(db: Database.Database): string {
-  const countStmt = db.prepare(`SELECT COUNT(*) as count FROM scheduled_items WHERE status = 'pending'`);
-  const { count } = countStmt.get() as { count: number };
+function cancelAllTriggers(db: Database.Database, userId: string): string {
+  const dismissStmt = db.prepare(`
+    UPDATE scheduled_items
+    SET status = 'dismissed', board_status = 'archived', updated_at = ?
+    WHERE user_id = ? AND source = 'agent' AND status = 'pending'
+  `);
+  const result = dismissStmt.run(Date.now(), userId);
 
-  if (count === 0) {
-    return 'No pending items to cancel.';
-  }
-
-  const deleteStmt = db.prepare(`DELETE FROM scheduled_items WHERE status = 'pending'`);
-  const result = deleteStmt.run();
-
-  return `Cancelled ${result.changes} pending item(s).`;
+  return result.changes === 0
+    ? 'No pending automatic triggers to cancel.'
+    : `Cancelled ${result.changes} pending automatic trigger(s).`;
 }
 
 async function main() {
@@ -163,19 +176,19 @@ async function main() {
 
     switch (args.action) {
       case 'list':
-        output = listTriggers(db);
+        output = listTriggers(db, USER_ID);
         break;
 
       case 'cancel':
         if (!args.trigger_id) {
           output = 'Please provide a trigger_id to cancel. Use action: list to see trigger IDs.';
         } else {
-          output = cancelTrigger(db, args.trigger_id);
+          output = cancelTrigger(db, USER_ID, args.trigger_id);
         }
         break;
 
       case 'cancel_all':
-        output = cancelAllTriggers(db);
+        output = cancelAllTriggers(db, USER_ID);
         break;
 
       default:

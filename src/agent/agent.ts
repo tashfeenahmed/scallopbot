@@ -37,6 +37,7 @@ import { effectiveContextWindowTokens } from '../routing/model-limits.js';
 import { selectBest, scoreResponseHeuristic } from './critic.js';
 import type { EvolutionRecorder } from '../evolution/signals.js';
 import { stripThinkTags } from '../utils/output-safety.js';
+import { resolveStateUserId } from '../utils/state-user-id.js';
 
 export interface AgentOptions {
   provider: LLMProvider;
@@ -91,6 +92,8 @@ export interface AgentOptions {
   evolutionRecorder?: EvolutionRecorder;
   /** Disable heuristic tier selection and use the standard tier for every turn. */
   enableComplexityAnalysis?: boolean;
+  /** Explicit aliases for this deployment's single canonical state owner. */
+  canonicalSingleUserIds?: readonly string[];
 }
 
 export type AgentCompletionReason =
@@ -227,6 +230,7 @@ export class Agent {
   /** Optional self-evolution signal recorder (best-effort, turn-end). */
   private evolutionRecorder: EvolutionRecorder | null;
   private enableComplexityAnalysis: boolean;
+  private canonicalSingleUserIds: readonly string[];
 
   /** Enhanced tool loop detector */
   private toolLoopDetector = new ToolLoopDetector();
@@ -260,6 +264,7 @@ export class Agent {
     this.bestOfNThreshold = options.bestOfNThreshold ?? 0.85;
     this.evolutionRecorder = options.evolutionRecorder ?? null;
     this.enableComplexityAnalysis = options.enableComplexityAnalysis ?? true;
+    this.canonicalSingleUserIds = [...(options.canonicalSingleUserIds ?? [])];
 
     this.logger.info({ enableThinking: this.enableThinking, bestOfN: this.bestOfN, bestOfNThreshold: this.bestOfNThreshold }, 'Agent thinking mode configured');
   }
@@ -324,10 +329,13 @@ export class Agent {
       timestamp: new Date(),
     }).catch(() => {});
 
-    // Single-user bot: use canonical 'default' userId for all memory operations.
-    // This keeps memories unified across channels (Telegram, WebSocket, etc.).
-    // Channel routing for proactive delivery is handled by the scheduler.
-    const resolvedUserId = 'default';
+    // Keep the channel identity for communication/tool routing, while all
+    // durable state uses the deployment's explicit canonical owner mapping.
+    // Empty/multi-user allow-lists retain channel-prefixed IDs and stay isolated.
+    const channelUserId = typeof session.metadata?.userId === 'string'
+      ? session.metadata.userId
+      : 'default';
+    const resolvedUserId = resolveStateUserId(channelUserId, this.canonicalSingleUserIds);
 
     // Check budget before processing
     if (this.costTracker) {
@@ -421,7 +429,7 @@ export class Agent {
     if (this.factExtractor && !isSubAgentResult && !hasImageAttachments) {
       this.factExtractor.queueForExtraction(
         userMessage,
-        resolvedUserId,
+        channelUserId,
         this.lastAssistantResponses.get(sessionId) || undefined,
         undefined,
         sessionId,
@@ -581,7 +589,7 @@ export class Agent {
           if (this.factExtractor) {
             this.factExtractor.queueForExtraction(
               interrupt.text,
-              resolvedUserId,
+              channelUserId,
               this.lastAssistantResponses.get(sessionId) || undefined,
               undefined,
               sessionId,
@@ -1031,7 +1039,7 @@ export class Agent {
       const imageContext = `User sent a message with an image attachment. The assistant's response (which could see the image) was:\n${finalResponse.slice(0, 2000)}`;
       this.factExtractor.queueForExtraction(
         userMessage,
-        resolvedUserId,
+        channelUserId,
         imageContext,
         undefined,
         sessionId,
@@ -1264,7 +1272,7 @@ Only install skills when the user asks, or when you determine a skill would help
         stableContext += `\n\n## YOUR IDENTITY\nThis is who you are. Embody this personality in all responses:\n${agentText}`;
       }
 
-      const staticProfile = profileManager.getStaticProfile('default');
+      const staticProfile = profileManager.getStaticProfile(userId);
       if (Object.keys(staticProfile).length > 0) {
         let profileText = '';
         for (const [key, value] of Object.entries(staticProfile)) {

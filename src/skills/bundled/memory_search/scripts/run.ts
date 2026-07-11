@@ -324,7 +324,7 @@ async function executeSearch(args: MemorySearchArgs): Promise<void> {
     db = new ScallopDatabase(dbPath);
 
     // Get candidate memories (only latest versions — exclude superseded)
-    const userId = process.env.SKILL_USER_ID || 'default';
+    const userId = process.env.SKILL_STATE_USER_ID || process.env.SKILL_USER_ID || 'default';
     const allMemories = db.getMemoriesByUser(userId, {
       minProminence: 0.1,
       isLatest: true,

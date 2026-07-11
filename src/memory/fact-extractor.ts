@@ -9,6 +9,7 @@
 import type { Logger } from 'pino';
 import type { LLMProvider } from '../providers/types.js';
 import type { CostTracker } from '../routing/cost.js';
+import { resolveStateUserId } from '../utils/state-user-id.js';
 import { cosineSimilarity, type EmbeddingProvider } from './embeddings.js';
 import type { ScallopMemoryStore } from './scallop-store.js';
 import type { MemoryCategory, RecurringSchedule } from './db.js';
@@ -98,6 +99,8 @@ export interface LLMFactExtractorOptions {
   resourceLimits?: ResourceLimits;
   /** Callback to resolve IANA timezone for a user (defaults to server timezone) */
   getTimezone?: (userId: string) => string;
+  /** Explicit aliases for this deployment's single canonical state owner. */
+  canonicalSingleUserIds?: readonly string[];
 }
 
 /**
@@ -293,6 +296,7 @@ export class LLMFactExtractor {
   private processingQueue: Map<string, Promise<FactExtractionResult>> = new Map();
   private resourceLimits: Required<ResourceLimits>;
   private getTimezone: (userId: string) => string;
+  private canonicalSingleUserIds: readonly string[];
   /** Counter for throttling consolidateMemory — runs every N extractions */
   private extractionCount = 0;
   private static readonly CONSOLIDATION_INTERVAL = 5;
@@ -307,6 +311,7 @@ export class LLMFactExtractor {
     this.embedder = options.embedder;
     this.deduplicationThreshold = options.deduplicationThreshold ?? 0.95;
     this.getTimezone = options.getTimezone ?? (() => Intl.DateTimeFormat().resolvedOptions().timeZone);
+    this.canonicalSingleUserIds = [...(options.canonicalSingleUserIds ?? [])];
 
     // Set resource limits with defaults suitable for 4GB RAM
     this.resourceLimits = {
@@ -337,6 +342,8 @@ export class LLMFactExtractor {
     /** Conversation that originated any extracted proactive intent. */
     sourceSessionId?: string,
   ): Promise<FactExtractionResult> {
+    const channelUserId = userId;
+    userId = resolveStateUserId(userId, this.canonicalSingleUserIds);
     const result: FactExtractionResult = {
       facts: [],
       factsStored: 0,
@@ -348,7 +355,7 @@ export class LLMFactExtractor {
     try {
       // Build prompt with current date injected and optional context
       const now = new Date();
-      const tz = this.getTimezone(userId);
+      const tz = this.getTimezone(channelUserId);
       const tzOptions = { timeZone: tz };
       const currentDate = now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', ...tzOptions });
       const currentTime = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true, ...tzOptions });
@@ -1034,6 +1041,7 @@ export class LLMFactExtractor {
     candidateMemoryIds?: string[],
   ): Promise<void> {
     if (!this.scallopStore) return;
+    userId = resolveStateUserId(userId, this.canonicalSingleUserIds);
 
     const profileManager = this.scallopStore.getProfileManager();
     const newIdSet = new Set(newMemoryIds);
@@ -1073,7 +1081,7 @@ export class LLMFactExtractor {
       : '(none)';
 
     // Get current profiles for context
-    const userProfile = profileManager.getStaticProfile('default');
+    const userProfile = profileManager.getStaticProfile(userId);
     const agentProfile = profileManager.getStaticProfile('agent');
     const userProfileStr = Object.keys(userProfile).length > 0
       ? Object.entries(userProfile).map(([k, v]) => `  ${k}: ${v}`).join('\n')
@@ -1232,7 +1240,7 @@ Respond with JSON only:
             // merging. Each successful update effectively reinforces the whole field
             // by refreshing user_profiles.updated_at.
             const FOCUS_TTL_MS = 14 * 24 * 60 * 60 * 1000;
-            const currentEntry = this.scallopStore.getDatabase().getProfileValue('default', 'focus');
+            const currentEntry = this.scallopStore.getDatabase().getProfileValue(userId, 'focus');
             const currentFocus = currentEntry?.value ?? null;
             const isStale = currentEntry ? (Date.now() - currentEntry.updatedAt > FOCUS_TTL_MS) : true;
 
@@ -1242,7 +1250,7 @@ Respond with JSON only:
               const genuinelyNew = [...newSet].filter(item => !currentSet.has(item));
               if (genuinelyNew.length === 0) {
                 // Still touch updated_at to reinforce the existing focus as fresh
-                profileManager.setStaticValue('default', key, currentFocus);
+                profileManager.setStaticValue(userId, key, currentFocus);
                 this.logger.debug({ focus: newFocus }, 'Focus unchanged, reinforced freshness');
                 continue;
               }
@@ -1251,13 +1259,13 @@ Respond with JSON only:
                 ...currentFocus.split(',').map(s => s.trim()).map(capItem),
                 ...genuinelyNew.map(capItem),
               ])].filter(Boolean).slice(0, 5);
-              profileManager.setStaticValue('default', key, merged.join(', '));
+              profileManager.setStaticValue(userId, key, merged.join(', '));
               this.logger.info({ key, value: merged.join(', '), added: genuinelyNew }, 'User focus merged via LLM');
               continue;
             }
 
             // No existing focus OR stale focus → replace wholesale with the new value
-            profileManager.setStaticValue('default', key, newFocus);
+            profileManager.setStaticValue(userId, key, newFocus);
             this.logger.info({ key, value: newFocus, replacedStale: isStale && !!currentFocus }, 'User focus set via LLM');
             continue;
           }
@@ -1268,7 +1276,7 @@ Respond with JSON only:
             continue;
           }
 
-          profileManager.setStaticValue('default', key, trimmed);
+          profileManager.setStaticValue(userId, key, trimmed);
           this.logger.info({ key, value: trimmed }, 'User profile updated via LLM');
         }
       }

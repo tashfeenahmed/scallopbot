@@ -1136,5 +1136,117 @@ describe('Agent', () => {
 
       scallopStore.close();
     });
+
+    it('maps one configured owner to default state while isolating two other channel users', async () => {
+      const { Agent } = await import('./agent.js');
+      const { SessionManager } = await import('./session.js');
+      const { BoardService } = await import('../board/board-service.js');
+      const logger = pino({ level: 'silent' });
+      const scallopStore = new ScallopMemoryStore({
+        dbPath: path.join(testDir, 'state-identity.db'),
+        logger,
+      });
+
+      try {
+        await scallopStore.add({
+          userId: 'default',
+          content: 'The owner tracks Project Amber in a private notebook.',
+          category: 'fact',
+          importance: 8,
+          confidence: 1,
+        });
+        await scallopStore.add({
+          userId: 'telegram:user-alpha',
+          content: 'User Alpha tracks Project Cedar in a private notebook.',
+          category: 'fact',
+          importance: 8,
+          confidence: 1,
+        });
+        await scallopStore.add({
+          userId: 'telegram:user-beta',
+          content: 'User Beta tracks Project Birch in a private notebook.',
+          category: 'fact',
+          importance: 8,
+          confidence: 1,
+        });
+
+        const profiles = scallopStore.getProfileManager();
+        profiles.setStaticValue('default', 'name', 'Owner Profile');
+        profiles.setStaticValue('telegram:user-alpha', 'name', 'Alpha Profile');
+        profiles.setStaticValue('telegram:user-beta', 'name', 'Beta Profile');
+
+        const stateDb = scallopStore.getDatabase();
+        const addBoardItem = (userId: string, message: string) => stateDb.addScheduledItem({
+          userId,
+          sessionId: null,
+          source: 'user',
+          kind: 'task',
+          type: 'reminder',
+          message,
+          context: null,
+          triggerAt: 0,
+          recurring: null,
+          sourceMemoryId: null,
+          boardStatus: 'backlog',
+        });
+        addBoardItem('default', 'Owner-only Amber task');
+        addBoardItem('telegram:user-alpha', 'Alpha-only Cedar task');
+        addBoardItem('telegram:user-beta', 'Beta-only Birch task');
+
+        const provider = createMockProvider(Array.from({ length: 3 }, () => ({
+          content: [{ type: 'text' as const, text: 'Synthetic response.' }],
+          stopReason: 'end_turn' as const,
+          usage: { inputTokens: 10, outputTokens: 5 },
+          model: 'test-model',
+        })));
+        const sessionManager = new SessionManager(stateDb);
+        const agent = new Agent({
+          provider,
+          sessionManager,
+          scallopStore,
+          boardService: new BoardService(stateDb, logger),
+          canonicalSingleUserIds: ['owner-1', 'telegram:owner-1'],
+          workspace: testDir,
+          logger,
+          maxIterations: 20,
+        });
+
+        const ownerSession = await sessionManager.createSession({
+          userId: 'telegram:owner-1', channelId: 'telegram',
+        });
+        const alphaSession = await sessionManager.createSession({
+          userId: 'telegram:user-alpha', channelId: 'telegram',
+        });
+        const betaSession = await sessionManager.createSession({
+          userId: 'telegram:user-beta', channelId: 'telegram',
+        });
+
+        await agent.processMessage(ownerSession.id, 'What do you know about Project Amber?');
+        await agent.processMessage(alphaSession.id, 'Show my Project Cedar board');
+        await agent.processMessage(betaSession.id, 'Show my Project Birch board');
+
+        const prompts = (provider.complete as any).mock.calls
+          .map((call: any[]) => flattenSystem(call[0].system));
+        expect(prompts[0]).toContain('Owner Profile');
+        expect(prompts[0]).toContain('Project Amber');
+        expect(prompts[0]).not.toContain('Alpha Profile');
+        expect(prompts[0]).not.toContain('Project Cedar');
+
+        expect(prompts[1]).toContain('Alpha Profile');
+        expect(prompts[1]).toContain('Project Cedar');
+        expect(prompts[1]).toContain('Alpha-only Cedar task');
+        expect(prompts[1]).not.toContain('Beta Profile');
+        expect(prompts[1]).not.toContain('Project Birch');
+        expect(prompts[1]).not.toContain('Owner-only Amber task');
+
+        expect(prompts[2]).toContain('Beta Profile');
+        expect(prompts[2]).toContain('Project Birch');
+        expect(prompts[2]).toContain('Beta-only Birch task');
+        expect(prompts[2]).not.toContain('Alpha Profile');
+        expect(prompts[2]).not.toContain('Project Cedar');
+      } finally {
+        scallopStore.close();
+      }
+    });
   });
 });

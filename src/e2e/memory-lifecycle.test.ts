@@ -17,6 +17,8 @@ import { ProfileManager } from '../memory/profiles.js';
 import { createMockEmbeddingProvider } from './helpers.js';
 
 const testLogger = pino({ level: 'silent' });
+const TEST_OWNER_ID = 'owner-example';
+const TEST_OWNER_ALIASES = [TEST_OWNER_ID, `telegram:${TEST_OWNER_ID}`] as const;
 
 describe('E2E Memory Lifecycle', () => {
 
@@ -49,7 +51,7 @@ describe('E2E Memory Lifecycle', () => {
 
       // Session 1: 6 messages, 12 days ago
       const session1Id = 'e2e-behavioral-sess-1';
-      db.createSession(session1Id);
+      db.createSession(session1Id, { userId: TEST_OWNER_ID });
       for (let i = 0; i < 6; i++) {
         // addSessionMessage sets created_at = Date.now(), which is fine.
         // The deepTick pulls messages and uses their created_at as timestamp.
@@ -58,14 +60,14 @@ describe('E2E Memory Lifecycle', () => {
 
       // Session 2: 5 messages, 7 days ago
       const session2Id = 'e2e-behavioral-sess-2';
-      db.createSession(session2Id);
+      db.createSession(session2Id, { userId: TEST_OWNER_ID });
       for (let i = 0; i < 5; i++) {
         db.addSessionMessage(session2Id, 'user', `Question about python and machine learning setup ${i}`);
       }
 
       // Session 3: 5 messages, 2 days ago
       const session3Id = 'e2e-behavioral-sess-3';
-      db.createSession(session3Id);
+      db.createSession(session3Id, { userId: TEST_OWNER_ID });
       for (let i = 0; i < 5; i++) {
         db.addSessionMessage(session3Id, 'user', `Discussion about docker and kubernetes deployment ${i}`);
       }
@@ -115,6 +117,7 @@ describe('E2E Memory Lifecycle', () => {
       gardener = new BackgroundGardener({
         scallopStore,
         logger: testLogger,
+        canonicalSingleUserIds: TEST_OWNER_ALIASES,
       });
     }, 30000);
 

@@ -305,7 +305,125 @@ describe('Gateway', () => {
     });
   });
 
+  describe('native memory_get skill', () => {
+    it('maps the configured owner while keeping another Telegram user isolated', async () => {
+      const { Gateway } = await import('./gateway.js');
+      const { pino } = await import('pino');
+      const gateway = new Gateway({
+        config: createMockConfig(testDir, {
+          channels: {
+            telegram: {
+              enabled: false,
+              botToken: '',
+              allowedUsers: ['owner-example'],
+              enableVoiceReply: false,
+            },
+            discord: { enabled: false, botToken: '', applicationId: '' },
+            api: { enabled: false, port: 3000, host: '127.0.0.1' },
+          },
+        }),
+        logger: pino({ level: 'silent' }),
+      });
+      await gateway.initialize();
+
+      const store = (gateway as unknown as {
+        scallopMemoryStore: {
+          add(input: {
+            userId: string;
+            content: string;
+            category: 'fact';
+            importance: number;
+            confidence: number;
+          }): Promise<{ id: string }>;
+          getDatabase(): {
+            getMemory(id: string): { accessCount: number } | null;
+          };
+        };
+      }).scallopMemoryStore;
+      const ownerMemory = await store.add({
+        userId: 'default',
+        content: 'The configured owner keeps a synthetic Saffron note.',
+        category: 'fact',
+        importance: 8,
+        confidence: 1,
+      });
+      const otherMemory = await store.add({
+        userId: 'telegram:user-beta',
+        content: 'The other user keeps a synthetic Indigo note.',
+        category: 'fact',
+        importance: 8,
+        confidence: 1,
+      });
+      const handler = gateway.getSkillRegistry().getSkill('memory_get')!.handler!;
+
+      const ownerResult = await handler({
+        args: { recent: 10 },
+        workspace: testDir,
+        sessionId: 'owner-session',
+        userId: 'telegram:owner-example',
+      });
+      const otherResult = await handler({
+        args: { recent: 10 },
+        workspace: testDir,
+        sessionId: 'other-session',
+        userId: 'telegram:user-beta',
+      });
+      const otherAccessCountBefore = store.getDatabase().getMemory(otherMemory.id)!.accessCount;
+      const crossUserIdResult = await handler({
+        args: { id: otherMemory.id },
+        workspace: testDir,
+        sessionId: 'owner-session',
+        userId: 'telegram:owner-example',
+      });
+
+      expect(ownerResult.output).toContain(ownerMemory.id);
+      expect(ownerResult.output).toContain('Saffron');
+      expect(ownerResult.output).not.toContain('Indigo');
+      expect(otherResult.output).toContain(otherMemory.id);
+      expect(otherResult.output).toContain('Indigo');
+      expect(otherResult.output).not.toContain('Saffron');
+      expect(crossUserIdResult.success).toBe(false);
+      expect(crossUserIdResult.error).toContain('Memory not found');
+      expect(store.getDatabase().getMemory(otherMemory.id)!.accessCount)
+        .toBe(otherAccessCountBefore);
+    });
+  });
+
   describe('channel management', () => {
+    it('fails closed for ambiguous defaults, unavailable channels, and users outside the Telegram allowlist', async () => {
+      const { Gateway } = await import('./gateway.js');
+      const { pino } = await import('pino');
+      const gateway = new Gateway({
+        config: createMockConfig(testDir, {
+          channels: {
+            telegram: {
+              enabled: false,
+              botToken: '',
+              allowedUsers: ['owner-alpha', 'owner-beta'],
+              enableVoiceReply: false,
+            },
+            discord: { enabled: false, botToken: '', applicationId: '' },
+            api: { enabled: false, port: 3000, host: '127.0.0.1' },
+          },
+        }),
+        logger: pino({ level: 'silent' }),
+      });
+      const telegramSource = {
+        sendMessage: vi.fn().mockResolvedValue(true),
+        sendFile: vi.fn().mockResolvedValue(true),
+        getName: () => 'telegram',
+      };
+      const internals = gateway as unknown as {
+        triggerSources: Map<string, typeof telegramSource>;
+        resolveTriggerSource(userId: string): { source: typeof telegramSource | null; rawUserId: string };
+      };
+      internals.triggerSources.set('telegram', telegramSource);
+
+      expect(internals.resolveTriggerSource('default')).toEqual({ source: null, rawUserId: 'default' });
+      expect(internals.resolveTriggerSource('api:default')).toEqual({ source: null, rawUserId: 'default' });
+      expect(internals.resolveTriggerSource('telegram:outside')).toEqual({ source: null, rawUserId: 'outside' });
+    });
+
     it('should not start telegram channel when disabled', async () => {
       const { Gateway } = await import('./gateway.js');
       const { TelegramChannel } = await import('../channels/telegram.js');

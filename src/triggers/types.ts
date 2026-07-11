@@ -9,6 +9,57 @@
  * TriggerSource represents a channel that can receive triggered messages.
  * Both TelegramChannel and ApiChannel implement this interface.
  */
+export interface MessageDeliveryReceipt {
+  /** Successful transport acknowledgement. */
+  sent: true;
+  /** Stable channel name used to namespace channel message IDs. */
+  channel: string;
+  /** Every outbound channel message ID produced by chunking this delivery. */
+  messageIds: string[];
+  /** True when one transport message represents multiple queued intents. */
+  combined?: boolean;
+}
+
+export interface MessageDeliverySuppressed {
+  sent: false;
+  suppressed: true;
+  /** Machine-readable validation reason; this is not a transport failure. */
+  reason: string;
+}
+
+/** Existing boolean transports remain valid while receipt-aware channels opt in. */
+export type MessageDeliveryResult = boolean | MessageDeliveryReceipt | MessageDeliverySuppressed;
+
+export type MessageDeliveryValidation = boolean | { valid: boolean; reason?: string };
+
+export interface MessageDeliveryMetadata {
+  scheduledItemId: string;
+  ownerUserId: string;
+  /** Re-read mutable source state immediately before raw transport. */
+  validate?: () => MessageDeliveryValidation | Promise<MessageDeliveryValidation>;
+}
+
+export type MessageDeliveryHandler = ((
+  userId: string,
+  message: string,
+  metadata?: MessageDeliveryMetadata,
+) => Promise<MessageDeliveryResult>) & {
+  /** Opt-in marker so legacy two-argument handlers keep their exact call shape. */
+  supportsDeliveryMetadata?: true;
+};
+
+export function messageWasDelivered(result: MessageDeliveryResult): boolean {
+  return result === true || (typeof result === 'object' && result.sent === true);
+}
+
+export function isMessageDeliveryReceipt(result: MessageDeliveryResult): result is MessageDeliveryReceipt {
+  return typeof result === 'object' && result.sent === true;
+}
+
+export function isMessageDeliverySuppressed(result: MessageDeliveryResult): result is MessageDeliverySuppressed {
+  return typeof result === 'object' && result.sent === false && result.suppressed === true;
+}
+
 export interface TriggerSource {
   /**
    * Send a text message to a user.
@@ -16,7 +67,7 @@ export interface TriggerSource {
    * @param message - The message content (may include markdown)
    * @returns true if message was sent successfully
    */
-  sendMessage(userId: string, message: string): Promise<boolean>;
+  sendMessage(userId: string, message: string): Promise<MessageDeliveryResult>;
 
   /**
    * Send a file to a user.

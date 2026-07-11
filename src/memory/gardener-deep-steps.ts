@@ -4,7 +4,13 @@
  */
 
 import type { GardenerContext } from './gardener-context.js';
-import { DEFAULT_USER_ID } from './gardener-context.js';
+import {
+  DEFAULT_USER_ID,
+  hasExplicitSingleOwner,
+  resolveSessionStateUserId,
+  sessionBelongsToStateUser,
+  stateIdentityCandidates,
+} from './gardener-context.js';
 import { storeFusedMemory } from './gardener-fusion-storage.js';
 import { getLastProactiveAt, createProactiveItem } from './gardener-scheduling.js';
 import { findFusionClusters, fuseMemoryCluster } from './fusion.js';
@@ -137,25 +143,33 @@ export async function runSessionSummarization(ctx: GardenerContext): Promise<{ s
        ORDER BY s.updated_at DESC
        LIMIT 20`,
       [cutoff]
-    ).filter(s => {
-      // Skip sub-agent sessions — transient, results already in parent
-      if (s.metadata) {
-        try {
-          const meta = JSON.parse(s.metadata);
-          if (meta.isSubAgent) return false;
-        } catch { /* ignore */ }
+    );
+    const sessionsByUser = new Map<string, string[]>();
+    for (const session of oldSessions) {
+      let metadata: Record<string, unknown> | null = null;
+      try {
+        const parsed = session.metadata ? JSON.parse(session.metadata) as unknown : null;
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          metadata = parsed as Record<string, unknown>;
+        }
+      } catch { /* malformed identity is ambiguous and must be skipped */ }
+      const userId = resolveSessionStateUserId(metadata, ctx.canonicalSingleUserIds);
+      if (!userId) continue;
+      const ids = sessionsByUser.get(userId) ?? [];
+      ids.push(session.id);
+      sessionsByUser.set(userId, ids);
+    }
+
+    if (sessionsByUser.size > 0) {
+      let summarized = 0;
+      for (const [userId, sessionIds] of sessionsByUser) {
+        summarized += await ctx.sessionSummarizer.summarizeBatch(ctx.db, sessionIds, userId);
       }
-      return true;
-    });
-    if (oldSessions.length > 0) {
-      const resolvedUserId = DEFAULT_USER_ID;
-      const summarized = await ctx.sessionSummarizer.summarizeBatch(
-        ctx.db,
-        oldSessions.map(s => s.id),
-        resolvedUserId
-      );
       if (summarized > 0) {
-        ctx.logger.info({ summarized, total: oldSessions.length }, 'Session summaries generated');
+        ctx.logger.info(
+          { summarized, eligible: [...sessionsByUser.values()].reduce((sum, ids) => sum + ids.length, 0), total: oldSessions.length },
+          'Session summaries generated',
+        );
       }
       return { summarized };
     }
@@ -241,21 +255,37 @@ export async function runEnhancedForgetting(ctx: GardenerContext): Promise<void>
 export function runBehavioralInference(ctx: GardenerContext): { messageCount: number } {
   try {
     const profileManager = ctx.scallopStore.getProfileManager();
-    const userId = DEFAULT_USER_ID;
     let totalMessages = 0;
 
     const recentSessions = ctx.db.listSessions(5);
-    const allMessages: Array<{ content: string; timestamp: number }> = [];
+    const sessionsByUser = new Map<string, typeof recentSessions>();
     for (const session of recentSessions) {
-      const messages = ctx.db.getSessionMessages(session.id);
-      for (const msg of messages) {
-        if (msg.role === 'user') {
-          allMessages.push({ content: msg.content, timestamp: msg.createdAt });
+      const userId = resolveSessionStateUserId(session.metadata, ctx.canonicalSingleUserIds);
+      if (!userId) continue;
+      const sessions = sessionsByUser.get(userId) ?? [];
+      sessions.push(session);
+      sessionsByUser.set(userId, sessions);
+    }
+
+    for (const [userId, sessionsForUser] of sessionsByUser) {
+      const allMessages: Array<{ content: string; timestamp: number }> = [];
+      for (const session of sessionsForUser) {
+        const messages = ctx.db.getSessionMessages(session.id);
+        for (const msg of messages) {
+          if (msg.role === 'user') {
+            allMessages.push({ content: msg.content, timestamp: msg.createdAt });
+          }
         }
       }
-    }
-    if (allMessages.length > 0) {
-      const sessionSummaries = ctx.db.getSessionSummariesByUser(userId, 20);
+      if (allMessages.length === 0) continue;
+
+      const sessionSummaries = ctx.db.getSessionSummariesByUser(userId, 20)
+        .filter(summary => sessionBelongsToStateUser(
+          ctx.db,
+          summary.sessionId,
+          userId,
+          ctx.canonicalSingleUserIds,
+        ));
       const sessions = sessionSummaries
         .filter(s => s.messageCount > 0)
         .map(s => ({
@@ -393,7 +423,7 @@ export async function runGoalDeadlineCheck(ctx: GardenerContext): Promise<void> 
  * Replaces the previous two-path approach (inner-thoughts + gap-scanner).
  */
 export async function runInnerThoughts(ctx: GardenerContext): Promise<void> {
-  if (!ctx.fusionProvider) return;
+  if (!ctx.fusionProvider || !hasExplicitSingleOwner(ctx)) return;
 
   try {
     const userId = DEFAULT_USER_ID;
@@ -402,7 +432,13 @@ export async function runInnerThoughts(ctx: GardenerContext): Promise<void> {
     const SESSION_CONTEXT_WINDOW_MS = 48 * 60 * 60 * 1000;
     const contextCutoff = Date.now() - SESSION_CONTEXT_WINDOW_MS;
 
-    const allSummaries = ctx.db.getSessionSummariesByUser(userId, 20);
+    const allSummaries = ctx.db.getSessionSummariesByUser(userId, 20)
+      .filter(summary => sessionBelongsToStateUser(
+        ctx.db,
+        summary.sessionId,
+        userId,
+        ctx.canonicalSingleUserIds,
+      ));
     const recentSummaries = allSummaries.filter(s => s.createdAt >= contextCutoff);
     const sessionSummary = recentSummaries.length > 0
       ? recentSummaries[0]
@@ -421,10 +457,14 @@ export async function runInnerThoughts(ctx: GardenerContext): Promise<void> {
 
     const existingItems = ctx.db.getScheduledItemsByUser(userId);
     const boardItems = existingItems
-      .filter(i => i.boardStatus === 'in_progress' || i.boardStatus === 'waiting')
+      // The canonical lifecycle state is authoritative. Never infer live work
+      // from a stale/contradictory board column on a terminal historical row.
+      .filter(i => (i.status === 'pending' || i.status === 'processing')
+        && (i.boardStatus === 'in_progress' || i.boardStatus === 'waiting'))
       .map(i => ({
         id: i.id,
         title: i.message,
+        status: i.status,
         boardStatus: i.boardStatus!,
         updatedAt: i.updatedAt,
         priority: i.priority,
@@ -472,6 +512,7 @@ export async function runInnerThoughts(ctx: GardenerContext): Promise<void> {
         maxMessages: 12,
         maxCharsPerMessage: 300,
         stalenessMs: SESSION_CONTEXT_WINDOW_MS,
+        identityCandidates: stateIdentityCandidates(userId, ctx.canonicalSingleUserIds),
       })?.formattedContext,
     }, ctx.fusionProvider);
 
@@ -486,6 +527,21 @@ export async function runInnerThoughts(ctx: GardenerContext): Promise<void> {
         const itemContext = JSON.parse(item.context) as Record<string, unknown>;
         if (typeof itemContext.sourceSessionId === 'string') sourceSessionId = itemContext.sourceSessionId;
       } catch { /* context was already safety-checked by the evaluator */ }
+      if (sourceSessionId && !sessionBelongsToStateUser(
+        ctx.db,
+        sourceSessionId,
+        userId,
+        ctx.canonicalSingleUserIds,
+      )) {
+        ctx.db.recordProactiveDecision({
+          userId,
+          stage: 'create',
+          outcome: 'suppressed',
+          reason: 'source_session_owner_mismatch',
+          detail: { gapType: item.gapType },
+        });
+        continue;
+      }
 
       const proResult = createProactiveItem({
         db: ctx.db,

@@ -9,7 +9,7 @@
  */
 
 import type { GoalItem, CheckinFrequency } from '../goals/types.js';
-import type { BehavioralPatterns, SessionSummaryRow } from './db.js';
+import type { BehavioralPatterns, ScheduledItemStatus, SessionSummaryRow } from './db.js';
 
 // ============ Types ============
 
@@ -25,6 +25,8 @@ export interface GapSignal {
 export interface BoardItemForScan {
   id: string;
   title: string;
+  /** Canonical lifecycle state. Board columns alone are never evidence of live work. */
+  status: ScheduledItemStatus;
   boardStatus: string;
   updatedAt: number;
   priority: string;
@@ -342,6 +344,11 @@ export function scanStaleBoardItems(items: BoardItemForScan[], now: number): Gap
   const signals: GapSignal[] = [];
 
   for (const item of items) {
+    // `status` is authoritative. Historical databases could contain terminal
+    // rows with an active-looking board_status; those must never create a
+    // proactive stale-task message, even before startup reconciliation runs.
+    if (item.status !== 'pending' && item.status !== 'processing') continue;
+
     const ageMs = now - item.updatedAt;
     const ageHours = ageMs / (60 * 60 * 1000);
 

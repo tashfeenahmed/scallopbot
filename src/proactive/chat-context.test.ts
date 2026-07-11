@@ -123,6 +123,17 @@ describe('getRecentChatContext', () => {
     expect(db.getAllMessagesPaginated).not.toHaveBeenCalled();
   });
 
+  it('passes only explicitly authorized aliases for canonical owner chat', () => {
+    const messages = [makeMessage({ content: 'Owner chat', createdAt: NOW - HOUR_MS })];
+    const db = makeMockDb(messages);
+    const aliases = ['default', 'owner-example', 'telegram:owner-example'];
+
+    const result = getRecentChatContext(db, 'default', { identityCandidates: aliases });
+
+    expect(result?.formattedContext).toBe('User: Owner chat');
+    expect(db.getRecentMessagesByUserId).toHaveBeenCalledWith('default', 10, aliases);
+  });
+
   it('respects custom maxCharsPerMessage option', () => {
     const messages = [makeMessage({ content: 'A'.repeat(200), createdAt: NOW - HOUR_MS })];
     const db = makeMockDb(messages);

@@ -36,6 +36,14 @@ export interface ProactiveEngagementContext {
   directReply?: boolean;
   /** Text of the message being replied to, when the channel provides it. */
   repliedToText?: string;
+  /** Exact channel-local ID of the message being replied to, when available. */
+  repliedToMessageId?: string;
+  /**
+   * Whether a standalone direct-reply command may mutate the linked source.
+   * Channels set this to false when the message also carries media: the reply
+   * is still engagement evidence, but the caption is not standalone intent.
+   */
+  allowSourceAction?: boolean;
   /** Explicit aliases resolved by the deployment's identity layer. */
   identityCandidates?: string[];
 }
@@ -44,6 +52,66 @@ export interface ProactiveEngagementMatch {
   itemId: string;
   score: number;
   reason: 'direct_reply' | 'acknowledgement' | 'topic_overlap' | 'negative';
+  /** Trusted, tightly parsed action from a direct reply to this exact nudge. */
+  replyAction?: ProactiveReplyAction;
+}
+
+export type ProactiveReplyAction =
+  | { type: 'archive' }
+  | { type: 'done' }
+  | { type: 'snooze'; delayMs: number };
+
+export interface ProactiveSourceActionOutcome {
+  action: ProactiveReplyAction['type'];
+  title: string;
+  applied: boolean;
+}
+
+export interface ProactiveFeedbackResult {
+  matched: boolean;
+  sourceAction?: ProactiveSourceActionOutcome;
+}
+
+const DEFAULT_SNOOZE_MS = 24 * 60 * 60 * 1000;
+const MAX_SNOOZE_MS = 30 * 24 * 60 * 60 * 1000;
+
+/**
+ * Parse only explicit, standalone board actions. This intentionally rejects
+ * conversational mentions such as "the archive is done" so reply routing
+ * cannot mutate a linked source item on an ambiguous sentence.
+ */
+export function parseProactiveReplyAction(message: string): ProactiveReplyAction | null {
+  const normalized = message.trim().toLowerCase().replace(/[.!]+$/, '').trim();
+  if (/^(?:archive|archive (?:it|this)|move (?:it|this) to archive)$/.test(normalized)) {
+    return { type: 'archive' };
+  }
+  if (/^(?:done|mark (?:it|this) done|finished|completed)$/.test(normalized)) {
+    return { type: 'done' };
+  }
+  if (/^(?:snooze|snooze (?:it|this)|remind me later)$/.test(normalized)) {
+    return { type: 'snooze', delayMs: DEFAULT_SNOOZE_MS };
+  }
+  if (/^snooze (?:until )?tomorrow$/.test(normalized)) {
+    return { type: 'snooze', delayMs: DEFAULT_SNOOZE_MS };
+  }
+
+  const timed = normalized.match(
+    /^snooze(?: (?:it|this))? (?:for |by |in )?(\d{1,3})\s*(minutes?|mins?|hours?|hrs?|days?|weeks?)$/,
+  );
+  if (!timed) return null;
+  const amount = Number.parseInt(timed[1], 10);
+  if (!Number.isFinite(amount) || amount <= 0) return null;
+  const unit = timed[2];
+  const unitMs = unit.startsWith('min')
+    ? 60_000
+    : unit.startsWith('h')
+      ? 60 * 60_000
+      : unit.startsWith('w')
+        ? 7 * 24 * 60 * 60_000
+        : 24 * 60 * 60_000;
+  const delayMs = amount * unitMs;
+  if (delayMs > MAX_SNOOZE_MS) return null;
+  return { type: 'snooze', delayMs };
 }
 
 /**
@@ -176,7 +244,15 @@ export function attributeProactiveEngagement(
 
     let candidate: ProactiveEngagementMatch | null = null;
     if (context.directReply && context.repliedToText && replyOverlap >= 0.34) {
-      candidate = { itemId: item.id, score: 1 + replyOverlap, reason: 'direct_reply' };
+      const replyAction = context.allowSourceAction === false
+        ? null
+        : parseProactiveReplyAction(userMessage);
+      candidate = {
+        itemId: item.id,
+        score: 1 + replyOverlap,
+        reason: 'direct_reply',
+        ...(replyAction ? { replyAction } : {}),
+      };
     } else if (messageOverlap >= 0.34) {
       candidate = { itemId: item.id, score: messageOverlap, reason: 'topic_overlap' };
     } else if (
