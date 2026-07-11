@@ -45,6 +45,10 @@ Rules:
   Address them as "you"; usually omit their name entirely.
 - Do not default to the user's name, "Hey", "just checking in", "wanted to
   check in", "hope you're well", or other canned openings.
+- When a draft has a concrete, grounded topic but uses one of those canned
+  openings, rewrite the opening; do not output SKIP merely because its style is
+  poor. Reserve SKIP for context that is explicitly resolved/cancelled, lacks a
+  concrete reason or open loop, or cannot be made safe without inventing facts.
 - Never mention that the user has been quiet, less active, replying less, or
   otherwise imply off-screen surveillance.
 - Never imply human feelings or intimacy (for example "I missed you", "I was

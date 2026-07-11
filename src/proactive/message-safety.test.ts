@@ -208,6 +208,7 @@ describe('renderUserFacingProactiveMessage', () => {
     expect(request.messages[0].content).toContain('The review was scheduled');
     expect(request.messages[0].content).toContain('RECENT PROACTIVE MESSAGES');
     expect(request.system).toContain('ask at most one');
+    expect(request.system).toContain('do not output SKIP merely');
   });
 
   it('rejects socially unsafe or canned rewrite candidates', async () => {
