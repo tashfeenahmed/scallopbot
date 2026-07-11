@@ -133,7 +133,10 @@ const agentSchema = z.object({
   workspace: z.string().min(1, 'Workspace path is required'),
   maxIterations: z.number().int().positive().default(100),
   foregroundCallTimeoutMs: z.number().int().min(1_000).max(300_000).default(25_000),
-  turnTimeoutMs: z.number().int().min(5_000).max(900_000).default(55_000),
+  // Disabled by default. A positive value is retained only as an explicit
+  // operator-configured hard cap; normal turns are governed by per-call and
+  // progress-aware safeguards instead of a cumulative wall-clock deadline.
+  turnTimeoutMs: z.number().int().min(0).max(900_000).default(0),
 });
 
 // Logging configuration schema
@@ -458,7 +461,7 @@ export function loadConfig(): Config {
     : 25_000;
   const turnTimeoutMs = process.env.AGENT_TURN_TIMEOUT_MS
     ? parseInt(process.env.AGENT_TURN_TIMEOUT_MS, 10)
-    : 55_000;
+    : 0;
   const logLevel = process.env.LOG_LEVEL || 'info';
   const parsePolicyJson = (name: string): unknown => {
     const raw = process.env[name];

@@ -634,6 +634,71 @@ describe('Agent improvements integration', () => {
   });
 
   describe('foreground response watchdog', () => {
+    it('does not impose a cumulative deadline on a progressing multi-step turn', async () => {
+      const { Agent } = await import('./agent.js');
+      const { SessionManager } = await import('./session.js');
+      const toolUse = {
+        type: 'tool_use' as const,
+        id: 'slow-read',
+        name: 'slow_read',
+        input: {},
+      };
+      let modelCalls = 0;
+      const provider: LLMProvider = {
+        name: 'deliberate',
+        isAvailable: () => true,
+        complete: vi.fn(async () => {
+          await new Promise(resolve => setTimeout(resolve, 60));
+          modelCalls++;
+          return modelCalls === 1
+            ? {
+                content: [toolUse],
+                stopReason: 'tool_use',
+                usage: { inputTokens: 5, outputTokens: 5 },
+                model: 'mock',
+              }
+            : endTurn('The multi-step result is complete.');
+        }),
+      };
+      const skill = {
+        name: 'slow_read', description: 'A deliberate read', path: '/tmp/slow-read/SKILL.md', source: 'workspace' as const,
+        frontmatter: { name: 'slow_read', description: 'A deliberate read' },
+        content: '', available: true, hasScripts: true,
+        handler: vi.fn(async () => {
+          await new Promise(resolve => setTimeout(resolve, 60));
+          return { success: true, output: 'Verified read result' };
+        }),
+      };
+      const registry = {
+        getSkill: vi.fn((name: string) => name === 'slow_read' ? skill : null),
+        getToolDefinitions: vi.fn(() => [{
+          name: 'slow_read', description: 'A deliberate read',
+          input_schema: { type: 'object', properties: {} },
+        }]),
+        generateSkillPrompt: vi.fn(() => ''),
+      };
+      const sessions = new SessionManager(db);
+      const session = await sessions.createSession();
+      const agent = new Agent({
+        provider,
+        sessionManager: sessions,
+        skillRegistry: registry as any,
+        workspace: testDir,
+        logger: pino({ level: 'silent' }),
+        maxIterations: 3,
+        foregroundCallTimeoutMs: 100,
+        // No turnTimeoutMs: whole-turn deadlines must be disabled by default.
+      });
+
+      const started = Date.now();
+      const result = await agent.processMessage(session.id, 'Read it, then answer');
+
+      expect(Date.now() - started).toBeGreaterThanOrEqual(160);
+      expect(result.response).toBe('The multi-step result is complete.');
+      expect(provider.complete).toHaveBeenCalledTimes(2);
+      expect(skill.handler).toHaveBeenCalledTimes(1);
+    });
+
     it('returns and persists an honest final response when the model stalls', async () => {
       const { Agent } = await import('./agent.js');
       const { SessionManager } = await import('./session.js');

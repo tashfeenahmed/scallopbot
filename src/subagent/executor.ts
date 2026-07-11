@@ -541,7 +541,9 @@ export class SubAgentExecutor {
       interruptQueue: childInterruptQueue,
       subAgentExecutor: run.role === 'orchestrator' ? this : undefined,
       foregroundCallTimeoutMs: Math.min(300_000, Math.max(25_000, run.idleTimeoutMs)),
-      turnTimeoutMs: Math.min(900_000, Math.max(55_000, run.idleTimeoutMs)),
+      // The executor below already has a progress-aware idle watchdog and an
+      // optional explicit hard timeout. Do not add a second cumulative cap.
+      turnTimeoutMs: 0,
       subAgentMode: true,
       systemPrompt,
       canonicalSingleUserIds: this.canonicalSingleUserIds,

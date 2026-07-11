@@ -124,7 +124,7 @@ export interface AgentOptions {
   canonicalSingleUserIds?: readonly string[];
   /** Maximum wall time for one foreground model attempt, including recovery. */
   foregroundCallTimeoutMs?: number;
-  /** Maximum wall time for the complete foreground turn. */
+  /** Optional whole-turn hard cap. Zero/undefined disables it. */
   turnTimeoutMs?: number;
   /** Minimal worker prompt: no channel/user-facing/skill-management/persona sections. */
   subAgentMode?: boolean;
@@ -315,7 +315,10 @@ export class Agent {
     this.enableComplexityAnalysis = options.enableComplexityAnalysis ?? true;
     this.canonicalSingleUserIds = [...(options.canonicalSingleUserIds ?? [])];
     this.foregroundCallTimeoutMs = Math.max(50, options.foregroundCallTimeoutMs ?? 25_000);
-    this.turnTimeoutMs = Math.max(this.foregroundCallTimeoutMs, options.turnTimeoutMs ?? 55_000);
+    const configuredTurnTimeoutMs = options.turnTimeoutMs ?? 0;
+    this.turnTimeoutMs = configuredTurnTimeoutMs > 0
+      ? Math.max(this.foregroundCallTimeoutMs, configuredTurnTimeoutMs)
+      : 0;
     this.subAgentMode = options.subAgentMode ?? false;
     this.maxToolCallsPerResponse = Math.min(
       512,
@@ -425,7 +428,9 @@ export class Agent {
       timezone: userTimezone,
       now: new Date(),
     };
-    const turnDeadline = Date.now() + this.turnTimeoutMs;
+    const turnDeadline = this.turnTimeoutMs > 0
+      ? Date.now() + this.turnTimeoutMs
+      : undefined;
 
     // Check budget before processing
     if (this.costTracker) {
@@ -637,7 +642,7 @@ export class Agent {
 
     // Agent loop
     while (iterations < this.maxIterations) {
-      if (Date.now() >= turnDeadline) {
+      if (turnDeadline !== undefined && Date.now() >= turnDeadline) {
         finalResponse = 'I reached the response deadline before every step completed. I stopped safely and have not marked any unverified action as done.';
         completionReason = 'budget_exhausted';
         break;
@@ -827,7 +832,9 @@ export class Agent {
       // Call LLM with error recovery (fallback and emergency compression)
       let response;
       const callAbortController = new AbortController();
-      const remainingTurnMs = Math.max(1, turnDeadline - Date.now());
+      const remainingTurnMs = turnDeadline === undefined
+        ? this.foregroundCallTimeoutMs
+        : Math.max(1, turnDeadline - Date.now());
       const callTimeoutMs = Math.min(this.foregroundCallTimeoutMs, remainingTurnMs);
       const callSignal = abortSignal
         ? AbortSignal.any([abortSignal, callAbortController.signal])
@@ -1026,14 +1033,21 @@ export class Agent {
         ) {
           const firstScore = scoreResponseHeuristic(finalResponse, userMessage).score;
           if (firstScore < this.bestOfNThreshold) {
-            const remainingMs = turnDeadline - Date.now();
-            // Reserve a small persistence/final-watchdog margin. Quality
-            // sampling is optional and may never outrun the public deadline.
-            const finalizationReserveMs = Math.min(250, Math.max(10, Math.floor(remainingMs * 0.05)));
-            const samplingDeadline = Math.min(
-              turnDeadline - finalizationReserveMs,
-              Date.now() + this.foregroundCallTimeoutMs,
-            );
+            const remainingMs = turnDeadline === undefined
+              ? this.foregroundCallTimeoutMs
+              : turnDeadline - Date.now();
+            // Quality sampling gets its own bounded model-call window. When an
+            // operator explicitly configures a whole-turn cap, retain a small
+            // persistence margin inside that cap.
+            const finalizationReserveMs = turnDeadline === undefined
+              ? 0
+              : Math.min(250, Math.max(10, Math.floor(remainingMs * 0.05)));
+            const samplingDeadline = turnDeadline === undefined
+              ? Date.now() + this.foregroundCallTimeoutMs
+              : Math.min(
+                  turnDeadline - finalizationReserveMs,
+                  Date.now() + this.foregroundCallTimeoutMs,
+                );
             if (samplingDeadline - Date.now() >= 25) {
               this.logger.info(
                 { firstScore: Number(firstScore.toFixed(2)), threshold: this.bestOfNThreshold },
