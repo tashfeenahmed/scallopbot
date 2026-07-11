@@ -94,6 +94,7 @@ export class Gateway {
   private announceQueue: AnnounceQueue | null = null;
   private interruptQueue: InterruptQueue | null = null;
   private outboundQueue: OutboundQueue | null = null;
+  private subAgentDeliveryTimer: NodeJS.Timeout | null = null;
   /** Explicit aliases for this deployment's single canonical state owner. */
   private canonicalSingleUserIds: string[] = [];
 
@@ -433,6 +434,16 @@ export class Gateway {
     this.sessionManager = new SessionManager(this.scallopMemoryStore!.getDatabase());
     this.logger.debug('Session manager initialized (SQLite)');
 
+    // Shared evidence recorder: successful multi-tool child workflows can feed
+    // the same held-out, privacy-gated procedural skill evolution as main turns.
+    const evolutionRecorder = this.config.evolution?.enabled
+      ? new EvolutionRecorder(
+          this.scallopMemoryStore.getDatabase(),
+          this.config.evolution,
+          this.logger,
+        )
+      : undefined;
+
     // Initialize sub-agent infrastructure
     const subagentConfig = this.config.subagent;
     this.announceQueue = new AnnounceQueue({ maxQueueSize: 20, logger: this.logger });
@@ -459,12 +470,41 @@ export class Gateway {
             allowedSkills: row.allowedSkills ? row.allowedSkills.split(',') : [],
             modelTier: row.modelTier as 'fast' | 'standard' | 'capable',
             timeoutMs: row.timeoutMs,
+            idleTimeoutMs: row.idleTimeoutMs ?? 300_000,
+            hardTimeoutMs: row.hardTimeoutMs ?? row.timeoutMs,
+            contextMode: (row.contextMode as 'isolated' | 'brief' | 'fork') ?? 'brief',
+            role: (row.role as 'leaf' | 'orchestrator') ?? 'leaf',
+            workspaceMode: (row.workspaceMode as 'shared' | 'worktree') ?? 'shared',
+            workspacePath: row.workspacePath ?? undefined,
+            parentRunId: row.parentRunId ?? undefined,
+            batchId: row.batchId ?? undefined,
+            batchIndex: row.batchIndex ?? undefined,
+            spawnDepth: row.spawnDepth ?? 0,
+            lastProgressAt: row.lastProgressAt ?? undefined,
             tokenUsage: { inputTokens: row.inputTokens, outputTokens: row.outputTokens },
             createdAt: row.createdAt,
             startedAt: row.startedAt ?? undefined,
             completedAt: row.completedAt ?? undefined,
           }))
         );
+        for (const row of activeRows) {
+          const parent = await this.sessionManager.getSession(row.parentSessionId);
+          db.enqueueSubAgentDelivery({
+            runId: row.id,
+            parentSessionId: row.parentSessionId,
+            userId: typeof parent?.metadata?.userId === 'string' ? parent.metadata.userId : null,
+            payloadJson: JSON.stringify({
+              runId: row.id,
+              label: row.label,
+              result: {
+                status: 'blocked',
+                summary: 'The worker was interrupted by a process restart, so no success was assumed.',
+                blockers: ['Process restarted while the worker was active'],
+                nextActions: ['Retry the task after checking whether any external side effect already happened'],
+              },
+            }),
+          });
+        }
         this.logger.info({ orphaned, total: activeRows.length }, 'Recovered orphaned sub-agent runs');
       }
     }
@@ -490,6 +530,8 @@ export class Gateway {
       logger: this.logger,
       config: subagentConfig,
       canonicalSingleUserIds: this.canonicalSingleUserIds,
+      deliveryOutbox: this.scallopMemoryStore!.getDatabase(),
+      evolutionRecorder,
       skillPolicyResolver: async (skillName, context) => {
         if (this.config.tools?.policy && !matchesPolicy(skillName, this.config.tools.policy)) return false;
         const parent = await this.sessionManager!.getSession(context.parentSessionId);
@@ -524,15 +566,6 @@ export class Gateway {
     // Register manage_skills skill for ClawHub integration
     await this.registerSkillManagementSkill();
     this.logger.debug('Skill management skill registered');
-
-    // Self-evolution Layer 1 recorder — captures improvement signals at turn end.
-    const evolutionRecorder = this.config.evolution?.enabled
-      ? new EvolutionRecorder(
-          this.scallopMemoryStore.getDatabase(),
-          this.config.evolution,
-          this.logger,
-        )
-      : undefined;
 
     this.agent = new Agent({
       provider,
@@ -805,6 +838,8 @@ export class Gateway {
         },
         configManager: this.configManager || undefined,
         providerRegistry: this.providerRegistry || undefined,
+        subAgentRegistry: this.subAgentRegistry || undefined,
+        subAgentExecutor: this.subAgentExecutor || undefined,
       });
       await this.apiChannel.start();
 
@@ -824,6 +859,13 @@ export class Gateway {
     if (this.unifiedScheduler) {
       void this.unifiedScheduler.start();
     }
+
+    // Push completed background children immediately. The durable outbox also
+    // drains completions produced just before a restart.
+    await this.drainSubAgentDeliveries();
+    this.subAgentDeliveryTimer = setInterval(() => {
+      void this.drainSubAgentDeliveries();
+    }, 1_000);
 
     this.isRunning = true;
     this.logger.info('Gateway started');
@@ -881,6 +923,11 @@ export class Gateway {
     if (this.outboundQueue) {
       this.outboundQueue.stop();
       this.outboundQueue = null;
+    }
+
+    if (this.subAgentDeliveryTimer) {
+      clearInterval(this.subAgentDeliveryTimer);
+      this.subAgentDeliveryTimer = null;
     }
 
     // Clear trigger sources before stopping channels
@@ -1208,50 +1255,98 @@ export class Gateway {
     // spawn_agent skill
     const spawnAgentSkill = defineSkill(
       'spawn_agent',
-      'Delegate a task to a focused sub-agent that runs independently. Use for parallel research, data gathering, or analysis that does not need your direct attention.'
+      'Delegate one task or an atomic parallel batch to durable focused workers. Supports explicit context, acceptance criteria, isolated/forked context, bounded orchestrators, and isolated Git worktrees.'
     )
       .userInvocable(false)
       .inputSchema({
         type: 'object',
         properties: {
           task: { type: 'string', description: 'Clear description of what the sub-agent should accomplish' },
+          tasks: {
+            type: 'array',
+            description: 'Atomic fan-out batch. All capacity is checked before any child starts.',
+            items: {
+              type: 'object',
+              properties: {
+                task: { type: 'string' },
+                label: { type: 'string' },
+                context: { type: 'string' },
+                acceptance_criteria: { type: 'array', items: { type: 'string' } },
+                skills: { type: 'string' },
+              },
+              required: ['task'],
+            },
+          },
           label: { type: 'string', description: 'Short label for tracking (e.g., "weather-check")' },
+          context: { type: 'string', description: 'Task-specific facts/context, kept separate from the instruction' },
+          acceptance_criteria: { type: 'array', items: { type: 'string' }, description: 'Concrete conditions that must pass before success' },
           skills: { type: 'string', description: 'Comma-separated skill names to request. Empty uses read-only defaults (read_file, memory_search); every request is still filtered by parent tool policy.' },
           model_tier: { type: 'string', description: 'fast (default/cheapest), standard, or capable' },
-          timeout_seconds: { type: 'number', description: 'Timeout in seconds (default: 120, max: 300)' },
+          context_mode: { type: 'string', description: 'isolated, brief (default), or fork' },
+          role: { type: 'string', description: 'leaf (default) or bounded orchestrator' },
+          workspace_mode: { type: 'string', description: 'shared (default) or worktree for coding isolation' },
+          workflow: { type: 'string', description: 'Set to coding for isolated implement -> independent review/test -> conflict-checked patch' },
+          timeout_seconds: { type: 'number', description: 'Optional hard wall-clock limit; 0/default means progress-aware idle timeout only' },
+          idle_timeout_seconds: { type: 'number', description: 'Stop only after this many seconds with no model/tool progress' },
           wait: { type: 'boolean', description: 'Wait for result inline (default: false = async)' },
         },
-        required: ['task'],
+        required: [],
       })
       .onNativeExecute(async (ctx) => {
-        const task = ctx.args.task as string;
-        if (!task || task.trim().length < 5) {
-          return { success: false, output: '', error: 'Task description must be at least 5 characters' };
+        const task = ctx.args.task as string | undefined;
+        const batch = Array.isArray(ctx.args.tasks) ? ctx.args.tasks as Array<Record<string, unknown>> : [];
+        if ((!task || task.trim().length < 5) && batch.length === 0) {
+          return { success: false, output: '', error: 'Provide task or a non-empty tasks batch' };
         }
 
         const skillsStr = ctx.args.skills as string | undefined;
         const skills = skillsStr ? skillsStr.split(',').map(s => s.trim()).filter(Boolean) : [];
         const modelTier = (ctx.args.model_tier as 'fast' | 'standard' | 'capable') || undefined;
         const timeoutSeconds = ctx.args.timeout_seconds as number | undefined;
+        const idleTimeoutSeconds = ctx.args.idle_timeout_seconds as number | undefined;
         const wait = ctx.args.wait as boolean | undefined;
 
         // Check concurrency
         const session = await this.sessionManager!.getSession(ctx.sessionId);
-        const canSpawn = registry.canSpawn(ctx.sessionId, session?.metadata as Record<string, unknown> | undefined);
+        const canSpawn = registry.canSpawn(ctx.sessionId, session?.metadata as Record<string, unknown> | undefined, batch.length || 1);
         if (!canSpawn.allowed) {
           return { success: false, output: '', error: canSpawn.reason || 'Cannot spawn sub-agent' };
         }
 
-        const input = {
-          task: task.trim(),
+        const common = {
           label: (ctx.args.label as string) || undefined,
           skills,
           modelTier,
           timeoutSeconds,
+          idleTimeoutSeconds,
+          context: (ctx.args.context as string) || undefined,
+          acceptanceCriteria: Array.isArray(ctx.args.acceptance_criteria) ? ctx.args.acceptance_criteria as string[] : undefined,
+          contextMode: ctx.args.context_mode as 'isolated' | 'brief' | 'fork' | undefined,
+          role: ctx.args.role as 'leaf' | 'orchestrator' | undefined,
+          workspaceMode: ctx.args.workspace_mode as 'shared' | 'worktree' | undefined,
           waitForResult: wait,
         };
+        const input = { ...common, task: task?.trim() || '' };
 
         try {
+          if (ctx.args.workflow === 'coding') {
+            if (!task || task.trim().length < 5) throw new Error('Coding workflow requires a task description');
+            const result = await executor.runCodingWorkflow(ctx.sessionId, { ...input, workspaceMode: 'worktree' });
+            return { success: result.status === 'succeeded', output: JSON.stringify(result), ...(result.status === 'succeeded' ? {} : { error: result.blockers.join('; ') || 'Coding workflow blocked' }) };
+          }
+          if (batch.length > 0) {
+            const inputs = batch.map(item => ({
+              ...common,
+              task: String(item.task || '').trim(),
+              label: typeof item.label === 'string' ? item.label : undefined,
+              context: typeof item.context === 'string' ? item.context : undefined,
+              acceptanceCriteria: Array.isArray(item.acceptance_criteria) ? item.acceptance_criteria as string[] : common.acceptanceCriteria,
+              skills: typeof item.skills === 'string' ? item.skills.split(',').map(value => value.trim()).filter(Boolean) : common.skills,
+            }));
+            if (inputs.some(item => item.task.length < 5)) throw new Error('Every batch task must be at least 5 characters');
+            const runs = await executor.spawnBatch(ctx.sessionId, inputs);
+            return { success: true, output: `${runs.length} sub-agents started atomically: ${runs.map(run => run.runId).join(', ')}` };
+          }
           if (wait) {
             // Synchronous: block until result
             const result = await executor.spawnAndWait(ctx.sessionId, input);
@@ -1278,16 +1373,45 @@ export class Gateway {
     // check_agents skill
     const checkAgentsSkill = defineSkill(
       'check_agents',
-      'Check the status of running or recently completed sub-agents.'
+      'Inspect or control delegated work: list, info, log, cancel, steer a running child, or start a follow-up.'
     )
       .userInvocable(false)
       .inputSchema({
         type: 'object',
-        properties: {},
+        properties: {
+          action: { type: 'string', description: 'list (default), info, log, cancel, steer, or followup' },
+          run_id: { type: 'string', description: 'Run id for all actions except list' },
+          message: { type: 'string', description: 'Steering/follow-up instruction' },
+          wait: { type: 'boolean', description: 'Wait inline for a follow-up result' },
+        },
         required: [],
       })
       .onNativeExecute(async (ctx) => {
         const runs = registry.getRunsForParent(ctx.sessionId);
+        const action = String(ctx.args.action || 'list');
+        if (action !== 'list') {
+          const runId = String(ctx.args.run_id || '');
+          const run = runs.find(candidate => candidate.id === runId);
+          if (!run) return { success: false, output: '', error: 'Unknown run for this parent session' };
+          if (action === 'info') return { success: true, output: JSON.stringify(run.result ?? run, null, 2) };
+          if (action === 'log') {
+            const log = await executor.getRunLog(runId);
+            return { success: true, output: log.map(entry => `${entry.role}: ${entry.content}`).join('\n\n') || 'No retained log.' };
+          }
+          if (action === 'cancel') {
+            const applied = executor.cancel(runId);
+            return applied ? { success: true, output: `Cancelled ${run.label}.` } : { success: false, output: '', error: 'Run is not active' };
+          }
+          if (action === 'steer') {
+            const applied = executor.steer(runId, String(ctx.args.message || ''));
+            return applied ? { success: true, output: `Steering update queued for ${run.label}.` } : { success: false, output: '', error: 'Run is not active or message is empty' };
+          }
+          if (action === 'followup' && String(ctx.args.message || '').trim()) {
+            const result = await executor.followUp(ctx.sessionId, runId, String(ctx.args.message), Boolean(ctx.args.wait));
+            return { success: true, output: 'response' in result ? result.response : `Follow-up spawned: ${result.runId}` };
+          }
+          return { success: false, output: '', error: 'Unknown action or missing message' };
+        }
         if (runs.length === 0) {
           return { success: true, output: 'No sub-agents found for this session.' };
         }
@@ -1478,6 +1602,58 @@ export class Gateway {
 
     this.logger.warn({ userId: rawUserId }, 'Cannot resolve unprefixed recipient across multiple transports');
     return { source: null, rawUserId };
+  }
+
+  /**
+   * Lease and deliver background child completions. Parent context receives a
+   * system-internal receipt; the user sees only a polished outcome sentence.
+   */
+  private async drainSubAgentDeliveries(): Promise<void> {
+    const db = this.scallopMemoryStore?.getDatabase();
+    if (!db || !this.sessionManager) return;
+    const deliveries = db.claimSubAgentDeliveries(10, 30_000);
+    for (const delivery of deliveries) {
+      if (!delivery.leaseToken) continue;
+      try {
+        const payload = JSON.parse(delivery.payloadJson) as {
+          runId: string;
+          label: string;
+          result: {
+            status: string;
+            summary: string;
+            blockers?: string[];
+            nextActions?: string[];
+          };
+        };
+        const parent = await this.sessionManager.getSession(delivery.parentSessionId);
+        const marker = `[Sub-agent result:${payload.runId}]`;
+        const alreadyInjected = parent?.messages.some(message =>
+          typeof message.content === 'string' && message.content.startsWith(marker),
+        );
+        if (parent && !alreadyInjected) {
+          await this.sessionManager.addMessage(delivery.parentSessionId, {
+            role: 'assistant',
+            content: `${marker}\n${JSON.stringify(payload.result)}`,
+          });
+        }
+        this.announceQueue?.acknowledge(delivery.parentSessionId, delivery.runId);
+
+        if (delivery.userId) {
+          const succeeded = payload.result.status === 'succeeded';
+          const summary = payload.result.summary.trim().replace(/\s+/g, ' ');
+          const blocker = payload.result.blockers?.find(Boolean);
+          const message = succeeded
+            ? `${payload.label} is finished — ${summary}`
+            : `${payload.label} couldn't finish yet — ${blocker || summary}`;
+          const sent = await this.handleProactiveMessage(delivery.userId, message);
+          if (!messageWasDelivered(sent)) throw new Error('No channel confirmed delivery');
+        }
+        db.completeSubAgentDelivery(delivery.runId, delivery.leaseToken);
+      } catch (error) {
+        db.failSubAgentDelivery(delivery.runId, delivery.leaseToken, (error as Error).message);
+        this.logger.warn({ runId: delivery.runId, error: (error as Error).message }, 'Sub-agent delivery deferred');
+      }
+    }
   }
 
   /**

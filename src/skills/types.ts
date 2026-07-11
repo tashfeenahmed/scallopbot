@@ -106,7 +106,7 @@ export interface SkillFrontmatter {
   /** Input parameter schema for skill documentation */
   inputSchema?: {
     type: 'object';
-    properties: Record<string, { type: string; description?: string }>;
+    properties: Record<string, { type: string; description?: string; [keyword: string]: unknown }>;
     required?: string[];
   };
 }

@@ -10,6 +10,7 @@ import type { Logger } from 'pino';
 import http from 'http';
 import WebSocket from 'ws';
 import { ScallopDatabase } from '../memory/db.js';
+import { SubAgentRegistry } from '../subagent/registry.js';
 
 // Create mock logger
 const createMockLogger = (): Logger =>
@@ -269,6 +270,43 @@ describe('ApiChannel', () => {
         req.end();
       });
     };
+
+    it('exposes the durable delegated-task rail without private protocol messages', async () => {
+      await channel.stop();
+      const db = new ScallopDatabase(':memory:');
+      db.createAuthUser('task-test@example.com', 'not-used-in-api-key-test');
+      const registry = new SubAgentRegistry({ logger: mockLogger, persistence: db });
+      const run = registry.createRun('parent', {
+        task: 'Review the deployment safely',
+        label: 'review',
+        taskName: 'Deployment review',
+        role: 'orchestrator',
+      }, 'child');
+      registry.updateStatus(run.id, 'running');
+      channel = new ApiChannel({
+        port,
+        host: '127.0.0.1',
+        agent: mockAgent,
+        sessionManager: mockSessionManager,
+        logger: mockLogger,
+        db,
+        apiKey: 'task-test-key',
+        subAgentRegistry: registry,
+      });
+      await channel.start();
+      const response = await makeRequest('/api/subagents', 'GET', undefined, { 'X-API-Key': 'task-test-key' });
+      expect(response.status).toBe(200);
+      expect(response.body).toMatchObject({
+        tasks: [expect.objectContaining({
+          id: run.id,
+          taskName: 'Deployment review',
+          status: 'running',
+          role: 'orchestrator',
+        })],
+      });
+      await channel.stop();
+      db.close();
+    });
 
     describe('GET /api/health', () => {
       it('should return health status', async () => {

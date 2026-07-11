@@ -33,13 +33,16 @@ import type {
 } from './types.js';
 import { DEFAULT_SUBAGENT_CONFIG } from './types.js';
 import type { ToolEvidenceReceipt } from '../memory/db.js';
+import { InterruptQueue } from '../agent/interrupt-queue.js';
+import { buildStructuredSubAgentResult, structuredResultPrompt } from './result.js';
+import { createSubAgentWorktree, finalizeSubAgentWorktree, type SubAgentWorktree } from './worktree.js';
+import { nanoid } from 'nanoid';
+import type { EvolutionRecorder } from '../evolution/signals.js';
 
 /**
  * Skills that sub-agents are never allowed to use
  */
 const NEVER_ALLOWED_SKILLS = new Set([
-  'spawn_agent',      // Recursion guard
-  'check_agents',     // Only for parent
   'send_message',     // No direct user communication
   'send_file',        // No direct user communication
   'voice_reply',      // No direct user communication
@@ -91,6 +94,17 @@ export interface SubAgentExecutorOptions {
   ) => boolean | Promise<boolean>;
   /** Explicit aliases for this deployment's single canonical state owner. */
   canonicalSingleUserIds?: readonly string[];
+  /** Durable completion outbox. ScallopDatabase implements this interface. */
+  deliveryOutbox?: {
+    enqueueSubAgentDelivery(input: {
+      runId: string;
+      parentSessionId: string;
+      userId?: string | null;
+      payloadJson: string;
+    }): boolean;
+  };
+  /** Feed successful reusable child workflows into the existing gated skill-evolution loop. */
+  evolutionRecorder?: EvolutionRecorder;
 }
 
 export class SubAgentExecutor {
@@ -109,6 +123,10 @@ export class SubAgentExecutor {
   private skillPolicyResolver: SubAgentExecutorOptions['skillPolicyResolver'];
   private canonicalSingleUserIds: readonly string[];
   private activeAbortControllers: Map<string, AbortController> = new Map();
+  private cancelRequested = new Set<string>();
+  private interruptQueues: Map<string, InterruptQueue> = new Map();
+  private deliveryOutbox?: SubAgentExecutorOptions['deliveryOutbox'];
+  private evolutionRecorder?: EvolutionRecorder;
 
   constructor(options: SubAgentExecutorOptions) {
     this.registry = options.registry;
@@ -125,6 +143,8 @@ export class SubAgentExecutor {
     this.config = { ...DEFAULT_SUBAGENT_CONFIG, ...options.config };
     this.skillPolicyResolver = options.skillPolicyResolver;
     this.canonicalSingleUserIds = [...(options.canonicalSingleUserIds ?? [])];
+    this.deliveryOutbox = options.deliveryOutbox;
+    this.evolutionRecorder = options.evolutionRecorder;
   }
 
   /**
@@ -176,22 +196,21 @@ export class SubAgentExecutor {
     parentOnProgress?: ProgressCallback,
   ): Promise<{ runId: string; childSessionId: string }> {
     const parent = await this.sessionManager.getSession(parentSessionId);
-    const session = await this.sessionManager.createSession({
-      isSubAgent: true,
-      parentSessionId,
-      label: input.label || 'sub-agent',
-      ...(typeof parent?.metadata?.userId === 'string' ? { userId: parent.metadata.userId } : {}),
-      ...(typeof parent?.metadata?.channelId === 'string' ? { channelId: parent.metadata.channelId } : {}),
-    });
-
-    const run = this.registry.createRun(parentSessionId, input, session.id);
+    const reservation = this.registry.reserveSpawn(parentSessionId, parent?.metadata, 1);
+    if (!reservation.token) throw new Error(reservation.reason || 'Sub-agent capacity unavailable');
+    let run: SubAgentRun;
+    try {
+      run = (await this.prepareRun(parentSessionId, input)).run;
+    } finally {
+      this.registry.releaseSpawnReservation(reservation.token);
+    }
 
     // Fire and forget — result will be enqueued via lane serialization
     enqueueInLane(`subagent:${run.id}`, () => this.executeSubAgent(run, parentOnProgress, true)).catch((err) => {
       this.logger.error({ runId: run.id, error: (err as Error).message }, 'Sub-agent execution failed unexpectedly');
     });
 
-    return { runId: run.id, childSessionId: session.id };
+    return { runId: run.id, childSessionId: run.childSessionId };
   }
 
   /**
@@ -203,31 +222,199 @@ export class SubAgentExecutor {
     parentOnProgress?: ProgressCallback,
   ): Promise<SubAgentResult> {
     const parent = await this.sessionManager.getSession(parentSessionId);
+    const reservation = this.registry.reserveSpawn(parentSessionId, parent?.metadata, 1);
+    if (!reservation.token) throw new Error(reservation.reason || 'Sub-agent capacity unavailable');
+    let run: SubAgentRun;
+    try {
+      run = (await this.prepareRun(parentSessionId, input)).run;
+    } finally {
+      this.registry.releaseSpawnReservation(reservation.token);
+    }
+    return this.executeSubAgent(run, parentOnProgress, false);
+  }
+
+  /** Atomically preflight a fan-out before starting any child. */
+  async spawnBatch(
+    parentSessionId: string,
+    inputs: SpawnAgentInput[],
+    parentOnProgress?: ProgressCallback,
+  ): Promise<Array<{ runId: string; childSessionId: string }>> {
+    if (inputs.length === 0) return [];
+    const parent = await this.sessionManager.getSession(parentSessionId);
+    const reservation = this.registry.reserveSpawn(parentSessionId, parent?.metadata, inputs.length);
+    if (!reservation.token) throw new Error(reservation.reason);
+    const batchId = nanoid();
+    const prepared: SubAgentRun[] = [];
+    try {
+      for (let index = 0; index < inputs.length; index++) {
+        const input = { ...inputs[index], batchId, batchIndex: index };
+        prepared.push((await this.prepareRun(parentSessionId, input)).run);
+      }
+    } catch (error) {
+      for (const run of prepared) {
+        this.registry.updateStatus(run.id, 'cancelled', undefined, 'Atomic batch preparation rolled back');
+        await this.sessionManager.archiveSession(run.childSessionId, 'batch_preflight_rollback', 'subagent_executor');
+      }
+      throw error;
+    } finally {
+      this.registry.releaseSpawnReservation(reservation.token);
+    }
+    for (const run of prepared) {
+      enqueueInLane(`subagent:${run.id}`, () => this.executeSubAgent(run, parentOnProgress, true)).catch(error => {
+        this.logger.error({ runId: run.id, error: (error as Error).message }, 'Batch child failed unexpectedly');
+      });
+    }
+    return prepared.map(run => ({ runId: run.id, childSessionId: run.childSessionId }));
+  }
+
+  /** Isolated implement -> independent review/test -> conflict-checked patch. */
+  async runCodingWorkflow(
+    parentSessionId: string,
+    input: SpawnAgentInput,
+    parentOnProgress?: ProgressCallback,
+  ): Promise<SubAgentResult> {
+    const workflowId = `workflow-${nanoid()}`;
+    const worktree = await createSubAgentWorktree(this.workspace, workflowId);
+    let finalized = false;
+    try {
+      const implementer = await this.spawnAndWait(parentSessionId, {
+        ...input,
+        label: input.label ? `${input.label}-implement` : 'implementer',
+        role: 'leaf',
+        workspaceMode: 'worktree',
+        workspaceOverride: worktree.path,
+        acceptanceCriteria: input.acceptanceCriteria,
+      }, parentOnProgress);
+      const reviewer = await this.spawnAndWait(parentSessionId, {
+        task: [
+          'Independently review and test the implementation in this workspace.',
+          'Inspect the full Git diff, run the relevant tests, and report concrete defects or missing acceptance criteria.',
+          'Do not modify files. Do not approve based only on the implementer summary.',
+          `Original task: ${input.task}`,
+          `Implementer report: ${implementer.summary}`,
+        ].join('\n'),
+        label: input.label ? `${input.label}-review` : 'reviewer',
+        skills: input.skills,
+        modelTier: input.modelTier,
+        contextMode: 'isolated',
+        workspaceMode: 'worktree',
+        workspaceOverride: worktree.path,
+        acceptanceCriteria: [
+          ...(input.acceptanceCriteria ?? []),
+          'Relevant tests pass',
+          'No unresolved defects remain in the reviewed diff',
+        ],
+      }, parentOnProgress);
+      const patch = await finalizeSubAgentWorktree(worktree, workflowId);
+      finalized = true;
+      const succeeded = implementer.status === 'succeeded'
+        && reviewer.status === 'succeeded'
+        && patch.conflicts.length === 0;
+      const structured = buildStructuredSubAgentResult({
+        response: succeeded
+          ? `Implementation and independent review passed. ${reviewer.summary}`
+          : `Coding workflow needs attention. ${reviewer.summary}`,
+        runtimeStatus: succeeded ? 'succeeded' : 'blocked',
+        acceptanceCriteria: input.acceptanceCriteria,
+        evidenceReceipts: [...implementer.evidenceReceipts, ...reviewer.evidenceReceipts],
+        changedFiles: patch.changedFiles,
+        additionalArtifacts: patch.artifacts,
+        additionalBlockers: [
+          ...patch.conflicts,
+          ...(implementer.status === 'succeeded' ? [] : implementer.blockers),
+          ...(reviewer.status === 'succeeded' ? [] : reviewer.blockers),
+        ],
+        verifiedAcceptancePassed: succeeded,
+      });
+      return {
+        ...structured,
+        response: structured.summary,
+        iterationsUsed: implementer.iterationsUsed + reviewer.iterationsUsed,
+        taskComplete: structured.acceptancePassed,
+        completionSource: structured.acceptancePassed ? 'verified_tool_evidence' : undefined,
+        costUsd: implementer.costUsd + reviewer.costUsd,
+      };
+    } finally {
+      if (!finalized) {
+        try { await finalizeSubAgentWorktree(worktree, workflowId); } catch { /* best effort */ }
+      }
+    }
+  }
+
+  steer(runId: string, message: string): boolean {
+    const run = this.registry.getRun(runId);
+    const queue = this.interruptQueues.get(runId);
+    if (!run || run.status !== 'running' || !queue || !message.trim()) return false;
+    queue.enqueue({ sessionId: run.childSessionId, text: `[Parent steering update] ${message.trim()}`, timestamp: Date.now() });
+    this.registry.markProgress(runId);
+    return true;
+  }
+
+  followUp(parentSessionId: string, runId: string, message: string, waitForResult = false) {
+    const prior = this.registry.getRun(runId);
+    if (!prior || prior.parentSessionId !== parentSessionId) throw new Error('Unknown sub-agent run');
+    return waitForResult
+      ? this.spawnAndWait(parentSessionId, { task: message, context: prior.result?.summary, label: `${prior.label}-followup`, skills: prior.allowedSkills })
+      : this.spawn(parentSessionId, { task: message, context: prior.result?.summary, label: `${prior.label}-followup`, skills: prior.allowedSkills });
+  }
+
+  async getRunLog(runId: string, maxMessages = 20): Promise<Array<{ role: string; content: string }>> {
+    const run = this.registry.getRun(runId);
+    if (!run) return [];
+    const session = await this.sessionManager.getSession(run.childSessionId);
+    return (session?.messages ?? []).slice(-Math.max(1, Math.min(100, maxMessages))).map(message => ({
+      role: message.role,
+      content: typeof message.content === 'string' ? message.content : '[structured content]',
+    }));
+  }
+
+  private async prepareRun(parentSessionId: string, input: SpawnAgentInput): Promise<{ run: SubAgentRun }> {
+    const parent = await this.sessionManager.getSession(parentSessionId);
+    const parentRunId = typeof parent?.metadata?.subAgentRunId === 'string'
+      ? parent.metadata.subAgentRunId
+      : input.parentRunId;
+    const normalized = { ...input, parentRunId };
     const session = await this.sessionManager.createSession({
       isSubAgent: true,
       parentSessionId,
       label: input.label || 'sub-agent',
+      subAgentRole: input.role ?? 'leaf',
+      subAgentSpawnDepth: Number(parent?.metadata?.subAgentSpawnDepth ?? -1) + 1,
+      ...(parentRunId ? { parentRunId } : {}),
       ...(typeof parent?.metadata?.userId === 'string' ? { userId: parent.metadata.userId } : {}),
       ...(typeof parent?.metadata?.channelId === 'string' ? { channelId: parent.metadata.channelId } : {}),
     });
-
-    const run = this.registry.createRun(parentSessionId, input, session.id);
-    return this.executeSubAgent(run, parentOnProgress, false);
+    let run: SubAgentRun;
+    try {
+      run = this.registry.createRun(parentSessionId, normalized, session.id);
+    } catch (error) {
+      await this.sessionManager.archiveSession(session.id, 'subagent_prepare_failed', 'subagent_executor');
+      throw error;
+    }
+    session.metadata = { ...session.metadata, subAgentRunId: run.id };
+    if (run.contextMode === 'fork' && parent) {
+      const messages = parent.messages
+        .filter(message => message.role === 'user' || message.role === 'assistant')
+        .slice(-20);
+      for (const message of messages) {
+        await this.sessionManager.addMessage(session.id, message);
+      }
+    }
+    return { run };
   }
 
   /**
    * Cancel a specific run
    */
   cancel(runId: string): boolean {
+    const run = this.registry.getRun(runId);
+    if (!run || !['pending', 'running'].includes(run.status)) return false;
+    this.cancelRequested.add(runId);
     const controller = this.activeAbortControllers.get(runId);
-    if (controller) {
-      controller.abort();
-      this.registry.updateStatus(runId, 'cancelled');
-      this.activeAbortControllers.delete(runId);
-      this.logger.info({ runId }, 'Sub-agent cancelled');
-      return true;
-    }
-    return false;
+    controller?.abort();
+    this.registry.updateStatus(runId, 'cancelled');
+    this.logger.info({ runId }, 'Sub-agent cancellation requested');
+    return true;
   }
 
   /**
@@ -252,7 +439,32 @@ export class SubAgentExecutor {
     parentOnProgress?: ProgressCallback,
     announceResult: boolean = true,
   ): Promise<SubAgentResult> {
+    if (this.cancelRequested.has(run.id) || run.status === 'cancelled') {
+      const failure = this.failureResult('Sub-agent cancelled by parent', 'cancelled');
+      if (announceResult) {
+        this.announceFailure(run, failure.response);
+        await this.enqueueDurableDelivery(run, failure);
+      }
+      this.cancelRequested.delete(run.id);
+      return failure;
+    }
     this.registry.updateStatus(run.id, 'running');
+    let worktree: SubAgentWorktree | undefined;
+    let executionWorkspace = run.workspacePath || this.workspace;
+    if (run.workspaceMode === 'worktree' && !run.workspacePath) {
+      try {
+        worktree = await createSubAgentWorktree(this.workspace, run.id);
+        executionWorkspace = worktree.path;
+        this.registry.setWorkspacePath(run.id, worktree.path);
+      } catch (error) {
+        const message = `Could not create isolated worktree: ${(error as Error).message}`;
+        this.registry.updateStatus(run.id, 'blocked', undefined, message);
+        if (announceResult) this.announceFailure(run, message);
+        const failure = this.failureResult(message, 'blocked');
+        if (announceResult) await this.enqueueDurableDelivery(run, failure);
+        return failure;
+      }
+    }
 
     // 1. Select provider via router
     const provider = await this.router.selectProvider(run.modelTier);
@@ -260,7 +472,12 @@ export class SubAgentExecutor {
       const error = `No provider available for tier "${run.modelTier}"`;
       this.registry.updateStatus(run.id, 'failed', undefined, error);
       if (announceResult) this.announceFailure(run, error);
-      throw new Error(error);
+      const failure = this.failureResult(error);
+      if (announceResult) await this.enqueueDurableDelivery(run, failure);
+      if (worktree) {
+        try { await finalizeSubAgentWorktree(worktree, run.id); } catch { /* best-effort cleanup */ }
+      }
+      return failure;
     }
 
     // 2. Wrap provider with cost tracker
@@ -286,6 +503,8 @@ export class SubAgentExecutor {
       run.recentChatContext,
       allowedSkills,
       stateUserId,
+      run,
+      executionWorkspace,
     );
     const filteredRegistry = this.createFilteredSkillRegistry(allowedSkills);
 
@@ -298,31 +517,54 @@ export class SubAgentExecutor {
     });
 
     // 7. Create Agent instance with sub-agent restrictions
+    const childInterruptQueue = new InterruptQueue({ maxQueueSize: 20, logger: this.logger });
+    this.interruptQueues.set(run.id, childInterruptQueue);
     const agent = new Agent({
       provider: activeProvider,
       sessionManager: this.sessionManager,
       skillRegistry: filteredRegistry,
       skillExecutor: this.skillExecutor,
       // Read-only memory: pass store for reads but no factExtractor (no writes)
-      scallopStore: this.config.allowMemoryWrites ? this.scallopStore : this.createReadOnlyMemoryProxy(),
+      scallopStore: run.contextMode === 'isolated'
+        ? undefined
+        : this.config.allowMemoryWrites ? this.scallopStore : this.createReadOnlyMemoryProxy(),
       contextManager: subAgentContextManager,
       // Deliberately omitted:
       // - factExtractor (no fact extraction from sub-agent conversations)
       // - goalService (sub-agents don't manage goals)
       // - configManager (sub-agents don't need user config)
       // - mediaProcessor (sub-agents don't process media)
-      workspace: this.workspace,
+      workspace: executionWorkspace,
       logger: this.logger,
       maxIterations: this.config.maxIterations,
+      interruptQueue: childInterruptQueue,
+      subAgentExecutor: run.role === 'orchestrator' ? this : undefined,
+      foregroundCallTimeoutMs: Math.min(300_000, Math.max(25_000, run.idleTimeoutMs)),
+      turnTimeoutMs: Math.min(900_000, Math.max(55_000, run.idleTimeoutMs)),
+      subAgentMode: true,
       systemPrompt,
       canonicalSingleUserIds: this.canonicalSingleUserIds,
       evidenceExecutionContext: run.evidenceExecutionContext,
     });
 
-    // 8. Set up timeout via AbortController
+    // 8. Progress-aware liveness. A hard timeout is optional; productive work
+    // is never killed merely because it crossed an arbitrary short wall time.
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), run.timeoutMs);
+    let abortReason: 'idle' | 'hard' | undefined;
+    const startedAt = Date.now();
+    const watchdog = setInterval(() => {
+      const current = this.registry.getRun(run.id);
+      const lastProgressAt = current?.lastProgressAt ?? startedAt;
+      if (Date.now() - lastProgressAt > run.idleTimeoutMs) {
+        abortReason = 'idle';
+        controller.abort();
+      } else if (run.hardTimeoutMs > 0 && Date.now() - startedAt > run.hardTimeoutMs) {
+        abortReason = 'hard';
+        controller.abort();
+      }
+    }, Math.min(1_000, Math.max(100, Math.floor(run.idleTimeoutMs / 10))));
     this.activeAbortControllers.set(run.id, controller);
+    if (this.cancelRequested.has(run.id)) controller.abort();
     const initialCostUsd = this.costTracker?.getSessionSpend(run.childSessionId) ?? 0;
 
     const shouldStop = () => controller.signal.aborted;
@@ -330,6 +572,7 @@ export class SubAgentExecutor {
     // 9. Progress forwarding
     const evidenceReceipts: ToolEvidenceReceipt[] = [];
     const subProgress: ProgressCallback = async (update) => {
+      this.registry.markProgress(run.id);
       if ((update.type === 'tool_complete' || update.type === 'tool_error') && update.toolName && update.evidence) {
         evidenceReceipts.push({
           toolName: update.toolName,
@@ -365,7 +608,7 @@ export class SubAgentExecutor {
         controller.signal // abortSignal — terminates in-flight LLM HTTP call on timeout/cancel
       );
 
-      const cleanedResponse = result.response.replace(/\[DONE\]\s*$/, '').trim();
+      let cleanedResponse = result.response.replace(/\[DONE\]\s*$/, '').trim();
       const hasFailureSignal = FINAL_FAILURE_SIGNAL.test(cleanedResponse);
       const finalToolReceipt = evidenceReceipts.at(-1);
       const hasVerifiedToolCompletion = Boolean(
@@ -388,18 +631,47 @@ export class SubAgentExecutor {
         (this.costTracker?.getSessionSpend(run.childSessionId) ?? initialCostUsd) - initialCostUsd,
       );
 
+      let worktreeResult: Awaited<ReturnType<typeof finalizeSubAgentWorktree>> | undefined;
+      if (worktree) {
+        worktreeResult = await finalizeSubAgentWorktree(worktree, run.id);
+        worktree = undefined;
+      }
+      const structured = buildStructuredSubAgentResult({
+        response: cleanedResponse,
+        runtimeStatus: taskComplete ? 'succeeded' : 'blocked',
+        acceptanceCriteria: run.acceptanceCriteria,
+        evidenceReceipts,
+        changedFiles: worktreeResult?.changedFiles,
+        additionalArtifacts: worktreeResult?.artifacts,
+        additionalBlockers: worktreeResult?.conflicts,
+      });
+      cleanedResponse = structured.summary.slice(0, this.config.maxSummaryChars);
       const subAgentResult: SubAgentResult = {
+        ...structured,
         response: cleanedResponse,
         iterationsUsed: result.iterationsUsed,
-        taskComplete,
-        completionSource,
+        taskComplete: taskComplete && structured.acceptancePassed,
+        completionSource: structured.acceptancePassed ? completionSource : undefined,
         costUsd,
         evidenceReceipts,
       };
 
       // Update registry
-      this.registry.updateStatus(run.id, 'completed', subAgentResult);
+      const registryStatus = subAgentResult.status === 'succeeded' ? 'completed'
+        : subAgentResult.status === 'blocked' ? 'blocked' : 'failed';
+      this.registry.updateStatus(run.id, registryStatus, subAgentResult);
       this.registry.updateTokenUsage(run.id, result.tokenUsage);
+      if (subAgentResult.status === 'succeeded' && this.evolutionRecorder) {
+        this.evolutionRecorder.recordTurn({
+          userId: stateUserId,
+          sessionId: run.childSessionId,
+          userMessage: run.task,
+          finalResponse: subAgentResult.summary,
+          toolCallCount: evidenceReceipts.length,
+          failedSkills: [],
+          complexityTier: run.modelTier,
+        });
+      }
 
       // Enqueue result for parent (async spawn only — for spawnAndWait, caller gets result directly)
       if (announceResult) {
@@ -411,6 +683,7 @@ export class SubAgentExecutor {
           tokenUsage: result.tokenUsage,
           timestamp: Date.now(),
         });
+        await this.enqueueDurableDelivery(run, subAgentResult);
       }
 
       this.logger.info(
@@ -428,10 +701,15 @@ export class SubAgentExecutor {
 
       return subAgentResult;
     } catch (error) {
-      const isTimeout = controller.signal.aborted;
-      const status = isTimeout ? 'timed_out' : 'failed';
-      const errorMsg = isTimeout
-        ? `Sub-agent timed out after ${run.timeoutMs / 1000}s`
+      const wasCancelled = this.registry.getRun(run.id)?.status === 'cancelled';
+      const isTimeout = controller.signal.aborted && !wasCancelled;
+      const status = wasCancelled ? 'cancelled' : isTimeout ? 'timed_out' : 'failed';
+      const errorMsg = wasCancelled
+        ? 'Sub-agent cancelled by parent'
+        : abortReason === 'idle'
+        ? `Sub-agent stopped after ${run.idleTimeoutMs / 1000}s without progress`
+        : abortReason === 'hard'
+          ? `Sub-agent reached the configured ${run.hardTimeoutMs / 1000}s hard limit`
         : (error as Error).message;
 
       this.registry.updateStatus(run.id, status, undefined, errorMsg);
@@ -439,19 +717,20 @@ export class SubAgentExecutor {
 
       this.logger.warn({ runId: run.id, label: run.label, status, error: errorMsg }, 'Sub-agent failed');
 
-      return {
-        response: `Error: ${errorMsg}`,
-        iterationsUsed: 0,
-        taskComplete: false,
-        evidenceReceipts,
-        costUsd: Math.max(
+      const failure = this.failureResult(errorMsg, status, evidenceReceipts, Math.max(
           0,
           (this.costTracker?.getSessionSpend(run.childSessionId) ?? initialCostUsd) - initialCostUsd,
-        ),
-      };
+        ));
+      if (announceResult) await this.enqueueDurableDelivery(run, failure);
+      return failure;
     } finally {
-      clearTimeout(timeout);
+      clearInterval(watchdog);
       this.activeAbortControllers.delete(run.id);
+      this.cancelRequested.delete(run.id);
+      this.interruptQueues.delete(run.id);
+      if (worktree) {
+        try { await finalizeSubAgentWorktree(worktree, run.id); } catch { /* best-effort cleanup */ }
+      }
     }
   }
 
@@ -463,6 +742,8 @@ export class SubAgentExecutor {
     recentChatContext?: string,
     allowedSkills: ReadonlySet<string> = new Set(),
     userId: string = 'default',
+    run?: SubAgentRun,
+    workspace = this.workspace,
   ): Promise<string> {
     const lines = [
       'You are a focused sub-agent assigned a specific task.',
@@ -470,7 +751,7 @@ export class SubAgentExecutor {
     ];
 
     // Inject agent identity if available
-    if (this.scallopStore) {
+    if (this.scallopStore && run?.contextMode !== 'isolated') {
       const agentProfile = this.scallopStore.getProfileManager().getStaticProfile('agent');
       if (agentProfile && Object.keys(agentProfile).length > 0) {
         const name = agentProfile['name'] || agentProfile['agent_name'];
@@ -482,7 +763,7 @@ export class SubAgentExecutor {
     }
 
     // Inject user profile context
-    if (this.scallopStore) {
+    if (this.scallopStore && run?.contextMode !== 'isolated') {
       const userProfile = this.scallopStore.getProfileManager().getStaticProfile(userId);
       if (userProfile && Object.keys(userProfile).length > 0) {
         lines.push('## USER CONTEXT');
@@ -494,7 +775,7 @@ export class SubAgentExecutor {
     }
 
     // Inject recent chat context (for proactive/scheduled sub-agents)
-    if (recentChatContext) {
+    if (recentChatContext && run?.contextMode !== 'isolated') {
       lines.push('## RECENT CONVERSATION');
       lines.push('Recent exchanges with the user for context. Use this to make your response');
       lines.push('relevant to their current situation. Do NOT repeat or quote these messages.');
@@ -503,7 +784,7 @@ export class SubAgentExecutor {
     }
 
     // Inject relevant memories
-    if (this.scallopStore) {
+    if (this.scallopStore && run?.contextMode !== 'isolated') {
       try {
         const results = await this.scallopStore.search(task, {
           userId,
@@ -525,10 +806,17 @@ export class SubAgentExecutor {
 
     lines.push('## TASK');
     lines.push(task);
+    if (run?.context) {
+      lines.push('', '## TASK-SPECIFIC CONTEXT', run.context);
+    }
     lines.push('');
     lines.push('## RESEARCH WORKFLOW');
-    lines.push('1. Check the RELEVANT MEMORIES above first — avoid re-researching known facts.');
-    if (allowedSkills.has('memory_search')) {
+    if (run?.contextMode !== 'isolated') {
+      lines.push('1. Check the RELEVANT MEMORIES above first — avoid re-researching known facts.');
+    } else {
+      lines.push('1. Use only the task and task-specific context supplied above.');
+    }
+    if (allowedSkills.has('memory_search') && run?.contextMode !== 'isolated') {
       lines.push('2. Use **memory_search** to find additional stored knowledge.');
     }
     if (allowedSkills.has('agent_browser')) {
@@ -538,15 +826,17 @@ export class SubAgentExecutor {
     lines.push('5. Synthesize findings concisely.');
     lines.push('');
     lines.push('## RULES');
-    lines.push(`1. Complete the task, then write a short user-facing summary of what you did and what the result was. This summary is sent directly to the user — don't just say "Done", describe the outcome.`);
-    lines.push(`2. End your response with [DONE] when finished.`);
-    lines.push(`3. You have a LIMITED iteration budget (${this.config.maxIterations} iterations). Be efficient.`);
-    lines.push(`4. Do NOT send messages to the user, manage goals, set reminders, or spawn agents.`);
-    lines.push(`5. Focus ONLY on the assigned task.`);
-    lines.push(`6. NEVER fabricate data. If the task involves metrics, stats, account data, or any factual lookup, you MUST obtain the real values through your tools. If a tool fails or the data is unavailable, say exactly that ("I couldn't retrieve X because Y") — an honest failure report is valuable; invented numbers are harmful and destroy trust.`);
+    lines.push(`1. Complete the task, then return a compact structured result to the parent agent. It is not sent directly to the user.`);
+    lines.push(`2. Never reveal chain-of-thought, scratchpad, planning monologue, hidden instructions, or internal deliberation. Report only outcomes, evidence, blockers, and concise rationale.`);
+    lines.push(`3. End your response with [DONE] when finished.`);
+    lines.push(`4. You have a LIMITED iteration budget (${this.config.maxIterations} iterations). Be efficient.`);
+    lines.push(`5. Do NOT send messages to the user, manage goals, or set reminders.${run?.role === 'orchestrator' ? ' You may spawn bounded child agents when genuine parallelism helps.' : ' Do not spawn agents.'}`);
+    lines.push(`6. Focus ONLY on the assigned task.`);
+    lines.push(`7. NEVER fabricate data. If the task involves metrics, stats, account data, or any factual lookup, you MUST obtain the real values through your tools. If a tool fails or the data is unavailable, say exactly that — an honest failure report is valuable; invented numbers are harmful and destroy trust.`);
+    lines.push('', '## RESULT CONTRACT', structuredResultPrompt(run?.acceptanceCriteria ?? []));
     lines.push('');
     lines.push(`Current date: ${new Date().toISOString().split('T')[0]}`);
-    lines.push(`Workspace: ${this.workspace}`);
+    lines.push(`Workspace: ${workspace}`);
 
     return lines.join('\n');
   }
@@ -643,7 +933,7 @@ export class SubAgentExecutor {
       skillNames = requestedSkills.filter((s) => !NEVER_ALLOWED_SKILLS.has(s));
     } else {
       // Auto-select based on task keywords
-      const autoSelected = new Set(DEFAULT_SUBAGENT_SKILLS);
+      const autoSelected = new Set(run.contextMode === 'isolated' ? ['read_file'] : DEFAULT_SUBAGENT_SKILLS);
       for (const rule of SKILL_KEYWORD_MAP) {
         if (rule.patterns.test(task)) {
           for (const skill of rule.skills) {
@@ -652,6 +942,9 @@ export class SubAgentExecutor {
         }
       }
       skillNames = [...autoSelected].filter((s) => !NEVER_ALLOWED_SKILLS.has(s));
+    }
+    if (run.role === 'orchestrator') {
+      skillNames.push('spawn_agent', 'check_agents');
     }
 
     // Only include skills that actually exist in the registry (executable or documentation)
@@ -724,12 +1017,17 @@ export class SubAgentExecutor {
       name: provider.name,
       isAvailable: () => provider.isAvailable(),
       complete: async (request: CompletionRequest): Promise<CompletionResponse> => {
+        const run = this.registry.getRun(runId);
+        if (run && this.costTracker && this.costTracker.getSessionSpend(run.childSessionId) >= this.config.maxCostUsdPerRun) {
+          throw new Error(`Sub-agent cost budget reached ($${this.config.maxCostUsdPerRun.toFixed(2)})`);
+        }
         if (cumulativeInputTokens >= maxInputTokens) {
           throw new Error(
             `Sub-agent token budget exceeded: ${cumulativeInputTokens}/${maxInputTokens} input tokens used`
           );
         }
         const response = await provider.complete(request);
+        this.registry.markProgress(runId);
         cumulativeInputTokens += response.usage.inputTokens;
         if (cumulativeInputTokens >= maxInputTokens) {
           logger.warn(
@@ -746,6 +1044,41 @@ export class SubAgentExecutor {
   }
 
   /**
+   * Build a complete honest result for every non-success terminal path.
+   */
+  private failureResult(
+    errorMsg: string,
+    status: 'failed' | 'blocked' | 'cancelled' | 'timed_out' = 'failed',
+    evidenceReceipts: ToolEvidenceReceipt[] = [],
+    costUsd = 0,
+  ): SubAgentResult {
+    const structured = buildStructuredSubAgentResult({
+      response: errorMsg,
+      runtimeStatus: status,
+      evidenceReceipts,
+      additionalBlockers: [errorMsg],
+    });
+    return {
+      ...structured,
+      response: structured.summary,
+      iterationsUsed: 0,
+      taskComplete: false,
+      costUsd,
+    };
+  }
+
+  private async enqueueDurableDelivery(run: SubAgentRun, result: SubAgentResult): Promise<void> {
+    if (!this.deliveryOutbox) return;
+    const parent = await this.sessionManager.getSession(run.parentSessionId);
+    this.deliveryOutbox.enqueueSubAgentDelivery({
+      runId: run.id,
+      parentSessionId: run.parentSessionId,
+      userId: typeof parent?.metadata?.userId === 'string' ? parent.metadata.userId : null,
+      payloadJson: JSON.stringify({ runId: run.id, label: run.label, result }),
+    });
+  }
+
+  /**
    * Announce a failure to the parent via the announce queue
    */
   private announceFailure(run: SubAgentRun, errorMsg: string): void {
@@ -753,12 +1086,12 @@ export class SubAgentExecutor {
       runId: run.id,
       parentSessionId: run.parentSessionId,
       label: run.label,
-      result: {
-        response: `Error: ${errorMsg}`,
-        iterationsUsed: 0,
-        taskComplete: false,
-        costUsd: this.costTracker?.getSessionSpend(run.childSessionId) ?? 0,
-      },
+      result: this.failureResult(
+        errorMsg,
+        run.status === 'timed_out' ? 'timed_out' : run.status === 'cancelled' ? 'cancelled' : run.status === 'blocked' ? 'blocked' : 'failed',
+        [],
+        this.costTracker?.getSessionSpend(run.childSessionId) ?? 0,
+      ),
       tokenUsage: run.tokenUsage,
       timestamp: Date.now(),
     });

@@ -11,8 +11,9 @@
 import Database from 'better-sqlite3';
 import * as path from 'path';
 import * as fs from 'fs';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { nanoid } from 'nanoid';
+import { redactSensitiveText } from '../security/redaction.js';
 import type {
   MessageFrequencySignal,
   SessionEngagementSignal,
@@ -721,6 +722,36 @@ export interface SubAgentRunRow {
   createdAt: number;
   startedAt: number | null;
   completedAt: number | null;
+  taskName?: string | null;
+  parentRunId?: string | null;
+  batchId?: string | null;
+  batchIndex?: number | null;
+  role?: string;
+  spawnDepth?: number;
+  contextMode?: string;
+  workspaceMode?: string;
+  workspacePath?: string | null;
+  idleTimeoutMs?: number;
+  hardTimeoutMs?: number;
+  lastProgressAt?: number | null;
+  resultJson?: string | null;
+  updatedAt?: number;
+}
+
+export interface SubAgentDeliveryRow {
+  runId: string;
+  parentSessionId: string;
+  userId: string | null;
+  payloadJson: string;
+  status: 'pending' | 'leased' | 'delivered' | 'failed';
+  attempts: number;
+  availableAt: number;
+  leaseToken: string | null;
+  leaseExpiresAt: number | null;
+  lastError: string | null;
+  createdAt: number;
+  updatedAt: number;
+  deliveredAt: number | null;
 }
 
 /** Durable state for one externally-mutating tool dispatch. */
@@ -1224,11 +1255,46 @@ export class ScallopDatabase {
         output_tokens INTEGER DEFAULT 0,
         created_at INTEGER NOT NULL,
         started_at INTEGER,
-        completed_at INTEGER
+        completed_at INTEGER,
+        task_name TEXT,
+        parent_run_id TEXT,
+        batch_id TEXT,
+        batch_index INTEGER,
+        role TEXT NOT NULL DEFAULT 'leaf',
+        spawn_depth INTEGER NOT NULL DEFAULT 0,
+        context_mode TEXT NOT NULL DEFAULT 'brief',
+        workspace_mode TEXT NOT NULL DEFAULT 'shared',
+        workspace_path TEXT,
+        idle_timeout_ms INTEGER NOT NULL DEFAULT 300000,
+        hard_timeout_ms INTEGER NOT NULL DEFAULT 0,
+        last_progress_at INTEGER,
+        result_json TEXT,
+        updated_at INTEGER NOT NULL DEFAULT 0
       );
 
       CREATE INDEX IF NOT EXISTS idx_subagent_runs_parent ON subagent_runs(parent_session_id);
       CREATE INDEX IF NOT EXISTS idx_subagent_runs_status ON subagent_runs(status);
+
+      -- Durable leased completion delivery. A completed background child
+      -- is pushed to its parent/user without waiting for another parent turn.
+      CREATE TABLE IF NOT EXISTS subagent_delivery_outbox (
+        run_id TEXT PRIMARY KEY,
+        parent_session_id TEXT NOT NULL,
+        user_id TEXT,
+        payload_json TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        attempts INTEGER NOT NULL DEFAULT 0,
+        available_at INTEGER NOT NULL,
+        lease_token TEXT,
+        lease_expires_at INTEGER,
+        last_error TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        delivered_at INTEGER,
+        FOREIGN KEY (run_id) REFERENCES subagent_runs(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_subagent_delivery_ready
+        ON subagent_delivery_outbox(status, available_at, lease_expires_at);
 
       -- Auth: single web UI user
       CREATE TABLE IF NOT EXISTS auth_user (
@@ -1497,10 +1563,55 @@ export class ScallopDatabase {
 
     // Migration: make conversation resets and retention lossless/auditable.
     this.migrateAddSessionLifecycleColumns();
+    this.migrateSubAgentOrchestration();
 
     // Migration: Index embeddings written before the bounded semantic index
     // existed. This is a one-time startup cost; normal writes stay indexed.
     this.migrateBackfillEmbeddingLsh();
+  }
+
+  /**
+   * Expand the public sub-agent ledger additively. This preserves every
+   * historical row while enabling lineage, progress liveness and durable push.
+   */
+  private migrateSubAgentOrchestration(): void {
+    const migrate = this.db.transaction(() => {
+      const columns = new Set(
+        (this.db.prepare('PRAGMA table_info(subagent_runs)').all() as SqliteTableColumn[])
+          .map(column => column.name),
+      );
+      const additions: Array<[string, string]> = [
+        ['task_name', 'TEXT'],
+        ['parent_run_id', 'TEXT'],
+        ['batch_id', 'TEXT'],
+        ['batch_index', 'INTEGER'],
+        ['role', "TEXT NOT NULL DEFAULT 'leaf'"],
+        ['spawn_depth', 'INTEGER NOT NULL DEFAULT 0'],
+        ['context_mode', "TEXT NOT NULL DEFAULT 'brief'"],
+        ['workspace_mode', "TEXT NOT NULL DEFAULT 'shared'"],
+        ['workspace_path', 'TEXT'],
+        ['idle_timeout_ms', 'INTEGER NOT NULL DEFAULT 300000'],
+        ['hard_timeout_ms', 'INTEGER NOT NULL DEFAULT 0'],
+        ['last_progress_at', 'INTEGER'],
+        ['result_json', 'TEXT'],
+        ['updated_at', 'INTEGER NOT NULL DEFAULT 0'],
+      ];
+      for (const [name, definition] of additions) {
+        if (!columns.has(name)) this.db.exec(`ALTER TABLE subagent_runs ADD COLUMN ${name} ${definition}`);
+      }
+      this.db.exec(`
+        UPDATE subagent_runs SET hard_timeout_ms = timeout_ms
+        WHERE hard_timeout_ms = 0 AND timeout_ms > 0;
+        UPDATE subagent_runs SET updated_at = COALESCE(completed_at, started_at, created_at)
+        WHERE updated_at = 0;
+      `);
+    });
+    try {
+      migrate();
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(`[migration] migrateSubAgentOrchestration failed: ${detail}`, { cause: error });
+    }
   }
 
   /**
@@ -8018,12 +8129,20 @@ export class ScallopDatabase {
       INSERT INTO subagent_runs (
         id, parent_session_id, child_session_id, task, label, status,
         allowed_skills, model_tier, timeout_ms, input_tokens, output_tokens,
-        created_at, started_at, completed_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        created_at, started_at, completed_at, task_name, parent_run_id,
+        batch_id, batch_index, role, spawn_depth, context_mode, workspace_mode,
+        workspace_path, idle_timeout_ms, hard_timeout_ms, last_progress_at,
+        result_json, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       run.id, run.parentSessionId, run.childSessionId, run.task, run.label, run.status,
       run.allowedSkills, run.modelTier, run.timeoutMs, run.inputTokens, run.outputTokens,
-      run.createdAt, run.startedAt ?? null, run.completedAt ?? null
+      run.createdAt, run.startedAt ?? null, run.completedAt ?? null,
+      run.taskName ?? null, run.parentRunId ?? null, run.batchId ?? null, run.batchIndex ?? null,
+      run.role ?? 'leaf', run.spawnDepth ?? 0, run.contextMode ?? 'brief',
+      run.workspaceMode ?? 'shared', run.workspacePath ?? null, run.idleTimeoutMs ?? 300_000,
+      run.hardTimeoutMs ?? run.timeoutMs, run.lastProgressAt ?? null, run.resultJson ?? null,
+      run.updatedAt ?? run.createdAt
     );
   }
 
@@ -8040,6 +8159,10 @@ export class ScallopDatabase {
     if (updates.outputTokens !== undefined) { setClauses.push('output_tokens = ?'); values.push(updates.outputTokens); }
     if (updates.startedAt !== undefined) { setClauses.push('started_at = ?'); values.push(updates.startedAt); }
     if (updates.completedAt !== undefined) { setClauses.push('completed_at = ?'); values.push(updates.completedAt); }
+    if (updates.lastProgressAt !== undefined) { setClauses.push('last_progress_at = ?'); values.push(updates.lastProgressAt); }
+    if (updates.workspacePath !== undefined) { setClauses.push('workspace_path = ?'); values.push(updates.workspacePath); }
+    if (updates.resultJson !== undefined) { setClauses.push('result_json = ?'); values.push(updates.resultJson); }
+    setClauses.push('updated_at = ?'); values.push(Date.now());
 
     if (setClauses.length === 0) return;
 
@@ -8061,10 +8184,89 @@ export class ScallopDatabase {
     return rows.map(r => this.rowToSubAgentRun(r));
   }
 
+  getRecentSubAgentRuns(limit = 100): SubAgentRunRow[] {
+    const safeLimit = Math.max(1, Math.min(500, Math.floor(limit)));
+    const rows = this.db.prepare(
+      'SELECT * FROM subagent_runs ORDER BY created_at DESC LIMIT ?'
+    ).all(safeLimit) as Array<Record<string, unknown>>;
+    return rows.map(row => this.rowToSubAgentRun(row));
+  }
+
+  enqueueSubAgentDelivery(input: {
+    runId: string;
+    parentSessionId: string;
+    userId?: string | null;
+    payloadJson: string;
+  }): boolean {
+    const now = Date.now();
+    const result = this.db.prepare(`
+      INSERT OR IGNORE INTO subagent_delivery_outbox (
+        run_id, parent_session_id, user_id, payload_json, status, attempts,
+        available_at, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, 'pending', 0, ?, ?, ?)
+    `).run(input.runId, input.parentSessionId, input.userId ?? null, input.payloadJson, now, now, now);
+    return result.changes === 1;
+  }
+
+  claimSubAgentDeliveries(limit = 10, leaseMs = 30_000): SubAgentDeliveryRow[] {
+    const claim = this.db.transaction(() => {
+      const now = Date.now();
+      const rows = this.db.prepare(`
+        SELECT * FROM subagent_delivery_outbox
+        WHERE available_at <= ?
+          AND (status IN ('pending', 'failed') OR (status = 'leased' AND lease_expires_at < ?))
+        ORDER BY created_at ASC LIMIT ?
+      `).all(now, now, Math.max(1, Math.min(100, limit))) as Array<Record<string, unknown>>;
+      const claimed: SubAgentDeliveryRow[] = [];
+      for (const row of rows) {
+        const token = randomUUID();
+        const updated = this.db.prepare(`
+          UPDATE subagent_delivery_outbox
+          SET status = 'leased', lease_token = ?, lease_expires_at = ?, attempts = attempts + 1, updated_at = ?
+          WHERE run_id = ?
+            AND (status IN ('pending', 'failed') OR (status = 'leased' AND lease_expires_at < ?))
+        `).run(token, now + leaseMs, now, row.run_id, now);
+        if (updated.changes === 1) {
+          claimed.push(this.rowToSubAgentDelivery({ ...row, status: 'leased', lease_token: token,
+            lease_expires_at: now + leaseMs, attempts: Number(row.attempts) + 1, updated_at: now }));
+        }
+      }
+      return claimed;
+    });
+    return claim();
+  }
+
+  completeSubAgentDelivery(runId: string, leaseToken: string): boolean {
+    const now = Date.now();
+    return this.db.prepare(`
+      UPDATE subagent_delivery_outbox
+      SET status = 'delivered', delivered_at = ?, updated_at = ?, payload_json = '{}',
+          last_error = NULL, lease_token = NULL, lease_expires_at = NULL
+      WHERE run_id = ? AND status = 'leased' AND lease_token = ?
+    `).run(now, now, runId, leaseToken).changes === 1;
+  }
+
+  failSubAgentDelivery(runId: string, leaseToken: string, error: string): boolean {
+    const now = Date.now();
+    const row = this.db.prepare('SELECT attempts FROM subagent_delivery_outbox WHERE run_id = ?').get(runId) as { attempts: number } | undefined;
+    const delay = Math.min(15 * 60_000, 1_000 * 2 ** Math.min(row?.attempts ?? 1, 9));
+    return this.db.prepare(`
+      UPDATE subagent_delivery_outbox
+      SET status = 'failed', available_at = ?, last_error = ?, updated_at = ?, lease_token = NULL, lease_expires_at = NULL
+      WHERE run_id = ? AND status = 'leased' AND lease_token = ?
+    `).run(now + delay, redactSensitiveText(error).slice(0, 500), now, runId, leaseToken).changes === 1;
+  }
+
   deleteOldSubAgentRuns(maxAgeMs: number): number {
     const cutoff = Date.now() - maxAgeMs;
     const result = this.db.prepare(
-      "DELETE FROM subagent_runs WHERE status NOT IN ('pending', 'running') AND COALESCE(completed_at, created_at) < ?"
+      `DELETE FROM subagent_runs
+       WHERE status NOT IN ('pending', 'running')
+         AND COALESCE(completed_at, created_at) < ?
+         AND NOT EXISTS (
+           SELECT 1 FROM subagent_delivery_outbox delivery
+           WHERE delivery.run_id = subagent_runs.id AND delivery.status != 'delivered'
+         )`
     ).run(cutoff);
     return result.changes;
   }
@@ -8078,7 +8280,7 @@ export class ScallopDatabase {
     const result = this.db.prepare(`
       UPDATE subagent_runs
       SET task = '[compacted]', label = 'sub-agent', allowed_skills = NULL,
-          result_response = NULL,
+          result_response = NULL, result_json = NULL,
           error = CASE WHEN error IS NULL THEN NULL ELSE '[redacted]' END
       WHERE status NOT IN ('pending', 'running')
         AND COALESCE(completed_at, created_at) < ?
@@ -8117,6 +8319,38 @@ export class ScallopDatabase {
       createdAt: row.created_at as number,
       startedAt: row.started_at as number | null,
       completedAt: row.completed_at as number | null,
+      taskName: row.task_name as string | null,
+      parentRunId: row.parent_run_id as string | null,
+      batchId: row.batch_id as string | null,
+      batchIndex: row.batch_index as number | null,
+      role: (row.role as string) || 'leaf',
+      spawnDepth: Number(row.spawn_depth ?? 0),
+      contextMode: (row.context_mode as string) || 'brief',
+      workspaceMode: (row.workspace_mode as string) || 'shared',
+      workspacePath: row.workspace_path as string | null,
+      idleTimeoutMs: Number(row.idle_timeout_ms ?? 300_000),
+      hardTimeoutMs: Number(row.hard_timeout_ms ?? row.timeout_ms ?? 0),
+      lastProgressAt: row.last_progress_at as number | null,
+      resultJson: row.result_json as string | null,
+      updatedAt: Number(row.updated_at ?? row.completed_at ?? row.started_at ?? row.created_at),
+    };
+  }
+
+  private rowToSubAgentDelivery(row: Record<string, unknown>): SubAgentDeliveryRow {
+    return {
+      runId: row.run_id as string,
+      parentSessionId: row.parent_session_id as string,
+      userId: row.user_id as string | null,
+      payloadJson: row.payload_json as string,
+      status: row.status as SubAgentDeliveryRow['status'],
+      attempts: Number(row.attempts),
+      availableAt: Number(row.available_at),
+      leaseToken: row.lease_token as string | null,
+      leaseExpiresAt: row.lease_expires_at as number | null,
+      lastError: row.last_error as string | null,
+      createdAt: Number(row.created_at),
+      updatedAt: Number(row.updated_at),
+      deliveredAt: row.delivered_at as number | null,
     };
   }
 

@@ -91,6 +91,17 @@ export default function Sidebar({
         </NavButton>
       )}
 
+      <NavButton
+        active={currentView === 'tasks'}
+        onClick={() => onViewChange('tasks')}
+        title="Tasks"
+      >
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M8 6h13M8 12h13M8 18h13" />
+          <path d="m3 6 1 1 2-2M3 12h3M3 18h3" />
+        </svg>
+      </NavButton>
+
       {/* Spacer */}
       <div className="flex-1" />
 

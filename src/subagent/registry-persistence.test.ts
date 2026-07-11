@@ -45,7 +45,7 @@ describe('SubAgentRegistry persistence', () => {
     expect(stored.completedAt).not.toBeNull();
   });
 
-  it('durably marks active work orphaned during restart recovery', () => {
+  it('durably marks interrupted work lost without inferring failure or success', () => {
     const run = registry.createRun('parent-2', { task: 'Long task' }, 'child-2');
     registry.updateStatus(run.id, 'running');
 
@@ -61,6 +61,12 @@ describe('SubAgentRegistry persistence', () => {
       allowedSkills: [],
       modelTier: 'fast',
       timeoutMs: row.timeoutMs,
+      idleTimeoutMs: row.idleTimeoutMs ?? 300_000,
+      hardTimeoutMs: row.hardTimeoutMs ?? row.timeoutMs,
+      contextMode: 'brief',
+      role: 'leaf',
+      workspaceMode: 'shared',
+      spawnDepth: 0,
       tokenUsage: { inputTokens: 0, outputTokens: 0 },
       createdAt: row.createdAt,
     }]);
@@ -68,8 +74,8 @@ describe('SubAgentRegistry persistence', () => {
     expect(orphaned).toBe(1);
     expect(db.getActiveSubAgentRuns()).toHaveLength(0);
     expect(db.getSubAgentRunsByParent('parent-2')[0]).toMatchObject({
-      status: 'failed',
-      error: 'Process restarted — orphaned sub-agent',
+      status: 'lost',
+      error: 'Process restarted while this sub-agent was active; no success was inferred',
     });
   });
 });

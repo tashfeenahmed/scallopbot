@@ -42,6 +42,7 @@ export class SubAgentRegistry {
   private config: SubAgentConfig;
   private logger: Logger;
   private persistence?: SubAgentPersistence;
+  private spawnReservations = new Map<string, { parentSessionId: string; count: number }>();
 
   constructor(options: SubAgentRegistryOptions) {
     this.config = { ...DEFAULT_SUBAGENT_CONFIG, ...options.config };
@@ -54,25 +55,46 @@ export class SubAgentRegistry {
    */
   createRun(parentSessionId: string, input: SpawnAgentInput, childSessionId: string): SubAgentRun {
     const id = nanoid();
-    const timeoutSeconds = Math.min(
+    const timeoutSeconds = Math.max(0, Math.min(
       input.timeoutSeconds ?? this.config.defaultTimeoutSeconds,
       this.config.maxTimeoutSeconds
-    );
+    ));
+    const idleTimeoutSeconds = Math.max(1, Math.min(
+      input.idleTimeoutSeconds ?? this.config.defaultIdleTimeoutSeconds,
+      this.config.maxIdleTimeoutSeconds,
+    ));
+    const parentRun = input.parentRunId ? this.runs.get(input.parentRunId) : undefined;
+    const now = Date.now();
 
     const run: SubAgentRun = {
       id,
       parentSessionId,
       childSessionId,
       task: input.task,
+      taskName: input.taskName,
+      context: input.context,
+      acceptanceCriteria: input.acceptanceCriteria,
       label: input.label || `sub-${id.slice(0, 6)}`,
       status: 'pending',
       allowedSkills: input.skills || [],
       modelTier: input.modelTier || this.config.defaultModelTier,
       timeoutMs: timeoutSeconds * 1000,
+      idleTimeoutMs: idleTimeoutSeconds * 1000,
+      hardTimeoutMs: timeoutSeconds * 1000,
+      contextMode: ['isolated', 'brief', 'fork'].includes(String(input.contextMode))
+        ? input.contextMode! : this.config.defaultContextMode,
+      role: input.role === 'orchestrator' ? 'orchestrator' : 'leaf',
+      workspaceMode: input.workspaceMode === 'worktree' ? 'worktree' : 'shared',
+      workspacePath: input.workspaceOverride,
+      parentRunId: input.parentRunId,
+      batchId: input.batchId,
+      batchIndex: input.batchIndex,
+      spawnDepth: parentRun ? parentRun.spawnDepth + 1 : 0,
       recentChatContext: input.recentChatContext,
       evidenceExecutionContext: input.evidenceExecutionContext,
       tokenUsage: { inputTokens: 0, outputTokens: 0 },
-      createdAt: Date.now(),
+      createdAt: now,
+      lastProgressAt: now,
     };
 
     this.runs.set(id, run);
@@ -83,7 +105,15 @@ export class SubAgentRegistry {
     }
     this.parentIndex.get(parentSessionId)!.add(id);
 
-    this.persistence?.insertSubAgentRun(this.toPersistenceRow(run));
+    try {
+      this.persistence?.insertSubAgentRun(this.toPersistenceRow(run));
+    } catch (error) {
+      this.runs.delete(id);
+      const parentSet = this.parentIndex.get(parentSessionId);
+      parentSet?.delete(id);
+      if (parentSet?.size === 0) this.parentIndex.delete(parentSessionId);
+      throw error;
+    }
 
     this.logger.debug({ runId: id, label: run.label, parent: parentSessionId }, 'Sub-agent run created');
     return run;
@@ -115,9 +145,10 @@ export class SubAgentRegistry {
 
     if (status === 'running' && !run.startedAt) {
       run.startedAt = Date.now();
+      run.lastProgressAt = run.startedAt;
     }
 
-    if (status === 'completed' || status === 'failed' || status === 'cancelled' || status === 'timed_out') {
+    if (['completed', 'failed', 'blocked', 'cancelled', 'timed_out', 'lost'].includes(status)) {
       run.completedAt = Date.now();
     }
 
@@ -137,6 +168,8 @@ export class SubAgentRegistry {
       error: safeDiagnosticText(run.error, 500),
       startedAt: run.startedAt,
       completedAt: run.completedAt,
+      lastProgressAt: run.lastProgressAt,
+      resultJson: run.result ? safeDiagnosticText(JSON.stringify(run.result), 20_000) : undefined,
     });
 
     this.logger.debug({ runId, status, label: run.label }, 'Sub-agent run status updated');
@@ -156,19 +189,42 @@ export class SubAgentRegistry {
     }
   }
 
+  markProgress(runId: string): void {
+    const run = this.runs.get(runId);
+    if (!run) return;
+    run.lastProgressAt = Date.now();
+    this.persistence?.updateSubAgentRun(runId, { lastProgressAt: run.lastProgressAt });
+  }
+
+  setWorkspacePath(runId: string, workspacePath: string): void {
+    const run = this.runs.get(runId);
+    if (!run) return;
+    run.workspacePath = workspacePath;
+    this.persistence?.updateSubAgentRun(runId, { workspacePath });
+  }
+
   /**
    * Check whether a new sub-agent can be spawned for this parent session.
    * Returns { allowed, reason } — reason explains the rejection.
    */
-  canSpawn(parentSessionId: string, sessionMetadata?: Record<string, unknown>): { allowed: boolean; reason?: string } {
-    // Recursion guard: reject if parent is itself a sub-agent
+  canSpawn(parentSessionId: string, sessionMetadata?: Record<string, unknown>, requestedCount = 1): { allowed: boolean; reason?: string } {
     if (sessionMetadata?.isSubAgent) {
-      return { allowed: false, reason: 'Sub-agents cannot spawn further sub-agents' };
+      const depth = Number(sessionMetadata.subAgentSpawnDepth ?? 0);
+      const role = sessionMetadata.subAgentRole;
+      if (role !== 'orchestrator') {
+        return { allowed: false, reason: 'Only orchestrator sub-agents may spawn children' };
+      }
+      if (depth >= this.config.maxSpawnDepth) {
+        return { allowed: false, reason: `Maximum sub-agent spawn depth reached (${this.config.maxSpawnDepth})` };
+      }
     }
 
     // Per-session concurrency
     const activeForParent = this.getActiveRunsForParent(parentSessionId);
-    if (activeForParent.length >= this.config.maxConcurrentPerSession) {
+    const reservedForParent = [...this.spawnReservations.values()]
+      .filter(reservation => reservation.parentSessionId === parentSessionId)
+      .reduce((sum, reservation) => sum + reservation.count, 0);
+    if (activeForParent.length + reservedForParent + requestedCount > this.config.maxConcurrentPerSession) {
       return {
         allowed: false,
         reason: `Maximum concurrent sub-agents per session reached (${this.config.maxConcurrentPerSession})`,
@@ -177,7 +233,8 @@ export class SubAgentRegistry {
 
     // Global concurrency
     const activeGlobal = this.getActiveRunsGlobal();
-    if (activeGlobal.length >= this.config.maxConcurrentGlobal) {
+    const reservedGlobal = [...this.spawnReservations.values()].reduce((sum, reservation) => sum + reservation.count, 0);
+    if (activeGlobal.length + reservedGlobal + requestedCount > this.config.maxConcurrentGlobal) {
       return {
         allowed: false,
         reason: `Maximum concurrent sub-agents globally reached (${this.config.maxConcurrentGlobal})`,
@@ -185,6 +242,19 @@ export class SubAgentRegistry {
     }
 
     return { allowed: true };
+  }
+
+  reserveSpawn(parentSessionId: string, sessionMetadata: Record<string, unknown> | undefined, count = 1): { token?: string; reason?: string } {
+    if (!Number.isInteger(count) || count < 1) return { reason: 'Spawn count must be a positive integer' };
+    const check = this.canSpawn(parentSessionId, sessionMetadata, count);
+    if (!check.allowed) return { reason: check.reason };
+    const token = nanoid();
+    this.spawnReservations.set(token, { parentSessionId, count });
+    return { token };
+  }
+
+  releaseSpawnReservation(token: string): void {
+    this.spawnReservations.delete(token);
   }
 
   /**
@@ -232,6 +302,10 @@ export class SubAgentRegistry {
     return runs;
   }
 
+  getAllRuns(): SubAgentRun[] {
+    return [...this.runs.values()].sort((a, b) => b.createdAt - a.createdAt);
+  }
+
   /**
    * Cancel all active runs for a parent session. Returns count cancelled.
    */
@@ -257,7 +331,7 @@ export class SubAgentRegistry {
 
     for (const [id, run] of this.runs) {
       if (
-        (run.status === 'completed' || run.status === 'failed' || run.status === 'cancelled' || run.status === 'timed_out') &&
+        !['pending', 'running'].includes(run.status) &&
         (run.completedAt ?? run.createdAt) < cutoff
       ) {
         this.runs.delete(id);
@@ -279,15 +353,16 @@ export class SubAgentRegistry {
   }
 
   /**
-   * Bulk-load runs (e.g., from SQLite on startup). Marks active runs as failed (orphaned).
+   * Bulk-load runs (e.g., from SQLite on startup). Interrupted work is marked
+   * lost, never falsely failed/succeeded; the durable ledger remains inspectable.
    */
   loadFromPersistence(runs: SubAgentRun[]): number {
     let orphaned = 0;
     for (const run of runs) {
-      // Mark orphaned active runs as failed (process restarted)
+      // Provider streams cannot be resumed safely after process death.
       if (run.status === 'pending' || run.status === 'running') {
-        run.status = 'failed';
-        run.error = 'Process restarted — orphaned sub-agent';
+        run.status = 'lost';
+        run.error = 'Process restarted while this sub-agent was active; no success was inferred';
         run.completedAt = Date.now();
         this.persistence?.updateSubAgentRun(run.id, {
           status: run.status,
@@ -325,6 +400,20 @@ export class SubAgentRegistry {
       allowedSkills: run.allowedSkills.join(','),
       modelTier: run.modelTier,
       timeoutMs: run.timeoutMs,
+      taskName: run.taskName ?? null,
+      parentRunId: run.parentRunId ?? null,
+      batchId: run.batchId ?? null,
+      batchIndex: run.batchIndex ?? null,
+      role: run.role,
+      spawnDepth: run.spawnDepth,
+      contextMode: run.contextMode,
+      workspaceMode: run.workspaceMode,
+      workspacePath: run.workspacePath ?? null,
+      idleTimeoutMs: run.idleTimeoutMs,
+      hardTimeoutMs: run.hardTimeoutMs,
+      lastProgressAt: run.lastProgressAt ?? null,
+      resultJson: run.result ? safeDiagnosticText(JSON.stringify(run.result), 20_000) : null,
+      updatedAt: run.completedAt ?? run.startedAt ?? run.createdAt,
       resultResponse: safeDiagnosticText(run.result?.response, 2_000),
       resultIterations: run.result?.iterationsUsed ?? null,
       resultTaskComplete: run.result?.taskComplete ?? null,

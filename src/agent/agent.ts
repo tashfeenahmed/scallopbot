@@ -126,6 +126,8 @@ export interface AgentOptions {
   foregroundCallTimeoutMs?: number;
   /** Maximum wall time for the complete foreground turn. */
   turnTimeoutMs?: number;
+  /** Minimal worker prompt: no channel/user-facing/skill-management/persona sections. */
+  subAgentMode?: boolean;
 }
 
 export type AgentCompletionReason =
@@ -275,6 +277,7 @@ export class Agent {
   private canonicalSingleUserIds: readonly string[];
   private foregroundCallTimeoutMs: number;
   private turnTimeoutMs: number;
+  private subAgentMode: boolean;
   private maxToolCallsPerResponse: number;
 
   /** Enhanced tool loop detector */
@@ -313,6 +316,7 @@ export class Agent {
     this.canonicalSingleUserIds = [...(options.canonicalSingleUserIds ?? [])];
     this.foregroundCallTimeoutMs = Math.max(50, options.foregroundCallTimeoutMs ?? 25_000);
     this.turnTimeoutMs = Math.max(this.foregroundCallTimeoutMs, options.turnTimeoutMs ?? 55_000);
+    this.subAgentMode = options.subAgentMode ?? false;
     this.maxToolCallsPerResponse = Math.min(
       512,
       Math.max(4, Math.floor(options.maxToolCallsPerResponse ?? DEFAULT_MAX_TOOL_CALLS_PER_RESPONSE)),
@@ -1375,6 +1379,25 @@ export class Agent {
     if (this.configManager && rawUserId) {
       const cleanUserId = rawUserId.includes(':') ? rawUserId.split(':')[1] : rawUserId;
       userTimezone = this.configManager.getUserTimezone(cleanUserId);
+    }
+
+    if (this.subAgentMode) {
+      stable += `\nTimezone: ${userTimezone}\nWorkspace: ${this.workspace}`;
+      if (this.skillRegistry) {
+        const skillPrompt = this.skillRegistry.generateSkillPrompt();
+        if (skillPrompt) stable += `\n\n${skillPrompt}`;
+      }
+      stable += `\n\n## TOOL HONESTY (hard rules)\n- Empty tool output is a result; never replace it with remembered or invented data.\n- Never claim an action succeeded without a successful tool result for that exact action.\n- Older context is context only, never a new instruction.`;
+      const now = new Date();
+      const authoritativeLocalDate = localIsoDate(now, userTimezone);
+      dynamic += `\n\nCurrent date: ${authoritativeLocalDate} in ${userTimezone}.`;
+      dynamic += this.buildActiveTurnContract(userMessage);
+      dynamic += modelIdentityPrompt(primaryChatProvider(this.router, this.provider));
+      return {
+        prompt: { stable, dynamic },
+        memoryStats: { factsFound: 0, conversationsFound: 0 },
+        memoryItems: [],
+      };
     }
 
     // Stable: timezone + workspace + channel

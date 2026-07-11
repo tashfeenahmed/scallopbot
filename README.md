@@ -107,6 +107,10 @@ All capabilities -- bash, browser, file I/O, git, Docker, PDF, web search, memor
 
 An optional, default-off evolution loop can distill reusable multi-tool workflows into documentation-only skills. Candidates are replayed against held-out tasks, safety and privacy checked, promoted only after a measured improvement, tracked for real use, and automatically rolled back or recoverably archived when they regress or become stale. Machine-authored executable scripts remain blocked without OS isolation. See the [intelligence roadmap and reproducible evidence](docs/INTELLIGENCE_ROADMAP.md).
 
+### Durable Sub-Agent Orchestration
+
+Delegated work is tracked in SQLite with atomic batch capacity reservations, lineage, explicit context modes (`isolated`, `brief`, `fork`), bounded orchestrator nesting, progress-aware idle limits, token/cost budgets, and structured acceptance results. Background completions use a leased delivery outbox, survive restarts, update parent context, and reach the user as a concise outcome rather than internal reasoning. Coding tasks can use detached Git worktrees and an implement → independent review/test workflow that returns a conflict-checked patch. The web dashboard includes a live Tasks rail with status, evidence, blockers, hierarchy, logs, and cancellation controls.
+
 ## Daily Cost Breakdown
 
 At 100 messages/day with Groq for fast-tier operations:
@@ -251,6 +255,7 @@ A React + Tailwind + Vite single-page app served from the API channel. Features:
 - Real-time chat with markdown rendering and streaming responses
 - Debug mode showing tool execution (start/complete/error), thinking steps, and memory operations
 - Cost panel with daily/monthly budget bars, per-model breakdown, and a 14-day spending chart
+- Delegated Tasks rail with live status, parent/child hierarchy, acceptance evidence, blockers, logs, cancellation, steering, and follow-ups
 - File send/receive with download links
 - Proactive message delivery (reminders, triggers)
 

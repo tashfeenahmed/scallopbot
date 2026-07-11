@@ -99,6 +99,16 @@ export class AnnounceQueue {
     return this.queues.get(parentSessionId)?.length ?? 0;
   }
 
+  /** Remove a result after durable push injected the equivalent parent receipt. */
+  acknowledge(parentSessionId: string, runId: string): boolean {
+    const queue = this.queues.get(parentSessionId);
+    if (!queue) return false;
+    const index = queue.findIndex(entry => entry.runId === runId);
+    if (index < 0) return false;
+    queue.splice(index, 1);
+    return true;
+  }
+
   /**
    * Clear all entries for a parent session
    */

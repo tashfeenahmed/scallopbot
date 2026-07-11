@@ -35,6 +35,7 @@ import { nanoid } from 'nanoid';
 import type { InterruptQueue } from '../agent/interrupt-queue.js';
 import type { BotConfigManager } from './bot-config.js';
 import type { ProviderRegistry } from '../providers/registry.js';
+import type { SubAgentRegistry, SubAgentExecutor } from '../subagent/index.js';
 import { stripThinkTags } from '../utils/output-safety.js';
 import { redactSensitiveText } from '../security/redaction.js';
 import {
@@ -114,6 +115,11 @@ function safeDebugText(text: string): string {
   return `${redacted.slice(0, MAX_DEBUG_TEXT_LENGTH)}\n…(truncated)`;
 }
 
+function parseOptionalJson(text: string | null | undefined): unknown {
+  if (!text) return null;
+  try { return JSON.parse(text); } catch { return null; }
+}
+
 /** Strip provider reasoning markup before a final reply crosses the API boundary. */
 function safeAssistantResponse(text: string): string {
   const visible = stripThinkTags(text);
@@ -156,6 +162,8 @@ export interface ApiChannelConfig {
   configManager?: BotConfigManager;
   /** Provider registry for /model command (optional) */
   providerRegistry?: ProviderRegistry;
+  subAgentRegistry?: SubAgentRegistry;
+  subAgentExecutor?: SubAgentExecutor;
 }
 
 /** Content-Type mapping for static files */
@@ -259,7 +267,7 @@ interface WsResponse {
 export class ApiChannel implements Channel, TriggerSource {
   name = 'api';
 
-  private config: Required<Omit<ApiChannelConfig, 'apiKey' | 'allowedOrigins' | 'staticDir' | 'costTracker' | 'memoryStore' | 'db' | 'interruptQueue' | 'onUserMessage' | 'configManager' | 'providerRegistry'>> & {
+  private config: Required<Omit<ApiChannelConfig, 'apiKey' | 'allowedOrigins' | 'staticDir' | 'costTracker' | 'memoryStore' | 'db' | 'interruptQueue' | 'onUserMessage' | 'configManager' | 'providerRegistry' | 'subAgentRegistry' | 'subAgentExecutor'>> & {
     apiKey?: string;
     allowedOrigins: string[];
     staticDir?: string;
@@ -283,6 +291,8 @@ export class ApiChannel implements Channel, TriggerSource {
   private configManager: BotConfigManager | null = null;
   private providerRegistry: ProviderRegistry | null = null;
   private db: ScallopDatabase | null = null;
+  private subAgentRegistry: SubAgentRegistry | null = null;
+  private subAgentExecutor: SubAgentExecutor | null = null;
   /** Per-client verbose mode toggle */
   private verboseClients: Set<string> = new Set();
 
@@ -309,6 +319,8 @@ export class ApiChannel implements Channel, TriggerSource {
     this.configManager = config.configManager || null;
     this.providerRegistry = config.providerRegistry || null;
     this.db = config.db || null;
+    this.subAgentRegistry = config.subAgentRegistry || null;
+    this.subAgentExecutor = config.subAgentExecutor || null;
   }
 
   async start(): Promise<void> {
@@ -518,6 +530,12 @@ export class ApiChannel implements Channel, TriggerSource {
       // Route requests
       if (urlPath === '/api/costs' && method === 'GET') {
         this.handleCosts(res);
+      } else if (urlPath === '/api/subagents' && method === 'GET') {
+        this.handleSubAgents(res, url);
+      } else if (urlPath.match(/^\/api\/subagents\/[^/]+\/log$/) && method === 'GET') {
+        await this.handleSubAgentLog(res, urlPath.split('/')[3]);
+      } else if (urlPath.match(/^\/api\/subagents\/[^/]+\/control$/) && method === 'POST') {
+        await this.handleSubAgentControl(req, res, urlPath.split('/')[3]);
       } else if (urlPath === '/api/health' && method === 'GET') {
         this.sendJson(res, 200, { status: 'ok', timestamp: new Date().toISOString() });
       } else if (urlPath === '/api/chat' && method === 'POST') {
@@ -568,15 +586,16 @@ export class ApiChannel implements Channel, TriggerSource {
     // No auth configured — allow all (backward compat)
     if (!hasApiKey && !hasAuth) return true;
 
+    // An explicitly configured API key is an independent operator credential,
+    // including before the optional browser-password setup is complete.
+    if (hasApiKey && this.authenticateRequest(req)) return true;
+
     // Setup not yet complete — only allow auth endpoints and static files (handled elsewhere)
     // Do NOT allow API access before setup to prevent unauthorized use
     if (hasAuth && !this.authService!.isSetupComplete()) return false;
 
     // Check session cookie
     if (hasAuth && this.authService!.validateRequest(req)) return true;
-
-    // Check API key
-    if (hasApiKey && this.authenticateRequest(req)) return true;
 
     // Same-origin exemption for specific GET endpoints (file downloads, costs, graph)
     const url = new URL(req.url || '/', `http://${req.headers.host}`);
@@ -1087,6 +1106,93 @@ export class ApiChannel implements Channel, TriggerSource {
       this.logger.error({ error: (error as Error).message }, 'Memory graph error');
       this.sendJson(res, 500, { error: 'Failed to get memory graph data' });
     }
+  }
+
+  /**
+   * Task rail for current and recent delegated work.
+   */
+  private handleSubAgents(res: ServerResponse, url: URL): void {
+    if (!this.db) {
+      this.sendJson(res, 503, { error: 'Sub-agent ledger unavailable' });
+      return;
+    }
+    const requestedLimit = Number(url.searchParams.get('limit') || 100);
+    const limit = Number.isFinite(requestedLimit)
+      ? Math.max(1, Math.min(200, Math.floor(requestedLimit)))
+      : 100;
+    const parentSessionId = url.searchParams.get('parentSessionId');
+    const rows = parentSessionId
+      ? this.db.getSubAgentRunsByParent(parentSessionId).slice(0, limit)
+      : this.db.getRecentSubAgentRuns(limit);
+    this.sendJson(res, 200, {
+      tasks: rows.map(row => ({
+        id: row.id,
+        taskName: row.taskName,
+        label: row.label,
+        task: safeDebugText(row.task),
+        status: row.status,
+        role: row.role,
+        spawnDepth: row.spawnDepth,
+        parentRunId: row.parentRunId,
+        batchId: row.batchId,
+        batchIndex: row.batchIndex,
+        contextMode: row.contextMode,
+        workspaceMode: row.workspaceMode,
+        result: parseOptionalJson(row.resultJson),
+        error: row.error ? safeDebugText(row.error) : null,
+        inputTokens: row.inputTokens,
+        outputTokens: row.outputTokens,
+        createdAt: row.createdAt,
+        startedAt: row.startedAt,
+        lastProgressAt: row.lastProgressAt,
+        completedAt: row.completedAt,
+      })),
+    });
+  }
+
+  private async handleSubAgentLog(res: ServerResponse, runId: string): Promise<void> {
+    if (!this.subAgentExecutor) {
+      this.sendJson(res, 503, { error: 'Sub-agent runtime unavailable' });
+      return;
+    }
+    const messages = await this.subAgentExecutor.getRunLog(runId);
+    if (messages.length === 0) {
+      this.sendJson(res, 404, { error: 'Run log unavailable or compacted' });
+      return;
+    }
+    this.sendJson(res, 200, { messages: messages.map(message => ({
+      role: message.role,
+      content: safeDebugText(message.content),
+    })) });
+  }
+
+  private async handleSubAgentControl(req: IncomingMessage, res: ServerResponse, runId: string): Promise<void> {
+    if (!this.subAgentExecutor || !this.subAgentRegistry) {
+      this.sendJson(res, 503, { error: 'Sub-agent runtime unavailable' });
+      return;
+    }
+    const body = await this.parseBody<{ action?: string; message?: string; wait?: boolean }>(req);
+    const run = this.subAgentRegistry.getRun(runId);
+    if (!run) {
+      this.sendJson(res, 404, { error: 'Run is not active in this process' });
+      return;
+    }
+    if (body.action === 'cancel') {
+      const applied = this.subAgentExecutor.cancel(runId);
+      this.sendJson(res, applied ? 200 : 409, { applied });
+      return;
+    }
+    if (body.action === 'steer') {
+      const applied = this.subAgentExecutor.steer(runId, body.message || '');
+      this.sendJson(res, applied ? 200 : 409, { applied });
+      return;
+    }
+    if (body.action === 'followup' && body.message?.trim()) {
+      const result = await this.subAgentExecutor.followUp(run.parentSessionId, runId, body.message, body.wait);
+      this.sendJson(res, 202, { result });
+      return;
+    }
+    this.sendJson(res, 400, { error: 'action must be cancel, steer, or followup' });
   }
 
   /**

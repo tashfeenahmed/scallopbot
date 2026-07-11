@@ -8,20 +8,23 @@ import ChatContainer from './components/ChatContainer';
 import ChatInput from './components/ChatInput';
 import SetupScreen from './components/SetupScreen';
 import LoginScreen from './components/LoginScreen';
+import TasksPanel from './components/TasksPanel';
 
 const MemoryMap = lazy(() => import('./components/memory-map/MemoryMap'));
 
-export type ViewMode = 'chat' | 'memory-map' | 'costs';
+export type ViewMode = 'chat' | 'memory-map' | 'costs' | 'tasks';
 
 function pathToView(pathname: string): ViewMode {
   if (pathname === '/memory') return 'memory-map';
   if (pathname === '/costs') return 'costs';
+  if (pathname === '/tasks') return 'tasks';
   return 'chat';
 }
 
 function viewToPath(view: ViewMode): string {
   if (view === 'memory-map') return '/memory';
   if (view === 'costs') return '/costs';
+  if (view === 'tasks') return '/tasks';
   return '/';
 }
 
@@ -463,6 +466,8 @@ export default function App() {
                 <p>No cost data available</p>
               </div>
             )
+          ) : currentView === 'tasks' ? (
+            <TasksPanel />
           ) : currentView === 'chat' ? (
             <>
               <ChatContainer

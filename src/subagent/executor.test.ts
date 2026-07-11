@@ -31,6 +31,8 @@ import type {
 import { flattenSystem } from '../providers/types.js';
 import type { EmbeddingProvider } from '../memory/embeddings.js';
 import { CostTracker } from '../routing/cost.js';
+import { EvolutionRecorder } from '../evolution/signals.js';
+import { DEFAULT_EVOLUTION_CONFIG } from '../evolution/config.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -162,6 +164,7 @@ async function buildExecutor(
   configOverrides: Record<string, unknown> = {},
   costTracker?: CostTracker,
   skillPolicyResolver?: SubAgentExecutorOptions['skillPolicyResolver'],
+  evolutionRecorder?: EvolutionRecorder,
 ) {
   const skillRegistry = createSkillRegistry('/tmp', logger);
   await skillRegistry.initialize();
@@ -187,6 +190,7 @@ async function buildExecutor(
     workspace: '/tmp',
     logger,
     config: configOverrides,
+    evolutionRecorder,
   });
 
   return { executor, registry, announceQueue, skillRegistry };
@@ -197,6 +201,60 @@ async function buildExecutor(
 // ---------------------------------------------------------------------------
 
 describe('SubAgentExecutor integration', () => {
+  it('feeds only verified successful child work into automatic skill learning', async () => {
+    const signals: Array<{ type: string }> = [];
+    const recorder = new EvolutionRecorder(
+      { recordEvolutionSignal: signal => signals.push(signal) },
+      { ...DEFAULT_EVOLUTION_CONFIG, enabled: true, minToolCalls: 0, reusableScoreBar: 0 },
+      logger,
+    );
+    const provider = createTrackingProvider([
+      '{"status":"succeeded","summary":"Verified reusable workflow completed successfully.","acceptancePassed":true} [DONE]',
+      '{"status":"succeeded","summary":"Claimed success without acceptance.","acceptancePassed":false} [DONE]',
+    ]);
+    const { executor } = await buildExecutor(provider, {}, undefined, undefined, recorder);
+    const parent = await ctx.sessionManager.createSession({ label: 'parent' });
+    await executor.spawnAndWait(parent.id, { task: 'Run reusable workflow' });
+    expect(signals.some(signal => signal.type === 'reusable_task')).toBe(true);
+    const countAfterSuccess = signals.length;
+    await executor.spawnAndWait(parent.id, { task: 'Run unverified workflow', acceptanceCriteria: ['must pass'] });
+    expect(signals).toHaveLength(countAfterSuccess);
+  });
+
+  it('keeps an explicit parent cancellation distinct from a timeout', async () => {
+    const provider: LLMProvider = {
+      name: 'openai',
+      isAvailable: () => true,
+      complete: request => new Promise((_resolve, reject) => {
+        request.signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+      }),
+    };
+    const { executor, registry } = await buildExecutor(provider);
+    const parentSession = await ctx.sessionManager.createSession({ label: 'parent' });
+    const { runId } = await executor.spawn(parentSession.id, { task: 'Wait for cancellation', idleTimeoutSeconds: 30 });
+    await vi.waitFor(() => expect(registry.getRun(runId)?.status).toBe('running'));
+    expect(executor.cancel(runId)).toBe(true);
+    await vi.waitFor(() => expect(registry.getRun(runId)?.status).toBe('cancelled'));
+    expect(registry.getRun(runId)?.status).not.toBe('timed_out');
+  });
+
+  it('keeps isolated context free of profiles and memories and forbids thought leakage', async () => {
+    const provider = createTrackingProvider(['{"status":"succeeded","summary":"Checked","acceptancePassed":true} [DONE]']);
+    const { executor } = await buildExecutor(provider);
+    const parentSession = await ctx.sessionManager.createSession({ label: 'parent' });
+    await executor.spawnAndWait(parentSession.id, {
+      task: 'Check only the supplied context',
+      context: 'ticket=42',
+      contextMode: 'isolated',
+    });
+    const systemPrompt = flattenSystem(provider.allRequests[0].system!);
+    expect(systemPrompt).toContain('ticket=42');
+    expect(systemPrompt).not.toContain('America/Chicago');
+    expect(systemPrompt).not.toContain('RELEVANT MEMORIES');
+    expect(systemPrompt).toContain('Never reveal chain-of-thought');
+    expect(systemPrompt).toContain('not sent directly to the user');
+  });
+
   // -----------------------------------------------------------------------
   // Scenario 1: System prompt contains user profile + agent identity + memories
   // -----------------------------------------------------------------------

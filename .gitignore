@@ -91,3 +91,4 @@ scripts/ft/
 scripts/pull-traces.sh
 scripts/export-traces.mjs
 scripts/backfill-dump.mjs
+.scallopbot/
