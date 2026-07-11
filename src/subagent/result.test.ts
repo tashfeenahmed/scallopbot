@@ -31,4 +31,13 @@ describe('structured sub-agent results', () => {
     expect(result.summary).toBe('The deployment check passed.');
     expect(result.summary).not.toContain('I should send');
   });
+
+  it('discards a model planning preamble before a trailing structured result', () => {
+    const result = buildStructuredSubAgentResult({
+      response: 'I need to calculate 17 plus 25.\n\n{"status":"succeeded","summary":"Calculated 17 + 25 = 42","artifacts":[],"changedFiles":[],"tests":[],"blockers":[],"nextActions":[],"acceptancePassed":true}',
+      runtimeStatus: 'succeeded',
+    });
+    expect(result.summary).toBe('Calculated 17 + 25 = 42');
+    expect(result.summary).not.toContain('I need');
+  });
 });

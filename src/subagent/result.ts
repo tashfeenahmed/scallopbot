@@ -38,7 +38,17 @@ function stringArray(value: unknown, limit = 100): string[] {
 
 function parseJsonCandidate(text: string): Record<string, unknown> | null {
   const fenced = [...text.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)].at(-1)?.[1];
-  const candidates = [fenced, text.trim()].filter((entry): entry is string => !!entry);
+  // Some otherwise-capable models prepend a planning sentence before the
+  // required result object. Try every trailing object boundary from the end;
+  // only a fully parseable suffix is accepted, so prose is never mistaken for
+  // structured success.
+  const trailingObjects: string[] = [];
+  for (let index = text.lastIndexOf('{'); index >= 0;) {
+    trailingObjects.push(text.slice(index).trim());
+    if (index === 0) break;
+    index = text.lastIndexOf('{', index - 1);
+  }
+  const candidates = [fenced, text.trim(), ...trailingObjects].filter((entry): entry is string => !!entry);
   for (const candidate of candidates) {
     try {
       const parsed = JSON.parse(candidate) as unknown;
