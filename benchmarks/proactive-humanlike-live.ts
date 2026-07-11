@@ -28,45 +28,38 @@ import { Agent } from '../src/agent/agent.js';
 import type { LLMProvider } from '../src/providers/types.js';
 
 const logger = pino({ level: 'silent' });
-const providerName = (process.env.PROACTIVE_LIVE_PROVIDER ?? process.env.MODEL ?? 'openai')
-  .trim()
-  .toLowerCase();
-let provider: LLMProvider;
-if (providerName === 'openai') {
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) throw new Error('OPENAI_API_KEY is required for the live proactive benchmark');
-  provider = new OpenAIProvider({
-    apiKey,
-    model: process.env.PROACTIVE_LIVE_MODEL ?? 'gpt-4.1-mini',
-    timeout: 45_000,
-    maxRetries: 1,
-  });
-} else if (providerName === 'moonshot') {
-  const apiKey = process.env.MOONSHOT_API_KEY;
-  if (!apiKey) throw new Error('MOONSHOT_API_KEY is required for the live proactive benchmark');
-  provider = new MoonshotProvider({
-    apiKey,
-    model: process.env.PROACTIVE_LIVE_MODEL ?? process.env.MOONSHOT_MODEL ?? 'kimi-k2.5',
-    timeout: 45_000,
-    maxRetries: 1,
-  }, logger);
-} else if (providerName === 'openrouter') {
-  const apiKey = process.env.OPENROUTER_API_KEY;
-  if (!apiKey) throw new Error('OPENROUTER_API_KEY is required for the live proactive benchmark');
-  provider = new OpenRouterProvider({
-    apiKey,
-    model: process.env.PROACTIVE_LIVE_MODEL ?? process.env.OPENROUTER_MODEL ?? 'openai/gpt-4.1-mini',
-    timeout: 45_000,
-    maxRetries: 1,
-  });
-} else {
-  const key = `CUSTOM_PROVIDER_${providerName.toUpperCase()}`;
+function createLiveProvider(name: string): LLMProvider | null {
+  if (name === 'openai' && process.env.OPENAI_API_KEY) {
+    return new OpenAIProvider({
+      apiKey: process.env.OPENAI_API_KEY,
+      model: process.env.PROACTIVE_LIVE_MODEL ?? 'gpt-4.1-mini',
+      timeout: 45_000,
+      maxRetries: 1,
+    });
+  }
+  if (name === 'moonshot' && process.env.MOONSHOT_API_KEY) {
+    return new MoonshotProvider({
+      apiKey: process.env.MOONSHOT_API_KEY,
+      model: process.env.PROACTIVE_LIVE_MODEL ?? process.env.MOONSHOT_MODEL ?? 'kimi-k2.5',
+      timeout: 45_000,
+      maxRetries: 1,
+    }, logger);
+  }
+  if (name === 'openrouter' && process.env.OPENROUTER_API_KEY) {
+    return new OpenRouterProvider({
+      apiKey: process.env.OPENROUTER_API_KEY,
+      model: process.env.PROACTIVE_LIVE_MODEL ?? process.env.OPENROUTER_MODEL ?? 'openai/gpt-4.1-mini',
+      timeout: 45_000,
+      maxRetries: 1,
+    });
+  }
+  const key = `CUSTOM_PROVIDER_${name.toUpperCase()}`;
   const raw = process.env[key];
-  if (!raw) throw new Error(`${key} is required for the live proactive benchmark`);
+  if (!raw) return null;
   const [baseUrl, configuredModel, apiKey] = raw.split('|').map(value => value.trim());
   if (!baseUrl || !configuredModel) throw new Error(`${key} must be baseUrl|model[|apiKey]`);
-  provider = new OpenAIProvider({
-    name: providerName,
+  return new OpenAIProvider({
+    name,
     apiKey: apiKey || 'sk-local',
     baseUrl,
     model: process.env.PROACTIVE_LIVE_MODEL ?? configuredModel,
@@ -74,9 +67,47 @@ if (providerName === 'openai') {
     maxRetries: 1,
   });
 }
+
+const requestedNames = process.env.PROACTIVE_LIVE_PROVIDER
+  ? [process.env.PROACTIVE_LIVE_PROVIDER]
+  : [
+      process.env.MODEL,
+      ...(process.env.PROVIDER_ORDER?.split(',') ?? []),
+      'openai',
+    ];
+const providerNames = [...new Set(requestedNames
+  .map(name => name?.trim().toLowerCase())
+  .filter((name): name is string => Boolean(name)))];
+const liveProviders = providerNames
+  .map(createLiveProvider)
+  .filter((candidate): candidate is LLMProvider => candidate !== null);
+if (liveProviders.length === 0) {
+  throw new Error('No configured live provider is available for the proactive benchmark');
+}
+const failedProviders = new Set<string>();
+const provider: LLMProvider = liveProviders.length === 1
+  ? liveProviders[0]
+  : {
+      name: 'configured-fallback',
+      model: liveProviders.map(candidate => candidate.name).join(','),
+      isAvailable: () => liveProviders.some(candidate => !failedProviders.has(candidate.name)),
+      complete: async request => {
+        let lastError: unknown;
+        for (const candidate of liveProviders) {
+          if (failedProviders.has(candidate.name) || candidate.isAvailable?.() === false) continue;
+          try {
+            return await candidate.complete(request);
+          } catch (error) {
+            failedProviders.add(candidate.name);
+            lastError = error;
+          }
+        }
+        throw lastError instanceof Error ? lastError : new Error('Every configured provider failed');
+      },
+    };
 const model = provider.model ?? provider.name;
-const router = new Router({ providerOrder: [provider.name] });
-router.registerProvider(provider);
+const router = new Router({ providerOrder: liveProviders.map(candidate => candidate.name) });
+for (const candidate of liveProviders) router.registerProvider(candidate);
 
 const renderFixtures = [
   {
