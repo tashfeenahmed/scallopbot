@@ -1990,7 +1990,11 @@ The current user request is quoted below. Execute tools only when they directly 
         reportSuccess();
         return response;
       } catch (error) {
-        const err = error as Error & { status?: number; headers?: Record<string, string> };
+        const err = error as Error & { status?: number; headers?: Record<string, string>; code?: string };
+
+        // Local policy/budget failures are deterministic. Trying another
+        // provider cannot make the forbidden call permissible.
+        if (err.code === 'LOCAL_BUDGET_EXCEEDED') throw err;
 
         // Rate limit — retry with backoff
         if (this.isRateLimitError(err) && attempt < MAX_RETRIES) {

@@ -127,6 +127,7 @@ export class SubAgentExecutor {
   private interruptQueues: Map<string, InterruptQueue> = new Map();
   private deliveryOutbox?: SubAgentExecutorOptions['deliveryOutbox'];
   private evolutionRecorder?: EvolutionRecorder;
+  private budgetFailures = new Map<string, string>();
 
   constructor(options: SubAgentExecutorOptions) {
     this.registry = options.registry;
@@ -480,11 +481,9 @@ export class SubAgentExecutor {
       return failure;
     }
 
-    // 2. Wrap provider with cost tracker
+    // 2. Provider accounting is applied by Agent so fallback providers are
+    // charged exactly once too.
     let activeProvider: LLMProvider = provider;
-    if (this.costTracker) {
-      activeProvider = this.costTracker.wrapProvider(provider, run.childSessionId);
-    }
 
     // 3. Wrap provider with token budget enforcement
     activeProvider = this.createTokenBudgetProvider(activeProvider, run.id);
@@ -521,6 +520,8 @@ export class SubAgentExecutor {
     this.interruptQueues.set(run.id, childInterruptQueue);
     const agent = new Agent({
       provider: activeProvider,
+      router: this.router,
+      costTracker: this.costTracker,
       sessionManager: this.sessionManager,
       skillRegistry: filteredRegistry,
       skillExecutor: this.skillExecutor,
@@ -604,9 +605,11 @@ export class SubAgentExecutor {
         undefined,
         subProgress,
         shouldStop,
-        undefined, // providerOverride
+        activeProvider, // lock the budget wrapper while retaining router fallback
         controller.signal // abortSignal — terminates in-flight LLM HTTP call on timeout/cancel
       );
+      const budgetFailure = this.budgetFailures.get(run.id);
+      if (budgetFailure) throw new Error(budgetFailure);
 
       let cleanedResponse = result.response.replace(/\[DONE\]\s*$/, '').trim();
       const hasFailureSignal = FINAL_FAILURE_SIGNAL.test(cleanedResponse);
@@ -727,6 +730,7 @@ export class SubAgentExecutor {
       clearInterval(watchdog);
       this.activeAbortControllers.delete(run.id);
       this.cancelRequested.delete(run.id);
+      this.budgetFailures.delete(run.id);
       this.interruptQueues.delete(run.id);
       if (worktree) {
         try { await finalizeSubAgentWorktree(worktree, run.id); } catch { /* best-effort cleanup */ }
@@ -1015,16 +1019,19 @@ export class SubAgentExecutor {
 
     return {
       name: provider.name,
+      model: provider.model,
       isAvailable: () => provider.isAvailable(),
       complete: async (request: CompletionRequest): Promise<CompletionResponse> => {
         const run = this.registry.getRun(runId);
         if (run && this.costTracker && this.costTracker.getSessionSpend(run.childSessionId) >= this.config.maxCostUsdPerRun) {
-          throw new Error(`Sub-agent cost budget reached ($${this.config.maxCostUsdPerRun.toFixed(2)})`);
+          const message = `Sub-agent cost budget reached ($${this.config.maxCostUsdPerRun.toFixed(2)})`;
+          this.budgetFailures.set(runId, message);
+          throw Object.assign(new Error(message), { code: 'LOCAL_BUDGET_EXCEEDED' });
         }
         if (cumulativeInputTokens >= maxInputTokens) {
-          throw new Error(
-            `Sub-agent token budget exceeded: ${cumulativeInputTokens}/${maxInputTokens} input tokens used`
-          );
+          const message = `Sub-agent token budget exceeded: ${cumulativeInputTokens}/${maxInputTokens} input tokens used`;
+          this.budgetFailures.set(runId, message);
+          throw Object.assign(new Error(message), { code: 'LOCAL_BUDGET_EXCEEDED' });
         }
         const response = await provider.complete(request);
         this.registry.markProgress(runId);

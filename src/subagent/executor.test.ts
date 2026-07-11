@@ -165,14 +165,17 @@ async function buildExecutor(
   costTracker?: CostTracker,
   skillPolicyResolver?: SubAgentExecutorOptions['skillPolicyResolver'],
   evolutionRecorder?: EvolutionRecorder,
+  fallbackProviders: LLMProvider[] = [],
+  providerOrder?: string[],
 ) {
   const skillRegistry = createSkillRegistry('/tmp', logger);
   await skillRegistry.initialize();
   const skillExecutor = createSkillExecutor(logger);
 
   // Fresh router per executor so mock providers don't collide
-  const router = new Router({});
+  const router = new Router({ providerOrder });
   router.registerProvider(provider);
+  for (const fallback of fallbackProviders) router.registerProvider(fallback);
 
   const registry = new SubAgentRegistry({ logger });
   const announceQueue = new AnnounceQueue({ logger });
@@ -201,6 +204,26 @@ async function buildExecutor(
 // ---------------------------------------------------------------------------
 
 describe('SubAgentExecutor integration', () => {
+  it('inherits provider fallback when the first-choice child model is offline', async () => {
+    let primaryCalls = 0;
+    const primary: LLMProvider = {
+      name: 'ornith',
+      isAvailable: () => true,
+      async complete() {
+        primaryCalls++;
+        throw new Error('Connection error.');
+      },
+    };
+    const fallback = createTrackingProvider(['Fallback completed the delegated calculation: 42. [DONE]']);
+    const { executor } = await buildExecutor(primary, {}, undefined, undefined, undefined, [fallback], ['ornith', 'openai']);
+    const parent = await ctx.sessionManager.createSession({ label: 'parent' });
+    const result = await executor.spawnAndWait(parent.id, { task: 'Calculate 17 plus 25' });
+    expect(primaryCalls).toBeGreaterThan(0);
+    expect(fallback.callCount).toBeGreaterThan(0);
+    expect(result.taskComplete).toBe(true);
+    expect(result.response).toContain('42');
+  });
+
   it('feeds only verified successful child work into automatic skill learning', async () => {
     const signals: Array<{ type: string }> = [];
     const recorder = new EvolutionRecorder(
