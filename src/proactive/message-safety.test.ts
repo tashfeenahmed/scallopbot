@@ -225,6 +225,23 @@ describe('renderUserFacingProactiveMessage', () => {
     expect(router.executeWithFallback).not.toHaveBeenCalled();
   });
 
+  it('deterministically realizes grounded tentative and confirmed reminders', async () => {
+    const router = { executeWithFallback: vi.fn() };
+    await expect(renderUserFacingProactiveMessage(
+      'The user might travel on Friday. Remind them to confirm only if the plan is still tentative.',
+      router as any,
+      { forceRewrite: true, context: 'The trip is tentative, not confirmed.' },
+    )).resolves.toBe(
+      'If your travel plans for Friday are still tentative, you may want to confirm them.',
+    );
+    await expect(renderUserFacingProactiveMessage(
+      'Dentist appointment at 2pm',
+      router as any,
+      { forceRewrite: true, context: 'Confirmed appointment today at 2pm.' },
+    )).resolves.toBe('Your dentist appointment is at 2pm.');
+    expect(router.executeWithFallback).not.toHaveBeenCalled();
+  });
+
   it('rejects socially unsafe or canned rewrite candidates', async () => {
     const router = {
       executeWithFallback: vi.fn()

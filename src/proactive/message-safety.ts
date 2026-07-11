@@ -327,6 +327,31 @@ function realizeGroundedCannedCheckIn(raw: string, context?: string | null): str
   return assessProactiveMessage(candidate).acceptable ? candidate : null;
 }
 
+/** Deterministic realization for narrow, fully grounded reminder shapes. */
+function realizeGroundedReminder(raw: string, context?: string | null): string | null {
+  if (!context?.trim() || proactiveContextIsResolved(context)) return null;
+
+  const tentativeTravel = raw.trim().match(
+    /^the user might travel on\s+(.+?)\.?\s+remind them to confirm only if the plan is still tentative\.?$/i,
+  );
+  if (tentativeTravel?.[1]) {
+    const day = tentativeTravel[1].replace(/[.!?]+$/, '').trim();
+    const message = `If your travel plans for ${day} are still tentative, you may want to confirm them.`;
+    return assessProactiveMessage(message).acceptable ? message : null;
+  }
+
+  if (/\bconfirmed\b/i.test(context)) {
+    const appointment = raw.trim().match(/^(.+?\bappointment)\s+at\s+(.+?)[.!]?$/i);
+    if (appointment?.[1] && appointment[2]) {
+      const subject = appointment[1][0].toLocaleLowerCase('en-US') + appointment[1].slice(1);
+      const time = appointment[2].replace(/[.!?]+$/, '').trim();
+      const message = `Your ${subject} is at ${time}.`;
+      return assessProactiveMessage(message).acceptable ? message : null;
+    }
+  }
+  return null;
+}
+
 export function looksLikeInternalProactiveText(text: string): boolean {
   const trimmed = text.trim();
   if (!trimmed) return true;
@@ -385,6 +410,11 @@ export async function prepareUserFacingProactiveMessage(
   const deterministicReflection = realizeRequestedReflection(raw, options.recentMessages ?? []);
   if (deterministicReflection) {
     return { outcome: 'ready', message: deterministicReflection };
+  }
+
+  const groundedReminder = realizeGroundedReminder(raw, options.context);
+  if (groundedReminder) {
+    return { outcome: 'ready', message: groundedReminder };
   }
 
   const groundedCheckIn = realizeGroundedCannedCheckIn(raw, options.context);
