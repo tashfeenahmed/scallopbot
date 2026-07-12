@@ -17,6 +17,14 @@ const notionWrite = (input: Record<string, unknown>): ToolUseContent => ({
   type: 'tool_use', id: 'n1', name: 'notion', input,
 });
 
+const notionCurlCreate = (id = 'curl-notion'): ToolUseContent => ({
+  type: 'tool_use', id, name: 'bash', input: {
+    command: `curl -s -X POST https://api.notion.com/v1/pages \\
+      -H "Content-Type: application/json" \\
+      --data '{"parent":{"database_id":"gym"},"properties":{"Weight":{"number":14}}}'`,
+  },
+});
+
 describe('turn-scoped tool safety', () => {
   it('blocks an unrequested sensitive external write', () => {
     const verdict = assessToolCallForTurn(
@@ -31,6 +39,46 @@ describe('turn-scoped tool safety', () => {
     const verdict = assessToolCallForTurn(
       notionWrite({ action: 'create', date: '2026-07-11' }),
       { userMessage: 'Log today that I am feeling sick', timezone: 'Europe/Dublin', now: new Date('2026-07-11T12:00:00Z') },
+    );
+    expect(verdict.allowed).toBe(true);
+  });
+
+  it('accepts a natural prefixed request to log a workout without another confirmation', () => {
+    const verdict = assessToolCallForTurn(
+      notionCurlCreate(),
+      {
+        userMessage: 'For today, can you log my gym session in our Notion tracker? It was 14 kg, 8 reps, 3 sets.',
+        timezone: 'Europe/Dublin',
+      },
+    );
+    expect(verdict.allowed).toBe(true);
+    expect(verdict.isExternalMutation).toBe(true);
+  });
+
+  it('binds a bare yes to a natural Notion confirmation for a bash-based write', () => {
+    const verdict = assessToolCallForTurn(
+      notionCurlCreate(),
+      {
+        userMessage: 'Yes',
+        previousAssistantMessage: 'Confirm: Should I write these 4 exercises to your Notion Gym Volume Tracker now?',
+        timezone: 'Europe/Dublin',
+      },
+    );
+    expect(verdict.allowed).toBe(true);
+  });
+
+  it.each([
+    'Yes write to notion',
+    'I explicitly instruct you to write to my Notion Gym Volume Tracker database',
+    "I authorize you to create 4 new pages in my Notion Gym Volume Tracker database for today's workout",
+  ])('accepts target-specific authorization without magic wording: %s', (userMessage) => {
+    const verdict = assessToolCallForTurn(
+      notionCurlCreate(),
+      {
+        userMessage,
+        previousAssistantMessage: 'Should I write these four gym exercises to your Notion tracker now?',
+        timezone: 'Europe/Dublin',
+      },
     );
     expect(verdict.allowed).toBe(true);
   });
@@ -217,6 +265,55 @@ describe('turn-scoped tool safety', () => {
     expect(isExternalBashMutation('http POST https://example.com/items name=x')).toBe(true);
     expect(isExternalBashMutation('curl https://example.com/items')).toBe(false);
     expect(isExternalBashMutation('wget --method=POST http://localhost:3000/items')).toBe(false);
+  });
+
+  it('treats Notion POST query endpoints as read-only', () => {
+    const query = `curl -s -X POST https://api.notion.com/v1/databases/db-id/query \\
+      -H "Content-Type: application/json" --data '{"page_size":1}'`;
+    expect(isExternalBashMutation(query)).toBe(false);
+    const verdict = assessToolCallForTurn(
+      { type: 'tool_use', id: 'notion-query', name: 'bash', input: { command: query } },
+      { userMessage: 'Show me the latest workout entry', timezone: 'Europe/Dublin' },
+    );
+    expect(verdict.allowed).toBe(true);
+    expect(isExternalBashMutation(
+      'curl -X DELETE https://api.notion.com/v1/databases/db-id/query',
+    )).toBe(true);
+  });
+
+  it('classifies an external write inside run_code as external and honors the active request', () => {
+    const tool: ToolUseContent = {
+      type: 'tool_use',
+      id: 'run-code-notion',
+      name: 'run_code',
+      input: {
+        language: 'python',
+        code: `import requests\nrequests.post('https://api.notion.com/v1/pages', json={'Weight': 14})`,
+      },
+    };
+    expect(isLikelyExternalMutation(tool)).toBe(true);
+    const allowed = assessToolCallForTurn(
+      tool,
+      { userMessage: 'Write this workout to my Notion tracker', timezone: 'Europe/Dublin' },
+    );
+    const blocked = assessToolCallForTurn(
+      tool,
+      { userMessage: 'Explain how the Notion tracker works', timezone: 'Europe/Dublin' },
+    );
+    expect(allowed.allowed).toBe(true);
+    expect(blocked.allowed).toBe(false);
+    expect(blocked.isExternalMutation).toBe(true);
+  });
+
+  it('lets a sub-agent execute the user-authorized Notion write it was assigned', () => {
+    const verdict = assessToolCallForTurn(
+      notionCurlCreate(),
+      {
+        userMessage: 'Write 4 workout entries to the user\'s Notion Gym Volume Tracker database.',
+        timezone: 'Europe/Dublin',
+      },
+    );
+    expect(verdict.allowed).toBe(true);
   });
 
   it('recognizes typed and HTTP failures despite a zero process exit', () => {

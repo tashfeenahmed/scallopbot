@@ -71,7 +71,7 @@ const DIRECT_LOCAL_REQUEST = new RegExp(
   'i',
 );
 const SENSITIVE_CONTEXT =
-  /\b(?:health|medical|medicine|medication|diagnos(?:is|ed)|doctor|hospital|therapy|therapist|mental health|anxiety|depress(?:ion|ed)|ill|sick|unwell|injur(?:y|ed)|pain|symptom|pregnan|period|weight|salary|bank|account number|legal case)\b/i;
+  /\b(?:health|medical|medicine|medication|diagnos(?:is|ed)|doctor|hospital|therapy|therapist|mental health|anxiety|depress(?:ion|ed)|ill|sick|unwell|injur(?:y|ed)|pain|symptom|pregnan|period|weight|gym|workout|exercise|salary|bank|account number|legal case)\b/i;
 const AMBIGUOUS_SHORTHAND = /\b\d+(?:\.\d+)?\s*(?:x|×)\s*\d+(?:\.\d+)?\b/i;
 const EXPLICIT_SET_REP_WORDING = /\b(?:sets?|reps?|repetitions?|times?|by)\b/i;
 
@@ -172,6 +172,14 @@ function bashCommand(toolUse: ToolUseContent): string {
   return typeof toolUse.input.command === 'string' ? toolUse.input.command : '';
 }
 
+function executableContent(toolUse: ToolUseContent): string {
+  if (toolUse.name === 'bash') return bashCommand(toolUse);
+  if (toolUse.name === 'run_code' && typeof toolUse.input.code === 'string') {
+    return toolUse.input.code;
+  }
+  return '';
+}
+
 function hasExternalShellTarget(command: string): boolean {
   return /https?:\/\/(?!localhost\b|127(?:\.\d+){3}\b|0\.0\.0\.0\b|\[?::1\]?\b)/i.test(command)
     || /\b(?:api\.|notion|gmail|calendar|slack|telegram|discord|airtable)\b/i.test(command);
@@ -183,6 +191,20 @@ export function isExternalBashMutation(command: string): boolean {
     return true;
   }
   if (!hasExternalShellTarget(command)) return false;
+
+  // Some APIs use POST for read-only queries. In particular, Notion's legacy
+  // database and current data-source query endpoints do not mutate state.
+  // Only apply the exception when every external URL in the command is one of
+  // those query endpoints so a mixed query/create script still fails closed.
+  const externalUrls = [...command.matchAll(/https?:\/\/[^\s'"\\]+/gi)]
+    .map(match => match[0].replace(/[),.;]+$/, ''));
+  const destructiveQueryMethod = /(?:(?:-X|--request)\s*['"]?(?:PUT|PATCH|DELETE)\b|\b(?:requests|httpx|axios|got)\s*\.\s*(?:put|patch|delete)\s*\(|\bfetch\s*\([\s\S]{0,2000}?\bmethod\s*:\s*['"](?:PUT|PATCH|DELETE)['"])/i.test(command);
+  const notionQueriesOnly = !destructiveQueryMethod
+    && externalUrls.length > 0
+    && externalUrls.every(url =>
+      /^https:\/\/api\.notion\.com\/v1\/(?:databases|data_sources)\/[^/\s]+\/query(?:\?|$)/i.test(url),
+    );
+  if (notionQueriesOnly) return false;
 
   const curlWrite = /\bcurl\b[\s\S]*(?:(?:-X|--request)\s*['"]?(?:POST|PUT|PATCH|DELETE)\b|(?:--data(?:-raw|-binary|-urlencode)?|-d)\s)/i.test(command);
   const wgetWrite = /\bwget\b[\s\S]*(?:(?:--method(?:=|\s+))['"]?(?:POST|PUT|PATCH|DELETE)\b|--post-(?:data|file)(?:=|\s+))/i.test(command);
@@ -212,6 +234,9 @@ export function isLikelyMutation(toolUse: ToolUseContent, skill?: Skill | null):
       || /(?:^|[;&|]\s*)(?:rm|mv|cp|mkdir|touch|git\s+(?:commit|push)|npm\s+install)\b/i.test(command)
       || /(?:^|[^>])>{1,2}\s*[^&]/.test(commandWithoutNullRedirection);
   }
+  if (toolUse.name === 'run_code' && isExternalBashMutation(executableContent(toolUse))) {
+    return true;
+  }
   if (KNOWN_LOCAL_MUTATING_TOOLS.has(toolUse.name.toLowerCase())) return true;
   return /(?:write|edit|create|delete|remove|send|post|publish|schedule|board|goal)/i.test(toolUse.name);
 }
@@ -222,6 +247,7 @@ export function isLikelyExternalMutation(toolUse: ToolUseContent, skill?: Skill 
   if (declared?.externalWrite || declared?.requiresConfirmation) return true;
   if (declared?.localWrite) return false;
   if (toolUse.name === 'bash') return isExternalBashMutation(bashCommand(toolUse));
+  if (toolUse.name === 'run_code') return isExternalBashMutation(executableContent(toolUse));
   if (toolUse.name === 'git' && /^(?:push|upload|deploy)$/i.test(actionFromInput(toolUse.input) ?? '')) return true;
   if (EXTERNAL_TOOL_NAME.test(toolUse.name)) return isLikelyMutation(toolUse, skill);
   if (!isLikelyMutation(toolUse, skill)) return false;
@@ -284,11 +310,29 @@ function toolTargetMentioned(message: string, toolUse: ToolUseContent): boolean 
   if (/send_file/.test(name)) return /\b(?:attachment|file|image|pdf|photo|report|spreadsheet|video|workbook)\b/i.test(message);
   if (/send_message/.test(name)) return /\b(?:chat|message|reply|update)\b/i.test(message);
   if (name === 'bash') {
-    if (/\bgit\s+push\b/i.test(bashCommand(toolUse))) {
+    const command = executableContent(toolUse);
+    if (/\bgit\s+push\b/i.test(command)) {
       return /\b(?:git|repo|repository|remote|push)\b/i.test(message);
     }
-    const hosts = [...bashCommand(toolUse).matchAll(/https?:\/\/([^/'"\s]+)/gi)].map(match => match[1].toLowerCase());
-    return hosts.some(host => message.toLowerCase().includes(host));
+    const hosts = [...command.matchAll(/https?:\/\/([^/'"\s]+)/gi)].map(match => match[1].toLowerCase());
+    return hosts.some(host => {
+      if (message.toLowerCase().includes(host)) return true;
+      const serviceTokens = host.split('.').filter(token =>
+        token.length >= 4 && !['api', 'www', 'com', 'org', 'net', 'cloud'].includes(token),
+      );
+      return serviceTokens.some(token => new RegExp(`\\b${token}\\b`, 'i').test(message));
+    });
+  }
+  if (name === 'run_code') {
+    const code = executableContent(toolUse);
+    const hosts = [...code.matchAll(/https?:\/\/([^/'"\s]+)/gi)].map(match => match[1].toLowerCase());
+    return hosts.some(host => {
+      const serviceTokens = host.split('.').filter(token =>
+        token.length >= 4 && !['api', 'www', 'com', 'org', 'net', 'cloud'].includes(token),
+      );
+      return message.toLowerCase().includes(host)
+        || serviceTokens.some(token => new RegExp(`\\b${token}\\b`, 'i').test(message));
+    });
   }
   return false;
 }
@@ -296,8 +340,8 @@ function toolTargetMentioned(message: string, toolUse: ToolUseContent): boolean 
 function toolMutationAction(toolUse: ToolUseContent): string | null {
   const declared = actionFromInput(toolUse.input)?.toLowerCase() ?? null;
   if (declared && new RegExp(`^(?:${WRITE_ACTIONS})$`, 'i').test(declared)) return declared;
-  if (toolUse.name === 'bash') {
-    const command = bashCommand(toolUse);
+  if (toolUse.name === 'bash' || toolUse.name === 'run_code') {
+    const command = executableContent(toolUse);
     if (/\bgit\s+push\b/i.test(command)) return 'push';
     if (/\bDELETE\b/i.test(command)) return 'delete';
     if (/\b(?:PUT|PATCH)\b/i.test(command)) return 'update';
@@ -320,7 +364,22 @@ function actionsCompatible(requested: string, actual: string | null): boolean {
 
 function directRequestedAction(message: string): string | null {
   const match = message.match(DIRECT_WRITE_REQUEST);
-  return (match?.slice(1).find(Boolean) ?? '').toLowerCase() || null;
+  const direct = (match?.slice(1).find(Boolean) ?? '').toLowerCase();
+  if (direct) return direct;
+
+  // Natural requests often include a discourse prefix ("For today, can you
+  // log...") or explicit authorization language. They are just as clear as an
+  // imperative and must not force the user into a magic-word loop.
+  const naturalPatterns = [
+    new RegExp(`\\b(?:can|could|would|will)\\s+(?:you|u)\\s+(?:please\\s+)?(${WRITE_ACTIONS})\\b`, 'i'),
+    new RegExp(`^\\s*(?:yes|yep|yeah|ok(?:ay)?|sure|confirmed?)[,!]?\\s+(?:please\\s+)?(${WRITE_ACTIONS})\\b`, 'i'),
+    new RegExp(`\\b(?:authorize|instruct|ask|tell)\\s+(?:you|the\\s+agent|this\\s+bot)\\s+to\\s+(${WRITE_ACTIONS})\\b`, 'i'),
+  ];
+  for (const pattern of naturalPatterns) {
+    const natural = message.match(pattern)?.[1]?.toLowerCase();
+    if (natural) return natural;
+  }
+  return null;
 }
 
 function hasExplicitLocalMutationIntent(message: string): boolean {
@@ -440,7 +499,13 @@ export function assessToolCallForTurn(
 
   const serializedInput = stable(toolUse.input);
   const payloadIsSensitive = declared?.sensitive || SENSITIVE_CONTEXT.test(serializedInput);
-  const currentTurnAcknowledgesSensitivity = SENSITIVE_CONTEXT.test(message) || boundConfirmation;
+  const affirmativeFollowUp = /^\s*(?:yes|yep|yeah|ok(?:ay)?|sure|confirmed?)\b/i.test(message);
+  const currentTurnAcknowledgesSensitivity = SENSITIVE_CONTEXT.test(message)
+    || boundConfirmation
+    || (explicitIntent
+      && affirmativeFollowUp
+      && !!context.previousAssistantMessage
+      && SENSITIVE_CONTEXT.test(context.previousAssistantMessage));
   if (payloadIsSensitive && !currentTurnAcknowledgesSensitivity) {
     return {
       allowed: false,

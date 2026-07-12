@@ -580,6 +580,49 @@ describe('Agent improvements integration', () => {
       expect(handler).toHaveBeenCalledTimes(1);
     });
 
+    it('executes a confirmed Notion curl write instead of asking for magic words again', async () => {
+      const { Agent } = await import('./agent.js');
+      const { SessionManager } = await import('./session.js');
+      const handler = vi.fn().mockResolvedValue({ success: true, output: '{"object":"page","id":"workout-1"}' });
+      const skill = {
+        name: 'bash', description: 'Shell', path: '/tmp/bash/SKILL.md', source: 'workspace' as const,
+        frontmatter: { name: 'bash', description: 'Shell' }, content: '', available: true,
+        hasScripts: true, handler,
+      };
+      const registry = {
+        getSkill: vi.fn((name: string) => name === 'bash' ? skill : null),
+        getToolDefinitions: vi.fn(() => [{ name: 'bash', description: 'Shell', input_schema: { type: 'object', properties: {} } }]),
+        generateSkillPrompt: vi.fn(() => ''),
+      };
+      const provider = seqProvider([
+        {
+          content: [{
+            type: 'tool_use', id: 'confirmed-notion-curl', name: 'bash', input: {
+              command: `curl -s -X POST https://api.notion.com/v1/pages --data '{"properties":{"Weight":{"number":14}}}'`,
+            },
+          }],
+          stopReason: 'tool_use', usage: { inputTokens: 5, outputTokens: 5 }, model: 'mock',
+        },
+        endTurn('Logged all four exercises.'),
+      ]);
+      const sessions = new SessionManager(db);
+      const session = await sessions.createSession();
+      await sessions.addMessage(session.id, {
+        role: 'assistant',
+        content: 'Confirm: Should I write these 4 gym exercises to your Notion Gym Volume Tracker now?',
+      });
+      const agent = new Agent({
+        provider, sessionManager: sessions, skillRegistry: registry as any,
+        workspace: testDir, logger: pino({ level: 'silent' }), maxIterations: 3,
+      });
+
+      const result = await agent.processMessage(session.id, 'Yes');
+
+      expect(handler).toHaveBeenCalledTimes(1);
+      expect(result.response).toBe('Logged all four exercises.');
+      expect(JSON.stringify(await sessions.getSession(session.id))).not.toContain('SAFETY_EXTERNAL_INTENT_REQUIRED');
+    });
+
     it('cancels a stale tool plan and re-locks intent when a mid-turn interrupt arrives', async () => {
       const { Agent } = await import('./agent.js');
       const { SessionManager } = await import('./session.js');
