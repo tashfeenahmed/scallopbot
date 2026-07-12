@@ -32,7 +32,8 @@ describe('turn-scoped tool safety', () => {
       { userMessage: "I'm feeling sick and skipping the gym", timezone: 'Europe/Dublin', now: new Date('2026-07-11T12:00:00Z') },
     );
     expect(verdict.allowed).toBe(false);
-    expect(verdict.reason).toMatch(/confirmation/i);
+    expect(verdict.reason).toMatch(/outside the current user request/i);
+    expect(verdict.reason).not.toMatch(/confirmation/i);
   });
 
   it('allows an explicitly requested sensitive write', () => {
@@ -54,6 +55,17 @@ describe('turn-scoped tool safety', () => {
     expect(verdict.allowed).toBe(true);
     expect(verdict.isExternalMutation).toBe(true);
   });
+
+  it.each(['Track this workout', 'Note this workout', 'Document this workout']) (
+    'treats an outcome request as direct authorization: %s',
+    (userMessage) => {
+      const verdict = assessToolCallForTurn(
+        notionCurlCreate(),
+        { userMessage, timezone: 'Europe/Dublin' },
+      );
+      expect(verdict.allowed).toBe(true);
+    },
+  );
 
   it('binds a bare yes to a natural Notion confirmation for a bash-based write', () => {
     const verdict = assessToolCallForTurn(

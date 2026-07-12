@@ -580,7 +580,7 @@ describe('Agent improvements integration', () => {
       expect(handler).toHaveBeenCalledTimes(1);
     });
 
-    it('executes a confirmed Notion curl write instead of asking for magic words again', async () => {
+    it('executes a requested Notion curl write directly without asking for confirmation', async () => {
       const { Agent } = await import('./agent.js');
       const { SessionManager } = await import('./session.js');
       const handler = vi.fn().mockResolvedValue({ success: true, output: '{"object":"page","id":"workout-1"}' });
@@ -607,20 +607,21 @@ describe('Agent improvements integration', () => {
       ]);
       const sessions = new SessionManager(db);
       const session = await sessions.createSession();
-      await sessions.addMessage(session.id, {
-        role: 'assistant',
-        content: 'Confirm: Should I write these 4 gym exercises to your Notion Gym Volume Tracker now?',
-      });
       const agent = new Agent({
         provider, sessionManager: sessions, skillRegistry: registry as any,
         workspace: testDir, logger: pino({ level: 'silent' }), maxIterations: 3,
       });
 
-      const result = await agent.processMessage(session.id, 'Yes');
+      const result = await agent.processMessage(
+        session.id,
+        'For today, can you log my gym session in our Notion tracker? It was 14 kg, 8 reps, 3 sets.',
+      );
 
       expect(handler).toHaveBeenCalledTimes(1);
       expect(result.response).toBe('Logged all four exercises.');
       expect(JSON.stringify(await sessions.getSession(session.id))).not.toContain('SAFETY_EXTERNAL_INTENT_REQUIRED');
+      expect(JSON.stringify((provider.complete as ReturnType<typeof vi.fn>).mock.calls[0][0].system))
+        .toContain('never ask for a separate confirmation');
     });
 
     it('cancels a stale tool plan and re-locks intent when a mid-turn interrupt arrives', async () => {

@@ -1555,7 +1555,7 @@ You can search for and install new skills from ClawHub (clawhub.ai) using the ma
 After installing a skill, it becomes available immediately — no restart needed.
 Keys take effect immediately and persist across restarts. After setting a key, skills that require it become available.
 When a user provides an API key, always store it via set_key so it persists.
-Only install skills when the user asks, or when you determine a skill would help accomplish the user's request and they confirm.`;
+Only install skills when the user asks, or when a skill is clearly necessary to accomplish the current request. The current request authorizes that aligned setup; do not ask for a separate permission round-trip. Report what you installed.`;
 
     // Tool-honesty hard rules. Small/local models in particular will otherwise
     // narrate remembered or plausible-looking results when a tool returns
@@ -1659,8 +1659,10 @@ Only install skills when the user asks, or when you determine a skill would help
     return `\n\n## ACTIVE TURN CONTRACT
 The current user request is quoted below. Execute tools only when they directly serve this request; do not continue an older task merely because it appears in history or memory.
 <current_user_request>${JSON.stringify(activeRequest)}</current_user_request>
+- The current request is the authorization for every local or external action directly needed to complete it. Act immediately; never ask for a separate confirmation or permission round-trip.
+- If the user directly supplied sensitive data and asked you to store or send it, execute that request without reconfirming.
+- Ask a question only when an essential factual value or target is genuinely missing or ambiguous. Ask for the missing fact, not for permission.
 - Treat every external write as uncompleted until its exact tool result proves success.
-- If current-turn wording is sensitive or structurally ambiguous, ask before writing it to another service.
 - Resolve relative dates from the authoritative timezone/date above; never calculate them from an older message.
 - Before the final reply, account for every part of the current request and disclose any part that failed or remains unverified.
 ## END ACTIVE TURN CONTRACT`;

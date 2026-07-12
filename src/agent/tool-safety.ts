@@ -45,13 +45,13 @@ const READ_ONLY_ACTION = /^(?:check|describe|fetch|get|inspect|list|read|search|
 
 const EXTERNAL_TOOL_NAME =
   /(?:notion|gmail|email|calendar|slack|discord|telegram_send|send_message|send_file|publish|social|crm|airtable|drive)/i;
-const MUTATING_ACTION = /^(?:add|append|archive|book|cancel|commit|complete|create|delete|deploy|edit|email|insert|install|log|mark|move|post|publish|push|record|remove|save|schedule|send|set|submit|sync|update|upload|write)$/i;
+const MUTATING_ACTION = /^(?:add|append|archive|book|cancel|commit|complete|create|delete|deploy|document|edit|email|insert|install|invite|log|mark|move|note|post|publish|push|record|register|remove|reply|save|schedule|send|set|share|submit|sync|track|update|upload|write)$/i;
 const EXPLICIT_CONFIRMATION =
   /^\s*(?:yes|yep|yeah|confirm(?:ed)?|go ahead|do it|please do|ok(?:ay)?|proceed|sounds good)\s*[.!]?\s*$/i;
 const INFORMATIONAL_UPDATE_REQUEST =
   /\b(?:update|brief|tell|catch)\s+(?:me|us)\s+(?:on|about|regarding)\b/i;
 const WRITE_ACTIONS =
-  'add|archive|book|cancel|complete|create|delete|deploy|edit|email|insert|log|mark|post|publish|push|record|remove|save|schedule|send|set|submit|sync|update|upload|write';
+  'add|archive|book|cancel|complete|create|delete|deploy|document|edit|email|insert|install|invite|log|mark|note|post|publish|push|record|register|remove|reply|save|schedule|send|set|share|submit|sync|track|update|upload|write';
 const DIRECT_WRITE_REQUEST = new RegExp(
   `(?:^\\s*(?:(?:please\\s+)?|(?:(?:can|could|would|will)\\s+you\\s+(?:please\\s+)?)|(?:i\\s+(?:want|need|would like)\\s+you\\s+to\\s+))(${WRITE_ACTIONS})\\b)`
   + `|(?:\\b(?:and|then)\\s+(?:please\\s+)?(${WRITE_ACTIONS})\\b)`
@@ -354,10 +354,10 @@ function toolMutationAction(toolUse: ToolUseContent): string | null {
 function actionsCompatible(requested: string, actual: string | null): boolean {
   if (!actual || requested === actual) return true;
   const groups = [
-    new Set(['add', 'book', 'create', 'insert', 'log', 'post', 'publish', 'record', 'save', 'schedule', 'submit', 'write']),
+    new Set(['add', 'book', 'create', 'document', 'insert', 'log', 'note', 'post', 'publish', 'record', 'register', 'save', 'schedule', 'submit', 'track', 'write']),
     new Set(['complete', 'edit', 'mark', 'set', 'update']),
     new Set(['archive', 'cancel', 'delete', 'remove']),
-    new Set(['email', 'post', 'publish', 'send', 'submit']),
+    new Set(['email', 'invite', 'post', 'publish', 'reply', 'send', 'share', 'submit']),
   ];
   return groups.some(group => group.has(requested) && group.has(actual));
 }
@@ -439,7 +439,7 @@ function hasExplicitExternalWriteIntent(
 
   const requestedAction = directRequestedAction(message);
   if (!requestedAction || !actionsCompatible(requestedAction, toolMutationAction(toolUse))) return false;
-  const targetIndependent = /^(?:book|deploy|log|push|record|schedule|submit|sync|upload)$/.test(requestedAction);
+  const targetIndependent = /^(?:book|deploy|document|invite|log|note|push|record|register|reply|schedule|share|submit|sync|track|upload)$/.test(requestedAction);
   const explicitPronoun = new RegExp(
     `^\\s*(?:please\\s+)?(?:${WRITE_ACTIONS})\\s+(?:it|that|this|those|these)\\b`,
     'i',
@@ -490,7 +490,7 @@ export function assessToolCallForTurn(
   if (!explicitIntent) {
     return {
       allowed: false,
-      reason: 'This would mutate an external service, but the current user message did not explicitly request that external write. Ask for target-specific confirmation first.',
+      reason: 'This external write is outside the current user request. Do not execute it and do not ask for permission to expand scope; continue only with the requested outcome or ask what outcome the user wants.',
       isMutation,
       isExternalMutation,
       signature,
@@ -509,7 +509,7 @@ export function assessToolCallForTurn(
   if (payloadIsSensitive && !currentTurnAcknowledgesSensitivity) {
     return {
       allowed: false,
-      reason: 'The external payload contains sensitive information that the current user message did not acknowledge. Show what category will be written and ask for confirmation first.',
+      reason: 'The external payload introduces sensitive information outside the current user request. Remove that extra information or ask which factual value should be used; do not ask for permission to write the already-requested data.',
       isMutation,
       isExternalMutation,
       signature,

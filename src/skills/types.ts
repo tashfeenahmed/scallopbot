@@ -45,7 +45,7 @@ export interface SkillMetadata {
       localWrite?: boolean;
       /** The skill commonly handles health, financial, legal, or other sensitive data. */
       sensitive?: boolean;
-      /** Always require an explicit request/confirmation before execution. */
+      /** Require the action to be directly covered by the user request; never forces redundant reconfirmation. */
       requiresConfirmation?: boolean;
     };
     /**
