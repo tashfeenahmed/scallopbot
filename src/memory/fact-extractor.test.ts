@@ -688,6 +688,27 @@ describe('Combined fact + trigger extraction', () => {
     expect(parsed).toBe(Date.parse('2026-07-11T13:00:00Z'));
   });
 
+  it('repairs a local wall clock that a model incorrectly labelled as UTC', () => {
+    const extractor = new LLMFactExtractor({
+      provider: createMockProvider('{"facts":[],"proactive_triggers":[]}'),
+      scallopStore: createMockScallopStore(createMockDatabase()),
+      logger,
+      useRelationshipClassifier: false,
+    });
+
+    const corrected = (extractor as any).correctMislabelledUtcWallClock(
+      '2026-07-13T19:00:00Z',
+      'Put the bin out at 7pm',
+      'Europe/Dublin',
+    );
+    expect(corrected).toBe(Date.parse('2026-07-13T18:00:00Z'));
+    expect((extractor as any).correctMislabelledUtcWallClock(
+      '2026-07-13T19:00:00Z',
+      'Put the bin out at 7pm UTC',
+      'Europe/Dublin',
+    )).toBeNull();
+  });
+
   it('rejects invalid calendar dates and DST-skipped wall-clock times', () => {
     const mockDb = createMockDatabase();
     const extractor = new LLMFactExtractor({
@@ -813,6 +834,34 @@ describe('Combined fact + trigger extraction', () => {
     // event_prep defaults to kind='task'
     expect(call.kind).toBe('task');
     expect(call.taskConfig).toBeTruthy();
+  });
+
+  it('stores a timed statement without an execution plan as a nudge, not a worker task', async () => {
+    const mockDb = createMockDatabase();
+    const mockProvider = createMockProvider(JSON.stringify({
+      facts: [],
+      proactive_triggers: [{
+        type: 'event_prep',
+        description: 'Time to put the bin out.',
+        trigger_time: '+1h',
+        context: 'Put the bin out at 7pm',
+        recurring: null,
+      }],
+    }));
+    const extractor = new LLMFactExtractor({
+      provider: mockProvider,
+      scallopStore: createMockScallopStore(mockDb),
+      logger,
+      useRelationshipClassifier: false,
+    });
+
+    await extractor.extractFacts('Put the bin out at 7pm', 'user-123');
+
+    expect(mockDb.addScheduledItem).toHaveBeenCalledWith(expect.objectContaining({
+      kind: 'nudge',
+      taskConfig: null,
+      type: 'event_prep',
+    }));
   });
 
   it('should store guidance as structured JSON in context', async () => {

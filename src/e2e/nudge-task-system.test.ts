@@ -240,7 +240,7 @@ describe('E2E Nudge/Task System', () => {
         outcome: 'blocked',
         failureCode: 'task_executor_unavailable',
       });
-      expect(task?.result?.response).toContain('background worker is unavailable');
+      expect(task?.result?.response).toContain('background execution is not configured');
     });
   });
 

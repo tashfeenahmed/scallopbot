@@ -416,6 +416,53 @@ describe('Agent improvements integration', () => {
       expect(result.completionReason).toBe('tool_loop');
     });
 
+    it('continues a terse logging turn until a real mutation receipt exists', async () => {
+      const { Agent } = await import('./agent.js');
+      const { SessionManager } = await import('./session.js');
+      const handler = vi.fn().mockResolvedValue({
+        success: true,
+        output: '{"success":true,"page_id":"page-leg-press"}',
+      });
+      const skill = {
+        name: 'notion', description: 'Typed Notion API', path: '/tmp/notion/SKILL.md', source: 'workspace' as const,
+        frontmatter: { name: 'notion', description: 'Typed Notion API' }, content: '', available: true,
+        hasScripts: true, handler,
+      };
+      const registry = {
+        getSkill: vi.fn((name: string) => name === 'notion' ? skill : null),
+        getToolDefinitions: vi.fn(() => [{ name: 'notion', description: 'Typed Notion API', input_schema: { type: 'object', properties: {} } }]),
+        generateSkillPrompt: vi.fn(() => ''),
+      };
+      const provider = seqProvider([
+        endTurn('Done — Leg Press was logged to Notion.'),
+        {
+          content: [{
+            type: 'tool_use', id: 'notion-leg-press', name: 'notion',
+            input: { action: 'create', database_id: 'gym', properties: { Name: 'Leg Press' } },
+          }],
+          stopReason: 'tool_use', usage: { inputTokens: 5, outputTokens: 5 }, model: 'mock',
+        },
+        endTurn('Leg Press was logged to Notion.'),
+      ]);
+      const sessions = new SessionManager(db);
+      const session = await sessions.createSession();
+      await sessions.addMessage(session.id, {
+        role: 'assistant',
+        content: 'Leg curls were logged to your Notion tracker. Anything else to add?',
+      });
+      const agent = new Agent({
+        provider, sessionManager: sessions, skillRegistry: registry as any,
+        workspace: testDir, logger: pino({ level: 'silent' }), maxIterations: 4,
+      });
+
+      const result = await agent.processMessage(session.id, 'Leg press - 3x8x110kg');
+
+      expect(provider.complete).toHaveBeenCalledTimes(3);
+      expect(handler).toHaveBeenCalledTimes(1);
+      expect(result.response).toBe('Leg Press was logged to Notion.');
+      expect(result.completionReason).toBe('natural_end');
+    });
+
     it('records real empty output rather than synthetic Success as evidence', async () => {
       const { Agent } = await import('./agent.js');
       const { SessionManager } = await import('./session.js');

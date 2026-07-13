@@ -57,7 +57,7 @@ import { setHookLogger } from '../hooks/hooks.js';
 import { registerWebhookEventRelay } from '../hooks/webhook-relay.js';
 import { SafeWorkflowExecutor, createExecuteWorkflowSkill } from '../workflow/index.js';
 import { matchesPolicy } from '../skills/tool-policy.js';
-import { resolveStateUserId } from '../utils/state-user-id.js';
+import { resolveStateUserId, resolveStateUserTimezone } from '../utils/state-user-id.js';
 import { inspectArtifact, validateArtifactForDelivery } from '../artifacts/delivery.js';
 
 export interface GatewayOptions {
@@ -108,6 +108,15 @@ export class Gateway {
   constructor(options: GatewayOptions) {
     this.config = options.config;
     this.logger = options.logger;
+  }
+
+  private getUserTimezone(userId: string): string {
+    if (!this.configManager) return Intl.DateTimeFormat().resolvedOptions().timeZone;
+    return resolveStateUserTimezone(
+      userId,
+      this.canonicalSingleUserIds,
+      candidate => this.configManager!.getUserTimezone(candidate),
+    );
   }
 
   private configureLifecycleEventRelay(): void {
@@ -297,7 +306,7 @@ export class Gateway {
         embedder,
         costTracker: this.costTracker || undefined,
         deduplicationThreshold: 0.95, // Higher threshold - only skip true duplicates
-        getTimezone: (userId: string) => this.configManager!.getUserTimezone(userId),
+        getTimezone: (userId: string) => this.getUserTimezone(userId),
         canonicalSingleUserIds: this.canonicalSingleUserIds,
       });
       this.logger.debug({ provider: factExtractionProvider.name }, 'LLM fact extractor initialized');
@@ -324,7 +333,7 @@ export class Gateway {
       fusionProvider: cognitionProvider,
       sessionSummarizer,
       workspace: this.config.agent.workspace,
-      getTimezone: (userId: string) => this.configManager!.getUserTimezone(userId),
+      getTimezone: (userId: string) => this.getUserTimezone(userId),
       canonicalSingleUserIds: this.canonicalSingleUserIds,
       subAgentCleanupAfterSeconds: this.config.subagent?.cleanupAfterSeconds ?? 3600,
       subAgentDiagnosticRetentionSeconds:
@@ -378,7 +387,7 @@ export class Gateway {
     // Create skill executor for skill-based execution
     this.skillExecutor = createSkillExecutor(
       this.logger,
-      (userId: string) => this.configManager!.getUserTimezone(userId),
+      (userId: string) => this.getUserTimezone(userId),
       {
         timeoutMs: this.config.tuning?.skills?.timeoutMs,
         maxOutputBytes: this.config.tuning?.skills?.maxOutputBytes,
@@ -626,7 +635,7 @@ export class Gateway {
         router: this.router || undefined,
         interval: 30 * 1000, // Check every 30 seconds
         onSendMessage: this.outboundQueue.createHandler(),
-        getTimezone: (userId: string) => this.configManager!.getUserTimezone(userId),
+        getTimezone: (userId: string) => this.getUserTimezone(userId),
         canonicalSingleUserIds: this.canonicalSingleUserIds,
       });
       this.logger.debug('Unified scheduler initialized');

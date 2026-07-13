@@ -1121,6 +1121,36 @@ export class UnifiedScheduler {
    */
   private async processTask(item: ScheduledItem, lease: TaskLeaseContext): Promise<TaskProcessResult> {
     const config = item.taskConfig;
+    if (!config) {
+      // Historical extractors could misclassify a plain reminder as a worker
+      // task. Do not expose a fake "background worker unavailable" error. Repair
+      // the row under its lease and deliver the user-facing reminder once.
+      if (!lease.renew()) return { outcome: 'failed', error: 'Task lease lost before reminder recovery' };
+      if (!this.db.reclassifyLeasedTaskAsNudge(item.id, lease.leaseToken)) {
+        return { outcome: 'failed', error: 'Task changed before reminder recovery' };
+      }
+      item.kind = 'nudge';
+      item.type = 'reminder';
+      this.db.recordProactiveDecision({
+        userId: item.userId,
+        stage: 'deliver',
+        outcome: 'rewritten',
+        reason: 'malformed_task_recovered_as_nudge',
+        detail: { itemId: item.id },
+      });
+      const outcome = await this.sendFormattedMessage(item, item.message, undefined, true);
+      return {
+        outcome,
+        result: {
+          response: item.message,
+          completedAt: Date.now(),
+          taskComplete: true,
+          outcome: 'succeeded',
+          completionSource: 'user',
+        },
+        error: isFailureOutcome(outcome) ? 'Recovered reminder delivery failed' : undefined,
+      };
+    }
     // If the work already completed but delivery failed, retry the stored result
     // instead of executing the task (and its potentially mutating tools) twice.
     if (item.result?.response) {
@@ -1187,21 +1217,26 @@ export class UnifiedScheduler {
     const schedulerSessionId = await this.ensureSchedulerSession(item.userId);
     const executionParentSessionId = this.getOwnedSessionId(item.sessionId, item.userId)
       ?? schedulerSessionId;
-    if (!config || !this.subAgentExecutor || !executionParentSessionId) {
+    if (!this.subAgentExecutor || !executionParentSessionId) {
       this.logger.warn({ itemId: item.id }, 'Scheduled task cannot run; opening capability circuit');
+      const failureCode = !this.subAgentExecutor
+        ? 'task_executor_unavailable'
+        : 'task_execution_session_unavailable';
       this.db.recordProactiveDecision({
         userId: item.userId,
         stage: 'deliver',
         outcome: 'suppressed',
-        reason: 'task_executor_unavailable',
+        reason: failureCode,
         detail: { itemId: item.id },
       });
       const unavailableResult: BoardItemResult = {
-        response: 'I paused this scheduled task because its background worker is unavailable. I will not keep retrying it automatically.',
+        response: !this.subAgentExecutor
+          ? 'I paused this scheduled task because background execution is not configured on this deployment.'
+          : 'I paused this scheduled task because its isolated execution session could not be created.',
         completedAt: Date.now(),
         taskComplete: false,
         outcome: 'blocked',
-        failureCode: 'task_executor_unavailable',
+        failureCode,
       };
       if (!lease.renew()) return { outcome: 'failed', error: 'Task lease lost before capability block' };
       const delivery = await this.sendFormattedMessage(item, unavailableResult.response, 'task_result', true);
@@ -1209,9 +1244,11 @@ export class UnifiedScheduler {
       return {
         outcome: 'failed',
         result: unavailableResult,
-        error: 'Scheduled task executor is unavailable',
+        error: !this.subAgentExecutor
+          ? 'Scheduled task executor is unavailable'
+          : 'Scheduled task execution session is unavailable',
         failureDisposition: 'block',
-        failureCode: 'task_executor_unavailable',
+        failureCode,
       };
     }
 

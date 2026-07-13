@@ -11,6 +11,7 @@ import {
   toolCallSignature,
   toolOperationIdentity,
   toolOutputIndicatesFailure,
+  turnRequiresMutationReceipt,
 } from './tool-safety.js';
 
 const notionWrite = (input: Record<string, unknown>): ToolUseContent => ({
@@ -306,6 +307,20 @@ describe('turn-scoped tool safety', () => {
     expect(verdict.reason).toMatch(/ambiguous/i);
   });
 
+  it('accepts conventional three-part workout notation in an active logging thread', () => {
+    const verdict = assessToolCallForTurn(
+      notionWrite({
+        action: 'create', name: 'Leg Press', sets: 3, reps: 8, weight_kg: 110,
+      }),
+      {
+        userMessage: 'Leg press - 3x8x110kg',
+        previousAssistantMessage: 'Leg curls were logged to your Notion tracker. Anything else to add?',
+        timezone: 'Europe/Dublin',
+      },
+    );
+    expect(verdict.allowed).toBe(true);
+  });
+
   it('blocks a model-generated date that conflicts with today in the user timezone', () => {
     const verdict = assessToolCallForTurn(
       notionWrite({ action: 'create', workout_date: '2026-07-10' }),
@@ -353,6 +368,12 @@ describe('turn-scoped tool safety', () => {
     expect(isExternalBashMutation(
       'curl -X DELETE https://api.notion.com/v1/databases/db-id/query',
     )).toBe(true);
+    expect(isExternalBashMutation(
+      `curl -s --fail-with-body -X POST https://api.notion.com/v1/search --data '{"query":"gym"}'`,
+    )).toBe(false);
+    expect(isExternalBashMutation(
+      `curl -s --fail-with-body -X POST https://api.notion.com/v1/data_sources/$DATA_SOURCE_ID/query --data '{"page_size":5}'`,
+    )).toBe(false);
   });
 
   it('classifies an external write inside run_code as external and honors the active request', () => {
@@ -394,6 +415,16 @@ describe('turn-scoped tool safety', () => {
     expect(toolOutputIndicatesFailure('{"success":false,"error":"bad"}')).toBe(true);
     expect(toolOutputIndicatesFailure('HTTP/2 429')).toBe(true);
     expect(toolOutputIndicatesFailure('{"success":true,"status":201}')).toBe(false);
+    expect(toolOutputIndicatesFailure('Logging: Pushups\n✓ Pushups logged - ID: ERROR')).toBe(true);
+    expect(toolOutputIndicatesFailure('Step one completed\nError: validation failed')).toBe(true);
+  });
+
+  it('requires a mutation receipt for structured continuation data', () => {
+    expect(turnRequiresMutationReceipt(
+      'Leg press - 3x8x110kg',
+      'Leg curls were logged to your Notion tracker. Anything else to add?',
+    )).toBe(true);
+    expect(turnRequiresMutationReceipt('How many reps did I do?', 'Your tracker is in Notion.')).toBe(false);
   });
 
   it('creates privacy-safe deterministic output evidence', () => {

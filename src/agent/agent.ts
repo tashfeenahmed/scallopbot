@@ -48,6 +48,7 @@ import {
   localIsoDate,
   toolOperationIdentity,
   toolOutputIndicatesFailure,
+  turnRequiresMutationReceipt,
   type TurnToolSafetyContext,
 } from './tool-safety.js';
 import {
@@ -647,6 +648,7 @@ export class Agent {
     let iterations = 0;
     let maxTokensContinuations = 0;
     let emptyEndTurnRetries = 0;
+    let unverifiedCompletionRetries = 0;
     let finalResponse = '';
     let completionReason: AgentCompletionReason | null = null;
     // Self-evolution signal accounting (best-effort, captured at turn end).
@@ -1057,6 +1059,34 @@ export class Agent {
           finalResponse = "I worked through that but my final reply came back empty — give me a moment and try once more, or rephrase if it keeps happening.";
         }
 
+        // A model may skip the requested write entirely and still say "done".
+        // Prompt instructions are not an enforcement boundary, so force one
+        // corrective continuation before allowing a receipt-less success claim
+        // to reach the user. This is especially important for terse follow-ups
+        // such as another workout row after "anything else to add?".
+        const mutationReceiptRequired = turnRequiresMutationReceipt(
+          turnToolSafety.userMessage,
+          turnToolSafety.previousAssistantMessage,
+        );
+        if (
+          mutationReceiptRequired
+          && successfulMutationSignatures.size === 0
+          && hasUnverifiedSuccessClaim(finalResponse)
+          && unverifiedCompletionRetries < 1
+        ) {
+          unverifiedCompletionRetries++;
+          await this.sessionManager.addMessage(sessionId, {
+            role: 'user',
+            content: '[System: Your draft claims a requested action succeeded, but this turn has no successful mutation receipt. Do not send that draft. Call the required tool now, verify its result, and only then give the final reply. If execution is impossible, state that honestly without claiming completion.]',
+          });
+          this.logger.warn(
+            { sessionId, retry: unverifiedCompletionRetries },
+            'Receipt-less completion claim — continuing the tool loop',
+          );
+          finalResponse = '';
+          continue;
+        }
+
         // Adaptive inference-time scaling (best-of-N).
         //
         // Resampling N answers on every turn would be brutally slow, so we make
@@ -1150,12 +1180,18 @@ export class Agent {
         // Never let fluent prose convert a failed external write into a false
         // success confirmation. Tool evidence, not the model's wording, is the
         // source of truth.
+        const missingRequiredMutationReceipt = turnRequiresMutationReceipt(
+          turnToolSafety.userMessage,
+          turnToolSafety.previousAssistantMessage,
+        ) && successfulMutationSignatures.size === 0;
         if (
-          failedExternalMutations > 0 &&
-          successfulExternalMutations === 0 &&
-          hasUnverifiedSuccessClaim(finalResponse)
+          ((failedExternalMutations > 0 && successfulExternalMutations === 0)
+            || missingRequiredMutationReceipt)
+          && hasUnverifiedSuccessClaim(finalResponse)
         ) {
-          finalResponse = 'I could not verify that external action, so I have not marked it complete. The tool reported a failure or required clarification.';
+          finalResponse = failedExternalMutations > 0
+            ? 'I could not verify that external action, so I have not marked it complete. The tool reported a failure or required clarification.'
+            : 'I did not obtain a successful tool receipt for that action, so I have not marked it complete.';
           persistContent = [{ type: 'text', text: finalResponse }];
           completionReason = 'tool_loop';
         }
@@ -1665,6 +1701,7 @@ The current user request is quoted below. Execute tools only when they directly 
 - A task/priorities list given in reply to a planning check-in should be captured on the board immediately; schedule any time-bound item as a nudge. Do not ask whether to add it.
 - Never mark a current-day task done from an older memory or prior-day accomplishment. Completion must be stated in the active user turn.
 - Treat every external write as uncompleted until its exact tool result proves success.
+- Prefer a typed integration tool over raw shell HTTP. For Notion, use the typed \`notion\` tool when available; with API version 2025-09-03, query a database through its data source, inspect the real schema before writing, and never guess property names.
 - Resolve relative dates from the authoritative timezone/date above; never calculate them from an older message.
 - Before the final reply, account for every part of the current request and disclose any part that failed or remains unverified.
 ## END ACTIVE TURN CONTRACT`;

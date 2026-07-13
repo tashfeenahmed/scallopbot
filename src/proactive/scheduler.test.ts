@@ -1751,6 +1751,36 @@ describe('UnifiedScheduler proactive delivery safety', () => {
     });
   });
 
+  it('repairs a reminder misclassified as a worker task instead of reporting worker failure', async () => {
+    const send = vi.fn().mockResolvedValue(true);
+    const router = {
+      executeWithFallback: vi.fn().mockResolvedValue({
+        response: { content: [{ type: 'text', text: 'Time to put the bin out.' }] },
+      }),
+    };
+    const item = db.addScheduledItem({
+      userId: 'default', sessionId: null, source: 'agent', kind: 'task',
+      type: 'event_prep', message: 'Time to put the bin out.',
+      context: 'Put the bin out at 7pm', triggerAt: Date.now() - 1,
+      recurring: null, sourceMemoryId: null, taskConfig: null,
+    });
+    scheduler = new UnifiedScheduler({
+      db, logger, router: router as any, onSendMessage: send,
+      getTimezone: () => middayTimezone(), minAgentProactiveGapMs: 0,
+    });
+
+    await scheduler.evaluate();
+
+    expect(send).toHaveBeenCalledWith('default', 'Time to put the bin out.');
+    expect(db.getScheduledItem(item.id)).toMatchObject({
+      kind: 'nudge', type: 'reminder', status: 'fired', boardStatus: 'done',
+      result: { outcome: 'succeeded', taskComplete: true },
+    });
+    expect(db.getRecentProactiveDecisions(10)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ reason: 'malformed_task_recovered_as_nudge' }),
+    ]));
+  });
+
   it('delivers a stored task result without rerunning an unavailable executor', async () => {
     const send = vi.fn().mockResolvedValue(true);
     const item = db.addScheduledItem({

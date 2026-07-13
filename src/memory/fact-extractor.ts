@@ -577,6 +577,7 @@ export class LLMFactExtractor {
       const currentDate = now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', ...tzOptions });
       const currentTime = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true, ...tzOptions });
       let prompt = FACT_AND_TRIGGER_EXTRACTION_PROMPT.replace('{{CURRENT_DATE}}', currentDate).replace('{{CURRENT_TIME}}', currentTime) + '\n\n';
+      prompt += `Authoritative user timezone: ${tz}. Treat clocks without an explicit timezone as local wall-clock times in ${tz}. Do not append Z or a UTC offset unless the user explicitly supplied that timezone.\n\n`;
       if (context) {
         prompt += `Context from previous messages:\n${context}\n\n`;
       }
@@ -681,7 +682,14 @@ export class LLMFactExtractor {
 
       // Process triggers from combined extraction (fire-and-forget)
       if (parsed.proactive_triggers && Array.isArray(parsed.proactive_triggers) && parsed.proactive_triggers.length > 0) {
-        this.processExtractedTriggers(parsed.proactive_triggers, userId, message, null, sourceSessionId);
+        this.processExtractedTriggers(
+          parsed.proactive_triggers,
+          userId,
+          message,
+          null,
+          sourceSessionId,
+          this.getTimezone(channelUserId),
+        );
       }
 
       // Process facts with batch classification for efficiency
@@ -1670,6 +1678,7 @@ Respond with JSON only:
     sourceUserMessage: string,
     sourceMemoryId?: string | null,
     sourceSessionId?: string,
+    sourceTimezone?: string,
   ): void {
     if (!this.scallopStore || triggers.length === 0) return;
 
@@ -1700,8 +1709,17 @@ Respond with JSON only:
 
       if (!trigger.description || !trigger.trigger_time || !trigger.context) continue;
 
-      // Determine kind: explicit from LLM, or default based on type.
-      const kind = trigger.kind || (trigger.type === 'event_prep' ? 'task' : 'nudge');
+      // A task means unattended worker execution and therefore needs an actual
+      // execution plan. A timed user-facing statement with no goal/guidance is
+      // a nudge, even when a model labels the intent as event_prep.
+      const hasExecutionPlan = !!trigger.goal?.trim()
+        || !!trigger.guidance?.trim()
+        || (Array.isArray(trigger.tools) && trigger.tools.length > 0);
+      const kind = trigger.kind === 'task' && hasExecutionPlan
+        ? 'task'
+        : !trigger.kind && trigger.type === 'event_prep' && hasExecutionPlan
+          ? 'task'
+          : 'nudge';
       const message = sanitizeProactiveMessage(trigger.description);
       if (!message) {
         this.logger.warn(
@@ -1718,7 +1736,12 @@ Respond with JSON only:
         continue;
       }
 
-      const triggerAt = this.parseTriggerTime(trigger.trigger_time, this.getTimezone(userId));
+      const timezone = sourceTimezone ?? this.getTimezone(userId);
+      const triggerAt = this.correctMislabelledUtcWallClock(
+        trigger.trigger_time,
+        sourceUserMessage,
+        timezone,
+      ) ?? this.parseTriggerTime(trigger.trigger_time, timezone);
       if (!triggerAt) {
         this.logger.debug({ trigger_time: trigger.trigger_time }, 'Invalid trigger time, skipping');
         continue;
@@ -1823,6 +1846,49 @@ Respond with JSON only:
       /\bset\s+(?:a\s+)?(?:reminder|notification)\b/i.test(normalized) ||
       /\b(?:don't\s+let\s+me\s+forget|make\s+sure\s+(?:you\s+)?(?:remind|notify)\s+me)\b/i.test(normalized)
     );
+  }
+
+  /**
+   * Structured models sometimes copy a local clock ("7pm") into an ISO string
+   * and incorrectly append Z. When the source contains exactly one explicit
+   * clock and its hour matches the ISO components, reinterpret those components
+   * in the user's timezone. Genuine UTC/GMT requests remain absolute.
+   */
+  private correctMislabelledUtcWallClock(
+    triggerTime: string,
+    sourceUserMessage: string,
+    timezone: string,
+  ): number | null {
+    if (/\b(?:UTC|GMT)\b/i.test(sourceUserMessage)) return null;
+    const iso = triggerTime.trim().match(
+      /^(\d{4})-(\d{2})-(\d{2})[T\s](\d{2}):(\d{2})(?::\d{2}(?:\.\d+)?)?Z$/i,
+    );
+    if (!iso) return null;
+
+    const clocks = sourceUserMessage.match(
+      /\b(?:(?:0?\d|1[0-2])(?::[0-5]\d)?\s*(?:am|pm)|(?:[01]?\d|2[0-3]):[0-5]\d)\b/gi,
+    ) ?? [];
+    if (clocks.length !== 1) return null;
+    const sourceClock = this.parseTimeOfDay(clocks[0]);
+    if (!sourceClock) return null;
+
+    const [, year, month, day, hour, minute] = iso.map(Number);
+    if (sourceClock.hour !== hour || sourceClock.minute !== minute) return null;
+    const absolute = new Date(triggerTime);
+    if (Number.isNaN(absolute.getTime())) return null;
+    try {
+      const rendered = new Intl.DateTimeFormat('en-GB', {
+        timeZone: timezone,
+        hourCycle: 'h23',
+        hour: '2-digit',
+        minute: '2-digit',
+      }).formatToParts(absolute);
+      const value = (type: string) => Number(rendered.find(part => part.type === type)?.value);
+      if (value('hour') === sourceClock.hour && value('minute') === sourceClock.minute) return null;
+    } catch {
+      return null;
+    }
+    return this.wallClockToEpoch(year, month, day, hour, minute, timezone);
   }
 
   /**

@@ -59,7 +59,9 @@ Rules:
 - For an explicitly requested daily/evening reflection, turn administrative
   wording like "recap what happened; follow-ups needed" into one compact,
   natural question such as "Anything from today worth carrying forward?"
-  Do not repeat the scheduler's recap/follow-up instructions.
+  Do not repeat the scheduler's recap/follow-up instructions. When RECENT
+  CONVERSATION contains a concrete unresolved activity from today, anchor the
+  message to that activity instead of sending a generic day-reflection prompt.
 - Reflect uncertainty faithfully: "might", "tentative", and "if it's still on"
   must not become confirmed facts.
 - If CURRENT CONTEXT or a relevant newer turn in RECENT CONVERSATION explicitly
@@ -407,7 +409,9 @@ export async function prepareUserFacingProactiveMessage(
   if (!raw.trim() || isOpaqueStructuredPayload(raw)) return { outcome: 'failed' };
   if (proactiveContextIsResolved(options.context)) return { outcome: 'skip' };
 
-  const deterministicReflection = realizeRequestedReflection(raw, options.recentMessages ?? []);
+  const deterministicReflection = options.recentConversation?.trim()
+    ? null
+    : realizeRequestedReflection(raw, options.recentMessages ?? []);
   if (deterministicReflection) {
     return { outcome: 'ready', message: deterministicReflection };
   }

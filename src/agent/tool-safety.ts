@@ -76,6 +76,7 @@ const SENSITIVE_CONTEXT =
   /\b(?:health|medical|medicine|medication|diagnos(?:is|ed)|doctor|hospital|therapy|therapist|mental health|anxiety|depress(?:ion|ed)|ill|sick|unwell|injur(?:y|ed)|pain|symptom|pregnan|period|weight|gym|workout|exercise|salary|bank|account number|legal case)\b/i;
 const AMBIGUOUS_SHORTHAND = /\b\d+(?:\.\d+)?\s*(?:x|×)\s*\d+(?:\.\d+)?\b/i;
 const EXPLICIT_SET_REP_WORDING = /\b(?:sets?|reps?|repetitions?|times?|by)\b/i;
+const STANDARD_THREE_PART_WORKOUT = /(?:\b\d+(?:\.\d+)?\s*(?:kg|lb|lbs)\s*(?:x|×)\s*\d+(?:\.\d+)?\s*(?:x|×)\s*\d+(?:\.\d+)?\b|\b\d+(?:\.\d+)?\s*(?:x|×)\s*\d+(?:\.\d+)?\s*(?:x|×)\s*\d+(?:\.\d+)?\s*(?:kg|lb|lbs)\b)/i;
 
 function stable(value: unknown): string {
   if (value === null || value === undefined) return String(value);
@@ -201,12 +202,13 @@ export function isExternalBashMutation(command: string): boolean {
   const externalUrls = [...command.matchAll(/https?:\/\/[^\s'"\\]+/gi)]
     .map(match => match[0].replace(/[),.;]+$/, ''));
   const destructiveQueryMethod = /(?:(?:-X|--request)\s*['"]?(?:PUT|PATCH|DELETE)\b|\b(?:requests|httpx|axios|got)\s*\.\s*(?:put|patch|delete)\s*\(|\bfetch\s*\([\s\S]{0,2000}?\bmethod\s*:\s*['"](?:PUT|PATCH|DELETE)['"])/i.test(command);
-  const notionQueriesOnly = !destructiveQueryMethod
+  const notionReadOnlyPostsOnly = !destructiveQueryMethod
     && externalUrls.length > 0
     && externalUrls.every(url =>
-      /^https:\/\/api\.notion\.com\/v1\/(?:databases|data_sources)\/[^/\s]+\/query(?:\?|$)/i.test(url),
+      /^https:\/\/api\.notion\.com\/v1\/(?:databases|data_sources)\/[^/\s]+\/query(?:\?|$)/i.test(url)
+      || /^https:\/\/api\.notion\.com\/v1\/search(?:\?|$)/i.test(url),
     );
-  if (notionQueriesOnly) return false;
+  if (notionReadOnlyPostsOnly) return false;
 
   const curlWrite = /\bcurl\b[\s\S]*(?:(?:-X|--request)\s*['"]?(?:POST|PUT|PATCH|DELETE)\b|(?:--data(?:-raw|-binary|-urlencode)?|-d)\s)/i.test(command);
   const wgetWrite = /\bwget\b[\s\S]*(?:(?:--method(?:=|\s+))['"]?(?:POST|PUT|PATCH|DELETE)\b|--post-(?:data|file)(?:=|\s+))/i.test(command);
@@ -481,6 +483,13 @@ function hasExplicitExternalWriteIntent(
       && /\b(?:attach|download|file|image|pdf|photo|report|send|share|spreadsheet|video|workbook)\b/i.test(message);
   }
   if (isBoundTargetedConfirmation(message, previousAssistantMessage, toolUse)) return true;
+  if (
+    previousAssistantMessage
+    && turnRequiresMutationReceipt(message, previousAssistantMessage)
+    && toolTargetMentioned(previousAssistantMessage, toolUse)
+  ) {
+    return true;
+  }
 
   const requestedAction = directRequestedAction(message);
   if (!requestedAction || !actionsCompatible(requestedAction, toolMutationAction(toolUse))) return false;
@@ -557,6 +566,8 @@ export function assessToolCallForTurn(
   const payloadIsSensitive = declared?.sensitive || SENSITIVE_CONTEXT.test(serializedInput);
   const affirmativeFollowUp = /^\s*(?:yes|yep|yeah|ok(?:ay)?|sure|confirmed?)\b/i.test(message);
   const currentTurnAcknowledgesSensitivity = SENSITIVE_CONTEXT.test(message)
+    || STANDARD_THREE_PART_WORKOUT.test(message)
+    || /\b\d+(?:\.\d+)?\s*(?:kg|lb|lbs)\b/i.test(message)
     || boundConfirmation
     || (explicitIntent
       && affirmativeFollowUp
@@ -572,7 +583,11 @@ export function assessToolCallForTurn(
     };
   }
 
-  if (AMBIGUOUS_SHORTHAND.test(message) && !EXPLICIT_SET_REP_WORDING.test(message)) {
+  if (
+    AMBIGUOUS_SHORTHAND.test(message)
+    && !EXPLICIT_SET_REP_WORDING.test(message)
+    && !STANDARD_THREE_PART_WORKOUT.test(message)
+  ) {
     return {
       allowed: false,
       reason: 'The current request contains ambiguous numeric shorthand (for example “4x3”). Clarify what each number means before writing structured data.',
@@ -614,7 +629,8 @@ export function toolOutputIndicatesFailure(output: string): boolean {
   } catch {
     // Plain-text command output is handled by the narrow patterns below.
   }
-  return /^(?:error|failed|failure)\b/i.test(text)
+  return /(?:^|\n)\s*(?:error|failed|failure)\b/i.test(text)
+    || /\b(?:id|result|status)\s*:\s*error\b/i.test(text)
     || /\bHTTP\/\d(?:\.\d)?\s+[45]\d\d\b/i.test(text)
     || /^\s*[45]\d\d\s+(?:bad request|unauthori[sz]ed|forbidden|not found|conflict|server error)/i.test(text);
 }
@@ -622,4 +638,38 @@ export function toolOutputIndicatesFailure(output: string): boolean {
 export function hasUnverifiedSuccessClaim(response: string): boolean {
   return /\b(?:done|successfully|saved|sent|created|updated|logged|recorded|published|scheduled|completed)\b/i.test(response)
     && !/\b(?:not|wasn't|weren't|couldn't|could not|failed|unable|unverified|can't|cannot)\b/i.test(response);
+}
+
+/**
+ * Determine whether this turn promises a state change whose completion must be
+ * backed by a successful tool receipt. This also covers terse continuation
+ * payloads (for example another workout row after "anything else to add?").
+ */
+export function turnRequiresMutationReceipt(
+  userMessage: string,
+  previousAssistantMessage?: string,
+): boolean {
+  const message = currentInstruction(userMessage);
+  // A successful mutation receipt is required for writes, not merely for any
+  // locally executable request. In particular, "run", "test", "inspect", and
+  // "use" may execute tools without changing state. Treating those as writes
+  // caused the agent to repeat successful read-only tool calls and could consume
+  // mock/provider responses without ever producing a final answer.
+  if (directRequestedAction(message) && !INFORMATIONAL_UPDATE_REQUEST.test(message)) return true;
+
+  if (isTaskList(message) && /\b(?:priorit|plan|task|deadline|today|board)\b/i.test(previousAssistantMessage ?? '')) {
+    return true;
+  }
+
+  const previous = previousAssistantMessage ?? '';
+  const continuesMutationThread = /\b(?:notion|tracker|database|calendar|board|reminder|email|message|file|document|spreadsheet)\b/i.test(previous)
+    && /\b(?:add|added|anything else to add|create|created|log|logged|record|recorded|save|saved|schedule|scheduled|send|sent|update|updated)\b/i.test(previous);
+  if (!continuesMutationThread) return false;
+
+  const affirmative = EXPLICIT_CONFIRMATION.test(message);
+  const structuredPayload = /\b\d+(?:\.\d+)?\s*(?:kg|lb|lbs|minutes?|mins?|hours?|hrs?|reps?|sets?)\b/i.test(message)
+    || /\b\d+(?:\.\d+)?\s*(?:x|×)\s*\d+(?:\.\d+)?(?:\s*(?:x|×)\s*\d+(?:\.\d+)?)?\b/i.test(message)
+    || STANDARD_THREE_PART_WORKOUT.test(message)
+    || isTaskList(message);
+  return affirmative || structuredPayload;
 }

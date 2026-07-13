@@ -6742,6 +6742,21 @@ export class ScallopDatabase {
   }
 
   /**
+   * Repair a leased legacy/malformed task that has no execution configuration.
+   * It is deliverable reminder text, not unattended work. The active lease is
+   * retained so the same scheduler can finish delivery exactly once.
+   */
+  reclassifyLeasedTaskAsNudge(id: string, leaseToken: string): boolean {
+    const result = this.db.prepare(`
+      UPDATE scheduled_items
+      SET kind = 'nudge', type = 'reminder', updated_at = ?
+      WHERE id = ? AND kind = 'task' AND task_config IS NULL
+        AND status = 'processing' AND lease_token = ?
+    `).run(Date.now(), id, leaseToken);
+    return result.changes === 1;
+  }
+
+  /**
    * Update board-specific fields on a scheduled item
    */
   updateScheduledItemBoard(id: string, updates: {

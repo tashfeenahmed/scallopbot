@@ -168,6 +168,25 @@ describe('renderUserFacingProactiveMessage', () => {
     })).resolves.toBe('What from today do you want to pick up tomorrow?');
   });
 
+  it('uses recent live conversation instead of the canned reflection shortcut', async () => {
+    const router = {
+      executeWithFallback: vi.fn().mockResolvedValue({
+        response: { content: [{ type: 'text', text: 'Did you finish logging your leg workout?' }] },
+      }),
+    };
+    await expect(renderUserFacingProactiveMessage(
+      'Evening check-in with Tash - recap what happened today, any follow-ups needed',
+      router as any,
+      {
+        forceRewrite: true,
+        recentConversation: 'User: I am doing legs today.\nUser: Leg press - 3x8x110kg.',
+      },
+    )).resolves.toBe('Did you finish logging your leg workout?');
+    expect(router.executeWithFallback).toHaveBeenCalledOnce();
+    const request = router.executeWithFallback.mock.calls[0][0];
+    expect(request.messages[0].content).toContain('Leg press - 3x8x110kg');
+  });
+
   it('does not miscast the scheduler-label recipient as a third party', async () => {
     const router = {
       executeWithFallback: vi.fn()

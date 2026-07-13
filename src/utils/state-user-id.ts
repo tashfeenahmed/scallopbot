@@ -36,3 +36,29 @@ export function resolveStateUserId(
     ? DEFAULT_STATE_USER_ID
     : trimmed;
 }
+
+/**
+ * Resolve timezone configuration for a durable state owner. In a declared
+ * single-user deployment, board/reminder rows intentionally use `default`,
+ * while onboarding configuration may still live under the owner's channel ID.
+ * Prefer that explicit owner timezone over the synthetic default UTC row.
+ */
+export function resolveStateUserTimezone(
+  userId: string | null | undefined,
+  canonicalSingleUserIds: readonly string[],
+  getTimezone: (candidateUserId: string) => string,
+): string {
+  const requested = userId?.trim() || DEFAULT_STATE_USER_ID;
+  const direct = getTimezone(requested) || 'UTC';
+  if (resolveStateUserId(requested, canonicalSingleUserIds) !== DEFAULT_STATE_USER_ID) {
+    return direct;
+  }
+
+  for (const alias of canonicalSingleUserIds) {
+    const candidate = alias.trim();
+    if (!candidate) continue;
+    const timezone = getTimezone(candidate);
+    if (timezone && timezone !== 'UTC') return timezone;
+  }
+  return direct;
+}
