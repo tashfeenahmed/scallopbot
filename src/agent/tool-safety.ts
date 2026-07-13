@@ -13,6 +13,8 @@ export interface TurnToolSafetyContext {
 
 export interface ToolSafetyAssessment {
   allowed: boolean;
+  /** Optional typed reason more specific than local/external intent. */
+  code?: string;
   reason?: string;
   isMutation: boolean;
   isExternalMutation: boolean;
@@ -386,6 +388,49 @@ function hasExplicitLocalMutationIntent(message: string): boolean {
   return DIRECT_LOCAL_REQUEST.test(message);
 }
 
+function isPlanningTool(toolUse: ToolUseContent): boolean {
+  return /^(?:board|goals|reminder|triggers)$/i.test(toolUse.name);
+}
+
+function isTaskList(message: string): boolean {
+  const lines = message.split(/\r?\n/)
+    .map(line => line.replace(/^\s*(?:[-*•]|\d+[.)])\s*/, '').trim())
+    .filter(line => line.length > 0 && line.length <= 180);
+  return lines.length >= 2;
+}
+
+/** A reply to a planning check-in is an instruction to capture the plan. */
+function hasImplicitPlanningMutationIntent(
+  message: string,
+  previousAssistantMessage: string | undefined,
+  toolUse: ToolUseContent,
+): boolean {
+  if (!isPlanningTool(toolUse)) return false;
+  const priorPlanningPrompt = !!previousAssistantMessage
+    && /\b(?:focus|priorit(?:y|ies)|plan|agenda|tasks?|to-?do|today|tomorrow|pick up)\b/i.test(previousAssistantMessage);
+  const hasClockTime = /\b(?:at\s+)?(?:[01]?\d|2[0-3])(?::[0-5]\d)?\s*(?:am|pm)\b/i.test(message);
+  const timedItem = hasClockTime
+    && /\b(?:remind|schedule|put|call|meet(?:ing)?|appointment|deadline|due|take|pick up|send|submit)\b/i.test(message);
+  const correctionContinuation = !!previousAssistantMessage
+    && /\b(?:board|reminder|task|nudge|add|schedule)\b/i.test(previousAssistantMessage)
+    && /\b(?:not done|isn['’]?t done|new day|today|tomorrow|instead|change|correct)\b/i.test(message);
+  return (priorPlanningPrompt && isTaskList(message)) || timedItem || correctionContinuation;
+}
+
+function planningToolClaimsCompletion(toolUse: ToolUseContent): boolean {
+  if (!isPlanningTool(toolUse)) return false;
+  const action = actionFromInput(toolUse.input) ?? '';
+  const state = [toolUse.input.status, toolUse.input.column]
+    .filter((value): value is string => typeof value === 'string')
+    .join(' ');
+  return /^(?:complete|completed|done)$/i.test(action) || /\b(?:complete|completed|done)\b/i.test(state);
+}
+
+function currentTurnStatesCompletion(message: string): boolean {
+  if (/\b(?:not|isn['’]?t|wasn['’]?t)\s+(?:done|finished|complete|completed)\b/i.test(message)) return false;
+  return /\b(?:done|finished|complete|completed|already did|did it|have done|has been done)\b/i.test(message);
+}
+
 /** Telegram/API reply wrappers are context, not the current instruction. */
 export function currentInstruction(message: string): string {
   const trimmed = message.trim();
@@ -466,12 +511,23 @@ export function assessToolCallForTurn(
   const declared = skill?.frontmatter.metadata?.openclaw?.safety;
   if (!isExternalMutation) {
     if (hasExplicitLocalMutationIntent(message)
+      || hasImplicitPlanningMutationIntent(message, context.previousAssistantMessage, toolUse)
       || isCorrectiveFollowUp(message, context.previousAssistantMessage)) {
+      if (planningToolClaimsCompletion(toolUse) && !currentTurnStatesCompletion(message)) {
+        return {
+          allowed: false,
+          code: 'TASK_COMPLETION_EVIDENCE_REQUIRED',
+          reason: 'The tool call marks a current task complete, but the current user turn does not say it is complete. Create or keep it pending; never infer today’s completion from older memory.',
+          isMutation,
+          isExternalMutation,
+          signature,
+        };
+      }
       return { allowed: true, isMutation, isExternalMutation, signature };
     }
     return {
       allowed: false,
-      reason: 'This would mutate local state, but the current user message only asks to inspect or explain. Ask for an explicit change request before writing.',
+      reason: 'This local write is outside the current user request. Do not execute it and do not ask for permission; continue only with the requested outcome.',
       isMutation,
       isExternalMutation,
       signature,

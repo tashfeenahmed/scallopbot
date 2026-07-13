@@ -25,6 +25,12 @@ const notionCurlCreate = (id = 'curl-notion'): ToolUseContent => ({
   },
 });
 
+const boardAdd = (title: string, state = 'inbox'): ToolUseContent => ({
+  type: 'tool_use', id: `board-${title}`, name: 'board', input: {
+    action: 'add', kind: 'task', title, status: state,
+  },
+});
+
 describe('turn-scoped tool safety', () => {
   it('blocks an unrequested sensitive external write', () => {
     const verdict = assessToolCallForTurn(
@@ -187,6 +193,62 @@ describe('turn-scoped tool safety', () => {
     expect(informational.allowed).toBe(false);
     expect(informational.isExternalMutation).toBe(false);
     expect(requested.allowed).toBe(true);
+  });
+
+  it('treats a priorities-list reply as authorization to capture board items', () => {
+    const verdict = assessToolCallForTurn(
+      boardAdd('Personal projects'),
+      {
+        userMessage: 'Gym\nPersonal projects\nWork projects\nMeetings\nPut the bin out at 7pm',
+        previousAssistantMessage: "What's your main priority for today?",
+        timezone: 'Europe/Dublin',
+      },
+    );
+    expect(verdict.allowed).toBe(true);
+  });
+
+  it('does not mark today\'s task done from an older accomplishment', () => {
+    const verdict = assessToolCallForTurn(
+      boardAdd('Gym', 'done'),
+      {
+        userMessage: 'Gym\nPersonal projects\nWork projects\nMeetings\nPut the bin out at 7pm',
+        previousAssistantMessage: "What's your main priority for today?",
+        timezone: 'Europe/Dublin',
+      },
+    );
+    expect(verdict.allowed).toBe(false);
+    expect(verdict.code).toBe('TASK_COMPLETION_EVIDENCE_REQUIRED');
+    expect(verdict.reason).toMatch(/older memory/i);
+  });
+
+  it('allows an explicit current-turn completion', () => {
+    const verdict = assessToolCallForTurn(
+      boardAdd('Gym', 'done'),
+      { userMessage: 'Mark Gym done', timezone: 'Europe/Dublin' },
+    );
+    expect(verdict.allowed).toBe(true);
+  });
+
+  it('keeps a corrected new-day task pending without another permission prompt', () => {
+    const verdict = assessToolCallForTurn(
+      boardAdd('Gym', 'in_progress'),
+      {
+        userMessage: 'Today is a new day. Gym not done.',
+        previousAssistantMessage: 'Should I add these tasks to your board and set the reminder?',
+        timezone: 'Europe/Dublin',
+      },
+    );
+    expect(verdict.allowed).toBe(true);
+  });
+
+  it('blocks an unrelated board write without asking the user for permission', () => {
+    const verdict = assessToolCallForTurn(
+      boardAdd('Invented task'),
+      { userMessage: 'Explain my priorities', timezone: 'Europe/Dublin' },
+    );
+    expect(verdict.allowed).toBe(false);
+    expect(verdict.reason).toMatch(/outside the current user request/i);
+    expect(verdict.reason).toMatch(/do not ask for permission/i);
   });
 
   it.each(['Build the PDF', 'Render the report', 'Compile the document', 'Export the analysis']) (

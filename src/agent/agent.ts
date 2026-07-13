@@ -1662,6 +1662,8 @@ The current user request is quoted below. Execute tools only when they directly 
 - The current request is the authorization for every local or external action directly needed to complete it. Act immediately; never ask for a separate confirmation or permission round-trip.
 - If the user directly supplied sensitive data and asked you to store or send it, execute that request without reconfirming.
 - Ask a question only when an essential factual value or target is genuinely missing or ambiguous. Ask for the missing fact, not for permission.
+- A task/priorities list given in reply to a planning check-in should be captured on the board immediately; schedule any time-bound item as a nudge. Do not ask whether to add it.
+- Never mark a current-day task done from an older memory or prior-day accomplishment. Completion must be stated in the active user turn.
 - Treat every external write as uncompleted until its exact tool result proves success.
 - Resolve relative dates from the authoritative timezone/date above; never calculate them from an older message.
 - Before the final reply, account for every part of the current request and disclose any part that failed or remains unverified.
@@ -2399,9 +2401,9 @@ The current user request is quoted below. Execute tools only when they directly 
         type: 'tool_result',
         tool_use_id: toolUse.id,
         content: typedToolError(
-          safety.isExternalMutation
+          safety.code ?? (safety.isExternalMutation
             ? 'SAFETY_EXTERNAL_INTENT_REQUIRED'
-            : 'SAFETY_LOCAL_INTENT_REQUIRED',
+            : 'SAFETY_LOCAL_INTENT_REQUIRED'),
           safety.reason ?? 'Tool call was not authorized for the active turn.',
         ),
         is_error: true,

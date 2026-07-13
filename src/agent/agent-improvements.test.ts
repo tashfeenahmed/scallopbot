@@ -624,6 +624,54 @@ describe('Agent improvements integration', () => {
         .toContain('never ask for a separate confirmation');
     });
 
+    it('captures a planning check-in reply directly and keeps today\'s tasks pending', async () => {
+      const { Agent } = await import('./agent.js');
+      const { SessionManager } = await import('./session.js');
+      const handler = vi.fn().mockResolvedValue({ success: true, output: '{"success":true,"id":"board-item"}' });
+      const skill = {
+        name: 'board', description: 'Task board', path: '/tmp/board/SKILL.md', source: 'workspace' as const,
+        frontmatter: { name: 'board', description: 'Task board' }, content: '', available: true,
+        hasScripts: true, handler,
+      };
+      const registry = {
+        getSkill: vi.fn((name: string) => name === 'board' ? skill : null),
+        getToolDefinitions: vi.fn(() => [{ name: 'board', description: 'Task board', input_schema: { type: 'object', properties: {} } }]),
+        generateSkillPrompt: vi.fn(() => ''),
+      };
+      const provider = seqProvider([
+        {
+          content: [
+            { type: 'tool_use', id: 'board-gym', name: 'board', input: { action: 'add', kind: 'task', title: 'Gym', status: 'inbox' } },
+            { type: 'tool_use', id: 'board-project', name: 'board', input: { action: 'add', kind: 'task', title: 'Personal projects', status: 'inbox' } },
+            { type: 'tool_use', id: 'board-bin', name: 'board', input: { action: 'add', kind: 'nudge', title: 'Put the bin out', trigger_time: 'today 7pm' } },
+          ],
+          stopReason: 'tool_use', usage: { inputTokens: 5, outputTokens: 5 }, model: 'mock',
+        },
+        endTurn('Added today\'s priorities and scheduled the bin reminder.'),
+      ]);
+      const sessions = new SessionManager(db);
+      const session = await sessions.createSession();
+      await sessions.addMessage(session.id, {
+        role: 'assistant',
+        content: "What's your main priority for today—any deadlines looming or things that need attention?",
+      });
+      const agent = new Agent({
+        provider, sessionManager: sessions, skillRegistry: registry as any,
+        workspace: testDir, logger: pino({ level: 'silent' }), maxIterations: 3,
+      });
+
+      const result = await agent.processMessage(
+        session.id,
+        'Gym\nPersonal projects\nWork projects\nMeetings\nPut the bin out at 7pm',
+      );
+
+      expect(handler).toHaveBeenCalledTimes(3);
+      expect(result.response).toContain('scheduled the bin reminder');
+      const stored = JSON.stringify(await sessions.getSession(session.id));
+      expect(stored).not.toContain('SAFETY_LOCAL_INTENT_REQUIRED');
+      expect(stored).not.toContain('explicitly instruct');
+    });
+
     it('cancels a stale tool plan and re-locks intent when a mid-turn interrupt arrives', async () => {
       const { Agent } = await import('./agent.js');
       const { SessionManager } = await import('./session.js');
