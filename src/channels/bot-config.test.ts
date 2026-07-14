@@ -79,6 +79,23 @@ describe('BotConfigManager', () => {
       expect(config1.botName).toBe(config2.botName);
       expect(config1.personalityId).toBe(config2.personalityId);
     });
+
+    it('migrates the legacy Moonshot model ID to the routable provider name', () => {
+      db.upsertBotConfig('legacy-user', { modelId: 'moonshot-v1-128k' });
+
+      expect(manager.getUserConfig('legacy-user').modelId).toBe('moonshot');
+      expect(db.getBotConfig('legacy-user')?.modelId).toBe('moonshot');
+    });
+
+    it('adopts a single user model for background routing without overriding a runtime choice', async () => {
+      await manager.updateUserConfig('owner', { modelId: 'moonshot' });
+      expect(manager.adoptSingleUserModelAsGlobal('owner')).toBe('moonshot');
+      expect(manager.getGlobalModel()).toBe('moonshot');
+
+      manager.setGlobalModel('openrouter');
+      expect(manager.adoptSingleUserModelAsGlobal('owner')).toBe('openrouter');
+      expect(manager.getGlobalModel()).toBe('openrouter');
+    });
   });
 
   describe('updateUserConfig', () => {

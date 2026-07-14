@@ -57,6 +57,11 @@ const DEFAULT_CONFIG: UserBotConfig = {
 const DEFAULT_PERSONALITY_PROMPT =
   'You are a friendly and helpful assistant. Be warm, conversational, and approachable. Use a casual tone while remaining helpful and accurate.';
 
+/** Historical rows stored a concrete Moonshot model ID where routing now expects a provider name. */
+function normalizeStoredModelId(modelId: string): string {
+  return /^(?:moonshot-v1-128k|kimi-k2\.5)$/i.test(modelId) ? 'moonshot' : modelId;
+}
+
 export class BotConfigManager {
   /** runtime_keys key for the global model switch (set by `/model`). */
   private static readonly GLOBAL_MODEL_KEY = 'runtime:model';
@@ -102,6 +107,15 @@ export class BotConfigManager {
     userId = this.normalizeUserId(userId);
     const row = this.db.getBotConfig(userId);
     if (row) {
+      const normalizedModelId = normalizeStoredModelId(row.modelId);
+      if (normalizedModelId !== row.modelId) {
+        const migrated = this.db.upsertBotConfig(userId, { modelId: normalizedModelId });
+        this.logger?.info(
+          { previousModelId: row.modelId, modelId: normalizedModelId },
+          'Migrated legacy model selection to provider routing name',
+        );
+        return this.rowToUserConfig(migrated);
+      }
       return this.rowToUserConfig(row);
     }
 
@@ -161,6 +175,21 @@ export class BotConfigManager {
   getGlobalModel(): string | undefined {
     const value = this.db.getRuntimeKey(BotConfigManager.GLOBAL_MODEL_KEY);
     return value && value !== 'auto' ? value : undefined;
+  }
+
+  /**
+   * Older single-user deployments persisted only the chat selection. Bring the
+   * global/background switch into agreement once, without overriding an
+   * explicit modern runtime choice.
+   */
+  adoptSingleUserModelAsGlobal(userId: string): string | undefined {
+    const existing = this.getGlobalModel();
+    if (existing) return existing;
+    const selected = this.getUserConfig(userId).modelId;
+    if (selected === 'auto') return undefined;
+    this.setGlobalModel(selected);
+    this.logger?.info({ modelId: selected }, 'Adopted single-user chat model for background routing');
+    return selected;
   }
 
   /**

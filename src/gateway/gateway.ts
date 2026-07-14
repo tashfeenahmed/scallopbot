@@ -259,6 +259,9 @@ export class Gateway {
 
     // Initialize config manager early (needed by fact extractor and agent for timezone)
     this.configManager = new BotConfigManager(this.scallopMemoryStore.getDatabase(), this.logger);
+    if (allowedTelegramUsers.length === 1) {
+      this.configManager.adoptSingleUserModelAsGlobal(allowedTelegramUsers[0]);
+    }
 
     // Backfill profiles without mixing facts between durable state owners.
     const backfillResult = this.scallopMemoryStore.backfillProfiles();
