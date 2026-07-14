@@ -81,6 +81,10 @@ A gap scanner identifies explicit open loops, approaching deadlines, and stale/b
 
 Generated outreach is realized immediately before delivery using current context and recent message history. Social-quality gates reject internal reasoning, generic check-ins, surveillance language, faux intimacy, pressure, and multi-question interrogations; literal reminders written by the user remain unchanged.
 
+### Single Outcome Brain
+
+Foreground replies, proactive candidates, scheduled results, sub-agent completions, workflow steps, progress messages, and file deliveries all converge through one shared `OutcomeBrain` before public delivery or side effects. Producers only propose outcomes; the brain combines the active request with recent conversation, durable user facts/profile, board work, goals, source state, time, provenance, evidence, and recent decisions. It can approve, rewrite, suppress, or block, and records only hashed decision receipts—not prompts, messages, tool payloads, or private reasoning. Exact user-authored reminders remain deterministic, while inferred outreach fails closed if final arbitration is unavailable.
+
 ### Spreading Activation
 
 ACT-R-inspired spreading activation over typed relation graphs (UPDATES, EXTENDS, DERIVES) with 3-step propagation, fan-out normalisation, and Gaussian noise to prevent deterministic retrieval. The same pure function powers both normal retrieval and REM dream exploration (with elevated noise).
@@ -321,6 +325,8 @@ Actionable reminders automatically execute when they contain action words (check
 |  CLI --------+  | Session |    |         | Anthropic |           |
 |  API/WS -----+  | Manager |    |         | Moonshot  |           |
 |                  +---------+    |         | OpenAI    |           |
+|                       |         |         |           |           |
+|                       +--> OUTCOME BRAIN --> delivery/actions     |
 |                                 |         | xAI       |           |
 |                 +---------------+-+       | Groq      |           |
 |                 |  COGNITIVE LAYER |       | Ollama    |           |

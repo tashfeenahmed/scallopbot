@@ -10,6 +10,7 @@ metadata:
     emoji: "\U0001F4E8"
     safety:
       externalWrite: true
+      publicCommunication: true
     requires:
       bins: []
 ---

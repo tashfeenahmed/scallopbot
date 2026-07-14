@@ -168,6 +168,23 @@ describe('Gateway', () => {
       expect(sessionManager).toBeDefined();
     });
 
+    it('shares exactly one outcome brain across foreground, child, and outbound paths', async () => {
+      const { Gateway } = await import('./gateway.js');
+      const { pino } = await import('pino');
+      const gateway = new Gateway({
+        config: createMockConfig(testDir),
+        logger: pino({ level: 'silent' }),
+      });
+      await gateway.initialize();
+
+      const runtime = gateway as any;
+      expect(runtime.outcomeBrain).toBeDefined();
+      expect(runtime.outcomeBrain.getId()).toBe('outcome-brain:primary');
+      expect(runtime.agent.outcomeBrain).toBe(runtime.outcomeBrain);
+      expect(runtime.subAgentExecutor.outcomeBrain).toBe(runtime.outcomeBrain);
+      expect(runtime.outboundQueue.outcomeBrain).toBe(runtime.outcomeBrain);
+    });
+
     it('fails closed when a workflow session cannot be resolved', async () => {
       const { Gateway } = await import('./gateway.js');
       const { pino } = await import('pino');
@@ -234,7 +251,13 @@ describe('Gateway', () => {
       });
 
       expect(result.success, JSON.stringify(result)).toBe(true);
-      expect(sendSpy).toHaveBeenCalledWith('telegram:123', await fs.realpath(filePath), 'Report');
+      expect(sendSpy).toHaveBeenCalledWith(
+        'telegram:123',
+        await fs.realpath(filePath),
+        'Report',
+        'session-1',
+        undefined,
+      );
     });
 
     it('refuses to substitute an older PDF when a newer generated sibling exists', async () => {

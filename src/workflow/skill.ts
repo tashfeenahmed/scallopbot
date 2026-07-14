@@ -25,6 +25,9 @@ export function createExecuteWorkflowSkill(executor: SafeWorkflowExecutor): Skil
           workspace: context.workspace,
           sessionId: context.sessionId,
           userId: context.userId,
+          userMessage: context.userMessage,
+          previousAssistantMessage: context.previousAssistantMessage,
+          turnStartedAt: context.turnStartedAt,
         });
         return { success: report.success, output: JSON.stringify(report) };
       } catch (error) {

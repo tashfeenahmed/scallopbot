@@ -42,6 +42,7 @@ import {
   type MessageDeliveryResult,
   type TriggerSource,
   type TriggerSourceRegistry,
+  isMessageDeliverySuppressed,
   messageWasDelivered,
   parseUserIdPrefix,
 } from '../triggers/index.js';
@@ -59,6 +60,7 @@ import { SafeWorkflowExecutor, createExecuteWorkflowSkill } from '../workflow/in
 import { matchesPolicy } from '../skills/tool-policy.js';
 import { resolveStateUserId, resolveStateUserTimezone } from '../utils/state-user-id.js';
 import { inspectArtifact, validateArtifactForDelivery } from '../artifacts/delivery.js';
+import { OutcomeBrain } from '../brain/index.js';
 
 export interface GatewayOptions {
   config: Config;
@@ -95,6 +97,7 @@ export class Gateway {
   private announceQueue: AnnounceQueue | null = null;
   private interruptQueue: InterruptQueue | null = null;
   private outboundQueue: OutboundQueue | null = null;
+  private outcomeBrain: OutcomeBrain | null = null;
   private subAgentDeliveryTimer: NodeJS.Timeout | null = null;
   /** Explicit aliases for this deployment's single canonical state owner. */
   private canonicalSingleUserIds: string[] = [];
@@ -447,6 +450,18 @@ export class Gateway {
     this.sessionManager = new SessionManager(this.scallopMemoryStore!.getDatabase());
     this.logger.debug('Session manager initialized (SQLite)');
 
+    // Every dynamic message/action converges here. All other components only
+    // propose outcomes and share this exact process-level instance.
+    this.outcomeBrain = new OutcomeBrain({
+      db: this.scallopMemoryStore!.getDatabase(),
+      logger: this.logger,
+      router: this.router!,
+      goalService: this.goalService ?? undefined,
+      getTimezone: (userId: string) => this.getUserTimezone(userId),
+      canonicalSingleUserIds: this.canonicalSingleUserIds,
+    });
+    this.logger.info({ brainId: this.outcomeBrain.getId() }, 'Shared outcome brain initialized');
+
     // Shared evidence recorder: successful multi-tool child workflows can feed
     // the same held-out, privacy-gated procedural skill evolution as main turns.
     const evolutionRecorder = this.config.evolution?.enabled
@@ -545,6 +560,7 @@ export class Gateway {
       canonicalSingleUserIds: this.canonicalSingleUserIds,
       deliveryOutbox: this.scallopMemoryStore!.getDatabase(),
       evolutionRecorder,
+      outcomeBrain: this.outcomeBrain,
       skillPolicyResolver: async (skillName, context) => {
         if (this.config.tools?.policy && !matchesPolicy(skillName, this.config.tools.policy)) return false;
         const parent = await this.sessionManager!.getSession(context.parentSessionId);
@@ -568,6 +584,24 @@ export class Gateway {
         const channelId = session?.metadata?.channelId as string | undefined;
         const channelPolicy = channelId ? this.config.tools?.channelPolicies?.[channelId] : undefined;
         return !channelPolicy || matchesPolicy(toolName, channelPolicy);
+      },
+      authorizeStep: async (toolUse, skill, context) => {
+        if (!this.outcomeBrain) return false;
+        const userId = context.userId ?? 'default';
+        const decision = await this.outcomeBrain.decideAction({
+          source: 'workflow',
+          userId,
+          sessionId: context.sessionId,
+          toolUse,
+          skill,
+          turn: {
+            userMessage: context.userMessage ?? 'Run the requested workflow.',
+            previousAssistantMessage: context.previousAssistantMessage,
+            timezone: this.getUserTimezone(userId),
+            now: new Date(context.turnStartedAt ?? Date.now()),
+          },
+        });
+        return decision.assessment.allowed;
       },
     });
     this.skillRegistry!.registerSkill(createExecuteWorkflowSkill(workflowExecutor));
@@ -614,6 +648,7 @@ export class Gateway {
       enableComplexityAnalysis: this.config.routing.enableComplexityAnalysis,
       canonicalSingleUserIds: this.canonicalSingleUserIds,
       evolutionRecorder,
+      outcomeBrain: this.outcomeBrain,
       announceQueue: this.announceQueue,
       subAgentExecutor: this.subAgentExecutor,
       interruptQueue: this.interruptQueue,
@@ -625,6 +660,7 @@ export class Gateway {
       sendMessage: (userId: string, message: string) => this.handleProactiveMessage(userId, message),
       logger: this.logger,
       router: this.router || undefined,
+      outcomeBrain: this.outcomeBrain,
     });
 
     // Initialize unified scheduler (handles both user reminders and agent triggers)
@@ -1023,7 +1059,7 @@ export class Gateway {
     // send_message skill
     const sendMessageSkill = defineSkill('send_message', 'Send a text message to the user immediately. Use this for conversational, human-like messaging.')
       .userInvocable(false)
-      .safety({ externalWrite: true })
+      .safety({ externalWrite: true, publicCommunication: true })
       .inputSchema({
         type: 'object',
         properties: {
@@ -1039,7 +1075,12 @@ export class Gateway {
         if (!ctx.userId) {
           return { success: false, output: 'Cannot send message - user ID not available' };
         }
-        const ok = await this.handleMessageSend(ctx.userId, message.trim());
+        const ok = await this.handleMessageSend(
+          ctx.userId,
+          message.trim(),
+          ctx.sessionId,
+          ctx.userMessage,
+        );
         return ok
           ? { success: true, output: 'Message sent' }
           : { success: false, output: 'Failed to send message - check logs for details' };
@@ -1084,7 +1125,7 @@ export class Gateway {
     // send_file skill
     const sendFileSkill = defineSkill('send_file', 'Send a file to the user via chat. Use this to send PDFs, images, documents, or any file the user requests.')
       .userInvocable(false)
-      .safety({ externalWrite: true })
+      .safety({ externalWrite: true, publicCommunication: true })
       .inputSchema({
         type: 'object',
         properties: {
@@ -1161,7 +1202,13 @@ export class Gateway {
           };
         }
 
-        const ok = await this.handleFileSend(ctx.userId, realFilePath, caption);
+        const ok = await this.handleFileSend(
+          ctx.userId,
+          realFilePath,
+          caption,
+          ctx.sessionId,
+          ctx.userMessage,
+        );
         if (ok) {
           const fileName = pathMod.basename(realFilePath);
           const sizeKB = (stats.size / 1024).toFixed(1);
@@ -1702,7 +1749,11 @@ export class Gateway {
         );
         if (parent && !alreadyInjected) {
           await this.sessionManager.addMessage(delivery.parentSessionId, {
-            role: 'assistant',
+            // Provider-role `user` is the protocol carrier for internal tool/
+            // worker results. The explicit marker makes the durable kind
+            // system_internal, so dashboards never mistake this for a public
+            // assistant reply.
+            role: 'user',
             content: `${marker}\n${JSON.stringify(payload.result)}`,
           });
         }
@@ -1715,8 +1766,23 @@ export class Gateway {
           const message = succeeded
             ? `${payload.label} is finished — ${summary}`
             : `${payload.label} couldn't finish yet — ${blocker || summary}`;
-          const sent = await this.handleProactiveMessage(delivery.userId, message);
-          if (!messageWasDelivered(sent)) throw new Error('No channel confirmed delivery');
+          const sent = await this.outboundQueue?.createHandler()(
+            delivery.userId,
+            message,
+            {
+              scheduledItemId: `subagent:${payload.runId}`,
+              ownerUserId: delivery.userId,
+              outcome: {
+                source: 'subagent_completion',
+                sessionId: delivery.parentSessionId,
+                activeRequest: payload.label,
+                evidenceVerified: true,
+              },
+            },
+          );
+          if (!sent || (!messageWasDelivered(sent) && !isMessageDeliverySuppressed(sent))) {
+            throw new Error('No channel confirmed delivery');
+          }
         }
         db.completeSubAgentDelivery(delivery.runId, delivery.leaseToken);
       } catch (error) {
@@ -1752,8 +1818,26 @@ export class Gateway {
    * Handle sending a file to a user
    * Uses trigger source abstraction for multi-channel support
    */
-  private async handleFileSend(userId: string, filePath: string, caption?: string): Promise<boolean> {
+  private async handleFileSend(
+    userId: string,
+    filePath: string,
+    caption?: string,
+    sessionId?: string,
+    activeRequest?: string,
+  ): Promise<boolean> {
     this.logger.info({ userId, filePath }, 'Sending file to user');
+
+    if (this.outcomeBrain) {
+      const decision = await this.outcomeBrain.decideFile({
+        userId,
+        sessionId,
+        filePath,
+        caption,
+        activeRequest,
+      });
+      if (!decision.approved) return false;
+      caption = decision.caption;
+    }
 
     const { source: triggerSource, rawUserId } = this.resolveTriggerSource(userId);
 
@@ -1771,8 +1855,25 @@ export class Gateway {
    * This allows the agent to send multiple messages during its execution loop
    * Uses trigger source abstraction for multi-channel support
    */
-  private async handleMessageSend(userId: string, message: string): Promise<boolean> {
+  private async handleMessageSend(
+    userId: string,
+    message: string,
+    sessionId?: string,
+    activeRequest?: string,
+  ): Promise<boolean> {
     this.logger.debug({ userId, messageLength: message.length }, 'Sending message to user');
+
+    if (this.outcomeBrain) {
+      const decision = await this.outcomeBrain.decideMessage({
+        source: 'progress',
+        userId,
+        sessionId,
+        messages: [message],
+        activeRequest,
+      });
+      if (decision.decision !== 'send' || !decision.message) return false;
+      message = decision.message;
+    }
 
     const { source: triggerSource, rawUserId } = this.resolveTriggerSource(userId);
 

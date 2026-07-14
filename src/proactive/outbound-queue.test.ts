@@ -65,6 +65,58 @@ describe('OutboundQueue', () => {
   });
 
   describe('single message passthrough', () => {
+    it('uses the shared outcome brain as the final delivery authority', async () => {
+      const outcomeBrain = {
+        decideMessage: vi.fn().mockResolvedValue({
+          brainId: 'outcome-brain:primary',
+          decisionId: 'decision-1',
+          decision: 'send',
+          message: 'Anything from today worth carrying forward?',
+          reasonCode: 'rewritten',
+          revised: true,
+        }),
+      };
+      const { queue, sendMessage, router } = createQueue({ outcomeBrain: outcomeBrain as any });
+      const onDeliveredMessage = vi.fn();
+
+      await queue.createHandler()(
+        'user1',
+        'Evening check-in with Jordan - recap what happened today',
+        {
+          scheduledItemId: 'item-1',
+          ownerUserId: 'user1',
+          outcome: { source: 'proactive', activeRequest: 'evening reflection' },
+          onDeliveredMessage,
+        },
+      );
+
+      expect(outcomeBrain.decideMessage).toHaveBeenCalledWith(expect.objectContaining({
+        source: 'proactive',
+        userId: 'user1',
+        messages: ['Evening check-in with Jordan - recap what happened today'],
+      }));
+      expect(sendMessage).toHaveBeenCalledWith('user1', 'Anything from today worth carrying forward?');
+      expect(onDeliveredMessage).toHaveBeenCalledWith('Anything from today worth carrying forward?');
+      expect(router.executeWithFallback).not.toHaveBeenCalled();
+    });
+
+    it('does not touch the transport when the shared brain suppresses a proposal', async () => {
+      const outcomeBrain = {
+        decideMessage: vi.fn().mockResolvedValue({
+          brainId: 'outcome-brain:primary',
+          decisionId: 'decision-1',
+          decision: 'suppress',
+          reasonCode: 'stale',
+          revised: false,
+        }),
+      };
+      const { queue, sendMessage } = createQueue({ outcomeBrain: outcomeBrain as any });
+      const result = await queue.createHandler()('user1', 'Old follow-up');
+
+      expect(result).toEqual({ sent: false, suppressed: true, reason: 'stale' });
+      expect(sendMessage).not.toHaveBeenCalled();
+    });
+
     it('sends a single message directly without LLM', async () => {
       const { queue, sendMessage, router } = createQueue();
 

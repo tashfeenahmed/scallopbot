@@ -36,6 +36,7 @@ import { compact, compactSync, estimateMessagesTokens } from '../routing/compact
 import { effectiveContextWindowTokens } from '../routing/model-limits.js';
 import { selectBest, scoreResponseHeuristic } from './critic.js';
 import type { EvolutionRecorder } from '../evolution/signals.js';
+import type { OutcomeBrain } from '../brain/index.js';
 import { stripThinkTags } from '../utils/output-safety.js';
 import { resolveStateUserId } from '../utils/state-user-id.js';
 import { compactCompletedConversationHistory } from '../memory/session-message-view.js';
@@ -136,6 +137,8 @@ export interface AgentOptions {
   turnTimeoutMs?: number;
   /** Minimal worker prompt: no channel/user-facing/skill-management/persona sections. */
   subAgentMode?: boolean;
+  /** Shared final outcome authority for messages and side effects. */
+  outcomeBrain?: OutcomeBrain;
 }
 
 export type AgentCompletionReason =
@@ -291,6 +294,7 @@ export class Agent {
   private foregroundCallTimeoutMs: number;
   private turnTimeoutMs: number;
   private subAgentMode: boolean;
+  private outcomeBrain: OutcomeBrain | null;
   private maxToolCallsPerResponse: number;
   private foregroundEvidence = new Map<string, EvidenceClaimReceipt[]>();
   private foregroundSuccessfulTools = new Map<string, Set<string>>();
@@ -338,6 +342,7 @@ export class Agent {
       ? Math.max(this.foregroundCallTimeoutMs, configuredTurnTimeoutMs)
       : 0;
     this.subAgentMode = options.subAgentMode ?? false;
+    this.outcomeBrain = options.outcomeBrain ?? null;
     this.maxToolCallsPerResponse = Math.min(
       512,
       Math.max(4, Math.floor(options.maxToolCallsPerResponse ?? DEFAULT_MAX_TOOL_CALLS_PER_RESPONSE)),
@@ -660,6 +665,7 @@ export class Agent {
     let emptyEndTurnRetries = 0;
     let unverifiedCompletionRetries = 0;
     let finalResponse = '';
+    let finalOutcomeApplied = false;
     let completionReason: AgentCompletionReason | null = null;
     // Self-evolution signal accounting (best-effort, captured at turn end).
     let totalToolCalls = 0;
@@ -1220,6 +1226,15 @@ export class Agent {
           completionReason = 'tool_loop';
         }
 
+        finalResponse = await this.finalizePublicResponse(
+          sessionId,
+          channelUserId,
+          userMessage,
+          finalResponse,
+        );
+        finalOutcomeApplied = true;
+        persistContent = [{ type: 'text', text: finalResponse }];
+
         // Add assistant response to session
         await this.persistAssistantMessage(sessionId, persistContent);
 
@@ -1423,6 +1438,14 @@ export class Agent {
     completionReason ??= 'iteration_limit';
     if (!finalResponse.trim()) {
       finalResponse = 'I stopped without a reliable final result. Nothing unverified has been marked complete; please retry this request.';
+    }
+    if (!finalOutcomeApplied) {
+      finalResponse = await this.finalizePublicResponse(
+        sessionId,
+        channelUserId,
+        userMessage,
+        finalResponse,
+      );
     }
     await this.ensureFinalResponsePersisted(sessionId, finalResponse);
 
@@ -1982,6 +2005,32 @@ The current user request is quoted below. Execute tools only when they directly 
     return true;
   }
 
+  /**
+   * The conversational model proposes the reply, but the shared outcome brain
+   * owns the only public boundary. Worker-agent text remains an internal
+   * proposal until its parent delivery is arbitrated separately.
+   */
+  private async finalizePublicResponse(
+    sessionId: string,
+    userId: string,
+    activeRequest: string,
+    response: string,
+  ): Promise<string> {
+    const fallback = stripThinkTags(response).trim();
+    if (!this.outcomeBrain || this.subAgentMode) return fallback;
+    const outcome = await this.outcomeBrain.decideMessage({
+      source: 'foreground',
+      userId,
+      sessionId,
+      messages: [response],
+      activeRequest,
+      evidenceVerified: true,
+    });
+    return outcome.decision === 'send' && outcome.message
+      ? outcome.message
+      : 'I could not produce a safe, reliable final response for that turn.';
+  }
+
   /** Ensure every loop exit leaves the same user-visible final in durable history. */
   private async ensureFinalResponsePersisted(sessionId: string, response: string): Promise<void> {
     const session = await this.sessionManager.getSession(sessionId);
@@ -2448,9 +2497,19 @@ The current user request is quoted below. Execute tools only when they directly 
       }
     }
 
-    const safety = turnSafety
-      ? assessToolCallForTurn(toolUse, turnSafety, skill)
-      : null;
+    let safety = turnSafety ? assessToolCallForTurn(toolUse, turnSafety, skill) : null;
+    if (turnSafety && this.outcomeBrain) {
+      const decision = await this.outcomeBrain.decideAction({
+        source: this.subAgentMode ? 'subagent' : 'foreground',
+        userId: userId ?? 'default',
+        sessionId,
+        toolUse,
+        turn: turnSafety,
+        skill,
+      });
+      toolUse = decision.toolUse;
+      safety = decision.assessment;
+    }
     if (!turnSafety && isLikelyExternalMutation(toolUse, skill)) {
       return {
         type: 'tool_result',

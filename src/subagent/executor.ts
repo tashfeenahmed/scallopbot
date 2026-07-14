@@ -38,6 +38,7 @@ import { buildStructuredSubAgentResult, structuredResultPrompt } from './result.
 import { createSubAgentWorktree, finalizeSubAgentWorktree, type SubAgentWorktree } from './worktree.js';
 import { nanoid } from 'nanoid';
 import type { EvolutionRecorder } from '../evolution/signals.js';
+import type { OutcomeBrain } from '../brain/index.js';
 
 /**
  * Skills that sub-agents are never allowed to use
@@ -105,6 +106,8 @@ export interface SubAgentExecutorOptions {
   };
   /** Feed successful reusable child workflows into the existing gated skill-evolution loop. */
   evolutionRecorder?: EvolutionRecorder;
+  /** The same final outcome authority used by the parent agent and scheduler. */
+  outcomeBrain?: OutcomeBrain;
 }
 
 export class SubAgentExecutor {
@@ -127,6 +130,7 @@ export class SubAgentExecutor {
   private interruptQueues: Map<string, InterruptQueue> = new Map();
   private deliveryOutbox?: SubAgentExecutorOptions['deliveryOutbox'];
   private evolutionRecorder?: EvolutionRecorder;
+  private outcomeBrain?: OutcomeBrain;
   private budgetFailures = new Map<string, string>();
 
   constructor(options: SubAgentExecutorOptions) {
@@ -146,6 +150,7 @@ export class SubAgentExecutor {
     this.canonicalSingleUserIds = [...(options.canonicalSingleUserIds ?? [])];
     this.deliveryOutbox = options.deliveryOutbox;
     this.evolutionRecorder = options.evolutionRecorder;
+    this.outcomeBrain = options.outcomeBrain;
   }
 
   /**
@@ -545,6 +550,7 @@ export class SubAgentExecutor {
       // optional explicit hard timeout. Do not add a second cumulative cap.
       turnTimeoutMs: 0,
       subAgentMode: true,
+      outcomeBrain: this.outcomeBrain,
       systemPrompt,
       canonicalSingleUserIds: this.canonicalSingleUserIds,
       evidenceExecutionContext: run.evidenceExecutionContext,

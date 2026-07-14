@@ -7,4 +7,5 @@ export * from './skills/types.js';
 export * from './agent/index.js';
 export * from './channels/index.js';
 export * from './gateway/index.js';
+export * from './brain/index.js';
 export * from './utils/index.js';

@@ -167,6 +167,41 @@ describe('SafeWorkflowExecutor', () => {
     expect(report.steps[0].error).toContain('denied by the active session policy at dispatch');
   });
 
+  it('sends every resolved workflow step through the shared outcome authorization hook', async () => {
+    const authorizeStep = vi.fn().mockResolvedValue(true);
+    const brainExecutor = new SafeWorkflowExecutor({
+      skillRegistry: registry,
+      skillExecutor: createSkillExecutor(logger),
+      logger,
+      allowlist: ['source', 'transform'],
+      authorizeStep,
+    });
+
+    const report = await brainExecutor.execute({
+      steps: [
+        { id: 'first', tool: 'source', expose: false },
+        { id: 'second', tool: 'transform', dependsOn: ['first'], args: { value: '{{first.output}}' } },
+      ],
+    }, {
+      workspace: '/tmp',
+      sessionId: 'session-1',
+      userId: 'user-1',
+      userMessage: 'Run both steps',
+    });
+
+    expect(report.success).toBe(true);
+    expect(authorizeStep).toHaveBeenCalledTimes(2);
+    expect(authorizeStep.mock.calls[1][0]).toMatchObject({
+      type: 'tool_use',
+      name: 'transform',
+      input: { value: expect.stringContaining('private:') },
+    });
+    expect(authorizeStep.mock.calls[1][2]).toMatchObject({
+      sessionId: 'session-1',
+      userMessage: 'Run both steps',
+    });
+  });
+
   it('rejects cycles and implicit output references before execution', async () => {
     await expect(executor.execute({
       steps: [

@@ -1677,30 +1677,42 @@ export class UnifiedScheduler {
         };
 
         const formatted = formatProactiveMessage((channel ?? 'telegram') as 'telegram' | 'api', formatInput);
-        let delivery: MessageDeliveryResult;
+        let delivered: { delivery: MessageDeliveryResult; deliveredMessage: string };
         try {
-          delivery = await this.deliverAndRecordConversation(item, formatted, message);
+          delivered = await this.deliverAndRecordConversation(item, formatted, message, sourceOverride);
         } catch (error) {
           if (deliveryReservationToken) {
             this.db.releaseProactiveDeliveryReservation(deliveryReservationToken);
           }
           throw error;
         }
-        return this.finishDelivery(item, message, delivery, sourceOverride, deliveryReservationToken);
+        return this.finishDelivery(
+          item,
+          delivered.deliveredMessage,
+          delivered.delivery,
+          sourceOverride,
+          deliveryReservationToken,
+        );
       }
     }
 
     // User-sourced items or unknown channels: send as-is
-    let delivery: MessageDeliveryResult;
+    let delivered: { delivery: MessageDeliveryResult; deliveredMessage: string };
     try {
-      delivery = await this.deliverAndRecordConversation(item, message);
+      delivered = await this.deliverAndRecordConversation(item, message, message, sourceOverride);
     } catch (error) {
       if (deliveryReservationToken) {
         this.db.releaseProactiveDeliveryReservation(deliveryReservationToken);
       }
       throw error;
     }
-    return this.finishDelivery(item, message, delivery, sourceOverride, deliveryReservationToken);
+    return this.finishDelivery(
+      item,
+      delivered.deliveredMessage,
+      delivered.delivery,
+      sourceOverride,
+      deliveryReservationToken,
+    );
   }
 
   private finishDelivery(
@@ -1794,10 +1806,26 @@ export class UnifiedScheduler {
     item: ScheduledItem,
     deliveredMessage: string,
     conversationMessage: string = deliveredMessage,
-  ): Promise<MessageDeliveryResult> {
+    sourceOverride?: 'task_result' | 'inner_thoughts' | 'gap_scanner',
+  ): Promise<{ delivery: MessageDeliveryResult; deliveredMessage: string }> {
+    let finalUserFacingMessage = deliveredMessage;
     const metadata: MessageDeliveryMetadata = {
       scheduledItemId: item.id,
       ownerUserId: item.userId,
+      outcome: {
+        source: sourceOverride === 'task_result'
+          ? 'task_result'
+          : item.source === 'user' ? 'scheduler' : 'proactive',
+        sessionId: item.sessionId ?? undefined,
+        activeRequest: item.message,
+        explicitUserText: sourceOverride === undefined
+          && item.source === 'user'
+          && item.messageProvenance === 'user_literal',
+        evidenceVerified: sourceOverride === 'task_result',
+      },
+      onDeliveredMessage: (message) => {
+        finalUserFacingMessage = message;
+      },
       ...(this.linkedSourceItemId(item)
         ? {
             validate: () => {
@@ -1810,7 +1838,7 @@ export class UnifiedScheduler {
     const delivery = this.onSendMessage.supportsDeliveryMetadata
       ? await this.onSendMessage(item.userId, deliveredMessage, metadata)
       : await this.onSendMessage(item.userId, deliveredMessage);
-    if (!messageWasDelivered(delivery)) return delivery;
+    if (!messageWasDelivered(delivery)) return { delivery, deliveredMessage: finalUserFacingMessage };
 
     if (isMessageDeliveryReceipt(delivery)) {
       try {
@@ -1832,7 +1860,7 @@ export class UnifiedScheduler {
       }
     }
 
-    if (!this.sessionManager) return delivery;
+    if (!this.sessionManager) return { delivery, deliveredMessage: finalUserFacingMessage };
 
     // Fact/gap generated wrappers historically had no session_id. Attach the
     // delivered assistant turn to the user's latest durable conversation so a
@@ -1840,19 +1868,19 @@ export class UnifiedScheduler {
     const conversationSessionId = this.getOwnedSessionId(item.sessionId, item.userId)
       ?? this.findLatestOwnedConversationSessionId(item.userId)
       ?? this.getOwnedSessionId(this.getOwnedLinkedSourceItem(item)?.sessionId, item.userId);
-    if (!conversationSessionId) return delivery;
+    if (!conversationSessionId) return { delivery, deliveredMessage: finalUserFacingMessage };
 
     try {
       await this.sessionManager.addMessage(conversationSessionId, {
         role: 'assistant',
-        content: conversationMessage,
+        content: finalUserFacingMessage || conversationMessage,
       });
       this.logger.debug({ itemId: item.id, sessionId: conversationSessionId }, 'Recorded proactive message in source conversation');
     } catch (err) {
       // A missing/deleted source session must not make delivery fail.
       this.logger.warn({ itemId: item.id, sessionId: conversationSessionId, error: (err as Error).message }, 'Failed to record proactive message in source conversation');
     }
-    return delivery;
+    return { delivery, deliveredMessage: finalUserFacingMessage };
   }
 
   /** Resolve only explicitly owned/canonical identities, never arbitrary users. */
@@ -2221,7 +2249,21 @@ export class UnifiedScheduler {
       deliverable.map(entry => ({ title: entry.item.message, result: entry.clean })),
       this.router,
     );
-    if (!message || !(await this.onSendMessage(userId, message))) return 0;
+    if (!message) return 0;
+    const first = deliverable[0];
+    const delivery = this.onSendMessage.supportsDeliveryMetadata && first
+      ? await this.onSendMessage(userId, message, {
+          scheduledItemId: first.item.id,
+          ownerUserId: userId,
+          outcome: {
+            source: 'task_result',
+            sessionId: first.item.sessionId ?? undefined,
+            activeRequest: deliverable.map(entry => entry.item.message).join('\n'),
+            evidenceVerified: true,
+          },
+        })
+      : await this.onSendMessage(userId, message);
+    if (!messageWasDelivered(delivery)) return 0;
 
     const notifiedAt = Date.now();
     for (const entry of deliverable) {

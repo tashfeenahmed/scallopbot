@@ -785,6 +785,32 @@ export interface ToolOperationLedgerEntry {
   updatedAt: number;
 }
 
+/** Privacy-safe receipt for the single final outcome-decision boundary. */
+export type BrainOutcomeKind = 'message' | 'action' | 'file';
+export type BrainOutcomeDecision = 'approved' | 'revised' | 'suppressed' | 'blocked';
+
+export interface BrainOutcomeRecordInput {
+  id?: string;
+  brainId: string;
+  userId: string;
+  sessionId?: string | null;
+  source: string;
+  kind: BrainOutcomeKind;
+  proposalDigest: string;
+  contextDigest: string;
+  decision: BrainOutcomeDecision;
+  reasonCode: string;
+  finalDigest?: string | null;
+  createdAt?: number;
+}
+
+export interface BrainOutcomeRow extends Required<Omit<BrainOutcomeRecordInput, 'id' | 'sessionId' | 'finalDigest' | 'createdAt'>> {
+  id: string;
+  sessionId: string | null;
+  finalDigest: string | null;
+  createdAt: number;
+}
+
 /**
  * Durable identity/status record for a goal hierarchy item.
  *
@@ -1056,6 +1082,29 @@ export class ScallopDatabase {
       );
       CREATE INDEX IF NOT EXISTS idx_tool_operation_session
         ON tool_operation_ledger(session_id, updated_at DESC);
+
+      -- Every dynamic user-visible message and tool/file side effect reaches
+      -- one shared outcome brain before dispatch. This append-only ledger keeps
+      -- only hashes and decision metadata: never prompts, payloads, messages,
+      -- or private reasoning.
+      CREATE TABLE IF NOT EXISTS brain_outcomes (
+        id TEXT PRIMARY KEY,
+        brain_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        session_id TEXT,
+        source TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('message', 'action', 'file')),
+        proposal_digest TEXT NOT NULL,
+        context_digest TEXT NOT NULL,
+        decision TEXT NOT NULL CHECK (decision IN ('approved', 'revised', 'suppressed', 'blocked')),
+        reason_code TEXT NOT NULL,
+        final_digest TEXT,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_brain_outcomes_user_time
+        ON brain_outcomes(user_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_brain_outcomes_session_time
+        ON brain_outcomes(session_id, created_at DESC);
 
       -- Bot configuration (replaces bot-config.json)
       CREATE TABLE IF NOT EXISTS bot_config (
@@ -4687,6 +4736,60 @@ export class ScallopDatabase {
       status: row.status as ToolOperationStatus,
       createdAt: Number(row.created_at),
       updatedAt: Number(row.updated_at),
+    }));
+  }
+
+  /** Record one final brain decision without retaining private content. */
+  recordBrainOutcome(input: BrainOutcomeRecordInput): BrainOutcomeRow {
+    const row: BrainOutcomeRow = {
+      id: input.id ?? randomUUID(),
+      brainId: input.brainId,
+      userId: input.userId,
+      sessionId: input.sessionId ?? null,
+      source: input.source,
+      kind: input.kind,
+      proposalDigest: input.proposalDigest,
+      contextDigest: input.contextDigest,
+      decision: input.decision,
+      reasonCode: input.reasonCode,
+      finalDigest: input.finalDigest ?? null,
+      createdAt: input.createdAt ?? Date.now(),
+    };
+    this.db.prepare(`
+      INSERT INTO brain_outcomes (
+        id, brain_id, user_id, session_id, source, kind,
+        proposal_digest, context_digest, decision, reason_code,
+        final_digest, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      row.id, row.brainId, row.userId, row.sessionId, row.source, row.kind,
+      row.proposalDigest, row.contextDigest, row.decision, row.reasonCode,
+      row.finalDigest, row.createdAt,
+    );
+    return row;
+  }
+
+  /** Recent privacy-safe decisions for deduplication and diagnostics. */
+  getRecentBrainOutcomes(userId: string, sinceMs = 0, limit = 100): BrainOutcomeRow[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM brain_outcomes
+      WHERE user_id = ? AND created_at >= ?
+      ORDER BY created_at DESC
+      LIMIT ?
+    `).all(userId, sinceMs, Math.max(1, Math.min(1_000, Math.floor(limit)))) as Record<string, unknown>[];
+    return rows.map(row => ({
+      id: String(row.id),
+      brainId: String(row.brain_id),
+      userId: String(row.user_id),
+      sessionId: row.session_id == null ? null : String(row.session_id),
+      source: String(row.source),
+      kind: row.kind as BrainOutcomeKind,
+      proposalDigest: String(row.proposal_digest),
+      contextDigest: String(row.context_digest),
+      decision: row.decision as BrainOutcomeDecision,
+      reasonCode: String(row.reason_code),
+      finalDigest: row.final_digest == null ? null : String(row.final_digest),
+      createdAt: Number(row.created_at),
     }));
   }
 

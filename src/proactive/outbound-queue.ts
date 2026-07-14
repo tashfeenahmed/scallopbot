@@ -15,6 +15,7 @@
 
 import type { Logger } from 'pino';
 import type { Router } from '../routing/router.js';
+import type { OutcomeBrain, OutcomeSource } from '../brain/index.js';
 import {
   isMessageDeliveryReceipt,
   messageWasDelivered,
@@ -52,6 +53,8 @@ export interface OutboundQueueOptions {
   logger: Logger;
   /** LLM router for message combining (optional — falls back to join if missing) */
   router?: Router;
+  /** Shared final authority. When present it replaces the legacy combiner. */
+  outcomeBrain?: Pick<OutcomeBrain, 'decideMessage'>;
 }
 
 interface QueuedMessage {
@@ -68,6 +71,7 @@ export class OutboundQueue {
   private sendMessage: (userId: string, message: string) => Promise<MessageDeliveryResult>;
   private logger: Logger;
   private router: Router | undefined;
+  private outcomeBrain: Pick<OutcomeBrain, 'decideMessage'> | undefined;
 
   private queue: QueuedMessage[] = [];
   private drainHandle: ReturnType<typeof setInterval> | null = null;
@@ -77,6 +81,7 @@ export class OutboundQueue {
     this.sendMessage = options.sendMessage;
     this.logger = options.logger.child({ component: 'outbound-queue' });
     this.router = options.router;
+    this.outcomeBrain = options.outcomeBrain;
   }
 
   /**
@@ -194,12 +199,44 @@ export class OutboundQueue {
     try {
       while (active.length > 0) {
         const combined = active.length > 1;
-        const finalMessage = combined
-          ? await this.combineMessages(active)
-          : active[0].message;
+        let finalMessage: string;
+        if (this.outcomeBrain) {
+          const provenance = active.map(item => item.metadata?.outcome).filter(Boolean);
+          const sources = new Set(provenance.map(item => item!.source));
+          const source: OutcomeSource = sources.size === 1
+            ? provenance[0]!.source
+            : 'proactive';
+          const decision = await this.outcomeBrain.decideMessage({
+            source,
+            userId,
+            sessionId: provenance.find(item => item?.sessionId)?.sessionId,
+            scheduledItemId: active.find(item => item.metadata?.scheduledItemId)?.metadata?.scheduledItemId,
+            messages: active.map(item => item.message),
+            activeRequest: provenance.find(item => item?.activeRequest)?.activeRequest,
+            explicitUserText: provenance.length === active.length
+              && provenance.every(item => item?.explicitUserText === true),
+            evidenceVerified: provenance.length === active.length
+              && provenance.every(item => item?.evidenceVerified === true),
+          });
+          if (decision.decision === 'suppress' || !decision.message) {
+            const suppressed: MessageDeliverySuppressed = {
+              sent: false,
+              suppressed: true,
+              reason: decision.reasonCode,
+            };
+            for (const item of active) item.resolve?.(suppressed);
+            this.logger.info({ userId, reason: decision.reasonCode }, 'Outcome brain suppressed outbound batch');
+            return;
+          }
+          finalMessage = decision.message;
+        } else {
+          finalMessage = combined
+            ? await this.combineMessages(active)
+            : active[0].message;
+        }
 
         if (combined) {
-          this.logger.info({ userId, messageCount: active.length }, 'Combined multiple proactive messages via LLM');
+          this.logger.info({ userId, messageCount: active.length }, 'Combined multiple outbound proposals');
         }
 
         // Combining is asynchronous. Source state may change while the model
@@ -218,6 +255,16 @@ export class OutboundQueue {
         }
         if (messageWasDelivered(result)) {
           this.logger.debug({ userId, combined }, 'Proactive message delivered');
+          for (const item of active) {
+            try {
+              await item.metadata?.onDeliveredMessage?.(finalMessage);
+            } catch (error) {
+              this.logger.warn(
+                { userId, error: (error as Error).message },
+                'Post-delivery message observer failed',
+              );
+            }
+          }
         } else {
           this.logger.warn({ userId, combined }, 'Proactive message delivery returned false');
         }

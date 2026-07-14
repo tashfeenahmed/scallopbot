@@ -47,6 +47,8 @@ export interface SkillMetadata {
       sensitive?: boolean;
       /** Require the action to be directly covered by the user request; never forces redundant reconfirmation. */
       requiresConfirmation?: boolean;
+      /** String arguments may be shown to a person and must cross the final public-output boundary. */
+      publicCommunication?: boolean;
     };
     /**
      * Explicit trust declaration for unattended factual reports. Merely being

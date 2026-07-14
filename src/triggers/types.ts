@@ -35,6 +35,16 @@ export type MessageDeliveryValidation = boolean | { valid: boolean; reason?: str
 export interface MessageDeliveryMetadata {
   scheduledItemId: string;
   ownerUserId: string;
+  /** Provenance consumed by the shared final outcome brain. */
+  outcome?: {
+    source: 'proactive' | 'scheduler' | 'task_result' | 'subagent_completion';
+    sessionId?: string;
+    activeRequest?: string;
+    explicitUserText?: boolean;
+    evidenceVerified?: boolean;
+  };
+  /** Receive the exact post-brain text only after transport confirms delivery. */
+  onDeliveredMessage?: (message: string) => void | Promise<void>;
   /** Re-read mutable source state immediately before raw transport. */
   validate?: () => MessageDeliveryValidation | Promise<MessageDeliveryValidation>;
 }

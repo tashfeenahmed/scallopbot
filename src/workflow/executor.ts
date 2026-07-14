@@ -2,6 +2,7 @@ import type { Logger } from 'pino';
 import type { SkillExecutor } from '../skills/executor.js';
 import type { SkillRegistry } from '../skills/registry.js';
 import type { Skill } from '../skills/types.js';
+import type { ToolUseContent } from '../providers/types.js';
 import { redactSensitiveText } from '../security/redaction.js';
 import type {
   WorkflowReport,
@@ -38,8 +39,23 @@ export interface SafeWorkflowExecutorOptions {
   /** Final runtime policy check; allowlist alone is not an authorization boundary. */
   isToolAllowed?: (
     toolName: string,
-    context: { workspace: string; sessionId: string; userId?: string },
+    context: WorkflowExecutionContext,
   ) => boolean | Promise<boolean>;
+  /** Shared-brain authorization after references have resolved to final args. */
+  authorizeStep?: (
+    toolUse: ToolUseContent,
+    skill: Skill,
+    context: WorkflowExecutionContext,
+  ) => boolean | Promise<boolean>;
+}
+
+export interface WorkflowExecutionContext {
+  workspace: string;
+  sessionId: string;
+  userId?: string;
+  userMessage?: string;
+  previousAssistantMessage?: string;
+  turnStartedAt?: number;
 }
 
 interface InternalStepResult {
@@ -102,7 +118,7 @@ export class SafeWorkflowExecutor {
 
   async execute(
     request: WorkflowRequest,
-    context: { workspace: string; sessionId: string; userId?: string },
+    context: WorkflowExecutionContext,
   ): Promise<WorkflowReport> {
     const startedAt = Date.now();
     try {
@@ -252,7 +268,7 @@ export class SafeWorkflowExecutor {
   private async executeStep(
     step: WorkflowStep,
     results: Map<string, InternalStepResult>,
-    context: { workspace: string; sessionId: string; userId?: string },
+    context: WorkflowExecutionContext,
   ): Promise<InternalStepResult> {
     const startedAt = Date.now();
     if (!(await this.isAllowedAtDispatch(step.tool, context))) {
@@ -283,6 +299,27 @@ export class SafeWorkflowExecutor {
           error: `Resolved arguments exceed ${this.maxArgumentBytes} bytes`,
         },
       };
+    }
+    if (this.options.authorizeStep) {
+      const approved = await this.options.authorizeStep({
+        type: 'tool_use',
+        id: `workflow:${context.sessionId}:${step.id}`,
+        name: step.tool,
+        input: args,
+      }, skill, context);
+      if (!approved) {
+        return {
+          output: '',
+          report: {
+            id: step.id,
+            tool: step.tool,
+            success: false,
+            durationMs: Date.now() - startedAt,
+            outputBytes: 0,
+            error: POLICY_DENIED_MESSAGE,
+          },
+        };
+      }
     }
 
     try {

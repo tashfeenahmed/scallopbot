@@ -26,6 +26,7 @@ const JSON_PURPOSES = new Set([
   'relation_classify',
   'rerank',
   'session_summary',
+  'outcome_brain',
 ]);
 
 /** Cap stored prompt/response sizes — guards against pathological rows on the Pi SD card. */
