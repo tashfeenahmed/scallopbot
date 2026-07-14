@@ -41,18 +41,14 @@ import { resolveStateUserId } from '../utils/state-user-id.js';
 import { compactCompletedConversationHistory } from '../memory/session-message-view.js';
 import {
   assessToolCallForTurn,
-  bareGreetingLeaksWorkoutInference,
   boundResponseToolCalls,
   digestToolOutput,
   hasUnverifiedSuccessClaim,
   isLikelyExternalMutation,
   localIsoDate,
-  renderAuthoritativeTrackerSummary,
-  removeUnsupportedWorkoutComparisons,
   toolOperationIdentity,
   toolOutputIndicatesFailure,
   turnRequiresMutationReceipt,
-  turnRequiresAuthoritativeTrackerRead,
   type TurnToolSafetyContext,
 } from './tool-safety.js';
 import {
@@ -663,7 +659,6 @@ export class Agent {
     let maxTokensContinuations = 0;
     let emptyEndTurnRetries = 0;
     let unverifiedCompletionRetries = 0;
-    let authoritativeTrackerReadRetries = 0;
     let finalResponse = '';
     let completionReason: AgentCompletionReason | null = null;
     // Self-evolution signal accounting (best-effort, captured at turn end).
@@ -671,8 +666,6 @@ export class Agent {
     let consecutiveRejectedToolBatches = 0;
     let successfulExternalMutations = 0;
     let failedExternalMutations = 0;
-    let successfulNotionQuery = false;
-    let successfulNotionQueryEvidence = '';
     const successfulMutationSignatures = new Set<string>();
     const failedSkills: string[] = [];
     const successfulToolNames = new Set<string>();
@@ -1076,41 +1069,10 @@ export class Agent {
           finalResponse = "I worked through that but my final reply came back empty — give me a moment and try once more, or rephrase if it keeps happening.";
         }
 
-        if (bareGreetingLeaksWorkoutInference(turnToolSafety.userMessage, finalResponse)) {
-          finalResponse = "Hey! How's it going?";
-        }
-
-        const authoritativeTrackerReadRequired = !!this.skillRegistry?.getSkill('notion')?.available
-          && turnRequiresAuthoritativeTrackerRead(
-            turnToolSafety.userMessage,
-            turnToolSafety.previousAssistantMessage,
-          );
-        if (
-          authoritativeTrackerReadRequired
-          && !successfulNotionQuery
-          && authoritativeTrackerReadRetries < 2
-        ) {
-          authoritativeTrackerReadRetries++;
-          await this.sessionManager.addMessage(sessionId, {
-            role: 'user',
-            content: '[System: This asks for factual tracker contents, but no live Notion query has succeeded in this turn. Do not answer from one memory, do not call the board, and do not ask for permission. Query the typed Notion tool now. Search results distinguish database_id from data_source_id; use the matching field and retry identifier-type mismatches automatically.]',
-          });
-          this.logger.warn(
-            { sessionId, retry: authoritativeTrackerReadRetries },
-            'Authoritative tracker read missing — continuing the tool loop',
-          );
-          finalResponse = '';
-          continue;
-        }
-        if (authoritativeTrackerReadRequired && !successfulNotionQuery) {
-          finalResponse = 'I could not verify the live tracker after retrying its typed read path, so I will not guess from partial memory.';
-        }
-
         // A model may skip the requested write entirely and still say "done".
         // Prompt instructions are not an enforcement boundary, so force one
         // corrective continuation before allowing a receipt-less success claim
-        // to reach the user. This is especially important for terse follow-ups
-        // such as another workout row after "anything else to add?".
+        // to reach the user, including terse follow-ups in an active write flow.
         const mutationReceiptRequired = turnRequiresMutationReceipt(
           turnToolSafety.userMessage,
           turnToolSafety.previousAssistantMessage,
@@ -1211,19 +1173,6 @@ export class Agent {
         }
 
         const activeUserMessage = turnToolSafety.userMessage;
-        if (
-          successfulNotionQuery
-          && turnRequiresAuthoritativeTrackerRead(
-            activeUserMessage,
-            turnToolSafety.previousAssistantMessage,
-          )
-        ) {
-          const exactTrackerSummary = renderAuthoritativeTrackerSummary(successfulNotionQueryEvidence);
-          if (exactTrackerSummary) {
-            finalResponse = exactTrackerSummary;
-            persistContent = [{ type: 'text', text: finalResponse }];
-          }
-        }
         if (/\b(?:research|analysis|analytics|competitor|market|report|forecast)\b/i.test(activeUserMessage)) {
           const grounded = quarantineUngroundedResponseClaims(finalResponse, turnEvidenceReceipts);
           if (grounded.removedLines > 0) {
@@ -1256,20 +1205,6 @@ export class Agent {
             : 'I did not obtain a successful tool receipt for that action, so I have not marked it complete.';
           persistContent = [{ type: 'text', text: finalResponse }];
           completionReason = 'tool_loop';
-        }
-
-        const workoutGrounding = removeUnsupportedWorkoutComparisons(
-          finalResponse,
-          activeUserMessage,
-          successfulNotionQuery,
-          successfulNotionQueryEvidence,
-        );
-        if (workoutGrounding.removed) {
-          finalResponse = workoutGrounding.response || (successfulMutationSignatures.size > 0
-            ? 'Logged with a verified tool receipt using the details exactly as provided.'
-            : 'I do not have verified tracker evidence for that comparison, so I will not present it as fact.');
-          persistContent = [{ type: 'text', text: finalResponse }];
-          this.logger.warn({ sessionId }, 'Removed an unsupported workout comparison from the final reply');
         }
 
         const artifactActionRequested = /\b(?:build|create|generate|render|compile|export|send|share|attach)\b[^.!?\n]{0,80}\b(?:pdf|report|document|artifact)\b/i.test(activeUserMessage)
@@ -1390,13 +1325,7 @@ export class Agent {
       for (const toolUse of toolUses) {
         const result = resultById.get(toolUse.id);
         if (!result || result.is_error) failedToolNames.add(toolUse.name);
-        else {
-          successfulToolNames.add(toolUse.name);
-          if (toolUse.name === 'notion' && toolUse.input.action === 'query') {
-            successfulNotionQuery = true;
-            successfulNotionQueryEvidence = `${successfulNotionQueryEvidence}\n${String(result.content)}`.slice(-200_000);
-          }
-        }
+        else successfulToolNames.add(toolUse.name);
       }
       for (const toolUse of toolUses) {
         if (!/^(?:web_search|webfetch|inspect_artifact|send_file)$/i.test(toolUse.name)) continue;
@@ -1783,11 +1712,11 @@ The current user request is quoted below. Execute tools only when they directly 
 - A task/priorities list given in reply to a planning check-in should be captured on the board immediately; schedule any time-bound item as a nudge. Do not ask whether to add it.
 - Never mark a current-day task done from an older memory or prior-day accomplishment. Completion must be stated in the active user turn.
 - Treat every external write as uncompleted until its exact tool result proves success.
-- Prefer a typed integration tool over raw shell HTTP. For Notion, use the typed \`notion\` tool when available; with API version 2025-09-03, query a database through its data source, inspect the real schema before writing, and never guess property names.
-- For structured logs, preserve the user's entity/exercise label exactly; never invent a modality such as "Dumbbell" or "each arm". Use date-sorted latest/max tool evidence for comparisons, and never call something a PR, increase, or improvement from memory or an arbitrary returned row.
-- When the user asks what is in a tracker or log, query that authoritative integration before answering. One recalled memory is never proof that it is the only entry. Stay on the current topic; do not inspect the task board as a fallback for a workout question.
-- In tracker read summaries, repeat each row's label and values exactly. Do not append parenthetical modalities, split rows into invented equipment categories, or explain differences the source does not state.
-- For a bare greeting, simply greet the user. Never volunteer an inferred activity from memory or claim they "just finished" something they did not say in this turn.
+- Choose capabilities from their current names, descriptions, schemas, and skill instructions; domain-specific behavior belongs in the relevant skill, not in the core agent.
+- Prefer a matching typed capability over hand-written shell/API calls. Inspect the capability's schema before a structured write and never guess field names or types.
+- When the answer depends on the current contents of an external source, use the matching available read capability. Treat recalled memory as context, not proof of current source state, and do not substitute an unrelated capability.
+- Ground factual summaries in successful tool output. Preserve source labels and values, and clearly distinguish source facts from interpretation.
+- For a bare social greeting, respond naturally without introducing an unrelated remembered event.
 - Resolve relative dates from the authoritative timezone/date above; never calculate them from an older message.
 - Before the final reply, account for every part of the current request and disclose any part that failed or remains unverified.
 ## END ACTIVE TURN CONTRACT`;
@@ -1884,7 +1813,7 @@ The current user request is quoted below. Execute tools only when they directly 
       // search results change per query, prominent facts are stable but are
       // kept with recent+search to preserve the combined dedupe ordering.
       const EVENT_EXPIRY_MS = 24 * 60 * 60 * 1000;
-      const historicalMemoryQuery = /\b(?:history|historical|previous|earlier|before|ago|yesterday|last\s+(?:time|week|month|year|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|when did|what did i|show me (?:my )?recent|recent (?:training|workouts?|activity))\b/i.test(userMessage);
+      const historicalMemoryQuery = /\b(?:history|historical|previous|earlier|before|ago|yesterday|last\s+(?:time|week|month|year|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|when did|what did i|show me (?:my )?recent|recent (?:activity|events?|history))\b/i.test(userMessage);
       const isPastEvent = (mem: { eventDate: number | null }): boolean => {
         return !historicalMemoryQuery
           && !!(mem.eventDate && mem.eventDate < Date.now() - EVENT_EXPIRY_MS);

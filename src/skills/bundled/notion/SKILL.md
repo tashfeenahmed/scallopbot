@@ -46,6 +46,9 @@ metadata:
   openclaw:
     emoji: "📝"
     primaryEnv: NOTION_TOKEN
+    evidence:
+      authoritative: true
+      source: notion-api:v2025-09-03
     requires:
       bins: []
 ---

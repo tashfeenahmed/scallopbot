@@ -12,10 +12,6 @@ import {
   toolOperationIdentity,
   toolOutputIndicatesFailure,
   turnRequiresMutationReceipt,
-  removeUnsupportedWorkoutComparisons,
-  renderAuthoritativeTrackerSummary,
-  turnRequiresAuthoritativeTrackerRead,
-  bareGreetingLeaksWorkoutInference,
 } from './tool-safety.js';
 
 const notionWrite = (input: Record<string, unknown>): ToolUseContent => ({
@@ -161,13 +157,31 @@ describe('turn-scoped tool safety', () => {
     expect(verdict.isExternalMutation).toBe(true);
   });
 
-  it('inspects payload sensitivity instead of trusting unrelated generic intent', () => {
+  it('does not impose domain-keyword permissions on a directly requested write', () => {
     const verdict = assessToolCallForTurn(
       notionWrite({ action: 'create', note: 'medical diagnosis from an older turn' }),
       { userMessage: 'Log this item', timezone: 'Europe/Dublin' },
     );
-    expect(verdict.allowed).toBe(false);
-    expect(verdict.reason).toMatch(/sensitive/i);
+    expect(verdict.allowed).toBe(true);
+  });
+
+  it('matches arbitrary write targets from capability metadata rather than vendor rules', () => {
+    const invoiceTool: ToolUseContent = {
+      type: 'tool_use', id: 'invoice-1', name: 'ledger_bridge', input: { action: 'create' },
+    };
+    const skill = {
+      frontmatter: {
+        name: 'ledger_bridge',
+        description: 'Manage customer invoices in the connected accounting service',
+        metadata: { openclaw: { safety: { externalWrite: true } } },
+      },
+    } as any;
+    const verdict = assessToolCallForTurn(
+      invoiceTool,
+      { userMessage: 'Create a customer invoice', timezone: 'Europe/Dublin' },
+      skill,
+    );
+    expect(verdict.allowed).toBe(true);
   });
 
   it('fails closed for an undeclared mutating integration', () => {
@@ -302,13 +316,12 @@ describe('turn-scoped tool safety', () => {
     expect(verdict.allowed).toBe(true);
   });
 
-  it('blocks ambiguous shorthand before structured external writes', () => {
+  it('does not impose domain-specific shorthand rules on a requested write', () => {
     const verdict = assessToolCallForTurn(
       notionWrite({ action: 'create', sets: 4, reps: 3 }),
       { userMessage: 'Log 14kg each hand and 4x3', timezone: 'Europe/Dublin' },
     );
-    expect(verdict.allowed).toBe(false);
-    expect(verdict.reason).toMatch(/ambiguous/i);
+    expect(verdict.allowed).toBe(true);
   });
 
   it('accepts conventional three-part workout notation in an active logging thread', () => {
@@ -431,10 +444,10 @@ describe('turn-scoped tool safety', () => {
     expect(turnRequiresMutationReceipt('How many reps did I do?', 'Your tracker is in Notion.')).toBe(false);
   });
 
-  it('binds a generic workout continuation to the exact recently successful tool', () => {
+  it('binds a generic continuation to the exact recently successful tool', () => {
     const previous = 'Want me to add those last two exercises to your workout log?';
     expect(turnRequiresMutationReceipt('Yes!', previous, 'notion')).toBe(true);
-    expect(turnRequiresMutationReceipt('Yes!', previous)).toBe(false);
+    expect(turnRequiresMutationReceipt('Yes!', previous)).toBe(true);
 
     const notion = assessToolCallForTurn(
       notionWrite({ action: 'create', name: 'Seated Cable Row', weight_kg: 65 }),
@@ -449,7 +462,7 @@ describe('turn-scoped tool safety', () => {
       { type: 'tool_use', id: 'wrong-mail', name: 'gmail', input: { action: 'send', body: 'workout' } },
       {
         userMessage: 'Yes!', previousAssistantMessage: previous,
-        continuationMutationTool: 'gmail', timezone: 'Europe/Dublin',
+        continuationMutationTool: 'notion', timezone: 'Europe/Dublin',
       },
     );
     expect(wrongExternalTool.allowed).toBe(false);
@@ -464,7 +477,7 @@ describe('turn-scoped tool safety', () => {
     expect(board.allowed).toBe(false);
   });
 
-  it('keeps a workout continuation out of the unrelated task board', () => {
+  it('does not hardcode read-only tool relevance in the core safety layer', () => {
     const verdict = assessToolCallForTurn(
       { type: 'tool_use', id: 'board-read', name: 'board', input: { action: 'view' } },
       {
@@ -473,70 +486,10 @@ describe('turn-scoped tool safety', () => {
         timezone: 'Europe/Dublin',
       },
     );
-    expect(verdict.allowed).toBe(false);
-    expect(verdict.code).toBe('READ_TOOL_CONTEXT_MISMATCH');
+    expect(verdict.allowed).toBe(true);
   });
 
-  it('recognizes tracker questions and prevents workout claims in bare greetings', () => {
-    expect(turnRequiresAuthoritativeTrackerRead('What did I do at gym today?')).toBe(true);
-    expect(turnRequiresAuthoritativeTrackerRead(
-      'Anything else?', 'From your workout logs, I found Chest Press.',
-    )).toBe(true);
-    expect(turnRequiresAuthoritativeTrackerRead('Anything else?', 'Your project has one task.')).toBe(false);
-    expect(bareGreetingLeaksWorkoutInference(
-      'Hey', 'Hey! From your logs, you just finished chest day.',
-    )).toBe(true);
-  });
-
-  it('removes exercise modalities invented beyond the successful tracker result', () => {
-    const cleaned = removeUnsupportedWorkoutComparisons(
-      '**Strength/Machine:**\n- **Pectoral machine** — 40kg\n- **Chest Press** (machine) — 40kg\n- **Upper Back** (machine) — 30kg\n\nTwo different entries (machine vs. dumbbell/free weight).',
-      'What did I do at the gym today?',
-      true,
-      '{"rows":[{"properties":{"Name":"Pectoral machine","Weight (kg)":40}},{"properties":{"Name":"Chest Press","Weight (kg)":40}},{"properties":{"Name":"Upper Back","Weight (kg)":30}}]}',
-    );
-    expect(cleaned.removed).toBe(true);
-    expect(cleaned.response).toContain('**Strength:**');
-    expect(cleaned.response).toContain('**Pectoral machine**');
-    expect(cleaned.response).toContain('**Chest Press** — 40kg');
-    expect(cleaned.response).toContain('**Upper Back** — 30kg');
-    expect(cleaned.response).not.toContain('(machine)');
-    expect(cleaned.response).not.toContain('dumbbell');
-  });
-
-  it('matches case-distinct duplicate tracker labels to their exact rows first', () => {
-    const cleaned = removeUnsupportedWorkoutComparisons(
-      '- **Chest press** — Strength, 15kg\n- **Chest Press** — Machine, 40kg',
-      'Show today\'s tracker',
-      true,
-      '{"rows":[{"properties":{"Name":"Chest press","Type":"Strength","Weight (kg)":15}},{"properties":{"Name":"Chest Press","Type":"Machine","Weight (kg)":40}}]}',
-    );
-    expect(cleaned.removed).toBe(false);
-    expect(cleaned.response).toContain('**Chest press** — Strength, 15kg');
-    expect(cleaned.response).toContain('**Chest Press** — Machine, 40kg');
-  });
-
-  it('renders tracker questions from exact query rows without model commentary', () => {
-    const summary = renderAuthoritativeTrackerSummary(JSON.stringify({
-      success: true,
-      result: {
-        rows: [
-          { id: '2', created_time: '2026-07-14T19:00:00Z', properties: {
-            Name: 'Chest press', Date: '2026-07-14', Type: 'Strength', 'Weight (kg)': 15, Reps: 10, Sets: 3,
-          } },
-          { id: '1', created_time: '2026-07-14T11:00:00Z', properties: {
-            Name: 'Stairmaster', Date: '2026-07-14', Type: 'Cardio', 'Duration (min)': 8.5,
-          } },
-        ],
-      },
-    }));
-    expect(summary).toContain('2 entries for 2026-07-14');
-    expect(summary).toContain('**Stairmaster** — Type: Cardio; Duration (min): 8.5');
-    expect(summary).toContain('**Chest press** — Type: Strength; Weight (kg): 15; Reps: 10; Sets: 3');
-    expect(summary).not.toMatch(/perhaps|warm-?up|dumbbell/i);
-  });
-
-  it('rejects exercise modalities invented by a structured write', () => {
+  it('leaves structured label interpretation to the selected capability', () => {
     const verdict = assessToolCallForTurn(
       notionWrite({
         action: 'create', name: 'Dumbbell Chest Press', notes: '15kg each arm',
@@ -547,23 +500,7 @@ describe('turn-scoped tool safety', () => {
         continuationMutationTool: 'notion', timezone: 'Europe/Dublin',
       },
     );
-    expect(verdict.allowed).toBe(false);
-    expect(verdict.code).toBe('STRUCTURED_LABEL_EXPANSION');
-  });
-
-  it('removes a workout PR claim when only a write receipt exists', () => {
-    const cleaned = removeUnsupportedWorkoutComparisons(
-      'All logged. Seated Cable Row was a 5kg jump and a new PR.',
-      'Seated cable row - 65kgx8x3',
-      false,
-    );
-    expect(cleaned).toEqual({ response: 'All logged.', removed: true });
-    expect(removeUnsupportedWorkoutComparisons(
-      'That is a new PR.', 'I hit a new PR today', false,
-    ).removed).toBe(false);
-    expect(removeUnsupportedWorkoutComparisons(
-      'That is a new PR.', 'Compare this workout', true,
-    ).removed).toBe(false);
+    expect(verdict.allowed).toBe(true);
   });
 
   it('creates privacy-safe deterministic output evidence', () => {

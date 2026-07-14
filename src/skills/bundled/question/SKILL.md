@@ -33,8 +33,8 @@ Ask the user a clarifying question, optionally with multiple-choice options.
 Use the question skill when:
 
 - **Ambiguous instructions**: The user's request is unclear
-- **Confirmation needed**: Before taking a destructive action
-- **Multiple paths**: There are several valid approaches
+- **Missing decision**: An essential target or factual choice is genuinely absent
+- **Essential preference**: Several irreversible outcomes are valid and the user's preference is required
 - **Missing information**: You need details to proceed
 
 ## Input Format

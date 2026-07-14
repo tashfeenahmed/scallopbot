@@ -520,64 +520,72 @@ describe('Agent improvements integration', () => {
       expect(JSON.stringify(handler.mock.calls[0][0].args)).toContain('Pectoral Machine');
     });
 
-    it('refuses a chest-only memory answer until the live tracker has been queried', async () => {
+    it('lets the model select an arbitrary authoritative capability from metadata', async () => {
       const { Agent } = await import('./agent.js');
       const { SessionManager } = await import('./session.js');
       const handler = vi.fn().mockResolvedValue({
         success: true,
         output: JSON.stringify({
-          success: true, action: 'query',
-          result: { rows: [
-            { properties: { Name: 'Chest Press', Date: '2026-07-14', 'Weight (kg)': 40 } },
-            { properties: { Name: 'Upper Back', Date: '2026-07-14', 'Weight (kg)': 30 } },
-            { properties: { Name: 'Seated cable row', Date: '2026-07-14', 'Weight (kg)': 65 } },
-          ] },
+          success: true,
+          result: { items: [{ sku: 'A-17', quantity: 12 }, { sku: 'B-04', quantity: 3 }] },
         }),
       });
       const skill = {
-        name: 'notion', description: 'Typed Notion API', path: '/tmp/notion/SKILL.md', source: 'workspace' as const,
-        frontmatter: { name: 'notion', description: 'Typed Notion API' }, content: '', available: true,
+        name: 'inventory_lookup',
+        description: 'Read current warehouse inventory',
+        path: '/tmp/inventory/SKILL.md', source: 'workspace' as const,
+        frontmatter: {
+          name: 'inventory_lookup', description: 'Read current warehouse inventory',
+          metadata: { openclaw: { evidence: { authoritative: true, source: 'inventory-api:v1' } } },
+        },
+        content: '', available: true,
         hasScripts: true, handler,
       };
       const registry = {
-        getSkill: vi.fn((name: string) => name === 'notion' ? skill : null),
-        getToolDefinitions: vi.fn(() => [{ name: 'notion', description: 'Typed Notion API', input_schema: { type: 'object', properties: {} } }]),
-        generateSkillPrompt: vi.fn(() => ''),
+        getSkill: vi.fn((name: string) => name === 'inventory_lookup' ? skill : null),
+        getToolDefinitions: vi.fn(() => [{
+          name: 'inventory_lookup', description: 'Read current warehouse inventory',
+          input_schema: { type: 'object', properties: { location: { type: 'string' } } },
+        }]),
+        generateSkillPrompt: vi.fn(() => 'Use inventory_lookup for current warehouse inventory.'),
       };
       const provider = seqProvider([
-        endTurn('You only did Chest Press today.'),
         {
           content: [{
-            type: 'tool_use', id: 'notion-live-query', name: 'notion',
-            input: { action: 'query', data_source_id: 'gym-source' },
+            type: 'tool_use', id: 'inventory-live-query', name: 'inventory_lookup',
+            input: { location: 'main' },
           }],
           stopReason: 'tool_use', usage: { inputTokens: 5, outputTokens: 5 }, model: 'mock',
         },
-        endTurn('Today you logged Chest Press, Upper Back, and Seated Cable Row.'),
+        endTurn('The live inventory has 12 units of A-17 and 3 units of B-04.'),
       ]);
       const sessions = new SessionManager(db);
       const session = await sessions.createSession();
-      await sessions.addMessage(session.id, {
-        role: 'assistant', content: 'From your logs, you did Chest Press today.',
-      });
       const agent = new Agent({
         provider, sessionManager: sessions, skillRegistry: registry as any,
-        workspace: testDir, logger: pino({ level: 'silent' }), maxIterations: 4,
+        workspace: testDir, logger: pino({ level: 'silent' }), maxIterations: 3,
       });
 
-      const result = await agent.processMessage(session.id, 'What did I do at gym today?');
+      const result = await agent.processMessage(
+        session.id,
+        'Check the main warehouse inventory and tell me what is currently in it.',
+      );
 
       expect(handler).toHaveBeenCalledTimes(1);
-      expect(provider.complete).toHaveBeenCalledTimes(3);
-      expect(result.response).toContain('Upper Back');
-      expect(result.response).not.toContain('only did');
+      expect(provider.complete).toHaveBeenCalledTimes(2);
+      expect(result.response).toContain('12 units of A-17');
+      const systemPrompt = JSON.stringify(
+        (provider.complete as ReturnType<typeof vi.fn>).mock.calls[0][0].system,
+      );
+      expect(systemPrompt).toMatch(/choose capabilities|name, description, schema/i);
+      expect(systemPrompt).not.toMatch(/\bgym\b|\bworkout\b|chest press/i);
     });
 
-    it('keeps a bare greeting free of unsolicited workout-memory claims', async () => {
+    it('does not rewrite a normal model response with domain-specific postprocessing', async () => {
       const { Agent } = await import('./agent.js');
       const { SessionManager } = await import('./session.js');
       const provider = seqProvider([
-        endTurn('Hey bestie! From your logs, you just finished chest day.'),
+        endTurn('Hey! Ready when you are.'),
       ]);
       const sessions = new SessionManager(db);
       const session = await sessions.createSession();
@@ -587,7 +595,7 @@ describe('Agent improvements integration', () => {
       });
 
       const result = await agent.processMessage(session.id, 'Hey');
-      expect(result.response).toBe("Hey! How's it going?");
+      expect(result.response).toBe('Hey! Ready when you are.');
     });
 
     it('records real empty output rather than synthetic Success as evidence', async () => {

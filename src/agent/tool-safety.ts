@@ -50,8 +50,6 @@ const KNOWN_LOCAL_MUTATING_TOOLS = new Set([
 ]);
 const READ_ONLY_ACTION = /^(?:check|describe|fetch|get|inspect|list|read|search|show|status|view)$/i;
 
-const EXTERNAL_TOOL_NAME =
-  /(?:notion|gmail|email|calendar|slack|discord|telegram_send|send_message|send_file|publish|social|crm|airtable|drive)/i;
 const MUTATING_ACTION = /^(?:add|append|archive|book|cancel|commit|complete|create|delete|deploy|document|edit|email|insert|install|invite|log|mark|move|note|post|publish|push|record|register|remove|reply|save|schedule|send|set|share|submit|sync|track|update|upload|write)$/i;
 const EXPLICIT_CONFIRMATION =
   /^\s*(?:yes|yep|yeah|confirm(?:ed)?|go ahead|do it|please do|ok(?:ay)?|proceed|sounds good)\s*[.!]?\s*$/i;
@@ -77,12 +75,6 @@ const DIRECT_LOCAL_REQUEST = new RegExp(
   + `|(?:\\b(?:asked|told)\\s+you\\s+to\\s+(${LOCAL_ACTIONS})\\b)`,
   'i',
 );
-const SENSITIVE_CONTEXT =
-  /\b(?:health|medical|medicine|medication|diagnos(?:is|ed)|doctor|hospital|therapy|therapist|mental health|anxiety|depress(?:ion|ed)|ill|sick|unwell|injur(?:y|ed)|pain|symptom|pregnan|period|weight|gym|workout|exercise|salary|bank|account number|legal case)\b/i;
-const AMBIGUOUS_SHORTHAND = /\b\d+(?:\.\d+)?\s*(?:x|×)\s*\d+(?:\.\d+)?\b/i;
-const EXPLICIT_SET_REP_WORDING = /\b(?:sets?|reps?|repetitions?|times?|by)\b/i;
-const STANDARD_THREE_PART_WORKOUT = /(?:\b\d+(?:\.\d+)?\s*(?:kg|lb|lbs)\s*(?:x|×)\s*\d+(?:\.\d+)?\s*(?:x|×)\s*\d+(?:\.\d+)?\b|\b\d+(?:\.\d+)?\s*(?:x|×)\s*\d+(?:\.\d+)?\s*(?:x|×)\s*\d+(?:\.\d+)?\s*(?:kg|lb|lbs)\b)/i;
-
 function stable(value: unknown): string {
   if (value === null || value === undefined) return String(value);
   if (Array.isArray(value)) return `[${value.map(stable).join(',')}]`;
@@ -189,8 +181,11 @@ function executableContent(toolUse: ToolUseContent): string {
 }
 
 function hasExternalShellTarget(command: string): boolean {
-  return /https?:\/\/(?!localhost\b|127(?:\.\d+){3}\b|0\.0\.0\.0\b|\[?::1\]?\b)/i.test(command)
-    || /\b(?:api\.|notion|gmail|calendar|slack|telegram|discord|airtable)\b/i.test(command);
+  const urls = [...command.matchAll(/https?:\/\/([^/'"\s]+)/gi)].map(match => match[1]);
+  if (urls.length > 0) {
+    return urls.some(host => !/^(?:localhost|127(?:\.\d+){3}|0\.0\.0\.0|\[?::1\]?)(?::\d+)?$/i.test(host));
+  }
+  return /\b(?:api\.|curl|wget|https?|fetch|requests|httpx|axios|got|ssh|scp|rsync|gh)\b/i.test(command);
 }
 
 export function isExternalBashMutation(command: string): boolean {
@@ -200,20 +195,17 @@ export function isExternalBashMutation(command: string): boolean {
   }
   if (!hasExternalShellTarget(command)) return false;
 
-  // Some APIs use POST for read-only queries. In particular, Notion's legacy
-  // database and current data-source query endpoints do not mutate state.
-  // Only apply the exception when every external URL in the command is one of
-  // those query endpoints so a mixed query/create script still fails closed.
+  // Some APIs expose read-only query/search operations through POST. Apply the
+  // exception by operation semantics, not by vendor, and only when every
+  // external URL is a recognized read endpoint. Mixed read/write scripts still
+  // classify as mutations.
   const externalUrls = [...command.matchAll(/https?:\/\/[^\s'"\\]+/gi)]
     .map(match => match[0].replace(/[),.;]+$/, ''));
   const destructiveQueryMethod = /(?:(?:-X|--request)\s*['"]?(?:PUT|PATCH|DELETE)\b|\b(?:requests|httpx|axios|got)\s*\.\s*(?:put|patch|delete)\s*\(|\bfetch\s*\([\s\S]{0,2000}?\bmethod\s*:\s*['"](?:PUT|PATCH|DELETE)['"])/i.test(command);
-  const notionReadOnlyPostsOnly = !destructiveQueryMethod
+  const readOnlyPostsOnly = !destructiveQueryMethod
     && externalUrls.length > 0
-    && externalUrls.every(url =>
-      /^https:\/\/api\.notion\.com\/v1\/(?:databases|data_sources)\/[^/\s]+\/query(?:\?|$)/i.test(url)
-      || /^https:\/\/api\.notion\.com\/v1\/search(?:\?|$)/i.test(url),
-    );
-  if (notionReadOnlyPostsOnly) return false;
+    && externalUrls.every(url => /\/(?:query|search|lookup)(?:\?|$)/i.test(url));
+  if (readOnlyPostsOnly) return false;
 
   const curlWrite = /\bcurl\b[\s\S]*(?:(?:-X|--request)\s*['"]?(?:POST|PUT|PATCH|DELETE)\b|(?:--data(?:-raw|-binary|-urlencode)?|-d)\s)/i.test(command);
   const wgetWrite = /\bwget\b[\s\S]*(?:(?:--method(?:=|\s+))['"]?(?:POST|PUT|PATCH|DELETE)\b|--post-(?:data|file)(?:=|\s+))/i.test(command);
@@ -258,7 +250,6 @@ export function isLikelyExternalMutation(toolUse: ToolUseContent, skill?: Skill 
   if (toolUse.name === 'bash') return isExternalBashMutation(bashCommand(toolUse));
   if (toolUse.name === 'run_code') return isExternalBashMutation(executableContent(toolUse));
   if (toolUse.name === 'git' && /^(?:push|upload|deploy)$/i.test(actionFromInput(toolUse.input) ?? '')) return true;
-  if (EXTERNAL_TOOL_NAME.test(toolUse.name)) return isLikelyMutation(toolUse, skill);
   if (!isLikelyMutation(toolUse, skill)) return false;
   // Unknown mutating integrations fail closed. A local custom skill must make
   // that confinement explicit via safety.localWrite; otherwise action=create
@@ -308,14 +299,26 @@ function expectedRelativeDate(message: string, now: Date, timezone: string): str
   return null;
 }
 
-function toolTargetMentioned(message: string, toolUse: ToolUseContent): boolean {
+const CAPABILITY_TOKEN_STOPWORDS = new Set([
+  'access', 'action', 'actions', 'current', 'data', 'external', 'manage',
+  'read', 'search', 'service', 'source', 'system', 'tool', 'typed', 'verified',
+  'write',
+]);
+
+function capabilityTokens(toolUse: ToolUseContent, skill?: Skill | null): string[] {
+  const declaration = [toolUse.name, skill?.frontmatter.name, skill?.frontmatter.description]
+    .filter((value): value is string => !!value)
+    .join(' ');
+  return [...new Set(declaration.toLowerCase().split(/[^a-z0-9]+/)
+    .filter(token => token.length >= 4 && !CAPABILITY_TOKEN_STOPWORDS.has(token)))];
+}
+
+function toolTargetMentioned(message: string, toolUse: ToolUseContent, skill?: Skill | null): boolean {
   const name = toolUse.name.toLowerCase();
-  const tokens = toolUse.name.toLowerCase().split(/[^a-z0-9]+/).filter(token => token.length >= 4);
+  const tokens = capabilityTokens(toolUse, skill);
   if (tokens.some(token => new RegExp(`\\b${token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(message))) {
     return true;
   }
-  if (/(?:gmail|email)/.test(name)) return /\b(?:email|gmail)\b/i.test(message);
-  if (/calendar/.test(name)) return /\b(?:calendar|event|meeting|reminder)\b/i.test(message);
   if (/send_file/.test(name)) return /\b(?:attachment|file|image|pdf|photo|report|spreadsheet|video|workbook)\b/i.test(message);
   if (/send_message/.test(name)) return /\b(?:chat|message|reply|update)\b/i.test(message);
   if (name === 'bash') {
@@ -413,17 +416,8 @@ function hasImplicitPlanningMutationIntent(
   toolUse: ToolUseContent,
 ): boolean {
   if (!isPlanningTool(toolUse)) return false;
-  const conversation = `${previousAssistantMessage ?? ''}\n${message}`;
   const priorPlanningPrompt = !!previousAssistantMessage
     && /\b(?:main focus|priorit(?:y|ies)|plan|agenda|tasks?|to-?do|board|reminder)\b/i.test(previousAssistantMessage);
-  const explicitlyPlanning = /\b(?:board|reminder|task|to-?do|plan|agenda|priorit(?:y|ies)|schedule)\b/i.test(message);
-  if (
-    !priorPlanningPrompt
-    && !explicitlyPlanning
-    && /\b(?:workout|exercise|gym|notion|tracker|database|log(?:ged|ging)?)\b/i.test(conversation)
-  ) {
-    return false;
-  }
   const hasClockTime = /\b(?:at\s+)?(?:[01]?\d|2[0-3])(?::[0-5]\d)?\s*(?:am|pm)\b/i.test(message);
   const timedItem = hasClockTime
     && /\b(?:remind|schedule|put|call|meet(?:ing)?|appointment|deadline|due|take|pick up|send|submit)\b/i.test(message);
@@ -468,10 +462,11 @@ function isBoundTargetedConfirmation(
   message: string,
   previousAssistantMessage: string | undefined,
   toolUse: ToolUseContent,
+  skill?: Skill | null,
 ): boolean {
   if (!EXPLICIT_CONFIRMATION.test(message) || !previousAssistantMessage) return false;
   if (!CONFIRMATION_REQUEST.test(previousAssistantMessage)) return false;
-  if (!toolTargetMentioned(previousAssistantMessage, toolUse)) return false;
+  if (!toolTargetMentioned(previousAssistantMessage, toolUse, skill)) return false;
   // Prefer a direct target-specific request ("Confirm: send the PDF") over
   // incidental safety prose such as "external write" earlier in the message.
   const priorAction = directRequestedAction(previousAssistantMessage)
@@ -485,34 +480,26 @@ function hasExplicitExternalWriteIntent(
   previousAssistantMessage: string | undefined,
   toolUse: ToolUseContent,
   continuationMutationTool?: string,
+  skill?: Skill | null,
 ): boolean {
   if (INFORMATIONAL_UPDATE_REQUEST.test(message)) return false;
   // Delivering progress into the active conversation is part of answering the
   // current turn. It still receives payload-sensitivity and idempotency checks.
   if (toolUse.name === 'send_message') return true;
   if (toolUse.name === 'send_file') {
-    if (isBoundTargetedConfirmation(message, previousAssistantMessage, toolUse)) return true;
+    if (isBoundTargetedConfirmation(message, previousAssistantMessage, toolUse, skill)) return true;
     const action = directRequestedAction(message);
     return !!action
       && actionsCompatible(action, 'send')
       && /\b(?:attach|download|file|image|pdf|photo|report|send|share|spreadsheet|video|workbook)\b/i.test(message);
   }
-  if (isBoundTargetedConfirmation(message, previousAssistantMessage, toolUse)) return true;
+  if (isBoundTargetedConfirmation(message, previousAssistantMessage, toolUse, skill)) return true;
   if (
     previousAssistantMessage
     && turnRequiresMutationReceipt(message, previousAssistantMessage, continuationMutationTool)
     && (
-      toolTargetMentioned(previousAssistantMessage, toolUse)
-      || (
-        continuationMutationTool?.toLocaleLowerCase('en-US') === toolUse.name.toLocaleLowerCase('en-US')
-        && (
-          (/notion/i.test(toolUse.name) && /\b(?:notion|tracker|database|workout log|exercise(?:s| log)?)\b/i.test(previousAssistantMessage))
-          || (/gmail|email/i.test(toolUse.name) && /\b(?:gmail|e-?mail|inbox|message)\b/i.test(previousAssistantMessage))
-          || (/calendar/i.test(toolUse.name) && /\b(?:calendar|appointment|event|meeting)\b/i.test(previousAssistantMessage))
-          || (/slack/i.test(toolUse.name) && /\b(?:slack|channel|workspace)\b/i.test(previousAssistantMessage))
-          || (/airtable/i.test(toolUse.name) && /\b(?:airtable|base|table|tracker)\b/i.test(previousAssistantMessage))
-        )
-      )
+      toolTargetMentioned(previousAssistantMessage, toolUse, skill)
+      || continuationMutationTool?.toLocaleLowerCase('en-US') === toolUse.name.toLocaleLowerCase('en-US')
     )
   ) {
     return true;
@@ -525,13 +512,13 @@ function hasExplicitExternalWriteIntent(
     `^\\s*(?:please\\s+)?(?:${WRITE_ACTIONS})\\s+(?:it|that|this|those|these)\\b`,
     'i',
   ).test(message);
-  return targetIndependent || explicitPronoun || toolTargetMentioned(message, toolUse);
+  return targetIndependent || explicitPronoun || toolTargetMentioned(message, toolUse, skill);
 }
 
 /**
- * Fail closed only at high-confidence safety boundaries. Ordinary local file
- * edits remain autonomous; sensitive or ambiguous writes to another system do
- * not inherit intent from an older turn.
+ * Keep side effects bound to the active request without imposing
+ * domain-specific permission or interpretation rules. Ordinary requested work
+ * proceeds autonomously.
  */
 export function assessToolCallForTurn(
   toolUse: ToolUseContent,
@@ -542,25 +529,7 @@ export function assessToolCallForTurn(
   const isExternalMutation = isLikelyExternalMutation(toolUse, skill);
   const signature = toolCallSignature(toolUse);
   const message = currentInstruction(context.userMessage);
-  if (!isMutation) {
-    const conversation = `${context.previousAssistantMessage ?? ''}\n${message}`;
-    if (
-      isPlanningTool(toolUse)
-      && /\b(?:gym|workout|exercise|notion|tracker|logged?|chest press)\b/i.test(conversation)
-      && !/\b(?:board|tasks?|to-?do|priorit(?:y|ies)|reminder|agenda)\b/i.test(message)
-    ) {
-      return {
-        allowed: false,
-        code: 'READ_TOOL_CONTEXT_MISMATCH',
-        reason: 'The board read is unrelated to the active workout/tracker question. Stay on that topic and use its authoritative source.',
-        isMutation,
-        isExternalMutation,
-        signature,
-      };
-    }
-    return { allowed: true, isMutation, isExternalMutation, signature };
-  }
-  const declared = skill?.frontmatter.metadata?.openclaw?.safety;
+  if (!isMutation) return { allowed: true, isMutation, isExternalMutation, signature };
   if (!isExternalMutation) {
     if (hasExplicitLocalMutationIntent(message)
       || hasImplicitPlanningMutationIntent(message, context.previousAssistantMessage, toolUse)
@@ -585,16 +554,12 @@ export function assessToolCallForTurn(
       signature,
     };
   }
-  const boundConfirmation = isBoundTargetedConfirmation(
-    message,
-    context.previousAssistantMessage,
-    toolUse,
-  );
   const explicitIntent = hasExplicitExternalWriteIntent(
     message,
     context.previousAssistantMessage,
     toolUse,
     context.continuationMutationTool,
+    skill,
   );
   if (!explicitIntent) {
     return {
@@ -604,66 +569,6 @@ export function assessToolCallForTurn(
       isExternalMutation,
       signature,
     };
-  }
-
-  const serializedInput = stable(toolUse.input);
-  const payloadIsSensitive = declared?.sensitive || SENSITIVE_CONTEXT.test(serializedInput);
-  const affirmativeFollowUp = /^\s*(?:yes|yep|yeah|ok(?:ay)?|sure|confirmed?)\b/i.test(message);
-  const currentTurnAcknowledgesSensitivity = SENSITIVE_CONTEXT.test(message)
-    || STANDARD_THREE_PART_WORKOUT.test(message)
-    || /\b\d+(?:\.\d+)?\s*(?:kg|lb|lbs)\b/i.test(message)
-    || boundConfirmation
-    || (explicitIntent
-      && affirmativeFollowUp
-      && !!context.previousAssistantMessage
-      && SENSITIVE_CONTEXT.test(context.previousAssistantMessage));
-  if (payloadIsSensitive && !currentTurnAcknowledgesSensitivity) {
-    return {
-      allowed: false,
-      reason: 'The external payload introduces sensitive information outside the current user request. Remove that extra information or ask which factual value should be used; do not ask for permission to write the already-requested data.',
-      isMutation,
-      isExternalMutation,
-      signature,
-    };
-  }
-
-  if (
-    AMBIGUOUS_SHORTHAND.test(message)
-    && !EXPLICIT_SET_REP_WORDING.test(message)
-    && !STANDARD_THREE_PART_WORKOUT.test(message)
-  ) {
-    return {
-      allowed: false,
-      reason: 'The current request contains ambiguous numeric shorthand (for example “4x3”). Clarify what each number means before writing structured data.',
-      isMutation,
-      isExternalMutation,
-      signature,
-    };
-  }
-
-  // Structured logging must preserve the user's own exercise label. Models
-  // sometimes invent a modality (for example "Dumbbell" or "each arm") that
-  // changes the meaning of the recorded data even though the numbers match.
-  if (/notion/i.test(toolUse.name) && STANDARD_THREE_PART_WORKOUT.test(message)) {
-    const serialized = stable(toolUse.input);
-    const qualifiers = [
-      'barbell', 'cable', 'decline', 'dumbbell', 'each arm', 'incline',
-      'machine', 'seated', 'standing', 'unilateral',
-    ];
-    const invented = qualifiers.find(qualifier => (
-      new RegExp(`\\b${qualifier.replace(' ', '\\s+')}\\b`, 'i').test(serialized)
-      && !new RegExp(`\\b${qualifier.replace(' ', '\\s+')}\\b`, 'i').test(message)
-    ));
-    if (invented) {
-      return {
-        allowed: false,
-        code: 'STRUCTURED_LABEL_EXPANSION',
-        reason: `The tool arguments add the unsupported workout qualifier "${invented}". Preserve the exercise label exactly as the user supplied it.`,
-        isMutation,
-        isExternalMutation,
-        signature,
-      };
-    }
   }
 
   const now = context.now ?? new Date();
@@ -709,218 +614,10 @@ export function hasUnverifiedSuccessClaim(response: string): boolean {
     && !/\b(?:not|wasn't|weren't|couldn't|could not|failed|unable|unverified|can't|cannot)\b/i.test(response);
 }
 
-const WORKOUT_COMPARISON = /\b(?:PR|personal record|record high|increase[sd]?|improv(?:e[dm]?|ement)|jump(?:ed)?|up\s+\d+(?:\.\d+)?\s*kg|added\s+\d+(?:\.\d+)?\s*kg|more than last)\b/i;
-const WORKOUT_SUBJECT = /\b(?:workout|exercise|press|row|curl|squat|deadlift|machine|cable|kg|reps?|sets?)\b/i;
-
-function trackerQueryRows(raw: string): { found: boolean; rows: Array<Record<string, unknown>> } {
-  const rows: Array<Record<string, unknown>> = [];
-  const seen = new Set<unknown>();
-  let found = false;
-  const visit = (value: unknown, depth: number): void => {
-    if (depth > 10 || value == null) return;
-    if (typeof value === 'string') {
-      const text = value.trim();
-      if ((text.startsWith('{') || text.startsWith('[')) && text.length <= 250_000) {
-        try {
-          visit(JSON.parse(text), depth + 1);
-        } catch {
-          for (const line of text.split(/\r?\n/).filter(Boolean)) {
-            try { visit(JSON.parse(line), depth + 1); } catch { /* ordinary text */ }
-          }
-        }
-      }
-      return;
-    }
-    if (typeof value !== 'object' || seen.has(value)) return;
-    seen.add(value);
-    if (Array.isArray(value)) {
-      for (const item of value) visit(item, depth + 1);
-      return;
-    }
-    const record = value as Record<string, unknown>;
-    if (Array.isArray(record.rows)) {
-      found = true;
-      for (const row of record.rows) {
-        if (row && typeof row === 'object' && !Array.isArray(row)) {
-          rows.push(row as Record<string, unknown>);
-        }
-      }
-      return;
-    }
-    for (const child of Object.values(record)) visit(child, depth + 1);
-  };
-  visit(raw, 0);
-  const unique = new Map<string, Record<string, unknown>>();
-  for (const row of rows) {
-    const key = typeof row.id === 'string' && row.id
-      ? row.id
-      : JSON.stringify([row.created_time ?? null, row.properties ?? null]);
-    if (!unique.has(key)) unique.set(key, row);
-  }
-  return { found, rows: [...unique.values()] };
-}
-
-function trackerEvidenceRows(raw: string): Array<{ title: string; evidence: string }> {
-  return trackerQueryRows(raw).rows.flatMap((row) => {
-    const properties = row.properties && typeof row.properties === 'object'
-      ? row.properties as Record<string, unknown>
-      : null;
-    if (!properties) return [];
-    const titleEntry = Object.entries(properties).find(([key, propertyValue]) => (
-      /^(?:name|exercise|activity|title)$/i.test(key) && typeof propertyValue === 'string'
-    ));
-    return titleEntry
-      ? [{ title: String(titleEntry[1]), evidence: JSON.stringify(row) }]
-      : [];
-  });
-}
-
-function canonicalTrackerTitle(value: string): string {
-  return value.toLocaleLowerCase('en-US').replace(/[^a-z0-9]+/g, ' ').trim();
-}
-
-function printableTrackerValue(value: unknown): string {
-  if (Array.isArray(value)) return value.map(printableTrackerValue).join(', ');
-  if (value && typeof value === 'object') return JSON.stringify(value);
-  return String(value);
-}
-
-/** Render factual tracker contents directly from the successful typed query. */
-export function renderAuthoritativeTrackerSummary(trackerQueryEvidence: string): string | null {
-  const query = trackerQueryRows(trackerQueryEvidence);
-  if (!query.found) return null;
-  if (query.rows.length === 0) {
-    return 'I checked the live tracker and found no entries matching that request.';
-  }
-
-  const rows = [...query.rows].sort((a, b) => (
-    String(a.created_time ?? '').localeCompare(String(b.created_time ?? ''))
-    || String(a.id ?? '').localeCompare(String(b.id ?? ''))
-  ));
-  const parsed = rows.flatMap((row) => {
-    const properties = row.properties && typeof row.properties === 'object'
-      ? row.properties as Record<string, unknown>
-      : null;
-    if (!properties) return [];
-    const titleEntry = Object.entries(properties).find(([key, value]) => (
-      /^(?:name|exercise|activity|title)$/i.test(key) && typeof value === 'string' && value.trim()
-    ));
-    if (!titleEntry) return [];
-    const date = Object.entries(properties).find(([key, value]) => (
-      /^date$/i.test(key) && typeof value === 'string' && value.trim()
-    ))?.[1] as string | undefined;
-    const preferred = ['Type', 'Weight (kg)', 'Reps', 'Sets', 'Duration (min)', 'Notes'];
-    const orderedKeys = [
-      ...preferred.filter(key => key in properties),
-      ...Object.keys(properties).filter(key => (
-        !preferred.includes(key)
-        && key !== titleEntry[0]
-        && !/^date$/i.test(key)
-      )),
-    ];
-    const details = orderedKeys.flatMap((key) => {
-      const value = properties[key];
-      if (value == null || value === '' || (Array.isArray(value) && value.length === 0)) return [];
-      return [`${key}: ${printableTrackerValue(value)}`];
-    });
-    return [{ title: String(titleEntry[1]), date, details }];
-  });
-  if (parsed.length === 0) return null;
-
-  const dates = [...new Set(parsed.map(row => row.date).filter((date): date is string => !!date))];
-  const dateLabel = dates.length === 1 ? ` for ${dates[0]}` : '';
-  const header = `I checked the live tracker. It has ${parsed.length} ${parsed.length === 1 ? 'entry' : 'entries'}${dateLabel}:`;
-  const lines = parsed.map(row => `- **${row.title}**${row.details.length ? ` — ${row.details.join('; ')}` : ''}`);
-  return `${header}\n\n${lines.join('\n')}\n\nThat's the complete result from the tracker.`;
-}
-
-/**
- * Remove comparison claims that have neither a current user assertion nor a
- * successful tracker query in this turn. A write receipt proves persistence,
- * not a PR or trend.
- */
-export function removeUnsupportedWorkoutComparisons(
-  response: string,
-  userMessage: string,
-  hasTrackerQueryEvidence: boolean,
-  trackerQueryEvidence: string = '',
-): { response: string; removed: boolean } {
-  let cleaned = response;
-  let removed = false;
-
-  if (hasTrackerQueryEvidence && trackerQueryEvidence.trim()) {
-    const evidence = `${userMessage}\n${trackerQueryEvidence}`;
-    const rows = trackerEvidenceRows(trackerQueryEvidence);
-    const modalities = [
-      /\bdumbbells?\b/gi,
-      /\bbarbells?\b/gi,
-      /\bfree[- ]weights?\b/gi,
-      /\b(?:each|per) arm\b/gi,
-      /\bbodyweight\b/gi,
-      /\bsmith machine\b/gi,
-      /\bmachine\b/gi,
-    ];
-    const cleanLine = (original: string): string => {
-      const displayedTitle = original.match(/\*\*([^*]+)\*\*/)?.[1]?.replace(/:$/, '').trim() ?? '';
-      const matchingRow = displayedTitle
-        ? (rows.find(row => row.title === displayedTitle)
-          ?? rows.find(row => canonicalTrackerTitle(row.title) === canonicalTrackerTitle(displayedTitle)))
-        : undefined;
-      const isSectionLabel = /^\s*\*\*[^*]+\*\*\s*$/.test(original);
-      const lineEvidence = matchingRow?.evidence
-        ?? (isSectionLabel ? userMessage : evidence);
-      const unsupported = modalities.filter(pattern => {
-        pattern.lastIndex = 0;
-        const claimed = pattern.test(original);
-        pattern.lastIndex = 0;
-        const supported = pattern.test(lineEvidence);
-        pattern.lastIndex = 0;
-        return claimed && !supported;
-      });
-      if (unsupported.length === 0) return original;
-
-      let line = original;
-      const unsupportedClause = unsupported.some(pattern => {
-        pattern.lastIndex = 0;
-        const found = pattern.test(line);
-        pattern.lastIndex = 0;
-        return found;
-      });
-      if (unsupportedClause) {
-        line = line.replace(/\s*\([^)]*(?:dumbbell|barbell|free[- ]weight|each arm|per arm|bodyweight|smith machine|machine)[^)]*\)/gi, '');
-      }
-      for (const pattern of unsupported) {
-        pattern.lastIndex = 0;
-        line = line.replace(pattern, '');
-      }
-      return line
-        .replace(/\/+\s*:/g, ':')
-        .replace(/\*\*\s*\*\*/g, '')
-        .replace(/[ \t]{2,}/g, ' ')
-        .trimEnd();
-    };
-    const lines = cleaned.split(/\r?\n/);
-    const groundedLines = lines.map(cleanLine).filter(line => line.trim());
-    const rebuilt = groundedLines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
-    if (rebuilt !== cleaned) {
-      cleaned = rebuilt;
-      removed = true;
-    }
-  }
-
-  if (hasTrackerQueryEvidence || WORKOUT_COMPARISON.test(userMessage)) {
-    return { response: cleaned, removed };
-  }
-  const pieces = cleaned.split(/(?<=[.!?])\s+|\s+[—;]\s+/);
-  const filtered = pieces.filter(piece => !(WORKOUT_COMPARISON.test(piece) && WORKOUT_SUBJECT.test(piece)));
-  if (filtered.length === pieces.length) return { response: cleaned, removed };
-  return { response: filtered.join(' ').trim(), removed: true };
-}
-
 /**
  * Determine whether this turn promises a state change whose completion must be
- * backed by a successful tool receipt. This also covers terse continuation
- * payloads (for example another workout row after "anything else to add?").
+ * backed by a successful tool receipt. This also covers terse continuations
+ * bound to the exact integration that most recently completed a write.
  */
 export function turnRequiresMutationReceipt(
   userMessage: string,
@@ -940,38 +637,14 @@ export function turnRequiresMutationReceipt(
   }
 
   const previous = previousAssistantMessage ?? '';
-  const explicitMutationThread = /\b(?:notion|tracker|database|calendar|board|reminder|email|message|file|document|spreadsheet)\b/i.test(previous)
-    && /\b(?:add|added|anything else to add|create|created|log|logged|record|recorded|save|saved|schedule|scheduled|send|sent|update|updated)\b/i.test(previous);
-  const boundImplicitThread = !!continuationMutationTool
-    && /\b(?:add|added|anything else|create|created|log|logged|record|recorded|save|saved|schedule|scheduled|send|sent|update|updated|want me to)\b/i.test(previous)
-    && /\b(?:it|that|this|those|these|entry|entries|exercise|exercises|workout|item|items|row|rows)\b/i.test(previous);
-  const continuesMutationThread = explicitMutationThread || boundImplicitThread;
+  const priorWriteHandoff = /\b(?:add|added|create|created|log|logged|record|recorded|save|saved|schedule|scheduled|send|sent|update|updated|want me to)\b/i.test(previous)
+    && /\b(?:anything else|want me to|another|more|next)\b/i.test(previous);
+  const continuesMutationThread = (!!continuationMutationTool || priorWriteHandoff)
+    && /\b(?:add|added|anything else|create|created|log|logged|record|recorded|save|saved|schedule|scheduled|send|sent|update|updated|want me to)\b/i.test(previous);
   if (!continuesMutationThread) return false;
 
   const affirmative = EXPLICIT_CONFIRMATION.test(message);
-  const structuredPayload = /\b\d+(?:\.\d+)?\s*(?:kg|lb|lbs|minutes?|mins?|hours?|hrs?|reps?|sets?)\b/i.test(message)
-    || /\b\d+(?:\.\d+)?\s*(?:x|×)\s*\d+(?:\.\d+)?(?:\s*(?:x|×)\s*\d+(?:\.\d+)?)?\b/i.test(message)
-    || STANDARD_THREE_PART_WORKOUT.test(message)
+  const structuredPayload = /\b\d+(?:\.\d+)?(?:\s*[a-z%]+)?(?:\s*(?:x|×)\s*\d+(?:\.\d+)?(?:\s*[a-z%]+)?)+\b/i.test(message)
     || isTaskList(message);
   return affirmative || structuredPayload;
-}
-
-/** A definitive tracker answer must come from the live tracker, not one recalled memory. */
-export function turnRequiresAuthoritativeTrackerRead(
-  userMessage: string,
-  previousAssistantMessage?: string,
-): boolean {
-  const message = currentInstruction(userMessage);
-  const explicitTrackerQuestion = /\b(?:notion|gym tracker|workout tracker|gym log|workout log)\b/i.test(message)
-    && /\b(?:check|look|pull|read|see|show|what|which|anything|history|today|doing|did)\b/i.test(message);
-  const directWorkoutQuestion = /\b(?:what did i do (?:at (?:the )?gym|for (?:my )?workout)|what was my workout|what did i log at (?:the )?gym)\b/i.test(message);
-  const continuation = /^\s*(?:anything|what)\s+else\??\s*$/i.test(message)
-    && /\b(?:gym|workout|exercise|tracker|logs?|chest press)\b/i.test(previousAssistantMessage ?? '');
-  return explicitTrackerQuestion || directWorkoutQuestion || continuation;
-}
-
-/** Bare greetings must not turn remembered activity into an unsolicited factual claim. */
-export function bareGreetingLeaksWorkoutInference(userMessage: string, response: string): boolean {
-  return /^\s*(?:hey|hi|hello|yo|hiya)[!.?\s]*$/i.test(currentInstruction(userMessage))
-    && /\b(?:from your logs?|just finished|you (?:did|hit|logged)|chest (?:day|press)|workout)\b/i.test(response);
 }
