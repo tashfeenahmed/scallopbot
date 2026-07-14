@@ -712,15 +712,22 @@ export function hasUnverifiedSuccessClaim(response: string): boolean {
 const WORKOUT_COMPARISON = /\b(?:PR|personal record|record high|increase[sd]?|improv(?:e[dm]?|ement)|jump(?:ed)?|up\s+\d+(?:\.\d+)?\s*kg|added\s+\d+(?:\.\d+)?\s*kg|more than last)\b/i;
 const WORKOUT_SUBJECT = /\b(?:workout|exercise|press|row|curl|squat|deadlift|machine|cable|kg|reps?|sets?)\b/i;
 
-function trackerEvidenceRows(raw: string): Array<{ title: string; evidence: string }> {
-  const rows: Array<{ title: string; evidence: string }> = [];
+function trackerQueryRows(raw: string): { found: boolean; rows: Array<Record<string, unknown>> } {
+  const rows: Array<Record<string, unknown>> = [];
   const seen = new Set<unknown>();
+  let found = false;
   const visit = (value: unknown, depth: number): void => {
     if (depth > 10 || value == null) return;
     if (typeof value === 'string') {
       const text = value.trim();
       if ((text.startsWith('{') || text.startsWith('[')) && text.length <= 250_000) {
-        try { visit(JSON.parse(text), depth + 1); } catch { /* ordinary text */ }
+        try {
+          visit(JSON.parse(text), depth + 1);
+        } catch {
+          for (const line of text.split(/\r?\n/).filter(Boolean)) {
+            try { visit(JSON.parse(line), depth + 1); } catch { /* ordinary text */ }
+          }
+        }
       }
       return;
     }
@@ -731,23 +738,100 @@ function trackerEvidenceRows(raw: string): Array<{ title: string; evidence: stri
       return;
     }
     const record = value as Record<string, unknown>;
-    const properties = record.properties && typeof record.properties === 'object'
-      ? record.properties as Record<string, unknown>
-      : null;
-    if (properties) {
-      const titleEntry = Object.entries(properties).find(([key, propertyValue]) => (
-        /^(?:name|exercise|activity|title)$/i.test(key) && typeof propertyValue === 'string'
-      ));
-      if (titleEntry) rows.push({ title: String(titleEntry[1]), evidence: JSON.stringify(record) });
+    if (Array.isArray(record.rows)) {
+      found = true;
+      for (const row of record.rows) {
+        if (row && typeof row === 'object' && !Array.isArray(row)) {
+          rows.push(row as Record<string, unknown>);
+        }
+      }
+      return;
     }
     for (const child of Object.values(record)) visit(child, depth + 1);
   };
   visit(raw, 0);
-  return rows;
+  const unique = new Map<string, Record<string, unknown>>();
+  for (const row of rows) {
+    const key = typeof row.id === 'string' && row.id
+      ? row.id
+      : JSON.stringify([row.created_time ?? null, row.properties ?? null]);
+    if (!unique.has(key)) unique.set(key, row);
+  }
+  return { found, rows: [...unique.values()] };
+}
+
+function trackerEvidenceRows(raw: string): Array<{ title: string; evidence: string }> {
+  return trackerQueryRows(raw).rows.flatMap((row) => {
+    const properties = row.properties && typeof row.properties === 'object'
+      ? row.properties as Record<string, unknown>
+      : null;
+    if (!properties) return [];
+    const titleEntry = Object.entries(properties).find(([key, propertyValue]) => (
+      /^(?:name|exercise|activity|title)$/i.test(key) && typeof propertyValue === 'string'
+    ));
+    return titleEntry
+      ? [{ title: String(titleEntry[1]), evidence: JSON.stringify(row) }]
+      : [];
+  });
 }
 
 function canonicalTrackerTitle(value: string): string {
   return value.toLocaleLowerCase('en-US').replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+function printableTrackerValue(value: unknown): string {
+  if (Array.isArray(value)) return value.map(printableTrackerValue).join(', ');
+  if (value && typeof value === 'object') return JSON.stringify(value);
+  return String(value);
+}
+
+/** Render factual tracker contents directly from the successful typed query. */
+export function renderAuthoritativeTrackerSummary(trackerQueryEvidence: string): string | null {
+  const query = trackerQueryRows(trackerQueryEvidence);
+  if (!query.found) return null;
+  if (query.rows.length === 0) {
+    return 'I checked the live tracker and found no entries matching that request.';
+  }
+
+  const rows = [...query.rows].sort((a, b) => (
+    String(a.created_time ?? '').localeCompare(String(b.created_time ?? ''))
+    || String(a.id ?? '').localeCompare(String(b.id ?? ''))
+  ));
+  const parsed = rows.flatMap((row) => {
+    const properties = row.properties && typeof row.properties === 'object'
+      ? row.properties as Record<string, unknown>
+      : null;
+    if (!properties) return [];
+    const titleEntry = Object.entries(properties).find(([key, value]) => (
+      /^(?:name|exercise|activity|title)$/i.test(key) && typeof value === 'string' && value.trim()
+    ));
+    if (!titleEntry) return [];
+    const date = Object.entries(properties).find(([key, value]) => (
+      /^date$/i.test(key) && typeof value === 'string' && value.trim()
+    ))?.[1] as string | undefined;
+    const preferred = ['Type', 'Weight (kg)', 'Reps', 'Sets', 'Duration (min)', 'Notes'];
+    const orderedKeys = [
+      ...preferred.filter(key => key in properties),
+      ...Object.keys(properties).filter(key => (
+        !preferred.includes(key)
+        && key !== titleEntry[0]
+        && !/^date$/i.test(key)
+      )),
+    ];
+    const details = orderedKeys.flatMap((key) => {
+      const value = properties[key];
+      if (value == null || value === '' || (Array.isArray(value) && value.length === 0)) return [];
+      return [`${key}: ${printableTrackerValue(value)}`];
+    });
+    return [{ title: String(titleEntry[1]), date, details }];
+  });
+  if (parsed.length === 0) return null;
+
+  const dates = [...new Set(parsed.map(row => row.date).filter((date): date is string => !!date))];
+  const dateLabel = dates.length === 1 ? ` for ${dates[0]}` : '';
+  const header = `I checked the live tracker. It has ${parsed.length} ${parsed.length === 1 ? 'entry' : 'entries'}${dateLabel}:`;
+  const lines = parsed.map(row => `- **${row.title}**${row.details.length ? ` — ${row.details.join('; ')}` : ''}`);
+  return `${header}\n\n${lines.join('\n')}\n\nThat's the complete result from the tracker.`;
 }
 
 /**

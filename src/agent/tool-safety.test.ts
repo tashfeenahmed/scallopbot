@@ -13,6 +13,7 @@ import {
   toolOutputIndicatesFailure,
   turnRequiresMutationReceipt,
   removeUnsupportedWorkoutComparisons,
+  renderAuthoritativeTrackerSummary,
   turnRequiresAuthoritativeTrackerRead,
   bareGreetingLeaksWorkoutInference,
 } from './tool-safety.js';
@@ -513,6 +514,26 @@ describe('turn-scoped tool safety', () => {
     expect(cleaned.removed).toBe(false);
     expect(cleaned.response).toContain('**Chest press** — Strength, 15kg');
     expect(cleaned.response).toContain('**Chest Press** — Machine, 40kg');
+  });
+
+  it('renders tracker questions from exact query rows without model commentary', () => {
+    const summary = renderAuthoritativeTrackerSummary(JSON.stringify({
+      success: true,
+      result: {
+        rows: [
+          { id: '2', created_time: '2026-07-14T19:00:00Z', properties: {
+            Name: 'Chest press', Date: '2026-07-14', Type: 'Strength', 'Weight (kg)': 15, Reps: 10, Sets: 3,
+          } },
+          { id: '1', created_time: '2026-07-14T11:00:00Z', properties: {
+            Name: 'Stairmaster', Date: '2026-07-14', Type: 'Cardio', 'Duration (min)': 8.5,
+          } },
+        ],
+      },
+    }));
+    expect(summary).toContain('2 entries for 2026-07-14');
+    expect(summary).toContain('**Stairmaster** — Type: Cardio; Duration (min): 8.5');
+    expect(summary).toContain('**Chest press** — Type: Strength; Weight (kg): 15; Reps: 10; Sets: 3');
+    expect(summary).not.toMatch(/perhaps|warm-?up|dumbbell/i);
   });
 
   it('rejects exercise modalities invented by a structured write', () => {

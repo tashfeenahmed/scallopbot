@@ -47,6 +47,7 @@ import {
   hasUnverifiedSuccessClaim,
   isLikelyExternalMutation,
   localIsoDate,
+  renderAuthoritativeTrackerSummary,
   removeUnsupportedWorkoutComparisons,
   toolOperationIdentity,
   toolOutputIndicatesFailure,
@@ -1210,6 +1211,19 @@ export class Agent {
         }
 
         const activeUserMessage = turnToolSafety.userMessage;
+        if (
+          successfulNotionQuery
+          && turnRequiresAuthoritativeTrackerRead(
+            activeUserMessage,
+            turnToolSafety.previousAssistantMessage,
+          )
+        ) {
+          const exactTrackerSummary = renderAuthoritativeTrackerSummary(successfulNotionQueryEvidence);
+          if (exactTrackerSummary) {
+            finalResponse = exactTrackerSummary;
+            persistContent = [{ type: 'text', text: finalResponse }];
+          }
+        }
         if (/\b(?:research|analysis|analytics|competitor|market|report|forecast)\b/i.test(activeUserMessage)) {
           const grounded = quarantineUngroundedResponseClaims(finalResponse, turnEvidenceReceipts);
           if (grounded.removedLines > 0) {
