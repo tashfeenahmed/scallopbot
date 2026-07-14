@@ -1666,7 +1666,7 @@ describe('UnifiedScheduler proactive delivery safety', () => {
 
     expect(send.mock.calls.map(call => call[1])).toEqual([
       'Anything from today worth carrying forward?',
-      'What from today do you want to pick up tomorrow?',
+      'Anything from today you want to revisit?',
     ]);
     expect(router.executeWithFallback).not.toHaveBeenCalled();
   });

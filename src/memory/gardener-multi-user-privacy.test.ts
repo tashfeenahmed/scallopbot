@@ -81,11 +81,13 @@ describe('gardener multi-user privacy', () => {
       'user',
       'Synthetic owner work uses TypeScript on Project Juniper.',
     );
+    db.addSessionMessage('owner-session', 'assistant', 'Owner work acknowledged.');
     db.addSessionMessage(
       'beta-session',
       'user',
       'Synthetic beta work uses Kubernetes on Project Magnolia.',
     );
+    db.addSessionMessage('beta-session', 'assistant', 'Beta work acknowledged.');
     db.addSessionMessage(
       'missing-owner-session',
       'user',
@@ -95,6 +97,7 @@ describe('gardener multi-user privacy', () => {
     runSql(db, 'UPDATE sessions SET updated_at = ?', [old]);
 
     const summarizer = {
+      minimumMessageCount: 2,
       summarizeBatch: vi.fn(async (
         database: ScallopDatabase,
         sessionIds: string[],

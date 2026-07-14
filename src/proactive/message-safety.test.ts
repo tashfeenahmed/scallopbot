@@ -165,7 +165,36 @@ describe('renderUserFacingProactiveMessage', () => {
       .toBe('Anything from today worth carrying forward?');
     await expect(renderUserFacingProactiveMessage(raw, undefined, {
       recentMessages: ['Anything from today worth carrying forward?'],
-    })).resolves.toBe('What from today do you want to pick up tomorrow?');
+    })).resolves.toBe('Anything from today you want to revisit?');
+  });
+
+  it('grounds rewrites in the delivery timezone and rejects invented future dates', async () => {
+    const router = {
+      executeWithFallback: vi.fn()
+        .mockResolvedValueOnce({
+          response: { content: [{ type: 'text', text: 'Leg day looked solid—anything on your mind for tomorrow?' }] },
+        })
+        .mockResolvedValueOnce({
+          response: { content: [{ type: 'text', text: 'How are today’s priorities looking?' }] },
+        }),
+    };
+
+    await expect(renderUserFacingProactiveMessage(
+      'Daily check-in with Tash - ask about priorities, deadlines, and how things are going',
+      router as any,
+      {
+        forceRewrite: true,
+        timeZone: 'Europe/Dublin',
+        currentTimeMs: Date.parse('2026-07-14T09:00:00Z'),
+        recentConversation: '[2026-07-13 14:10 Europe/Dublin] User: Leg day completed.',
+      },
+    )).resolves.toBe('How are today’s priorities looking?');
+
+    expect(router.executeWithFallback).toHaveBeenCalledTimes(2);
+    const request = router.executeWithFallback.mock.calls[0][0];
+    expect(request.messages[0].content).toContain('AUTHORITATIVE CURRENT TIME:');
+    expect(request.messages[0].content).toContain('Tuesday, 14 July 2026');
+    expect(request.system).toMatch(/Never treat\s+an activity from an earlier local date as happening today/);
   });
 
   it('uses recent live conversation instead of the canned reflection shortcut', async () => {

@@ -1313,6 +1313,8 @@ export class UnifiedScheduler {
       // Fetch recent chat context so the sub-agent is aware of ongoing conversations
       const chatContext = getRecentChatContext(this.db, item.userId, {
         identityCandidates: [...this.ownedIdentityCandidates(item.userId)],
+        includeTimestamps: true,
+        timeZone: this.getTimezone(item.userId),
       });
 
       // Grounding directive: scheduled tasks run unattended, so a sub-agent that
@@ -1463,6 +1465,8 @@ export class UnifiedScheduler {
           maxCharsPerMessage: 350,
           stalenessMs: 7 * 24 * 60 * 60 * 1000,
           identityCandidates: [...this.ownedIdentityCandidates(item.userId)],
+          includeTimestamps: true,
+          timeZone: this.getTimezone(item.userId),
         })
       : null;
     if (gapApplies && hasUnresolvedArtifactWork(recentChat?.formattedContext)) {
@@ -1484,6 +1488,8 @@ export class UnifiedScheduler {
           recentConversation: recentChat?.formattedContext,
           recentMessages: this.getRecentMessagesForStyle(item.userId),
           messageType: sourceOverride ?? item.type,
+          timeZone: this.getTimezone(item.userId),
+          currentTimeMs: Date.now(),
         });
     if (renderResult.outcome === 'skip') {
       this.logger.info(

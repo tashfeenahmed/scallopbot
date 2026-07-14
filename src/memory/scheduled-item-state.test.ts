@@ -46,6 +46,50 @@ describe('scheduled-item lifecycle invariants', () => {
     });
   }
 
+  it('uses unfinished task intent instead of persisting a premature completion claim', () => {
+    const task = add({
+      source: 'agent',
+      kind: 'task',
+      type: 'event_prep',
+      message: "I've completed competitor analysis and prepared the report.",
+      taskConfig: { goal: 'Identify the competitors and build the comparison report.' },
+    });
+
+    expect(task.message).toBe('Identify the competitors and build the comparison report.');
+    expect(task.messageProvenance).toBe('generated');
+  });
+
+  it('losslessly reconciles an already-persisted premature completion title', () => {
+    const task = add({
+      source: 'agent',
+      kind: 'task',
+      type: 'event_prep',
+      message: 'Neutral task title',
+      taskConfig: { goal: 'Identify the competitors and build the comparison report.' },
+    });
+    db!.close();
+    db = null;
+    const legacy = new Database(dbPath);
+    legacy.prepare('UPDATE scheduled_items SET message = ? WHERE id = ?').run(
+      "I've completed competitor analysis and prepared the report.",
+      task.id,
+    );
+    legacy.close();
+
+    db = new ScallopDatabase(dbPath);
+    expect(db.getScheduledItem(task.id)?.message).toBe(
+      'Identify the competitors and build the comparison report.',
+    );
+    const inspect = new Database(dbPath, { readonly: true });
+    const audit = inspect.prepare(`
+      SELECT item_snapshot, reason
+      FROM scheduled_task_intent_reconciliation_audit WHERE item_id = ?
+    `).get(task.id) as { item_snapshot: string; reason: string };
+    expect(audit.reason).toBe('premature_completion_message_replaced_with_task_goal');
+    expect(JSON.parse(audit.item_snapshot).message).toContain("I've completed competitor analysis");
+    inspect.close();
+  });
+
   it('age cleanup expires only scheduled pending nudges', () => {
     const now = Date.now();
 

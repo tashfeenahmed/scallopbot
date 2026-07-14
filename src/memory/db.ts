@@ -70,6 +70,19 @@ const NON_EVIDENCE_SOURCE_TOOLS = new Set([
   'board', 'goals', 'reminder', 'triggers', 'progress', 'question', 'telegram_send',
 ]);
 
+const PREMATURE_TASK_COMPLETION_RE = /^\s*(?:i(?:'ve| have)?|we(?:'ve| have)?|the (?:task|work|analysis|report))\s+(?:has\s+|have\s+|was\s+|were\s+)?(?:successfully\s+)?(?:completed|finished|created|generated|delivered|sent|published|deployed|done)\b/i;
+const RELATIVE_MEMORY_DATE_RE = /\b(?:today|tomorrow|yesterday|next\s+(?:week|month|year)|last\s+(?:week|month|year))\b/gi;
+const LEGACY_EXTERNAL_SUMMARY_CLAIM_RE = /\b(?:logged|saved|sent|updated|created|uploaded|deleted|booked|submitted|added|wrote|written|published|deployed)\b[^.!?]{0,160}\b(?:notion|tracker|dashboard|calendar|email|service|database|file|document|report|spreadsheet|github|slack|drive)\b|\b(?:notion|tracker|dashboard|calendar|email|service|database|file|document|report|spreadsheet|github|slack|drive)\b[^.!?]{0,160}\b(?:logged|saved|sent|updated|created|uploaded|deleted|booked|submitted|added|wrote|written|published|deployed)\b/i;
+
+function normalizePendingTaskMessage(
+  message: string,
+  kind: ScheduledItemKind,
+  taskConfig: TaskConfig | null | undefined,
+): string {
+  if (kind !== 'task' || !taskConfig?.goal?.trim()) return message;
+  return PREMATURE_TASK_COMPLETION_RE.test(message) ? taskConfig.goal.trim() : message;
+}
+
 function isValidRuntimeEvidenceReceipt(value: unknown): value is ToolEvidenceReceipt {
   if (!value || typeof value !== 'object') return false;
   const receipt = value as Partial<ToolEvidenceReceipt>;
@@ -761,6 +774,15 @@ export interface ToolOperationReservation {
   reserved: boolean;
   /** Existing durable state when the operation was not reserved. */
   existingStatus?: Exclude<ToolOperationStatus, 'failed'>;
+}
+
+export interface ToolOperationLedgerEntry {
+  operationId: string;
+  sessionId: string;
+  toolName: string;
+  status: ToolOperationStatus;
+  createdAt: number;
+  updatedAt: number;
 }
 
 /**
@@ -1507,6 +1529,7 @@ export class ScallopDatabase {
     this.migrateDecoupleSessionSummaries();
     this.migrateAddSessionMessageKinds();
     this.migrateAddSessionSummaryVerification();
+    this.migrateQuarantineLegacyUnprovenSessionSummaries();
 
     // Existing public databases may predate the one-active-version invariant.
     // Normalize duplicates before creating the partial unique index.
@@ -1520,6 +1543,7 @@ export class ScallopDatabase {
 
     // Migration: Add source memory columns (learned_from, times_confirmed, contradiction_ids)
     this.migrateAddSourceMemoryColumns();
+    this.migrateRepairRelativeNremMemories();
 
     // Migration: Clean polluted memory entries (skill outputs, assistant responses stored as facts)
     this.migrateCleanPollutedMemories();
@@ -1552,6 +1576,7 @@ export class ScallopDatabase {
     // Quarantine provably inconsistent or unverified historical task rows
     // losslessly, then restore active goal records to durable storage semantics.
     this.migrateQuarantineRecurringCadenceMismatches();
+    this.migrateReconcilePrematureTaskCompletionMessages();
     this.migrateQuarantineUnverifiedTaskResults();
     this.migrateDurableGoalMemories();
 
@@ -1863,6 +1888,68 @@ export class ScallopDatabase {
     }
   }
 
+  /**
+   * Version-1 summary verification checked transcript shape, not external-action
+   * provenance. Invalidate only those legacy summaries that assert an external
+   * completion; the summary and receipt history remain preserved for audit and
+   * the version-2 summarizer can regenerate them safely.
+   */
+  private migrateQuarantineLegacyUnprovenSessionSummaries(): void {
+    const migrate = this.db.transaction(() => {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS session_summary_provenance_quarantine (
+          summary_id TEXT PRIMARY KEY,
+          session_id TEXT NOT NULL,
+          summary_snapshot TEXT NOT NULL,
+          reason TEXT NOT NULL,
+          quarantined_at INTEGER NOT NULL
+        )
+      `);
+      const rows = this.db.prepare(`
+        SELECT * FROM session_summaries
+        WHERE schema_valid = 1 AND verified_at IS NOT NULL
+          AND COALESCE(verification_version, 0) < 2
+          AND NOT EXISTS (
+            SELECT 1 FROM session_summary_provenance_quarantine quarantine
+            WHERE quarantine.summary_id = session_summaries.id
+          )
+      `).all() as Record<string, unknown>[];
+      const audit = this.db.prepare(`
+        INSERT INTO session_summary_provenance_quarantine
+          (summary_id, session_id, summary_snapshot, reason, quarantined_at)
+        VALUES (?, ?, ?, 'legacy_external_completion_claim_lacked_turn_receipt_verification', ?)
+      `);
+      const invalidate = this.db.prepare(`
+        UPDATE session_summaries
+        SET schema_valid = 0, verified_at = NULL
+        WHERE id = ?
+      `);
+      const reject = this.db.prepare(`
+        INSERT INTO session_summary_verification_events
+          (summary_id, session_id, outcome, verifier, verification_version, reason, checked_at)
+        VALUES (?, ?, 'rejected', 'provenance_migration', 2,
+          'legacy_external_completion_claim_lacked_turn_receipt_verification', ?)
+      `);
+      const now = Date.now();
+      for (const row of rows) {
+        if (!LEGACY_EXTERNAL_SUMMARY_CLAIM_RE.test(String(row.summary))) continue;
+        const snapshot = JSON.stringify({
+          summary: row.summary,
+          topics: row.topics,
+          messageCount: row.message_count,
+          durationMs: row.duration_ms,
+          verifiedAt: row.verified_at,
+          verifier: row.verifier,
+          verificationVersion: row.verification_version,
+        });
+        audit.run(String(row.id), String(row.session_id), snapshot, now);
+        invalidate.run(row.id);
+        reject.run(String(row.id), String(row.session_id), now);
+      }
+    });
+    migrate.immediate();
+  }
+
   private migrateNormalizeEvolutionVersions(): void {
     const migrate = this.db.transaction(() => {
       this.db.prepare(`
@@ -2045,6 +2132,108 @@ export class ScallopDatabase {
         console.warn(`[migration] migrateAddSourceMemoryColumns: ${error.message}`);
       }
     }
+  }
+
+  /**
+   * Repair NREM memories that interpreted an old source's "today" at the time
+   * the nightly job ran. A unique source event day is canonicalized to an
+   * absolute date; ambiguous rows are merely superseded, never deleted.
+   */
+  private migrateRepairRelativeNremMemories(): void {
+    const migrate = this.db.transaction(() => {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS nrem_temporal_repair_audit (
+          memory_id TEXT PRIMARY KEY,
+          memory_snapshot TEXT NOT NULL,
+          outcome TEXT NOT NULL CHECK (outcome IN ('canonicalized', 'quarantined')),
+          reason TEXT NOT NULL,
+          repaired_at INTEGER NOT NULL
+        )
+      `);
+      const rows = this.db.prepare(`
+        SELECT id, content, event_date, metadata, memory_type, is_latest, updated_at
+        FROM memories
+        WHERE learned_from = 'nrem_consolidation' AND is_latest = 1
+          AND NOT EXISTS (
+            SELECT 1 FROM nrem_temporal_repair_audit audit
+            WHERE audit.memory_id = memories.id
+          )
+      `).all() as Record<string, unknown>[];
+      const audit = this.db.prepare(`
+        INSERT INTO nrem_temporal_repair_audit
+          (memory_id, memory_snapshot, outcome, reason, repaired_at)
+        VALUES (?, ?, ?, ?, ?)
+      `);
+      const canonicalize = this.db.prepare(`
+        UPDATE memories
+        SET content = ?, event_date = ?, metadata = ?, updated_at = ?
+        WHERE id = ? AND is_latest = 1
+      `);
+      const quarantine = this.db.prepare(`
+        UPDATE memories
+        SET is_latest = 0, memory_type = 'superseded', updated_at = ?
+        WHERE id = ? AND is_latest = 1
+      `);
+      const getSource = this.db.prepare(`
+        SELECT content, event_date, metadata FROM memories WHERE id = ?
+      `);
+      const hasRelativeDate = new RegExp(RELATIVE_MEMORY_DATE_RE.source, 'i');
+      const now = Date.now();
+
+      for (const row of rows) {
+        const content = String(row.content);
+        if (!hasRelativeDate.test(content)) continue;
+        const metadata = row.metadata == null ? {} : (parseDetailJSON(String(row.metadata)) ?? {});
+        const sourceIds = Array.isArray(metadata.sourceIds)
+          ? metadata.sourceIds.filter((id): id is string => typeof id === 'string')
+          : [];
+        const sourceDates = new Map<string, number>();
+        for (const sourceId of sourceIds) {
+          const source = getSource.get(sourceId) as Record<string, unknown> | undefined;
+          if (!source || source.event_date == null) continue;
+          const sourceMetadata = source.metadata == null
+            ? null
+            : parseDetailJSON(String(source.metadata));
+          if (sourceMetadata?.isRelativeDate !== true && !hasRelativeDate.test(String(source.content))) continue;
+          const eventDate = Number(source.event_date);
+          const day = new Date(eventDate).toISOString().slice(0, 10);
+          if (!sourceDates.has(day)) sourceDates.set(day, eventDate);
+        }
+        const snapshot = JSON.stringify({
+          content,
+          eventDate: row.event_date,
+          metadata,
+          memoryType: row.memory_type,
+          isLatest: row.is_latest,
+          updatedAt: row.updated_at,
+        });
+        if (sourceDates.size !== 1) {
+          audit.run(
+            String(row.id), snapshot, 'quarantined',
+            'relative_nrem_memory_has_no_unique_source_event_date', now,
+          );
+          quarantine.run(now, row.id);
+          continue;
+        }
+
+        const [day, eventDate] = [...sourceDates.entries()][0];
+        const repairedMetadata = {
+          ...metadata,
+          rawDateText: null,
+          isRelativeDate: false,
+          relativeDateCanonicalized: true,
+          temporalSourceDate: day,
+          temporalRepairVersion: 1,
+        };
+        const repairedContent = content.replace(RELATIVE_MEMORY_DATE_RE, `on ${day}`);
+        audit.run(
+          String(row.id), snapshot, 'canonicalized',
+          'relative_nrem_memory_reanchored_to_unique_source_event_date', now,
+        );
+        canonicalize.run(repairedContent, eventDate, JSON.stringify(repairedMetadata), now, row.id);
+      }
+    });
+    migrate.immediate();
   }
 
   /** Assistant self-reflection is derived coaching, never user-authored memory. */
@@ -2560,6 +2749,58 @@ export class ScallopDatabase {
           outcome: 'blocked',
           failureCode: 'schedule_cadence_mismatch',
         } satisfies BoardItemResult), now, row.id);
+      }
+    });
+    migrate.immediate();
+  }
+
+  /**
+   * A pending task title describes work to perform. Legacy rows occasionally
+   * stored a fabricated completion sentence there, even though task_config.goal
+   * still described unfinished work. Preserve the original row in an audit and
+   * restore the executable goal as the neutral board title.
+   */
+  private migrateReconcilePrematureTaskCompletionMessages(): void {
+    const migrate = this.db.transaction(() => {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS scheduled_task_intent_reconciliation_audit (
+          item_id TEXT PRIMARY KEY,
+          item_snapshot TEXT NOT NULL,
+          reason TEXT NOT NULL,
+          reconciled_at INTEGER NOT NULL
+        )
+      `);
+      const rows = this.db.prepare(`
+        SELECT * FROM scheduled_items
+        WHERE kind = 'task' AND status = 'pending'
+          AND task_config IS NOT NULL AND json_valid(task_config)
+          AND NOT EXISTS (
+            SELECT 1 FROM scheduled_task_intent_reconciliation_audit audit
+            WHERE audit.item_id = scheduled_items.id
+          )
+      `).all() as Record<string, unknown>[];
+      const audit = this.db.prepare(`
+        INSERT INTO scheduled_task_intent_reconciliation_audit
+          (item_id, item_snapshot, reason, reconciled_at)
+        VALUES (?, ?, 'premature_completion_message_replaced_with_task_goal', ?)
+      `);
+      const update = this.db.prepare(`
+        UPDATE scheduled_items
+        SET message = ?, message_provenance = 'generated', updated_at = ?
+        WHERE id = ? AND kind = 'task' AND status = 'pending'
+      `);
+      const now = Date.now();
+      for (const row of rows) {
+        let config: TaskConfig;
+        try {
+          config = JSON.parse(String(row.task_config)) as TaskConfig;
+        } catch {
+          continue;
+        }
+        const normalized = normalizePendingTaskMessage(String(row.message), 'task', config);
+        if (normalized === row.message) continue;
+        audit.run(String(row.id), JSON.stringify(row), now);
+        update.run(normalized, now, row.id);
       }
     });
     migrate.immediate();
@@ -4431,6 +4672,24 @@ export class ScallopDatabase {
     };
   }
 
+  /** Privacy-safe operation provenance for transcript summarization. */
+  getToolOperationsBySession(sessionId: string): ToolOperationLedgerEntry[] {
+    const rows = this.db.prepare(`
+      SELECT operation_id, session_id, tool_name, status, created_at, updated_at
+      FROM tool_operation_ledger
+      WHERE session_id = ?
+      ORDER BY updated_at, operation_id
+    `).all(sessionId) as Record<string, unknown>[];
+    return rows.map(row => ({
+      operationId: String(row.operation_id),
+      sessionId: String(row.session_id),
+      toolName: String(row.tool_name),
+      status: row.status as ToolOperationStatus,
+      createdAt: Number(row.created_at),
+      updatedAt: Number(row.updated_at),
+    }));
+  }
+
   // ============ Session Operations ============
 
   createSession(id: string, metadata?: Record<string, unknown>): SessionRow {
@@ -4507,6 +4766,26 @@ export class ScallopDatabase {
       return true;
     });
     return archive();
+  }
+
+  /** Archive old empty top-level sessions without deleting metadata or history. */
+  archiveStaleEmptySessions(maxAgeMs: number, now: number = Date.now()): number {
+    const cutoff = now - Math.max(0, maxAgeMs);
+    const rows = this.db.prepare(`
+      SELECT id
+      FROM sessions
+      WHERE archived_at IS NULL AND transcript_deleted_at IS NULL
+        AND updated_at < ?
+        AND NOT EXISTS (SELECT 1 FROM session_messages WHERE session_id = sessions.id)
+        AND NOT EXISTS (SELECT 1 FROM session_message_archive WHERE session_id = sessions.id)
+        AND COALESCE(json_extract(CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END, '$.isSubAgent'), 0) != 1
+        AND COALESCE(json_extract(CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END, '$.source'), '') != 'scheduler'
+    `).all(cutoff) as Array<{ id: string }>;
+    let archived = 0;
+    for (const row of rows) {
+      if (this.archiveSession(row.id, 'stale_empty_session', 'gardener')) archived++;
+    }
+    return archived;
   }
 
   /** Archive every active session for one durable channel identity. */
@@ -5603,7 +5882,9 @@ export class ScallopDatabase {
    * Status defaults to 'pending' if not specified
    */
   addScheduledItem(item: Omit<ScheduledItem, 'id' | 'status' | 'createdAt' | 'updatedAt' | 'firedAt' | 'kind' | 'taskConfig' | 'boardStatus' | 'priority' | 'labels' | 'result' | 'dependsOn' | 'goalId' | 'workerId' | 'preferredWorkerId' | 'leaseToken' | 'leasedAt' | 'leaseExpiresAt' | 'attemptCount' | 'maxAttempts' | 'lastError' | 'handedOffFrom' | 'messageProvenance' | 'sourceItemId'> & { status?: ScheduledItemStatus; kind?: ScheduledItemKind; taskConfig?: TaskConfig | null; boardStatus?: BoardStatus | null; priority?: Priority; labels?: string[] | null; dependsOn?: string[] | null; goalId?: string | null; preferredWorkerId?: string | null; maxAttempts?: number; messageProvenance?: ScheduledMessageProvenance; sourceItemId?: string | null }): ScheduledItem {
-    if (item.recurring) validateRecurringSchedule(item.recurring, item.message);
+    const kind = item.kind ?? 'nudge';
+    const durableMessage = normalizePendingTaskMessage(item.message, kind, item.taskConfig);
+    if (item.recurring) validateRecurringSchedule(item.recurring, durableMessage);
     const id = nanoid();
     const now = Date.now();
     const status = item.status ?? (
@@ -5631,7 +5912,7 @@ export class ScallopDatabase {
     if (item.source === 'agent') {
       const existing = this.findSimilarAgentScheduledItem(
         item.userId,
-        item.message,
+        durableMessage,
         item.triggerAt,
         item.sourceItemId ?? null,
       );
@@ -5644,8 +5925,8 @@ export class ScallopDatabase {
       this.ensureScheduledGoalReference(
         item.goalId,
         item.userId,
-        item.message,
-        item.kind ?? 'nudge',
+        durableMessage,
+        kind,
       );
     }
 
@@ -5665,9 +5946,9 @@ export class ScallopDatabase {
       item.userId,
       item.sessionId ?? null,
       item.source,
-      item.kind ?? 'nudge',
+      kind,
       item.type,
-      item.message,
+      durableMessage,
       messageProvenance,
       item.context ?? null,
       item.triggerAt,
@@ -5697,10 +5978,11 @@ export class ScallopDatabase {
 
     return {
       ...item,
+      message: durableMessage,
       id,
       messageProvenance,
       sourceItemId: item.sourceItemId ?? null,
-      kind: item.kind ?? 'nudge',
+      kind,
       taskConfig: item.taskConfig ?? null,
       boardStatus,
       priority: item.priority ?? 'medium',

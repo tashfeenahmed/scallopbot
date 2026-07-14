@@ -302,7 +302,7 @@ describe('buildFusionPrompt', () => {
     expect(userContent).toMatch(/no explicit connections|semantic space/i);
   });
 
-  it('uses temperature 0.1 and maxTokens 500', () => {
+  it('uses strict non-reasoning structured output with enough response budget', () => {
     const cluster = [
       makeMemory({ id: 'm1', content: 'Memory A', category: 'fact', importance: 5 }),
       makeMemory({ id: 'm2', content: 'Memory B', category: 'fact', importance: 5 }),
@@ -312,7 +312,12 @@ describe('buildFusionPrompt', () => {
     const prompt = buildFusionPrompt(cluster, []);
 
     expect(prompt.temperature).toBe(0.1);
-    expect(prompt.maxTokens).toBe(500);
+    expect(prompt.maxTokens).toBe(1_000);
+    expect(prompt.enableThinking).toBe(false);
+    expect(prompt.structuredOutput).toMatchObject({ name: 'memory_fusion', strict: true });
+    expect(prompt.purpose).toBe('memory_fusion');
+    expect(String(prompt.messages[0].content)).toContain('[authored:');
+    expect(prompt.system).toMatch(/Use absolute YYYY-MM-DD\s+dates/);
   });
 
   it('requests JSON response format in system prompt', () => {
@@ -445,6 +450,9 @@ describe('nremConsolidate', () => {
     expect(result.clustersProcessed).toBe(2);
     // One should have failed, one should have succeeded
     expect(result.failures).toBe(1);
+    expect(result.failureDetails).toEqual([
+      expect.objectContaining({ reason: 'provider_error', sourceMemoryIds: expect.any(Array) }),
+    ]);
     expect(result.fusionResults.length).toBe(1);
   });
 

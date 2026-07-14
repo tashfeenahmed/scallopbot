@@ -98,6 +98,7 @@ export async function runDreamCycle(ctx: GardenerContext): Promise<void> {
             clustersProcessed: dreamResult.nrem.clustersProcessed,
             memoriesConsolidated: dreamResult.nrem.fusionResults.length,
             failures: dreamResult.nrem.failures,
+            failureDetails: dreamResult.nrem.failureDetails,
           }, 'NREM consolidation complete for user');
 
           triggerHook({

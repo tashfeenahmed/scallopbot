@@ -71,6 +71,12 @@ export interface NremResult {
   fusionResults: NremFusionResult[];
   /** Number of clusters that failed to fuse */
   failures: number;
+  /** Privacy-safe per-cluster diagnostics; IDs and reason only, never content. */
+  failureDetails?: Array<{
+    sourceMemoryIds: string[];
+    reason: 'invalid_json' | 'summary_not_shorter' | 'provider_error';
+    errorCode?: string;
+  }>;
 }
 
 // ============ Relation Context ============
@@ -160,7 +166,7 @@ export async function nremConsolidate(
   const config = { ...DEFAULT_NREM_CONFIG, ...options };
 
   if (memories.length === 0) {
-    return { clustersProcessed: 0, fusionResults: [], failures: 0 };
+    return { clustersProcessed: 0, fusionResults: [], failures: 0, failureDetails: [] };
   }
 
   // Step 1: Find cross-category clusters using NREM config
@@ -173,12 +179,13 @@ export async function nremConsolidate(
   });
 
   if (clusters.length === 0) {
-    return { clustersProcessed: 0, fusionResults: [], failures: 0 };
+    return { clustersProcessed: 0, fusionResults: [], failures: 0, failureDetails: [] };
   }
 
   // Step 2: Fuse each cluster with relation context (per-cluster error isolation)
   const fusionResults: NremFusionResult[] = [];
   let failures = 0;
+  const failureDetails: NonNullable<NremResult['failureDetails']> = [];
 
   for (const cluster of clusters) {
     try {
@@ -194,6 +201,10 @@ export async function nremConsolidate(
       const parsed = parseFusionResponse(responseText);
       if (!parsed) {
         failures++;
+        failureDetails.push({
+          sourceMemoryIds: cluster.map(memory => memory.id),
+          reason: 'invalid_json',
+        });
         continue;
       }
 
@@ -201,6 +212,10 @@ export async function nremConsolidate(
       const combinedLength = cluster.reduce((sum, m) => sum + m.content.length, 0);
       if (parsed.summary.length >= combinedLength) {
         failures++;
+        failureDetails.push({
+          sourceMemoryIds: cluster.map(memory => memory.id),
+          reason: 'summary_not_shorter',
+        });
         continue;
       }
 
@@ -221,8 +236,13 @@ export async function nremConsolidate(
         learnedFrom: 'nrem_consolidation',
         sourceMemoryIds: cluster.map(m => m.id),
       });
-    } catch {
+    } catch (error) {
       failures++;
+      failureDetails.push({
+        sourceMemoryIds: cluster.map(memory => memory.id),
+        reason: 'provider_error',
+        errorCode: error instanceof Error ? error.name : 'unknown_error',
+      });
     }
   }
 
@@ -230,5 +250,6 @@ export async function nremConsolidate(
     clustersProcessed: clusters.length,
     fusionResults,
     failures,
+    failureDetails,
   };
 }

@@ -30,6 +30,37 @@ export interface StoreFusedMemoryResult {
   fusedProminence: number;
 }
 
+const RELATIVE_DATE_RE = /\b(?:today|tomorrow|yesterday|next\s+(?:week|month|year)|last\s+(?:week|month|year))\b/gi;
+const HAS_RELATIVE_DATE_RE = /\b(?:today|tomorrow|yesterday|next\s+(?:week|month|year)|last\s+(?:week|month|year))\b/i;
+
+function normalizeFusedTemporalSummary(
+  summary: string,
+  sourceMemories: ScallopMemoryEntry[],
+): { content: string; eventDate?: number; temporalSourceDate?: string } {
+  if (!HAS_RELATIVE_DATE_RE.test(summary)) return { content: summary };
+
+  const relativeSources = sourceMemories.filter(memory => {
+    const metadata = memory.metadata as Record<string, unknown> | null;
+    return memory.eventDate != null
+      && (metadata?.isRelativeDate === true || HAS_RELATIVE_DATE_RE.test(memory.content));
+  });
+  const dates = new Map<string, number>();
+  for (const source of relativeSources) {
+    const day = new Date(source.eventDate!).toISOString().slice(0, 10);
+    if (!dates.has(day)) dates.set(day, source.eventDate!);
+  }
+  if (dates.size !== 1) {
+    throw new Error('fused_relative_time_has_no_unique_source_date');
+  }
+
+  const [day, eventDate] = [...dates.entries()][0];
+  return {
+    content: summary.replace(RELATIVE_DATE_RE, `on ${day}`),
+    eventDate,
+    temporalSourceDate: day,
+  };
+}
+
 /**
  * Stores a derived memory, creates DERIVES relations to all sources,
  * and caps prominence at 0.6.
@@ -38,9 +69,11 @@ export async function storeFusedMemory(
   input: StoreFusedMemoryInput,
   allMemories: ScallopMemoryEntry[],
 ): Promise<StoreFusedMemoryResult> {
+  const sourceMemories = allMemories.filter(m => input.sourceMemoryIds.includes(m.id));
+  const temporal = normalizeFusedTemporalSummary(input.summary, sourceMemories);
   const fusedMemory = await input.scallopStore.add({
     userId: input.userId,
-    content: input.summary,
+    content: temporal.content,
     category: input.category,
     importance: input.importance,
     confidence: input.confidence,
@@ -49,10 +82,14 @@ export async function storeFusedMemory(
       fusedAt: new Date().toISOString(),
       sourceCount: input.sourceMemoryIds.length,
       sourceIds: input.sourceMemoryIds,
+      ...(temporal.temporalSourceDate
+        ? { temporalSourceDate: temporal.temporalSourceDate, relativeDateCanonicalized: true }
+        : {}),
       ...input.extraMetadata,
     },
     learnedFrom: input.learnedFrom,
     detectRelations: false,
+    ...(temporal.eventDate !== undefined ? { eventDate: temporal.eventDate } : {}),
   });
 
   // Override memoryType to 'derived' (add() sets 'regular')
@@ -72,7 +109,6 @@ export async function storeFusedMemory(
   }
 
   // Set fused memory prominence capped at 0.6
-  const sourceMemories = allMemories.filter(m => input.sourceMemoryIds.includes(m.id));
   const maxProminence = sourceMemories.length > 0
     ? Math.max(...sourceMemories.map(m => m.prominence))
     : 0.5;

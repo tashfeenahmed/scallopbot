@@ -1725,6 +1725,12 @@ The current user request is quoted below. Execute tools only when they directly 
     const MAX_MEMORY_CHARS = Math.max(2000, Math.min(16000, Math.floor(remainingChars * 0.15)));
     let stableContext = '';
     let dynamicContext = '';
+    let userTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    try {
+      userTimezone = this.configManager?.getUserTimezone(userId) ?? userTimezone;
+    } catch {
+      // Fall back to the host timezone when no per-user timezone is configured.
+    }
     const items: { type: 'fact' | 'conversation'; content: string; subject?: string }[] = [];
 
     if (!this.scallopStore) {
@@ -1792,9 +1798,15 @@ The current user request is quoted below. Execute tools only when they directly 
       // search results change per query, prominent facts are stable but are
       // kept with recent+search to preserve the combined dedupe ordering.
       const EVENT_EXPIRY_MS = 24 * 60 * 60 * 1000;
+      const historicalMemoryQuery = /\b(?:history|historical|previous|earlier|before|ago|yesterday|last\s+(?:time|week|month|year|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|when did|what did i|show me (?:my )?recent|recent (?:training|workouts?|activity))\b/i.test(userMessage);
       const isPastEvent = (mem: { eventDate: number | null }): boolean => {
-        return !!(mem.eventDate && mem.eventDate < Date.now() - EVENT_EXPIRY_MS);
+        return !historicalMemoryQuery
+          && !!(mem.eventDate && mem.eventDate < Date.now() - EVENT_EXPIRY_MS);
       };
+      const contextMemoryContent = (mem: { content: string; eventDate: number | null }): string =>
+        mem.eventDate == null
+          ? mem.content
+          : `[Event date: ${localIsoDate(new Date(mem.eventDate), userTimezone)}] ${mem.content}`;
 
       const SHORT_TERM_WINDOW_MS = 6 * 60 * 60 * 1000;
       const isUserGroundedMemory = (memory: {
@@ -1817,6 +1829,9 @@ The current user request is quoted below. Execute tools only when they directly 
           userId,
           minProminence: 0.1,
           limit: 10,
+          ...(!historicalMemoryQuery
+            ? { excludeEventsBefore: Date.now() - EVENT_EXPIRY_MS }
+            : {}),
         }),
       ]);
 
@@ -1827,21 +1842,21 @@ The current user request is quoted below. Execute tools only when they directly 
         if (isUserGroundedMemory(fact) && !seenIds.has(fact.id) && !isPastEvent(fact)) {
           seenIds.add(fact.id);
           const subject = fact.metadata?.subject as string | undefined;
-          allFactTexts.push({ content: fact.content, subject });
+          allFactTexts.push({ content: contextMemoryContent(fact), subject });
         }
       }
       for (const result of relevantResults) {
         if (isUserGroundedMemory(result.memory) && !seenIds.has(result.memory.id) && !isPastEvent(result.memory)) {
           seenIds.add(result.memory.id);
           const subject = result.memory.metadata?.subject as string | undefined;
-          allFactTexts.push({ content: result.memory.content, subject });
+          allFactTexts.push({ content: contextMemoryContent(result.memory), subject });
         }
       }
       for (const fact of userFacts) {
         if (isUserGroundedMemory(fact) && !seenIds.has(fact.id) && !isPastEvent(fact)) {
           seenIds.add(fact.id);
           const subject = fact.metadata?.subject as string | undefined;
-          allFactTexts.push({ content: fact.content, subject });
+          allFactTexts.push({ content: contextMemoryContent(fact), subject });
         }
       }
 

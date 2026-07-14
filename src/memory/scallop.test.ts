@@ -830,6 +830,26 @@ describe('ScallopMemoryStore', () => {
     expect(results[0].memory.content).toContain('Acme Corp');
   });
 
+  it('excludes stale dated episodes from current-context search but preserves them for history', async () => {
+    const oldEvent = Date.parse('2026-06-28T12:00:00Z');
+    const cutoff = Date.parse('2026-07-13T12:00:00Z');
+    const memory = await store.add({
+      userId: 'user1',
+      content: 'Completed eight minutes on the StairMaster',
+      category: 'activity',
+      eventDate: oldEvent,
+    });
+
+    const currentContext = await store.search('eight minutes StairMaster', {
+      userId: 'user1',
+      excludeEventsBefore: cutoff,
+    });
+    expect(currentContext.some(result => result.memory.id === memory.id)).toBe(false);
+
+    const history = await store.search('eight minutes StairMaster', { userId: 'user1' });
+    expect(history.some(result => result.memory.id === memory.id)).toBe(true);
+  });
+
   it('should get active memories', async () => {
     await store.add({ userId: 'user1', content: 'Active memory 1', category: 'fact' });
     await store.add({ userId: 'user1', content: 'Active memory 2', category: 'fact' });
@@ -1329,4 +1349,3 @@ describe('ScallopMemoryStore activation-based related memories', () => {
     }
   });
 });
-

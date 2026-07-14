@@ -175,12 +175,17 @@ describe('gardener-deep-steps', () => {
         userId: 'telegram:owner-example',
         channelId: 'telegram',
       });
+      db.addSessionMessage(session.id, 'user', 'First question');
+      db.addSessionMessage(session.id, 'assistant', 'First answer');
+      db.addSessionMessage(session.id, 'user', 'Second question');
+      db.addSessionMessage(session.id, 'assistant', 'Second answer');
       const twoDaysAgo = Date.now() - 2 * 24 * 60 * 60 * 1000;
       rawRun(db, 'UPDATE sessions SET updated_at = ? WHERE id = ?', [twoDaysAgo, session.id]);
 
       const mockSummarizer = {
         summarizeBatch: vi.fn().mockResolvedValue(1),
         summarize: vi.fn(),
+        minimumMessageCount: 4,
       };
 
       const ctx = buildCtx(store, db, { sessionSummarizer: mockSummarizer as any });
@@ -221,6 +226,7 @@ describe('gardener-deep-steps', () => {
       });
       const mockSummarizer = {
         summarizeBatch: vi.fn().mockResolvedValue(1),
+        minimumMessageCount: 2,
       };
 
       const result = await runSessionSummarization(buildCtx(store, db, {
@@ -319,6 +325,26 @@ describe('gardener-deep-steps', () => {
         inputTokens: 10, outputTokens: 5,
       });
       expect(db.getActiveSession('child-active')).not.toBeNull();
+    });
+
+    it('archives stale empty top-level sessions once and leaves fresh sessions active', () => {
+      db.createSession('stale-empty', { userId: 'telegram:owner-example', channelId: 'api' });
+      db.createSession('fresh-empty', { userId: 'telegram:owner-example', channelId: 'api' });
+      rawRun(db, 'UPDATE sessions SET updated_at = ? WHERE id = ?', [
+        Date.now() - 2 * 24 * 60 * 60 * 1000,
+        'stale-empty',
+      ]);
+
+      const ctx = buildCtx(store, db);
+      runSubAgentCleanup(ctx, 3600);
+      runSubAgentCleanup(ctx, 3600);
+
+      expect(db.getActiveSession('stale-empty')).toBeNull();
+      expect(db.getSession('stale-empty')?.transcriptDeletedAt).toBeNull();
+      expect(db.getSessionLifecycleEvents('stale-empty')).toMatchObject([
+        { action: 'archived', reason: 'stale_empty_session' },
+      ]);
+      expect(db.getActiveSession('fresh-empty')).not.toBeNull();
     });
   });
 
@@ -607,6 +633,10 @@ describe('gardener-deep-steps', () => {
         userId: 'telegram:owner-example',
         channelId: 'telegram',
       });
+      db.addSessionMessage(session.id, 'user', 'First question');
+      db.addSessionMessage(session.id, 'assistant', 'First answer');
+      db.addSessionMessage(session.id, 'user', 'Second question');
+      db.addSessionMessage(session.id, 'assistant', 'Second answer');
       const twoDaysAgo = Date.now() - 2 * 24 * 60 * 60 * 1000;
       rawRun(db, 'UPDATE sessions SET updated_at = ? WHERE id = ?', [twoDaysAgo, session.id]);
 

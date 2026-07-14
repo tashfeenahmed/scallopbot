@@ -78,6 +78,23 @@ describe('getRecentChatContext', () => {
     );
   });
 
+  it('optionally includes local timestamps so proactive context cannot blur days', () => {
+    const messages = [
+      makeMessage({ id: 1, role: 'user', content: 'Leg day completed', createdAt: Date.parse('2024-01-14T12:00:00Z') }),
+      makeMessage({ id: 2, role: 'assistant', content: 'Logged', createdAt: Date.parse('2024-01-14T12:01:00Z') }),
+    ];
+    const result = getRecentChatContext(makeMockDb(messages), {
+      includeTimestamps: true,
+      timeZone: 'Europe/Dublin',
+      nowMs: NOW,
+    });
+
+    expect(result?.formattedContext).toBe(
+      '[2024-01-14 12:00 Europe/Dublin] User: Leg day completed\n'
+      + '[2024-01-14 12:01 Europe/Dublin] Assistant: Logged',
+    );
+  });
+
   it('truncates long messages at 300 chars by default', () => {
     const longContent = 'A'.repeat(500);
     const messages = [makeMessage({ content: longContent, createdAt: NOW - HOUR_MS })];

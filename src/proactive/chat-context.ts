@@ -24,6 +24,12 @@ export interface RecentChatContextOptions {
   stalenessMs?: number;
   /** Exact channel identities authorized to contribute to this state owner's context. */
   identityCandidates?: readonly string[];
+  /** Include an authoritative local timestamp on every rendered turn. */
+  includeTimestamps?: boolean;
+  /** IANA timezone used for rendered timestamps. */
+  timeZone?: string;
+  /** Injectable clock used by the staleness guard. */
+  nowMs?: number;
 }
 
 /** Do not inject a generic check-in while an artifact awaits correction or delivery. */
@@ -40,6 +46,25 @@ export function hasUnresolvedArtifactWork(formattedContext: string | null | unde
 const DEFAULT_MAX_MESSAGES = 10;
 const DEFAULT_MAX_CHARS = 300;
 const DEFAULT_STALENESS_MS = 48 * 60 * 60 * 1000; // 48 hours
+
+function formatLocalTimestamp(at: number, timeZone: string): string {
+  try {
+    const parts = new Intl.DateTimeFormat('en-GB', {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
+    }).formatToParts(new Date(at));
+    const value = (type: Intl.DateTimeFormatPartTypes): string =>
+      parts.find(part => part.type === type)?.value ?? '';
+    return `${value('year')}-${value('month')}-${value('day')} ${value('hour')}:${value('minute')} ${timeZone}`;
+  } catch {
+    return new Date(at).toISOString();
+  }
+}
 
 /**
  * Extract text from a session message content field.
@@ -61,6 +86,7 @@ export function getRecentChatContext(
   const maxMessages = options?.maxMessages ?? DEFAULT_MAX_MESSAGES;
   const maxChars = options?.maxCharsPerMessage ?? DEFAULT_MAX_CHARS;
   const stalenessMs = options?.stalenessMs ?? DEFAULT_STALENESS_MS;
+  const nowMs = options?.nowMs ?? Date.now();
 
   // Over-fetch because provider protocol rows (tool results/reasoning) are not
   // conversation turns and must not consume the context window.
@@ -89,10 +115,10 @@ export function getRecentChatContext(
   const lastMessageAt = lastMessage.createdAt;
 
   // Staleness guard
-  if (Date.now() - lastMessageAt > stalenessMs) return null;
+  if (nowMs - lastMessageAt > stalenessMs) return null;
 
   const lines: string[] = [];
-  for (const { view } of messages) {
+  for (const { message, view } of messages) {
     const role = view.isHumanTurn ? 'User' : 'Assistant';
     let text = view.visibleText;
     if (text.length > maxChars) {
@@ -101,7 +127,10 @@ export function getRecentChatContext(
     // Collapse to single line for compactness
     text = text.replace(/\n+/g, ' ').trim();
     if (text) {
-      lines.push(`${role}: ${text}`);
+      const timestamp = options?.includeTimestamps
+        ? `[${formatLocalTimestamp(message.createdAt, options.timeZone ?? 'UTC')}] `
+        : '';
+      lines.push(`${timestamp}${role}: ${text}`);
     }
   }
 

@@ -137,10 +137,16 @@ export async function runSessionSummarization(ctx: GardenerContext): Promise<{ s
     // gets input sooner and proactive follow-ups can be generated.
     const cutoffMs = 2 * 60 * 60 * 1000; // 2 hours
     const cutoff = Date.now() - cutoffMs;
+    const minimumMessages = Math.max(2, ctx.sessionSummarizer.minimumMessageCount ?? 4);
     const oldSessions = ctx.db.raw<{ id: string; metadata: string | null }>(
       `SELECT s.id, s.metadata FROM sessions s
        WHERE s.updated_at < ?
          AND s.transcript_deleted_at IS NULL
+         AND (
+           SELECT COUNT(*) FROM session_messages visible
+           WHERE visible.session_id = s.id
+             AND visible.message_kind IN ('human_user', 'assistant_final')
+         ) >= ?
          AND NOT EXISTS (
            SELECT 1 FROM session_summaries ss
            WHERE ss.session_id = s.id
@@ -158,7 +164,7 @@ export async function runSessionSummarization(ctx: GardenerContext): Promise<{ s
          )
        ORDER BY s.updated_at DESC
        LIMIT 20`,
-      [cutoff]
+      [cutoff, minimumMessages]
     );
     const sessionsByUser = new Map<string, string[]>();
     for (const session of oldSessions) {
@@ -679,8 +685,9 @@ export function runSubAgentCleanup(ctx: GardenerContext, cleanupAfterSeconds?: n
     let sessionsDeleted = 0;
     for (const sessionId of childSessionIds) {
       try {
-        ctx.db.deleteSession(sessionId, 'subagent_cleanup', 'gardener');
-        sessionsDeleted++;
+        if (ctx.db.deleteSession(sessionId, 'subagent_cleanup', 'gardener')) {
+          sessionsDeleted++;
+        }
       } catch {
         // Session may already be deleted
       }
@@ -694,9 +701,14 @@ export function runSubAgentCleanup(ctx: GardenerContext, cleanupAfterSeconds?: n
       // Non-critical — log and continue
     }
 
-    if (runsCompacted > 0 || runsDeleted > 0 || sessionsDeleted > 0 || staleSessionsCleaned > 0) {
+    // Empty top-level protocol/API sessions carry no transcript to retain, but
+    // leaving them active forever makes every background scan revisit them.
+    // Archive rather than delete so lifecycle metadata and audit remain intact.
+    const staleEmptySessionsArchived = ctx.db.archiveStaleEmptySessions(24 * 60 * 60 * 1000);
+
+    if (runsCompacted > 0 || runsDeleted > 0 || sessionsDeleted > 0 || staleSessionsCleaned > 0 || staleEmptySessionsArchived > 0) {
       ctx.logger.info(
-        { runsCompacted, runsDeleted, sessionsDeleted, staleSessionsCleaned },
+        { runsCompacted, runsDeleted, sessionsDeleted, staleSessionsCleaned, staleEmptySessionsArchived },
         'Sub-agent cleanup complete'
       );
     }

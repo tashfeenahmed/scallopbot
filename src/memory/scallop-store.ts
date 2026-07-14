@@ -68,7 +68,8 @@ export interface AddMemoryOptions {
   importance?: number;
   confidence?: number;
   sourceChunk?: string;
-  eventDate?: number;
+  /** Explicit null suppresses temporal extraction (used by derived memories). */
+  eventDate?: number | null;
   metadata?: Record<string, unknown>;
   /** Source of the memory: user message or assistant response */
   source?: 'user' | 'assistant';
@@ -99,6 +100,8 @@ export interface ScallopSearchOptions {
   queryEmbedding?: number[];
   /** Include assistant-derived/reflection memories. Default false. */
   includeAllSources?: boolean;
+  /** Exclude only dated events older than this instant; undated facts remain. */
+  excludeEventsBefore?: number;
 }
 
 /**
@@ -198,7 +201,9 @@ export class ScallopMemoryStore {
 
     // Extract temporal information
     const temporal = this.temporalExtractor.extract(content);
-    const eventDate = options.eventDate ?? temporal.eventDate;
+    const eventDate = Object.prototype.hasOwnProperty.call(options, 'eventDate')
+      ? (options.eventDate ?? null)
+      : temporal.eventDate;
 
     // Use pre-computed embedding if provided, otherwise generate via embedder
     let embedding: number[] | undefined = options.embedding;
@@ -224,6 +229,16 @@ export class ScallopMemoryStore {
       for (const mem of existing) {
         if (!mem.embedding) continue;
         const sim = cosineSimilarity(embedding, mem.embedding);
+        // Similar wording on another event day is a new episode, not a
+        // duplicate fact. This is common for workouts, medication, meals, and
+        // recurring appointments.
+        const incomingEventDay = eventDate == null
+          ? null
+          : new Date(eventDate).toISOString().slice(0, 10);
+        const existingEventDay = mem.eventDate == null
+          ? null
+          : new Date(mem.eventDate).toISOString().slice(0, 10);
+        if (incomingEventDay && incomingEventDay !== existingEventDay) continue;
         if (sim >= 0.93 && sim > bestSim) {
           bestSim = sim;
           bestMatch = mem;
@@ -444,6 +459,11 @@ export class ScallopMemoryStore {
         (m) =>
           m.documentDate >= documentDateRange.start &&
           m.documentDate <= documentDateRange.end
+      );
+    }
+    if (options.excludeEventsBefore !== undefined) {
+      lightCandidates = lightCandidates.filter(
+        memory => memory.eventDate === null || memory.eventDate >= options.excludeEventsBefore!,
       );
     }
 

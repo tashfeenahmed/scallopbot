@@ -62,6 +62,10 @@ Rules:
   Do not repeat the scheduler's recap/follow-up instructions. When RECENT
   CONVERSATION contains a concrete unresolved activity from today, anchor the
   message to that activity instead of sending a generic day-reflection prompt.
+- AUTHORITATIVE CURRENT TIME and the timestamps in RECENT CONVERSATION are the
+  only authority for words such as today, yesterday, and tomorrow. Never treat
+  an activity from an earlier local date as happening today. Never introduce a
+  future relative date unless the draft or current context actually mentions it.
 - Reflect uncertainty faithfully: "might", "tentative", and "if it's still on"
   must not become confirmed facts.
 - If CURRENT CONTEXT or a relevant newer turn in RECENT CONVERSATION explicitly
@@ -122,6 +126,10 @@ export interface ProactiveRenderOptions {
   recentConversation?: string | null;
   /** Message category, such as reminder, follow_up, or goal_checkin. */
   messageType?: string;
+  /** IANA timezone for authoritative delivery-time temporal grounding. */
+  timeZone?: string;
+  /** Injectable delivery clock for deterministic tests. */
+  currentTimeMs?: number;
 }
 
 export type ProactiveRenderResult =
@@ -281,10 +289,43 @@ function miscastsRecipientAsThirdParty(candidate: string, recipient: string | nu
 
 const REFLECTION_VARIANTS = [
   'Anything from today worth carrying forward?',
-  'What from today do you want to pick up tomorrow?',
+  'Anything from today you want to revisit?',
   'Is there one thing from today worth following up?',
   'What stood out today that deserves another look?',
 ] as const;
+
+const FUTURE_RELATIVE_TIME_RE = /\b(?:tomorrow|next\s+(?:week|month|year|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|later\s+(?:today|this\s+week))\b/gi;
+
+function relativeTimePhrases(text: string): Set<string> {
+  return new Set(
+    [...text.matchAll(FUTURE_RELATIVE_TIME_RE)]
+      .map(match => match[0].toLocaleLowerCase('en-US').replace(/\s+/g, ' ')),
+  );
+}
+
+/** A renderer may restyle temporal language, but it may not invent a future day. */
+function introducesUnsupportedFutureTime(candidate: string, groundedInput: string): boolean {
+  const grounded = relativeTimePhrases(groundedInput);
+  return [...relativeTimePhrases(candidate)].some(phrase => !grounded.has(phrase));
+}
+
+function formatAuthoritativeCurrentTime(at: number, timeZone: string): string {
+  try {
+    return new Intl.DateTimeFormat('en-GB', {
+      timeZone,
+      weekday: 'long',
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
+      timeZoneName: 'short',
+    }).format(new Date(at));
+  } catch {
+    return new Date(at).toISOString();
+  }
+}
 
 /**
  * Realize the legacy scheduler label that triggered the original leak without
@@ -439,8 +480,11 @@ export async function prepareUserFacingProactiveMessage(
     .slice(-8)
     .map((message, index) => `${index + 1}. ${message.slice(0, 320)}`)
     .join('\n');
+  const timeZone = options.timeZone?.trim() || 'UTC';
+  const currentTimeMs = options.currentTimeMs ?? Date.now();
   const renderInput = [
     `MESSAGE TYPE: ${options.messageType ?? 'proactive message'}`,
+    `AUTHORITATIVE CURRENT TIME: ${formatAuthoritativeCurrentTime(currentTimeMs, timeZone)} (${timeZone})`,
     recipient
       ? `RECIPIENT FROM SCHEDULER LABEL: ${recipient} (this is the person reading the message; refer to them as "you")`
       : '',
@@ -453,6 +497,7 @@ export async function prepareUserFacingProactiveMessage(
       ? `RECENT PROACTIVE MESSAGES (do not repeat their opening or structure):\n<history>\n${recentMessages}\n</history>`
       : '',
   ].filter(Boolean).join('\n\n');
+  const temporalGroundingInput = [raw, context, recentConversation].filter(Boolean).join('\n');
 
   for (let attempt = 0; attempt < REWRITE_ATTEMPTS; attempt++) {
     try {
@@ -473,6 +518,7 @@ export async function prepareUserFacingProactiveMessage(
       const candidate = sanitizeProactiveMessage(responseText);
       if (
         candidate &&
+        !introducesUnsupportedFutureTime(candidate, temporalGroundingInput) &&
         !miscastsRecipientAsThirdParty(candidate, recipient) &&
         assessProactiveMessage(candidate).acceptable
       ) return { outcome: 'ready', message: candidate };

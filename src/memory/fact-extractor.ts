@@ -20,6 +20,7 @@ import {
 } from './relation-classifier.js';
 import { sanitizeProactiveMessage } from '../proactive/message-safety.js';
 import { assessProactiveMessage } from '../proactive/message-quality.js';
+import { TemporalExtractor } from './temporal.js';
 
 /**
  * Categories for extracted facts
@@ -53,6 +54,10 @@ export interface ExtractedFactWithEmbedding {
   oldValue?: string;
   /** For preference updates: what this preference replaces */
   replaces?: string;
+  /** Deterministically inferred occurrence time; never supplied by the LLM. */
+  eventDate?: number | null;
+  /** User-local occurrence day used to keep repeated episodes distinct. */
+  eventDay?: string | null;
 }
 
 /**
@@ -509,6 +514,32 @@ export class LLMFactExtractor {
   private extractionCount = 0;
   private static readonly CONSOLIDATION_INTERVAL = 5;
 
+  private localDay(epochMs: number, userId: string): string {
+    try {
+      const parts = new Intl.DateTimeFormat('en-CA', {
+        timeZone: this.getTimezone(userId),
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+      }).formatToParts(new Date(epochMs));
+      const value = (type: Intl.DateTimeFormatPartTypes): string =>
+        parts.find(part => part.type === type)?.value ?? '';
+      return `${value('year')}-${value('month')}-${value('day')}`;
+    } catch {
+      return new Date(epochMs).toISOString().slice(0, 10);
+    }
+  }
+
+  private inferFactOccurrence(fact: ExtractedFactWithEmbedding, userId: string): void {
+    const now = this.now();
+    const extracted = new TemporalExtractor().extract(fact.content, now).eventDate;
+    const episodic = /\b(?:completed|did|performed|logged|attended|visited|went|ran|walked|cycled|worked\s+out|trained|slept|ate|drank|took)\b/i.test(fact.content)
+      || /\b\d+\s*(?:kg|kgs|lb|lbs|minutes?|mins?|reps?|sets?)\b/i.test(fact.content);
+    const eventDate = extracted ?? (episodic ? now : null);
+    fact.eventDate = eventDate;
+    fact.eventDay = eventDate == null ? null : this.localDay(eventDate, userId);
+  }
+
   constructor(options: LLMFactExtractorOptions) {
     // Wrap provider with cost tracking if available
     this.provider = options.costTracker
@@ -830,6 +861,7 @@ export class LLMFactExtractor {
 
     // Use limitedFacts from here on
     const facts_to_process = limitedFacts;
+    for (const fact of facts_to_process) this.inferFactOccurrence(fact, userId);
 
     // Step 2: Single merged search per fact (dedup + classification in one pass)
     // Run all searches in parallel since SQLite WAL mode supports concurrent reads
@@ -866,6 +898,11 @@ export class LLMFactExtractor {
           if (r.memory.embedding) {
             const similarity = cosineSimilarity(fact.embedding, r.memory.embedding);
             if (similarity >= this.deduplicationThreshold) {
+              const existingEventDay = r.memory.metadata?.eventDay as string | undefined
+                ?? (r.memory.eventDate == null ? undefined : this.localDay(r.memory.eventDate, userId));
+              // A repeated activity on a different local day is a distinct
+              // episode. Do not reinforce the older row and erase the new date.
+              if (fact.eventDay && fact.eventDay !== existingEventDay) continue;
               isDuplicate = true;
               // Reinforce the existing memory: bump confidence, prominence, times_confirmed
               const db = this.scallopStore.getDatabase();
@@ -1095,6 +1132,7 @@ export class LLMFactExtractor {
     if (sourceMessageId) provenance.sourceMessageId = sourceMessageId;
     if (sourceMessage) provenance.sourceMessageExcerpt = sourceMessage.substring(0, 200);
     provenance.extractedAt = new Date().toISOString();
+    if (fact.eventDay) provenance.eventDay = fact.eventDay;
 
     const scallopCategory = this.mapToScallopCategory(fact.category);
     // Identity facts (personal, relationship, location) get higher importance to resist decay
@@ -1110,6 +1148,7 @@ export class LLMFactExtractor {
       learnedFrom,
       detectRelations: false,
       embedding: fact.embedding,
+      ...(fact.eventDate != null ? { eventDate: fact.eventDate } : {}),
     });
 
     return { id: newMemory.id, content: searchableContent };

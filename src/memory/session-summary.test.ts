@@ -5,7 +5,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { LLMProvider } from '../providers/types.js';
 import { ScallopDatabase } from './db.js';
-import { SessionSummarizer } from './session-summary.js';
+import { groundSessionSummaryExternalClaims, SessionSummarizer } from './session-summary.js';
 
 function summaryProvider(): LLMProvider {
   return {
@@ -41,7 +41,7 @@ describe('SessionSummarizer transcript hygiene', () => {
     await expect(summarizer.summarizeAndStore(db, 'chat')).resolves.toBe(true);
     const prompt = String(vi.mocked(provider.complete).mock.calls[0][0].messages[0].content);
     expect(prompt).toContain('User: Real question');
-    expect(prompt).toContain('Assistant: Final answer');
+    expect(prompt).toContain('Assistant [no successful external-operation receipt for this reply]: Final answer');
     expect(prompt).not.toContain('private thought');
     expect(prompt).not.toContain('private tool output');
     expect(vi.mocked(provider.complete).mock.calls[0][0]).toMatchObject({
@@ -61,13 +61,51 @@ describe('SessionSummarizer transcript hygiene', () => {
       messageCount: 2,
       schemaValid: true,
       verifier: 'session_summarizer',
-      verificationVersion: 1,
+      verificationVersion: 2,
     });
     const summaryId = db.getSessionSummary('chat')!.id;
     expect(db.getSessionSummaryVerificationEvents(summaryId)).toMatchObject([
       { outcome: 'verified', reason: 'schema_and_transcript_match' },
     ]);
     db.close();
+  });
+
+  it('does not certify an assistant external-write claim without a successful receipt', async () => {
+    const db = new ScallopDatabase(':memory:');
+    db.createSession('unreceipted-write', { userId: 'default', channelId: 'api' });
+    db.addSessionMessage('unreceipted-write', 'user', 'Log the workout in Notion');
+    db.addSessionMessage('unreceipted-write', 'assistant', 'I logged every exercise in Notion.');
+    const provider = summaryProvider();
+    vi.mocked(provider.complete).mockResolvedValue({
+      content: [{
+        type: 'text',
+        text: '{"summary":"The assistant logged every exercise in Notion.","topics":["workout"]}',
+      }],
+      stopReason: 'end_turn', usage: { inputTokens: 1, outputTokens: 1 }, model: 'test',
+    });
+    const summarizer = new SessionSummarizer({
+      provider, logger: pino({ level: 'silent' }), minMessages: 2,
+    });
+
+    await expect(summarizer.summarizeAndStore(db, 'unreceipted-write')).resolves.toBe(true);
+    expect(db.getSessionSummary('unreceipted-write')?.summary).toBe(
+      'The assistant reported an external action as complete, but no successful operation receipt is attached, so completion remains unconfirmed.',
+    );
+    const prompt = String(vi.mocked(provider.complete).mock.calls[0][0].messages[0].content);
+    expect(prompt).toContain('Assistant [no successful external-operation receipt for this reply]');
+    db.close();
+  });
+
+  it('keeps receipt scope conservative even when one external operation succeeded', () => {
+    expect(groundSessionSummaryExternalClaims(
+      'The assistant logged all six exercises in Notion.',
+      [{
+        operationId: 'op-1', sessionId: 's', toolName: 'notion', status: 'succeeded',
+        createdAt: 1, updatedAt: 2,
+      }],
+    )).toBe(
+      '1 successful notion operation receipt was recorded, but it does not by itself verify every assistant completion claim.',
+    );
   });
 
   it('never summarizes an isolated sub-agent transcript', async () => {
@@ -240,5 +278,42 @@ describe('SessionSummarizer transcript hygiene', () => {
       lastErrorCode: 'timeout',
     });
     db.close();
+  });
+
+  it('preserves but invalidates a version-1 external completion summary on reopen', () => {
+    const dbPath = path.join(os.tmpdir(), `summary-provenance-${Date.now()}-${Math.random()}.db`);
+    let db: ScallopDatabase | null = null;
+    try {
+      db = new ScallopDatabase(dbPath);
+      db.createSession('legacy-write-summary', { userId: 'default', channelId: 'api' });
+      db.addSessionMessage('legacy-write-summary', 'user', 'Log these exercises in Notion');
+      db.addSessionMessage('legacy-write-summary', 'assistant', 'Everything is logged.');
+      const summary = db.addSessionSummary({
+        sessionId: 'legacy-write-summary', userId: 'default',
+        summary: 'The assistant logged every exercise in Notion.', topics: ['workout'],
+        messageCount: 2, durationMs: 0, embedding: null,
+      }, { verifier: 'session_summarizer', verificationVersion: 1 });
+      expect(summary.schemaValid).toBe(true);
+      db.close();
+
+      db = new ScallopDatabase(dbPath);
+      expect(db.getSessionSummary('legacy-write-summary')).toMatchObject({
+        id: summary.id, schemaValid: false, verifiedAt: null,
+      });
+      expect(db.raw<{ reason: string }>(
+        'SELECT reason FROM session_summary_provenance_quarantine WHERE summary_id = ?',
+        [summary.id],
+      )).toEqual([{
+        reason: 'legacy_external_completion_claim_lacked_turn_receipt_verification',
+      }]);
+      expect(db.getSessionSummaryVerificationEvents(summary.id)).toContainEqual(
+        expect.objectContaining({ outcome: 'rejected', verifier: 'provenance_migration' }),
+      );
+    } finally {
+      db?.close();
+      for (const suffix of ['', '-wal', '-shm']) {
+        try { fs.unlinkSync(dbPath + suffix); } catch { /* already removed */ }
+      }
+    }
   });
 });

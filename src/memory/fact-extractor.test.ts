@@ -409,6 +409,51 @@ describe('LLMFactExtractor', () => {
       expect(result.duplicatesSkipped).toBeGreaterThanOrEqual(1);
     });
 
+    it('stores a repeated workout as a new dated episode on a different local day', async () => {
+      const db = createMockDatabase();
+      const store = createMockScallopStore(db);
+      const oldEvent = Date.parse('2026-06-28T10:00:00Z');
+      (store.search as any).mockResolvedValue([{
+        memory: {
+          id: 'old-stairmaster',
+          content: 'Completed 8 minutes on the StairMaster today',
+          category: 'event',
+          metadata: { subject: 'user', eventDay: '2026-06-28' },
+          embedding: [0, 0, 0, 0, 0, 0, 0.1],
+          eventDate: oldEvent,
+          isLatest: true,
+        },
+        score: 0.99,
+      }]);
+      const provider = createMockProvider(JSON.stringify({
+        facts: [{
+          content: 'Completed 8 minutes on the StairMaster today',
+          subject: 'user',
+          category: 'general',
+        }],
+      }));
+      const now = Date.parse('2026-07-13T11:00:00Z');
+      const extractor = new LLMFactExtractor({
+        provider,
+        scallopStore: store,
+        logger,
+        embedder: createMockEmbedder(),
+        deduplicationThreshold: 0.85,
+        getTimezone: () => 'Europe/Dublin',
+        now: () => now,
+        useRelationshipClassifier: false,
+      });
+
+      const result = await extractor.extractFacts('8 minutes StairMaster', 'user-123');
+
+      expect(result.duplicatesSkipped).toBe(0);
+      expect(store.add).toHaveBeenCalledWith(expect.objectContaining({
+        eventDate: now,
+        metadata: expect.objectContaining({ eventDay: '2026-07-13' }),
+      }));
+      expect(db.reinforceMemory).not.toHaveBeenCalled();
+    });
+
     it('should update existing fact if new info is more specific', async () => {
       (mockScallopStore.search as any).mockResolvedValue([{
         memory: {

@@ -47,6 +47,20 @@ export interface FusionResult {
   confidence: number;
 }
 
+export const MEMORY_FUSION_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['summary', 'importance', 'category'],
+  properties: {
+    summary: { type: 'string', minLength: 1, maxLength: 12_000 },
+    importance: { type: 'number', minimum: 1, maximum: 10 },
+    category: {
+      type: 'string',
+      enum: ['preference', 'fact', 'event', 'relationship', 'insight'],
+    },
+  },
+};
+
 /** A relation context entry for enriched fusion prompts (used by NREM consolidation) */
 export interface RelationContextEntry {
   /** 1-based index of the source memory in the cluster */
@@ -337,6 +351,10 @@ Rules:
 3. Synthesize cross-category connections into coherent insights
 4. Use the CONNECTIONS section to understand WHY these memories are related
 5. The summary should capture the deeper pattern, not just list facts
+6. Every memory includes its authored date and, when known, its event date.
+   Preserve those dates. Never rewrite an old relative word such as "today",
+   "tomorrow", or "yesterday" relative to the current consolidation run.
+7. Use absolute YYYY-MM-DD dates in the summary. Do not output relative dates.
 
 Respond with JSON only:
 {"summary": "...", "importance": 1-10, "category": "preference|fact|event|relationship|insight"}`
@@ -350,16 +368,21 @@ Rules:
 5. The summary should read as a single coherent memory entry
 6. Set importance to the highest importance among source memories
 7. Set category to the most common category
+8. Every memory includes its authored and event dates. Use absolute YYYY-MM-DD
+   dates in the summary; never reinterpret relative dates at consolidation time.
 
 Respond with JSON only:
 {"summary": "...", "importance": 1-10, "category": "preference|fact|event|relationship|insight"}`;
 
   const memoryLines = cluster
     .map((m, i) => {
-      const dateStr = !hasRelationContext && m.documentDate
-        ? ` (date: ${new Date(m.documentDate).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })})`
-        : '';
-      return `${i + 1}. [${m.category}]${dateStr} "${m.content}" (importance: ${m.importance})`;
+      const documentDate = Number.isFinite(m.documentDate)
+        ? new Date(m.documentDate).toISOString().slice(0, 10)
+        : 'unknown';
+      const eventDate = m.eventDate != null && Number.isFinite(m.eventDate)
+        ? new Date(m.eventDate).toISOString().slice(0, 10)
+        : 'unknown';
+      return `${i + 1}. [${m.category}] [authored: ${documentDate}] [event: ${eventDate}] "${m.content}" (importance: ${m.importance})`;
     })
     .join('\n');
 
@@ -382,7 +405,14 @@ Respond with JSON only:
     messages: [{ role: 'user', content: userMessage }],
     system,
     temperature: 0.1,
-    maxTokens: 500,
+    maxTokens: 1_000,
+    enableThinking: false,
+    structuredOutput: {
+      name: 'memory_fusion',
+      schema: MEMORY_FUSION_SCHEMA,
+      strict: true,
+    },
+    purpose: 'memory_fusion',
   };
 }
 
