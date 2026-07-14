@@ -489,13 +489,18 @@ describe('turn-scoped tool safety', () => {
 
   it('removes exercise modalities invented beyond the successful tracker result', () => {
     const cleaned = removeUnsupportedWorkoutComparisons(
-      'You logged Chest Press and chest press.\n\nTwo different entries (machine vs. dumbbell/free weight).',
+      '**Strength/Machine:**\n- **Pectoral machine** — 40kg\n- **Chest Press** (machine) — 40kg\n- **Upper Back** (machine) — 30kg\n\nTwo different entries (machine vs. dumbbell/free weight).',
       'What did I do at the gym today?',
       true,
-      '{"rows":[{"Name":"Chest Press"},{"Name":"chest press"}]}',
+      '{"rows":[{"properties":{"Name":"Pectoral machine","Weight (kg)":40}},{"properties":{"Name":"Chest Press","Weight (kg)":40}},{"properties":{"Name":"Upper Back","Weight (kg)":30}}]}',
     );
     expect(cleaned.removed).toBe(true);
-    expect(cleaned.response).toBe('You logged Chest Press and chest press.');
+    expect(cleaned.response).toContain('**Strength:**');
+    expect(cleaned.response).toContain('**Pectoral machine**');
+    expect(cleaned.response).toContain('**Chest Press** — 40kg');
+    expect(cleaned.response).toContain('**Upper Back** — 30kg');
+    expect(cleaned.response).not.toContain('(machine)');
+    expect(cleaned.response).not.toContain('dumbbell');
   });
 
   it('rejects exercise modalities invented by a structured write', () => {

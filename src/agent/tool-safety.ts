@@ -712,6 +712,44 @@ export function hasUnverifiedSuccessClaim(response: string): boolean {
 const WORKOUT_COMPARISON = /\b(?:PR|personal record|record high|increase[sd]?|improv(?:e[dm]?|ement)|jump(?:ed)?|up\s+\d+(?:\.\d+)?\s*kg|added\s+\d+(?:\.\d+)?\s*kg|more than last)\b/i;
 const WORKOUT_SUBJECT = /\b(?:workout|exercise|press|row|curl|squat|deadlift|machine|cable|kg|reps?|sets?)\b/i;
 
+function trackerEvidenceRows(raw: string): Array<{ title: string; evidence: string }> {
+  const rows: Array<{ title: string; evidence: string }> = [];
+  const seen = new Set<unknown>();
+  const visit = (value: unknown, depth: number): void => {
+    if (depth > 10 || value == null) return;
+    if (typeof value === 'string') {
+      const text = value.trim();
+      if ((text.startsWith('{') || text.startsWith('[')) && text.length <= 250_000) {
+        try { visit(JSON.parse(text), depth + 1); } catch { /* ordinary text */ }
+      }
+      return;
+    }
+    if (typeof value !== 'object' || seen.has(value)) return;
+    seen.add(value);
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item, depth + 1);
+      return;
+    }
+    const record = value as Record<string, unknown>;
+    const properties = record.properties && typeof record.properties === 'object'
+      ? record.properties as Record<string, unknown>
+      : null;
+    if (properties) {
+      const titleEntry = Object.entries(properties).find(([key, propertyValue]) => (
+        /^(?:name|exercise|activity|title)$/i.test(key) && typeof propertyValue === 'string'
+      ));
+      if (titleEntry) rows.push({ title: String(titleEntry[1]), evidence: JSON.stringify(record) });
+    }
+    for (const child of Object.values(record)) visit(child, depth + 1);
+  };
+  visit(raw, 0);
+  return rows;
+}
+
+function canonicalTrackerTitle(value: string): string {
+  return value.toLocaleLowerCase('en-US').replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
 /**
  * Remove comparison claims that have neither a current user assertion nor a
  * successful tracker query in this turn. A write receipt proves persistence,
@@ -728,18 +766,59 @@ export function removeUnsupportedWorkoutComparisons(
 
   if (hasTrackerQueryEvidence && trackerQueryEvidence.trim()) {
     const evidence = `${userMessage}\n${trackerQueryEvidence}`;
-    const unsupportedModality = (line: string): boolean => [
-      /\bdumbbells?\b/i,
-      /\bbarbells?\b/i,
-      /\bfree[- ]weights?\b/i,
-      /\b(?:each|per) arm\b/i,
-      /\bbodyweight\b/i,
-      /\bsmith machine\b/i,
-    ].some(pattern => pattern.test(line) && !pattern.test(evidence));
+    const rows = trackerEvidenceRows(trackerQueryEvidence);
+    const modalities = [
+      /\bdumbbells?\b/gi,
+      /\bbarbells?\b/gi,
+      /\bfree[- ]weights?\b/gi,
+      /\b(?:each|per) arm\b/gi,
+      /\bbodyweight\b/gi,
+      /\bsmith machine\b/gi,
+      /\bmachine\b/gi,
+    ];
+    const cleanLine = (original: string): string => {
+      const displayedTitle = original.match(/\*\*([^*]+)\*\*/)?.[1]?.replace(/:$/, '').trim() ?? '';
+      const matchingRow = displayedTitle
+        ? rows.find(row => canonicalTrackerTitle(row.title) === canonicalTrackerTitle(displayedTitle))
+        : undefined;
+      const isSectionLabel = /^\s*\*\*[^*]+\*\*\s*$/.test(original);
+      const lineEvidence = matchingRow?.evidence
+        ?? (isSectionLabel ? userMessage : evidence);
+      const unsupported = modalities.filter(pattern => {
+        pattern.lastIndex = 0;
+        const claimed = pattern.test(original);
+        pattern.lastIndex = 0;
+        const supported = pattern.test(lineEvidence);
+        pattern.lastIndex = 0;
+        return claimed && !supported;
+      });
+      if (unsupported.length === 0) return original;
+
+      let line = original;
+      const unsupportedClause = unsupported.some(pattern => {
+        pattern.lastIndex = 0;
+        const found = pattern.test(line);
+        pattern.lastIndex = 0;
+        return found;
+      });
+      if (unsupportedClause) {
+        line = line.replace(/\s*\([^)]*(?:dumbbell|barbell|free[- ]weight|each arm|per arm|bodyweight|smith machine|machine)[^)]*\)/gi, '');
+      }
+      for (const pattern of unsupported) {
+        pattern.lastIndex = 0;
+        line = line.replace(pattern, '');
+      }
+      return line
+        .replace(/\/+\s*:/g, ':')
+        .replace(/\*\*\s*\*\*/g, '')
+        .replace(/[ \t]{2,}/g, ' ')
+        .trimEnd();
+    };
     const lines = cleaned.split(/\r?\n/);
-    const groundedLines = lines.filter(line => !unsupportedModality(line));
-    if (groundedLines.length !== lines.length) {
-      cleaned = groundedLines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+    const groundedLines = lines.map(cleanLine).filter(line => line.trim());
+    const rebuilt = groundedLines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+    if (rebuilt !== cleaned) {
+      cleaned = rebuilt;
       removed = true;
     }
   }
