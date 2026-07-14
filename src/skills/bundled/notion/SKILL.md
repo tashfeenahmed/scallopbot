@@ -63,6 +63,12 @@ Workflow:
 3. `query` for existing rows.
 4. `create` or `update`, then trust completion only when the tool returns success.
 
+Search returns explicit `database_id` and `data_source_id` fields. Pass the
+matching field to later calls. The client also recovers safely when a returned
+data-source ID is accidentally supplied as `database_id`; do not interpret that
+identifier mismatch as a permission problem or ask the user to re-share an
+integration unless both typed paths genuinely fail.
+
 Query responses are compact and date-sorted. For repeated entities, use
 `result.stats_by_title[].latest` for the newest dated record and `maxima` for
 numeric records. Never infer a personal record, improvement, increase, or trend

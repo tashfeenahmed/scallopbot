@@ -541,9 +541,25 @@ export function assessToolCallForTurn(
   const isMutation = isLikelyMutation(toolUse, skill);
   const isExternalMutation = isLikelyExternalMutation(toolUse, skill);
   const signature = toolCallSignature(toolUse);
-  if (!isMutation) return { allowed: true, isMutation, isExternalMutation, signature };
-
   const message = currentInstruction(context.userMessage);
+  if (!isMutation) {
+    const conversation = `${context.previousAssistantMessage ?? ''}\n${message}`;
+    if (
+      isPlanningTool(toolUse)
+      && /\b(?:gym|workout|exercise|notion|tracker|logged?|chest press)\b/i.test(conversation)
+      && !/\b(?:board|tasks?|to-?do|priorit(?:y|ies)|reminder|agenda)\b/i.test(message)
+    ) {
+      return {
+        allowed: false,
+        code: 'READ_TOOL_CONTEXT_MISMATCH',
+        reason: 'The board read is unrelated to the active workout/tracker question. Stay on that topic and use its authoritative source.',
+        isMutation,
+        isExternalMutation,
+        signature,
+      };
+    }
+    return { allowed: true, isMutation, isExternalMutation, signature };
+  }
   const declared = skill?.frontmatter.metadata?.openclaw?.safety;
   if (!isExternalMutation) {
     if (hasExplicitLocalMutationIntent(message)
@@ -752,4 +768,24 @@ export function turnRequiresMutationReceipt(
     || STANDARD_THREE_PART_WORKOUT.test(message)
     || isTaskList(message);
   return affirmative || structuredPayload;
+}
+
+/** A definitive tracker answer must come from the live tracker, not one recalled memory. */
+export function turnRequiresAuthoritativeTrackerRead(
+  userMessage: string,
+  previousAssistantMessage?: string,
+): boolean {
+  const message = currentInstruction(userMessage);
+  const explicitTrackerQuestion = /\b(?:notion|gym tracker|workout tracker|gym log|workout log)\b/i.test(message)
+    && /\b(?:check|look|pull|read|see|show|what|which|anything|history|today|doing|did)\b/i.test(message);
+  const directWorkoutQuestion = /\b(?:what did i do (?:at (?:the )?gym|for (?:my )?workout)|what was my workout|what did i log at (?:the )?gym)\b/i.test(message);
+  const continuation = /^\s*(?:anything|what)\s+else\??\s*$/i.test(message)
+    && /\b(?:gym|workout|exercise|tracker|logs?|chest press)\b/i.test(previousAssistantMessage ?? '');
+  return explicitTrackerQuestion || directWorkoutQuestion || continuation;
+}
+
+/** Bare greetings must not turn remembered activity into an unsolicited factual claim. */
+export function bareGreetingLeaksWorkoutInference(userMessage: string, response: string): boolean {
+  return /^\s*(?:hey|hi|hello|yo|hiya)[!.?\s]*$/i.test(currentInstruction(userMessage))
+    && /\b(?:from your logs?|just finished|you (?:did|hit|logged)|chest (?:day|press)|workout)\b/i.test(response);
 }

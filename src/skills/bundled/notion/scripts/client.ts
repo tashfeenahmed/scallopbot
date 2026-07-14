@@ -30,6 +30,16 @@ export interface NotionClientOptions {
   fetchImpl?: FetchLike;
 }
 
+class NotionRequestError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code: string,
+  ) {
+    super(message);
+  }
+}
+
 function required(value: string | undefined, name: string): string {
   const clean = value?.trim();
   if (!clean) throw new Error(`Missing required parameter: ${name}`);
@@ -170,6 +180,50 @@ function compactQueryResult(payload: Record<string, unknown>): Record<string, un
   };
 }
 
+function compactSearchResult(payload: Record<string, unknown>): Record<string, unknown> {
+  const results = Array.isArray(payload.results)
+    ? payload.results.flatMap((entry) => {
+      if (!entry || typeof entry !== 'object') return [];
+      const row = entry as Record<string, unknown>;
+      const parent = row.parent && typeof row.parent === 'object'
+        ? row.parent as Record<string, unknown>
+        : {};
+      const object = typeof row.object === 'string' ? row.object : 'unknown';
+      const id = typeof row.id === 'string' ? row.id : '';
+      const title = textFromNotion(row.title)
+        || (() => {
+          const properties = row.properties && typeof row.properties === 'object'
+            ? row.properties as Record<string, unknown>
+            : {};
+          const titleProperty = Object.values(properties).find(value => (
+            !!value && typeof value === 'object' && (value as Record<string, unknown>).type === 'title'
+          ));
+          return titleProperty && typeof titleProperty === 'object'
+            ? textFromNotion((titleProperty as Record<string, unknown>).title)
+            : '';
+        })();
+      return [{
+        object,
+        id,
+        title,
+        url: typeof row.url === 'string' ? row.url : null,
+        database_id: object === 'database'
+          ? id
+          : (typeof parent.database_id === 'string' ? parent.database_id : null),
+        data_source_id: object === 'data_source'
+          ? id
+          : (typeof parent.data_source_id === 'string' ? parent.data_source_id : null),
+      }];
+    })
+    : [];
+  return {
+    object: payload.object ?? 'list',
+    results,
+    next_cursor: payload.next_cursor ?? null,
+    has_more: payload.has_more === true,
+  };
+}
+
 export async function executeNotion(
   args: NotionArgs,
   options: NotionClientOptions,
@@ -202,7 +256,11 @@ export async function executeNotion(
     if (!response.ok) {
       const code = typeof payload.code === 'string' ? payload.code : 'request_failed';
       const message = typeof payload.message === 'string' ? payload.message : 'Unknown Notion error';
-      throw new Error(`Notion HTTP ${response.status} ${code}: ${message}`);
+      throw new NotionRequestError(
+        `Notion HTTP ${response.status} ${code}: ${message}`,
+        response.status,
+        code,
+      );
     }
     return payload;
   };
@@ -210,7 +268,21 @@ export async function executeNotion(
   const resolveDataSourceId = async (): Promise<string> => {
     if (args.data_source_id) return cleanId(args.data_source_id);
     const databaseId = cleanId(required(args.database_id, 'database_id or data_source_id'));
-    const database = await request(`/databases/${databaseId}`);
+    let database: Record<string, unknown>;
+    try {
+      database = await request(`/databases/${databaseId}`);
+    } catch (error) {
+      // Search results prominently expose data-source IDs. Models and humans
+      // naturally paste one into database_id; retrying the same identifier at
+      // the typed data-source endpoint is safe and removes a fake permission
+      // wall. A truly inaccessible/invalid ID still fails on the actual query.
+      if (error instanceof NotionRequestError
+        && error.status === 404
+        && error.code === 'object_not_found') {
+        return databaseId;
+      }
+      throw error;
+    }
     const sources = Array.isArray(database.data_sources)
       ? database.data_sources as Array<Record<string, unknown>>
       : [];
@@ -224,7 +296,8 @@ export async function executeNotion(
       const body: Record<string, unknown> = { page_size: Math.min(100, Math.max(1, args.page_size ?? 20)) };
       if (args.query?.trim()) body.query = args.query.trim();
       if (args.object_type) body.filter = { property: 'object', value: args.object_type };
-      return { success: true, action: args.action, result: await request('/search', 'POST', body) };
+      const result = await request('/search', 'POST', body);
+      return { success: true, action: args.action, result: compactSearchResult(result) };
     }
     case 'schema': {
       const dataSourceId = await resolveDataSourceId();

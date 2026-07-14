@@ -21,6 +21,48 @@ describe('typed Notion client', () => {
     expect(result).toMatchObject({ success: true, data_source_id: 'source-1' });
   });
 
+  it('self-corrects when a search data-source ID is supplied as database_id', async () => {
+    const fetchImpl = vi.fn<FetchLike>()
+      .mockResolvedValueOnce(response(404, {
+        code: 'object_not_found', message: 'Could not find database',
+      }))
+      .mockResolvedValueOnce(response(200, { results: [], has_more: false }));
+
+    const result = await executeNotion(
+      { action: 'query', database_id: 'source-1' },
+      { token: 'secret', fetchImpl },
+    );
+
+    expect(fetchImpl.mock.calls[0][0]).toMatch(/\/databases\/source-1$/);
+    expect(fetchImpl.mock.calls[1][0]).toMatch(/\/data_sources\/source-1\/query$/);
+    expect(result).toMatchObject({ success: true, data_source_id: 'source-1' });
+  });
+
+  it('makes search identifier types explicit without returning a giant schema payload', async () => {
+    const fetchImpl = vi.fn<FetchLike>().mockResolvedValue(response(200, {
+      object: 'list',
+      results: [{
+        object: 'data_source', id: 'source-1',
+        title: [{ plain_text: 'Gym Volume Tracker' }],
+        parent: { type: 'database_id', database_id: 'database-1' },
+        properties: { Weight: { type: 'number', number: {} } },
+      }],
+      has_more: false,
+    }));
+
+    const output = await executeNotion(
+      { action: 'search', query: 'gym' },
+      { token: 'secret', fetchImpl },
+    );
+
+    expect(output.result).toMatchObject({
+      results: [{
+        title: 'Gym Volume Tracker', database_id: 'database-1', data_source_id: 'source-1',
+      }],
+    });
+    expect(JSON.stringify(output)).not.toContain('properties');
+  });
+
   it('returns deterministic latest and maximum evidence for repeated tracker rows', async () => {
     const page = (id: string, name: string, date: string, weight: number) => ({
       id, created_time: `${date}T12:00:00.000Z`, properties: {

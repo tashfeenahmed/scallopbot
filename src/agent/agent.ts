@@ -41,6 +41,7 @@ import { resolveStateUserId } from '../utils/state-user-id.js';
 import { compactCompletedConversationHistory } from '../memory/session-message-view.js';
 import {
   assessToolCallForTurn,
+  bareGreetingLeaksWorkoutInference,
   boundResponseToolCalls,
   digestToolOutput,
   hasUnverifiedSuccessClaim,
@@ -50,6 +51,7 @@ import {
   toolOperationIdentity,
   toolOutputIndicatesFailure,
   turnRequiresMutationReceipt,
+  turnRequiresAuthoritativeTrackerRead,
   type TurnToolSafetyContext,
 } from './tool-safety.js';
 import {
@@ -660,6 +662,7 @@ export class Agent {
     let maxTokensContinuations = 0;
     let emptyEndTurnRetries = 0;
     let unverifiedCompletionRetries = 0;
+    let authoritativeTrackerReadRetries = 0;
     let finalResponse = '';
     let completionReason: AgentCompletionReason | null = null;
     // Self-evolution signal accounting (best-effort, captured at turn end).
@@ -1069,6 +1072,36 @@ export class Agent {
         // earlier user-facing fallback that told them to do work.
         if (!finalResponse.trim() && emptyEndTurnRetries > 0) {
           finalResponse = "I worked through that but my final reply came back empty — give me a moment and try once more, or rephrase if it keeps happening.";
+        }
+
+        if (bareGreetingLeaksWorkoutInference(turnToolSafety.userMessage, finalResponse)) {
+          finalResponse = "Hey! How's it going?";
+        }
+
+        const authoritativeTrackerReadRequired = !!this.skillRegistry?.getSkill('notion')?.available
+          && turnRequiresAuthoritativeTrackerRead(
+            turnToolSafety.userMessage,
+            turnToolSafety.previousAssistantMessage,
+          );
+        if (
+          authoritativeTrackerReadRequired
+          && !successfulNotionQuery
+          && authoritativeTrackerReadRetries < 2
+        ) {
+          authoritativeTrackerReadRetries++;
+          await this.sessionManager.addMessage(sessionId, {
+            role: 'user',
+            content: '[System: This asks for factual tracker contents, but no live Notion query has succeeded in this turn. Do not answer from one memory, do not call the board, and do not ask for permission. Query the typed Notion tool now. Search results distinguish database_id from data_source_id; use the matching field and retry identifier-type mismatches automatically.]',
+          });
+          this.logger.warn(
+            { sessionId, retry: authoritativeTrackerReadRetries },
+            'Authoritative tracker read missing — continuing the tool loop',
+          );
+          finalResponse = '';
+          continue;
+        }
+        if (authoritativeTrackerReadRequired && !successfulNotionQuery) {
+          finalResponse = 'I could not verify the live tracker after retrying its typed read path, so I will not guess from partial memory.';
         }
 
         // A model may skip the requested write entirely and still say "done".
@@ -1735,6 +1768,8 @@ The current user request is quoted below. Execute tools only when they directly 
 - Treat every external write as uncompleted until its exact tool result proves success.
 - Prefer a typed integration tool over raw shell HTTP. For Notion, use the typed \`notion\` tool when available; with API version 2025-09-03, query a database through its data source, inspect the real schema before writing, and never guess property names.
 - For structured logs, preserve the user's entity/exercise label exactly; never invent a modality such as "Dumbbell" or "each arm". Use date-sorted latest/max tool evidence for comparisons, and never call something a PR, increase, or improvement from memory or an arbitrary returned row.
+- When the user asks what is in a tracker or log, query that authoritative integration before answering. One recalled memory is never proof that it is the only entry. Stay on the current topic; do not inspect the task board as a fallback for a workout question.
+- For a bare greeting, simply greet the user. Never volunteer an inferred activity from memory or claim they "just finished" something they did not say in this turn.
 - Resolve relative dates from the authoritative timezone/date above; never calculate them from an older message.
 - Before the final reply, account for every part of the current request and disclose any part that failed or remains unverified.
 ## END ACTIVE TURN CONTRACT`;

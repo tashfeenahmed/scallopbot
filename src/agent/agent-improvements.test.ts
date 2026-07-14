@@ -520,6 +520,76 @@ describe('Agent improvements integration', () => {
       expect(JSON.stringify(handler.mock.calls[0][0].args)).toContain('Pectoral Machine');
     });
 
+    it('refuses a chest-only memory answer until the live tracker has been queried', async () => {
+      const { Agent } = await import('./agent.js');
+      const { SessionManager } = await import('./session.js');
+      const handler = vi.fn().mockResolvedValue({
+        success: true,
+        output: JSON.stringify({
+          success: true, action: 'query',
+          result: { rows: [
+            { properties: { Name: 'Chest Press', Date: '2026-07-14', 'Weight (kg)': 40 } },
+            { properties: { Name: 'Upper Back', Date: '2026-07-14', 'Weight (kg)': 30 } },
+            { properties: { Name: 'Seated cable row', Date: '2026-07-14', 'Weight (kg)': 65 } },
+          ] },
+        }),
+      });
+      const skill = {
+        name: 'notion', description: 'Typed Notion API', path: '/tmp/notion/SKILL.md', source: 'workspace' as const,
+        frontmatter: { name: 'notion', description: 'Typed Notion API' }, content: '', available: true,
+        hasScripts: true, handler,
+      };
+      const registry = {
+        getSkill: vi.fn((name: string) => name === 'notion' ? skill : null),
+        getToolDefinitions: vi.fn(() => [{ name: 'notion', description: 'Typed Notion API', input_schema: { type: 'object', properties: {} } }]),
+        generateSkillPrompt: vi.fn(() => ''),
+      };
+      const provider = seqProvider([
+        endTurn('You only did Chest Press today.'),
+        {
+          content: [{
+            type: 'tool_use', id: 'notion-live-query', name: 'notion',
+            input: { action: 'query', data_source_id: 'gym-source' },
+          }],
+          stopReason: 'tool_use', usage: { inputTokens: 5, outputTokens: 5 }, model: 'mock',
+        },
+        endTurn('Today you logged Chest Press, Upper Back, and Seated Cable Row.'),
+      ]);
+      const sessions = new SessionManager(db);
+      const session = await sessions.createSession();
+      await sessions.addMessage(session.id, {
+        role: 'assistant', content: 'From your logs, you did Chest Press today.',
+      });
+      const agent = new Agent({
+        provider, sessionManager: sessions, skillRegistry: registry as any,
+        workspace: testDir, logger: pino({ level: 'silent' }), maxIterations: 4,
+      });
+
+      const result = await agent.processMessage(session.id, 'What did I do at gym today?');
+
+      expect(handler).toHaveBeenCalledTimes(1);
+      expect(provider.complete).toHaveBeenCalledTimes(3);
+      expect(result.response).toContain('Upper Back');
+      expect(result.response).not.toContain('only did');
+    });
+
+    it('keeps a bare greeting free of unsolicited workout-memory claims', async () => {
+      const { Agent } = await import('./agent.js');
+      const { SessionManager } = await import('./session.js');
+      const provider = seqProvider([
+        endTurn('Hey bestie! From your logs, you just finished chest day.'),
+      ]);
+      const sessions = new SessionManager(db);
+      const session = await sessions.createSession();
+      const agent = new Agent({
+        provider, sessionManager: sessions,
+        workspace: testDir, logger: pino({ level: 'silent' }), maxIterations: 2,
+      });
+
+      const result = await agent.processMessage(session.id, 'Hey');
+      expect(result.response).toBe("Hey! How's it going?");
+    });
+
     it('records real empty output rather than synthetic Success as evidence', async () => {
       const { Agent } = await import('./agent.js');
       const { SessionManager } = await import('./session.js');

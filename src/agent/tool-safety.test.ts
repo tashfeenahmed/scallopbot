@@ -13,6 +13,8 @@ import {
   toolOutputIndicatesFailure,
   turnRequiresMutationReceipt,
   removeUnsupportedWorkoutComparisons,
+  turnRequiresAuthoritativeTrackerRead,
+  bareGreetingLeaksWorkoutInference,
 } from './tool-safety.js';
 
 const notionWrite = (input: Record<string, unknown>): ToolUseContent => ({
@@ -459,6 +461,30 @@ describe('turn-scoped tool safety', () => {
       },
     );
     expect(board.allowed).toBe(false);
+  });
+
+  it('keeps a workout continuation out of the unrelated task board', () => {
+    const verdict = assessToolCallForTurn(
+      { type: 'tool_use', id: 'board-read', name: 'board', input: { action: 'view' } },
+      {
+        userMessage: 'Anything else?',
+        previousAssistantMessage: 'From your gym logs, I found Chest Press today.',
+        timezone: 'Europe/Dublin',
+      },
+    );
+    expect(verdict.allowed).toBe(false);
+    expect(verdict.code).toBe('READ_TOOL_CONTEXT_MISMATCH');
+  });
+
+  it('recognizes tracker questions and prevents workout claims in bare greetings', () => {
+    expect(turnRequiresAuthoritativeTrackerRead('What did I do at gym today?')).toBe(true);
+    expect(turnRequiresAuthoritativeTrackerRead(
+      'Anything else?', 'From your workout logs, I found Chest Press.',
+    )).toBe(true);
+    expect(turnRequiresAuthoritativeTrackerRead('Anything else?', 'Your project has one task.')).toBe(false);
+    expect(bareGreetingLeaksWorkoutInference(
+      'Hey', 'Hey! From your logs, you just finished chest day.',
+    )).toBe(true);
   });
 
   it('rejects exercise modalities invented by a structured write', () => {
