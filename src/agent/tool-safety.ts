@@ -779,7 +779,8 @@ export function removeUnsupportedWorkoutComparisons(
     const cleanLine = (original: string): string => {
       const displayedTitle = original.match(/\*\*([^*]+)\*\*/)?.[1]?.replace(/:$/, '').trim() ?? '';
       const matchingRow = displayedTitle
-        ? rows.find(row => canonicalTrackerTitle(row.title) === canonicalTrackerTitle(displayedTitle))
+        ? (rows.find(row => row.title === displayedTitle)
+          ?? rows.find(row => canonicalTrackerTitle(row.title) === canonicalTrackerTitle(displayedTitle)))
         : undefined;
       const isSectionLabel = /^\s*\*\*[^*]+\*\*\s*$/.test(original);
       const lineEvidence = matchingRow?.evidence

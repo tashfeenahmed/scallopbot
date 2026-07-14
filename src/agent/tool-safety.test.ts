@@ -503,6 +503,18 @@ describe('turn-scoped tool safety', () => {
     expect(cleaned.response).not.toContain('dumbbell');
   });
 
+  it('matches case-distinct duplicate tracker labels to their exact rows first', () => {
+    const cleaned = removeUnsupportedWorkoutComparisons(
+      '- **Chest press** — Strength, 15kg\n- **Chest Press** — Machine, 40kg',
+      'Show today\'s tracker',
+      true,
+      '{"rows":[{"properties":{"Name":"Chest press","Type":"Strength","Weight (kg)":15}},{"properties":{"Name":"Chest Press","Type":"Machine","Weight (kg)":40}}]}',
+    );
+    expect(cleaned.removed).toBe(false);
+    expect(cleaned.response).toContain('**Chest press** — Strength, 15kg');
+    expect(cleaned.response).toContain('**Chest Press** — Machine, 40kg');
+  });
+
   it('rejects exercise modalities invented by a structured write', () => {
     const verdict = assessToolCallForTurn(
       notionWrite({
