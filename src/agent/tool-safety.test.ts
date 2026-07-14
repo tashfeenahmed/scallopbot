@@ -487,6 +487,17 @@ describe('turn-scoped tool safety', () => {
     )).toBe(true);
   });
 
+  it('removes exercise modalities invented beyond the successful tracker result', () => {
+    const cleaned = removeUnsupportedWorkoutComparisons(
+      'You logged Chest Press and chest press.\n\nTwo different entries (machine vs. dumbbell/free weight).',
+      'What did I do at the gym today?',
+      true,
+      '{"rows":[{"Name":"Chest Press"},{"Name":"chest press"}]}',
+    );
+    expect(cleaned.removed).toBe(true);
+    expect(cleaned.response).toBe('You logged Chest Press and chest press.');
+  });
+
   it('rejects exercise modalities invented by a structured write', () => {
     const verdict = assessToolCallForTurn(
       notionWrite({

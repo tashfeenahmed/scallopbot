@@ -721,13 +721,35 @@ export function removeUnsupportedWorkoutComparisons(
   response: string,
   userMessage: string,
   hasTrackerQueryEvidence: boolean,
+  trackerQueryEvidence: string = '',
 ): { response: string; removed: boolean } {
-  if (hasTrackerQueryEvidence || WORKOUT_COMPARISON.test(userMessage)) {
-    return { response, removed: false };
+  let cleaned = response;
+  let removed = false;
+
+  if (hasTrackerQueryEvidence && trackerQueryEvidence.trim()) {
+    const evidence = `${userMessage}\n${trackerQueryEvidence}`;
+    const unsupportedModality = (line: string): boolean => [
+      /\bdumbbells?\b/i,
+      /\bbarbells?\b/i,
+      /\bfree[- ]weights?\b/i,
+      /\b(?:each|per) arm\b/i,
+      /\bbodyweight\b/i,
+      /\bsmith machine\b/i,
+    ].some(pattern => pattern.test(line) && !pattern.test(evidence));
+    const lines = cleaned.split(/\r?\n/);
+    const groundedLines = lines.filter(line => !unsupportedModality(line));
+    if (groundedLines.length !== lines.length) {
+      cleaned = groundedLines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+      removed = true;
+    }
   }
-  const pieces = response.split(/(?<=[.!?])\s+|\s+[—;]\s+/);
+
+  if (hasTrackerQueryEvidence || WORKOUT_COMPARISON.test(userMessage)) {
+    return { response: cleaned, removed };
+  }
+  const pieces = cleaned.split(/(?<=[.!?])\s+|\s+[—;]\s+/);
   const filtered = pieces.filter(piece => !(WORKOUT_COMPARISON.test(piece) && WORKOUT_SUBJECT.test(piece)));
-  if (filtered.length === pieces.length) return { response, removed: false };
+  if (filtered.length === pieces.length) return { response: cleaned, removed };
   return { response: filtered.join(' ').trim(), removed: true };
 }
 

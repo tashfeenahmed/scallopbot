@@ -671,6 +671,7 @@ export class Agent {
     let successfulExternalMutations = 0;
     let failedExternalMutations = 0;
     let successfulNotionQuery = false;
+    let successfulNotionQueryEvidence = '';
     const successfulMutationSignatures = new Set<string>();
     const failedSkills: string[] = [];
     const successfulToolNames = new Set<string>();
@@ -1247,6 +1248,7 @@ export class Agent {
           finalResponse,
           activeUserMessage,
           successfulNotionQuery,
+          successfulNotionQueryEvidence,
         );
         if (workoutGrounding.removed) {
           finalResponse = workoutGrounding.response || (successfulMutationSignatures.size > 0
@@ -1378,6 +1380,7 @@ export class Agent {
           successfulToolNames.add(toolUse.name);
           if (toolUse.name === 'notion' && toolUse.input.action === 'query') {
             successfulNotionQuery = true;
+            successfulNotionQueryEvidence = `${successfulNotionQueryEvidence}\n${String(result.content)}`.slice(-200_000);
           }
         }
       }
