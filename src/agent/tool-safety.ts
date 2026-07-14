@@ -7,6 +7,11 @@ export interface TurnToolSafetyContext {
   userMessage: string;
   /** Last human-visible assistant reply immediately preceding this user turn. */
   previousAssistantMessage?: string;
+  /**
+   * Exact externally-mutating tool most recently verified in this session.
+   * Used only to bind a terse continuation to the same destination.
+   */
+  continuationMutationTool?: string;
   timezone: string;
   now?: Date;
 }
@@ -408,8 +413,17 @@ function hasImplicitPlanningMutationIntent(
   toolUse: ToolUseContent,
 ): boolean {
   if (!isPlanningTool(toolUse)) return false;
+  const conversation = `${previousAssistantMessage ?? ''}\n${message}`;
   const priorPlanningPrompt = !!previousAssistantMessage
-    && /\b(?:focus|priorit(?:y|ies)|plan|agenda|tasks?|to-?do|today|tomorrow|pick up)\b/i.test(previousAssistantMessage);
+    && /\b(?:main focus|priorit(?:y|ies)|plan|agenda|tasks?|to-?do|board|reminder)\b/i.test(previousAssistantMessage);
+  const explicitlyPlanning = /\b(?:board|reminder|task|to-?do|plan|agenda|priorit(?:y|ies)|schedule)\b/i.test(message);
+  if (
+    !priorPlanningPrompt
+    && !explicitlyPlanning
+    && /\b(?:workout|exercise|gym|notion|tracker|database|log(?:ged|ging)?)\b/i.test(conversation)
+  ) {
+    return false;
+  }
   const hasClockTime = /\b(?:at\s+)?(?:[01]?\d|2[0-3])(?::[0-5]\d)?\s*(?:am|pm)\b/i.test(message);
   const timedItem = hasClockTime
     && /\b(?:remind|schedule|put|call|meet(?:ing)?|appointment|deadline|due|take|pick up|send|submit)\b/i.test(message);
@@ -470,6 +484,7 @@ function hasExplicitExternalWriteIntent(
   message: string,
   previousAssistantMessage: string | undefined,
   toolUse: ToolUseContent,
+  continuationMutationTool?: string,
 ): boolean {
   if (INFORMATIONAL_UPDATE_REQUEST.test(message)) return false;
   // Delivering progress into the active conversation is part of answering the
@@ -485,8 +500,20 @@ function hasExplicitExternalWriteIntent(
   if (isBoundTargetedConfirmation(message, previousAssistantMessage, toolUse)) return true;
   if (
     previousAssistantMessage
-    && turnRequiresMutationReceipt(message, previousAssistantMessage)
-    && toolTargetMentioned(previousAssistantMessage, toolUse)
+    && turnRequiresMutationReceipt(message, previousAssistantMessage, continuationMutationTool)
+    && (
+      toolTargetMentioned(previousAssistantMessage, toolUse)
+      || (
+        continuationMutationTool?.toLocaleLowerCase('en-US') === toolUse.name.toLocaleLowerCase('en-US')
+        && (
+          (/notion/i.test(toolUse.name) && /\b(?:notion|tracker|database|workout log|exercise(?:s| log)?)\b/i.test(previousAssistantMessage))
+          || (/gmail|email/i.test(toolUse.name) && /\b(?:gmail|e-?mail|inbox|message)\b/i.test(previousAssistantMessage))
+          || (/calendar/i.test(toolUse.name) && /\b(?:calendar|appointment|event|meeting)\b/i.test(previousAssistantMessage))
+          || (/slack/i.test(toolUse.name) && /\b(?:slack|channel|workspace)\b/i.test(previousAssistantMessage))
+          || (/airtable/i.test(toolUse.name) && /\b(?:airtable|base|table|tracker)\b/i.test(previousAssistantMessage))
+        )
+      )
+    )
   ) {
     return true;
   }
@@ -551,6 +578,7 @@ export function assessToolCallForTurn(
     message,
     context.previousAssistantMessage,
     toolUse,
+    context.continuationMutationTool,
   );
   if (!explicitIntent) {
     return {
@@ -597,6 +625,31 @@ export function assessToolCallForTurn(
     };
   }
 
+  // Structured logging must preserve the user's own exercise label. Models
+  // sometimes invent a modality (for example "Dumbbell" or "each arm") that
+  // changes the meaning of the recorded data even though the numbers match.
+  if (/notion/i.test(toolUse.name) && STANDARD_THREE_PART_WORKOUT.test(message)) {
+    const serialized = stable(toolUse.input);
+    const qualifiers = [
+      'barbell', 'cable', 'decline', 'dumbbell', 'each arm', 'incline',
+      'machine', 'seated', 'standing', 'unilateral',
+    ];
+    const invented = qualifiers.find(qualifier => (
+      new RegExp(`\\b${qualifier.replace(' ', '\\s+')}\\b`, 'i').test(serialized)
+      && !new RegExp(`\\b${qualifier.replace(' ', '\\s+')}\\b`, 'i').test(message)
+    ));
+    if (invented) {
+      return {
+        allowed: false,
+        code: 'STRUCTURED_LABEL_EXPANSION',
+        reason: `The tool arguments add the unsupported workout qualifier "${invented}". Preserve the exercise label exactly as the user supplied it.`,
+        isMutation,
+        isExternalMutation,
+        signature,
+      };
+    }
+  }
+
   const now = context.now ?? new Date();
   const expectedDate = expectedRelativeDate(message, now, context.timezone);
   if (expectedDate) {
@@ -640,6 +693,28 @@ export function hasUnverifiedSuccessClaim(response: string): boolean {
     && !/\b(?:not|wasn't|weren't|couldn't|could not|failed|unable|unverified|can't|cannot)\b/i.test(response);
 }
 
+const WORKOUT_COMPARISON = /\b(?:PR|personal record|record high|increase[sd]?|improv(?:e[dm]?|ement)|jump(?:ed)?|up\s+\d+(?:\.\d+)?\s*kg|added\s+\d+(?:\.\d+)?\s*kg|more than last)\b/i;
+const WORKOUT_SUBJECT = /\b(?:workout|exercise|press|row|curl|squat|deadlift|machine|cable|kg|reps?|sets?)\b/i;
+
+/**
+ * Remove comparison claims that have neither a current user assertion nor a
+ * successful tracker query in this turn. A write receipt proves persistence,
+ * not a PR or trend.
+ */
+export function removeUnsupportedWorkoutComparisons(
+  response: string,
+  userMessage: string,
+  hasTrackerQueryEvidence: boolean,
+): { response: string; removed: boolean } {
+  if (hasTrackerQueryEvidence || WORKOUT_COMPARISON.test(userMessage)) {
+    return { response, removed: false };
+  }
+  const pieces = response.split(/(?<=[.!?])\s+|\s+[—;]\s+/);
+  const filtered = pieces.filter(piece => !(WORKOUT_COMPARISON.test(piece) && WORKOUT_SUBJECT.test(piece)));
+  if (filtered.length === pieces.length) return { response, removed: false };
+  return { response: filtered.join(' ').trim(), removed: true };
+}
+
 /**
  * Determine whether this turn promises a state change whose completion must be
  * backed by a successful tool receipt. This also covers terse continuation
@@ -648,6 +723,7 @@ export function hasUnverifiedSuccessClaim(response: string): boolean {
 export function turnRequiresMutationReceipt(
   userMessage: string,
   previousAssistantMessage?: string,
+  continuationMutationTool?: string,
 ): boolean {
   const message = currentInstruction(userMessage);
   // A successful mutation receipt is required for writes, not merely for any
@@ -662,8 +738,12 @@ export function turnRequiresMutationReceipt(
   }
 
   const previous = previousAssistantMessage ?? '';
-  const continuesMutationThread = /\b(?:notion|tracker|database|calendar|board|reminder|email|message|file|document|spreadsheet)\b/i.test(previous)
+  const explicitMutationThread = /\b(?:notion|tracker|database|calendar|board|reminder|email|message|file|document|spreadsheet)\b/i.test(previous)
     && /\b(?:add|added|anything else to add|create|created|log|logged|record|recorded|save|saved|schedule|scheduled|send|sent|update|updated)\b/i.test(previous);
+  const boundImplicitThread = !!continuationMutationTool
+    && /\b(?:add|added|anything else|create|created|log|logged|record|recorded|save|saved|schedule|scheduled|send|sent|update|updated|want me to)\b/i.test(previous)
+    && /\b(?:it|that|this|those|these|entry|entries|exercise|exercises|workout|item|items|row|rows)\b/i.test(previous);
+  const continuesMutationThread = explicitMutationThread || boundImplicitThread;
   if (!continuesMutationThread) return false;
 
   const affirmative = EXPLICIT_CONFIRMATION.test(message);

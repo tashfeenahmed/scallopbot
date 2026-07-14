@@ -166,6 +166,26 @@ describe('UnifiedScheduler durable task execution', () => {
     });
   });
 
+  it('never turns an ordinary zero-time backlog card into a proactive message', async () => {
+    const card = db.addScheduledItem({
+      userId: 'default', sessionId: null, source: 'user', kind: 'task',
+      type: 'event_prep', message: 'Log workout entries in the external tracker',
+      context: null, triggerAt: 0, recurring: null, sourceMemoryId: null,
+      taskConfig: null, boardStatus: 'backlog',
+    });
+    const spawnAndWait = vi.fn();
+    const send = vi.fn().mockResolvedValue(true);
+    const scheduler = makeScheduler('configured-only-worker', spawnAndWait, send);
+
+    await scheduler.evaluate();
+
+    expect(spawnAndWait).not.toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
+    expect(db.getScheduledItem(card.id)).toMatchObject({
+      kind: 'task', status: 'pending', boardStatus: 'backlog', result: null,
+    });
+  });
+
   it('reclaims a crashed lease and succeeds on the next durable attempt', async () => {
     const oldNow = Date.now() - 10_000;
     const item = addDueTask(db, { triggerAt: oldNow - 1_000 });

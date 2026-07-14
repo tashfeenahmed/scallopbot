@@ -340,8 +340,15 @@ export class BoardService {
     workerId: string,
     leaseMs: number = 60_000,
     now: number = Date.now(),
+    executionConfiguredOnly: boolean = false,
   ): BoardTaskClaim | null {
-    const claimed = this.db.claimNextBoardTask(userId, workerId, leaseMs, now);
+    const claimed = this.db.claimNextBoardTask(
+      userId,
+      workerId,
+      leaseMs,
+      now,
+      executionConfiguredOnly,
+    );
     if (!claimed?.leaseToken) return null;
     this.logger?.info(
       { itemId: claimed.id, workerId, attempt: claimed.attemptCount, leaseExpiresAt: claimed.leaseExpiresAt },

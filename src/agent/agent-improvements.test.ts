@@ -463,6 +463,63 @@ describe('Agent improvements integration', () => {
       expect(result.completionReason).toBe('natural_end');
     });
 
+    it('uses the durable latest reply and exact prior tool for a bare yes continuation', async () => {
+      const { Agent } = await import('./agent.js');
+      const { SessionManager } = await import('./session.js');
+      const handler = vi.fn().mockResolvedValue({
+        success: true,
+        output: '{"success":true,"page_id":"page-pectoral"}',
+      });
+      const skill = {
+        name: 'notion', description: 'Typed Notion API', path: '/tmp/notion/SKILL.md', source: 'workspace' as const,
+        frontmatter: { name: 'notion', description: 'Typed Notion API' }, content: '', available: true,
+        hasScripts: true, handler,
+      };
+      const registry = {
+        getSkill: vi.fn((name: string) => name === 'notion' ? skill : null),
+        getToolDefinitions: vi.fn(() => [{ name: 'notion', description: 'Typed Notion API', input_schema: { type: 'object', properties: {} } }]),
+        generateSkillPrompt: vi.fn(() => ''),
+      };
+      const provider = seqProvider([
+        {
+          content: [{
+            type: 'tool_use', id: 'continue-notion', name: 'notion',
+            input: { action: 'create', properties: { Name: 'Pectoral Machine', Weight: 40 } },
+          }],
+          stopReason: 'tool_use', usage: { inputTokens: 5, outputTokens: 5 }, model: 'mock',
+        },
+        endTurn('Added those exercises to the workout log.'),
+      ]);
+      const sessions = new SessionManager(db);
+      const session = await sessions.createSession();
+      await sessions.addMessage(session.id, {
+        role: 'assistant', content: 'The first three entries were logged.',
+      });
+      // Simulate a scheduler/background component appending a public message
+      // without updating SessionManager's in-memory cache.
+      db.addSessionMessage(
+        session.id,
+        'assistant',
+        'Want me to add those last two exercises to your workout log?',
+        'assistant_final',
+      );
+      sessions.reserveToolOperation({
+        operationId: 'prior-notion-operation', sessionId: session.id, toolName: 'notion',
+        callSignature: 'prior-call', userIntentDigest: 'prior-intent',
+      });
+      sessions.completeToolOperation('prior-notion-operation', 'succeeded', 'prior-result');
+      const agent = new Agent({
+        provider, sessionManager: sessions, skillRegistry: registry as any,
+        workspace: testDir, logger: pino({ level: 'silent' }), maxIterations: 3,
+      });
+
+      const result = await agent.processMessage(session.id, 'Yes!');
+
+      expect(handler).toHaveBeenCalledTimes(1);
+      expect(result.response).toBe('Added those exercises to the workout log.');
+      expect(JSON.stringify(handler.mock.calls[0][0].args)).toContain('Pectoral Machine');
+    });
+
     it('records real empty output rather than synthetic Success as evidence', async () => {
       const { Agent } = await import('./agent.js');
       const { SessionManager } = await import('./session.js');

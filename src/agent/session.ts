@@ -6,6 +6,7 @@ import type {
   ToolOperationStatus,
 } from '../memory/db.js';
 import { inferSessionMessageKind } from '../memory/session-message-kinds.js';
+import { classifySessionMessage } from '../memory/session-message-view.js';
 
 export interface SessionMetadata {
   userId?: string;
@@ -119,6 +120,26 @@ export class SessionManager {
     resultDigest?: string,
   ): boolean {
     return this.db.completeToolOperation(operationId, status, resultDigest);
+  }
+
+  /** Read through the durable transcript so scheduler-written replies cannot be hidden by the LRU cache. */
+  getLatestVisibleAssistantMessage(sessionId: string): string | undefined {
+    const session = this.db.getSession(sessionId);
+    const metadata = session?.metadata as Record<string, unknown> | undefined;
+    for (const message of this.db.getSessionMessages(sessionId).reverse()) {
+      const view = classifySessionMessage(message, { sessionMetadata: metadata });
+      if (view.kind === 'assistant_visible' && view.visibleText) return view.visibleText;
+    }
+    return undefined;
+  }
+
+  /** The operation ledger contains only external mutations reserved at dispatch time. */
+  getLatestSuccessfulMutationTool(sessionId: string, since: number): string | undefined {
+    return this.db.getToolOperationsBySession(sessionId)
+      .filter(operation => operation.status === 'succeeded'
+        && operation.updatedAt >= since
+        && operation.toolName !== 'send_message')
+      .at(-1)?.toolName;
   }
 
   async addMessage(sessionId: string, message: Message): Promise<void> {

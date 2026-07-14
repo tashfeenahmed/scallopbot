@@ -63,6 +63,13 @@ Workflow:
 3. `query` for existing rows.
 4. `create` or `update`, then trust completion only when the tool returns success.
 
+Query responses are compact and date-sorted. For repeated entities, use
+`result.stats_by_title[].latest` for the newest dated record and `maxima` for
+numeric records. Never infer a personal record, improvement, increase, or trend
+from an arbitrary row or from response order. A comparison is factual only when
+the returned latest/max evidence supports it. Preserve user-supplied titles and
+labels exactly on writes; do not add modalities such as “Dumbbell” or “each arm”.
+
 Examples:
 
 ```json

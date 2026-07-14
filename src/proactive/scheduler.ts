@@ -947,7 +947,13 @@ export class UnifiedScheduler {
 
     for (const userId of dueUsers) {
       while (processed < UnifiedScheduler.MAX_TASKS_PER_EVALUATION) {
-        const claim = this.boardService.claimNextTask(userId, this.workerId, this.taskLeaseMs);
+        const claim = this.boardService.claimNextTask(
+          userId,
+          this.workerId,
+          this.taskLeaseMs,
+          Date.now(),
+          true,
+        );
         if (!claim) break;
         processed++;
 
@@ -1122,6 +1128,14 @@ export class UnifiedScheduler {
   private async processTask(item: ScheduledItem, lease: TaskLeaseContext): Promise<TaskProcessResult> {
     const config = item.taskConfig;
     if (!config) {
+      if (item.triggerAt <= 0) {
+        return {
+          outcome: 'failed',
+          error: 'Unscheduled backlog item has no executable task configuration',
+          failureCode: 'task_configuration_missing',
+          failureDisposition: 'fail',
+        };
+      }
       // Historical extractors could misclassify a plain reminder as a worker
       // task. Do not expose a fake "background worker unavailable" error. Repair
       // the row under its lease and deliver the user-facing reminder once.

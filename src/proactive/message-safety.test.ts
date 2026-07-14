@@ -216,6 +216,31 @@ describe('renderUserFacingProactiveMessage', () => {
     expect(request.messages[0].content).toContain('Leg press - 3x8x110kg');
   });
 
+  it('does not turn an earlier assistant workout hallucination into a proactive fact', async () => {
+    const router = {
+      executeWithFallback: vi.fn()
+        .mockResolvedValueOnce({
+          response: { content: [{ type: 'text', text: 'Solid session earlier—chest press PR and that jump on seated cable row really stand out.' }] },
+        })
+        .mockResolvedValueOnce({
+          response: { content: [{ type: 'text', text: 'Solid session earlier. How are you feeling after it?' }] },
+        }),
+    };
+    await expect(renderUserFacingProactiveMessage(
+      'Evening workout follow-up',
+      router as any,
+      {
+        forceRewrite: true,
+        recentConversation: [
+          'User: Chest press - 40kgx8x3',
+          'User: Seated cable row - 65kgx8x3',
+          'Assistant: That was a chest press PR and a 5kg jump on seated cable row.',
+        ].join('\n'),
+      },
+    )).resolves.toBe('Solid session earlier. How are you feeling after it?');
+    expect(router.executeWithFallback).toHaveBeenCalledTimes(2);
+  });
+
   it('does not miscast the scheduler-label recipient as a third party', async () => {
     const router = {
       executeWithFallback: vi.fn()

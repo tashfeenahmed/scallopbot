@@ -46,6 +46,7 @@ import {
   hasUnverifiedSuccessClaim,
   isLikelyExternalMutation,
   localIsoDate,
+  removeUnsupportedWorkoutComparisons,
   toolOperationIdentity,
   toolOutputIndicatesFailure,
   turnRequiresMutationReceipt,
@@ -440,9 +441,19 @@ export class Agent {
         break;
       }
     }
+    // A scheduler or background worker can append a public reply directly to
+    // the durable transcript while this SessionManager entry remains cached.
+    // The database is authoritative for the immediate conversational handoff.
+    previousAssistantMessage = this.sessionManager.getLatestVisibleAssistantMessage(sessionId)
+      ?? previousAssistantMessage;
+    const continuationMutationTool = this.sessionManager.getLatestSuccessfulMutationTool(
+      sessionId,
+      Date.now() - 2 * 60 * 60 * 1_000,
+    );
     let turnToolSafety: TurnToolSafetyContext = {
       userMessage,
       previousAssistantMessage,
+      continuationMutationTool,
       timezone: userTimezone,
       now: new Date(),
     };
@@ -656,6 +667,7 @@ export class Agent {
     let consecutiveRejectedToolBatches = 0;
     let successfulExternalMutations = 0;
     let failedExternalMutations = 0;
+    let successfulNotionQuery = false;
     const successfulMutationSignatures = new Set<string>();
     const failedSkills: string[] = [];
     const successfulToolNames = new Set<string>();
@@ -1067,6 +1079,7 @@ export class Agent {
         const mutationReceiptRequired = turnRequiresMutationReceipt(
           turnToolSafety.userMessage,
           turnToolSafety.previousAssistantMessage,
+          turnToolSafety.continuationMutationTool,
         );
         if (
           mutationReceiptRequired
@@ -1183,6 +1196,7 @@ export class Agent {
         const missingRequiredMutationReceipt = turnRequiresMutationReceipt(
           turnToolSafety.userMessage,
           turnToolSafety.previousAssistantMessage,
+          turnToolSafety.continuationMutationTool,
         ) && successfulMutationSignatures.size === 0;
         if (
           ((failedExternalMutations > 0 && successfulExternalMutations === 0)
@@ -1194,6 +1208,19 @@ export class Agent {
             : 'I did not obtain a successful tool receipt for that action, so I have not marked it complete.';
           persistContent = [{ type: 'text', text: finalResponse }];
           completionReason = 'tool_loop';
+        }
+
+        const workoutGrounding = removeUnsupportedWorkoutComparisons(
+          finalResponse,
+          activeUserMessage,
+          successfulNotionQuery,
+        );
+        if (workoutGrounding.removed) {
+          finalResponse = workoutGrounding.response || (successfulMutationSignatures.size > 0
+            ? 'Logged with a verified tool receipt using the details exactly as provided.'
+            : 'I do not have verified tracker evidence for that comparison, so I will not present it as fact.');
+          persistContent = [{ type: 'text', text: finalResponse }];
+          this.logger.warn({ sessionId }, 'Removed an unsupported workout comparison from the final reply');
         }
 
         const artifactActionRequested = /\b(?:build|create|generate|render|compile|export|send|share|attach)\b[^.!?\n]{0,80}\b(?:pdf|report|document|artifact)\b/i.test(activeUserMessage)
@@ -1314,7 +1341,12 @@ export class Agent {
       for (const toolUse of toolUses) {
         const result = resultById.get(toolUse.id);
         if (!result || result.is_error) failedToolNames.add(toolUse.name);
-        else successfulToolNames.add(toolUse.name);
+        else {
+          successfulToolNames.add(toolUse.name);
+          if (toolUse.name === 'notion' && toolUse.input.action === 'query') {
+            successfulNotionQuery = true;
+          }
+        }
       }
       for (const toolUse of toolUses) {
         if (!/^(?:web_search|webfetch|inspect_artifact|send_file)$/i.test(toolUse.name)) continue;
@@ -1702,6 +1734,7 @@ The current user request is quoted below. Execute tools only when they directly 
 - Never mark a current-day task done from an older memory or prior-day accomplishment. Completion must be stated in the active user turn.
 - Treat every external write as uncompleted until its exact tool result proves success.
 - Prefer a typed integration tool over raw shell HTTP. For Notion, use the typed \`notion\` tool when available; with API version 2025-09-03, query a database through its data source, inspect the real schema before writing, and never guess property names.
+- For structured logs, preserve the user's entity/exercise label exactly; never invent a modality such as "Dumbbell" or "each arm". Use date-sorted latest/max tool evidence for comparisons, and never call something a PR, increase, or improvement from memory or an arbitrary returned row.
 - Resolve relative dates from the authoritative timezone/date above; never calculate them from an older message.
 - Before the final reply, account for every part of the current request and disclose any part that failed or remains unverified.
 ## END ACTIVE TURN CONTRACT`;

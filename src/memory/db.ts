@@ -6042,6 +6042,10 @@ export class ScallopDatabase {
         AND board_status IN ('inbox', 'backlog', 'scheduled', 'waiting')
         AND (trigger_at = 0 OR trigger_at <= ?)
         AND (result IS NOT NULL OR attempt_count < max_attempts)
+        -- An ordinary zero-time backlog card is planning state, not executable
+        -- work. Scheduler eligibility requires a worker config, a stored result
+        -- awaiting delivery, or a real scheduled time for legacy recovery.
+        AND (task_config IS NOT NULL OR result IS NOT NULL OR trigger_at > 0)
         AND lease_token IS NULL
       ORDER BY user_id
     `).all(now) as Array<{ user_id: string }>;
@@ -6201,6 +6205,7 @@ export class ScallopDatabase {
     workerId: string,
     leaseMs: number,
     now: number = Date.now(),
+    executionConfiguredOnly: boolean = false,
   ): ScheduledItem | null {
     const duration = Math.max(1_000, Math.floor(leaseMs));
     const transaction = this.db.transaction((): ScheduledItem | null => {
@@ -6230,12 +6235,13 @@ export class ScallopDatabase {
           AND board_status IN ('inbox', 'backlog', 'scheduled', 'waiting')
           AND (trigger_at = 0 OR trigger_at <= ?)
           AND (result IS NOT NULL OR attempt_count < max_attempts)
+          AND (? = 0 OR task_config IS NOT NULL OR result IS NOT NULL OR trigger_at > 0)
           AND lease_token IS NULL
           AND (preferred_worker_id IS NULL OR preferred_worker_id = ?)
         ORDER BY
           CASE priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 END,
           created_at ASC
-      `).all(userId, now, workerId) as Record<string, unknown>[];
+      `).all(userId, now, executionConfiguredOnly ? 1 : 0, workerId) as Record<string, unknown>[];
 
       for (const row of rows) {
         const candidate = this.rowToScheduledItem(row);

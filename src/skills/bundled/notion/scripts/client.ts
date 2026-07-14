@@ -40,6 +40,136 @@ function cleanId(value: string): string {
   return value.trim().replace(/[^a-zA-Z0-9-]/g, '');
 }
 
+function textFromNotion(value: unknown): string {
+  if (!Array.isArray(value)) return '';
+  return value.map((part) => {
+    if (!part || typeof part !== 'object') return '';
+    const record = part as Record<string, unknown>;
+    if (typeof record.plain_text === 'string') return record.plain_text;
+    const text = record.text as Record<string, unknown> | undefined;
+    return typeof text?.content === 'string' ? text.content : '';
+  }).join('');
+}
+
+function flattenProperty(property: unknown): unknown {
+  if (!property || typeof property !== 'object') return null;
+  const record = property as Record<string, unknown>;
+  const type = typeof record.type === 'string' ? record.type : '';
+  if (type === 'title' || type === 'rich_text') return textFromNotion(record[type]);
+  if (type === 'number' || type === 'checkbox' || type === 'url'
+    || type === 'email' || type === 'phone_number') return record[type] ?? null;
+  if (type === 'date') {
+    const date = record.date as Record<string, unknown> | null | undefined;
+    if (!date || typeof date.start !== 'string') return null;
+    return typeof date.end === 'string' ? { start: date.start, end: date.end } : date.start;
+  }
+  if (type === 'select' || type === 'status') {
+    const selected = record[type] as Record<string, unknown> | null | undefined;
+    return typeof selected?.name === 'string' ? selected.name : null;
+  }
+  if (type === 'multi_select') {
+    return Array.isArray(record.multi_select)
+      ? record.multi_select.flatMap(item => (
+        item && typeof item === 'object' && typeof (item as Record<string, unknown>).name === 'string'
+          ? [String((item as Record<string, unknown>).name)]
+          : []
+      ))
+      : [];
+  }
+  if (type === 'formula') return flattenProperty(record.formula);
+  return null;
+}
+
+interface CompactNotionRow {
+  id: string;
+  created_time: string | null;
+  last_edited_time: string | null;
+  url: string | null;
+  properties: Record<string, unknown>;
+  title: string;
+  date: string | null;
+}
+
+function compactQueryResult(payload: Record<string, unknown>): Record<string, unknown> {
+  const rawRows = Array.isArray(payload.results)
+    ? payload.results.filter((row): row is Record<string, unknown> => !!row && typeof row === 'object')
+    : [];
+  const rows: CompactNotionRow[] = rawRows.map((row) => {
+    const rawProperties = row.properties && typeof row.properties === 'object'
+      ? row.properties as Record<string, unknown>
+      : {};
+    const properties = Object.fromEntries(
+      Object.entries(rawProperties).map(([name, value]) => [name, flattenProperty(value)]),
+    );
+    const titleEntry = Object.entries(rawProperties).find(([, value]) => (
+      !!value && typeof value === 'object' && (value as Record<string, unknown>).type === 'title'
+    ));
+    const dateEntry = Object.entries(rawProperties).find(([name, value]) => (
+      name.toLocaleLowerCase('en-US') === 'date'
+      || (!!value && typeof value === 'object' && (value as Record<string, unknown>).type === 'date')
+    ));
+    const flattenedDate = dateEntry ? flattenProperty(dateEntry[1]) : null;
+    return {
+      id: typeof row.id === 'string' ? row.id : '',
+      created_time: typeof row.created_time === 'string' ? row.created_time : null,
+      last_edited_time: typeof row.last_edited_time === 'string' ? row.last_edited_time : null,
+      url: typeof row.url === 'string' ? row.url : null,
+      properties,
+      title: titleEntry ? String(properties[titleEntry[0]] ?? '') : '',
+      date: typeof flattenedDate === 'string'
+        ? flattenedDate
+        : (flattenedDate && typeof flattenedDate === 'object'
+          ? String((flattenedDate as Record<string, unknown>).start ?? '') || null
+          : null),
+    };
+  }).sort((a, b) => (
+    (b.date ?? '').localeCompare(a.date ?? '')
+    || (b.created_time ?? '').localeCompare(a.created_time ?? '')
+    || a.id.localeCompare(b.id)
+  ));
+
+  const grouped = new Map<string, CompactNotionRow[]>();
+  for (const row of rows) {
+    const key = row.title.trim().toLocaleLowerCase('en-US');
+    if (!key) continue;
+    const group = grouped.get(key) ?? [];
+    group.push(row);
+    grouped.set(key, group);
+  }
+  const statsByTitle = [...grouped.values()].map((group) => {
+    const latest = group[0];
+    const maxima: Record<string, { value: number; date: string | null; page_id: string }> = {};
+    for (const row of group) {
+      for (const [name, value] of Object.entries(row.properties)) {
+        if (typeof value !== 'number' || !Number.isFinite(value)) continue;
+        if (!maxima[name] || value > maxima[name].value) {
+          maxima[name] = { value, date: row.date, page_id: row.id };
+        }
+      }
+    }
+    return {
+      title: latest.title,
+      latest: {
+        page_id: latest.id,
+        date: latest.date,
+        properties: latest.properties,
+      },
+      maxima,
+      recent: group.slice(0, 3).map(row => ({
+        page_id: row.id, date: row.date, properties: row.properties,
+      })),
+    };
+  });
+
+  return {
+    object: payload.object ?? 'list',
+    rows: rows.map(({ title: _title, date: _date, ...row }) => row),
+    stats_by_title: statsByTitle,
+    next_cursor: payload.next_cursor ?? null,
+    has_more: payload.has_more === true,
+  };
+}
+
 export async function executeNotion(
   args: NotionArgs,
   options: NotionClientOptions,
@@ -113,11 +243,12 @@ export async function executeNotion(
       if (args.filter) body.filter = args.filter;
       if (args.sorts) body.sorts = args.sorts;
       if (args.start_cursor) body.start_cursor = args.start_cursor;
+      const result = await request(`/data_sources/${dataSourceId}/query`, 'POST', body);
       return {
         success: true,
         action: args.action,
         data_source_id: dataSourceId,
-        result: await request(`/data_sources/${dataSourceId}/query`, 'POST', body),
+        result: compactQueryResult(result),
       };
     }
     case 'create': {

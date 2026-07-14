@@ -12,6 +12,7 @@ import {
   toolOperationIdentity,
   toolOutputIndicatesFailure,
   turnRequiresMutationReceipt,
+  removeUnsupportedWorkoutComparisons,
 } from './tool-safety.js';
 
 const notionWrite = (input: Record<string, unknown>): ToolUseContent => ({
@@ -425,6 +426,69 @@ describe('turn-scoped tool safety', () => {
       'Leg curls were logged to your Notion tracker. Anything else to add?',
     )).toBe(true);
     expect(turnRequiresMutationReceipt('How many reps did I do?', 'Your tracker is in Notion.')).toBe(false);
+  });
+
+  it('binds a generic workout continuation to the exact recently successful tool', () => {
+    const previous = 'Want me to add those last two exercises to your workout log?';
+    expect(turnRequiresMutationReceipt('Yes!', previous, 'notion')).toBe(true);
+    expect(turnRequiresMutationReceipt('Yes!', previous)).toBe(false);
+
+    const notion = assessToolCallForTurn(
+      notionWrite({ action: 'create', name: 'Seated Cable Row', weight_kg: 65 }),
+      {
+        userMessage: 'Yes!', previousAssistantMessage: previous,
+        continuationMutationTool: 'notion', timezone: 'Europe/Dublin',
+      },
+    );
+    expect(notion.allowed).toBe(true);
+
+    const wrongExternalTool = assessToolCallForTurn(
+      { type: 'tool_use', id: 'wrong-mail', name: 'gmail', input: { action: 'send', body: 'workout' } },
+      {
+        userMessage: 'Yes!', previousAssistantMessage: previous,
+        continuationMutationTool: 'gmail', timezone: 'Europe/Dublin',
+      },
+    );
+    expect(wrongExternalTool.allowed).toBe(false);
+
+    const board = assessToolCallForTurn(
+      { type: 'tool_use', id: 'wrong-fallback', name: 'board', input: { action: 'add', title: 'Log workout' } },
+      {
+        userMessage: 'Yes!', previousAssistantMessage: previous,
+        continuationMutationTool: 'notion', timezone: 'Europe/Dublin',
+      },
+    );
+    expect(board.allowed).toBe(false);
+  });
+
+  it('rejects exercise modalities invented by a structured write', () => {
+    const verdict = assessToolCallForTurn(
+      notionWrite({
+        action: 'create', name: 'Dumbbell Chest Press', notes: '15kg each arm',
+      }),
+      {
+        userMessage: 'Chest press - 15kgx10x3',
+        previousAssistantMessage: 'Your workout was logged to your Notion tracker. Anything else to add?',
+        continuationMutationTool: 'notion', timezone: 'Europe/Dublin',
+      },
+    );
+    expect(verdict.allowed).toBe(false);
+    expect(verdict.code).toBe('STRUCTURED_LABEL_EXPANSION');
+  });
+
+  it('removes a workout PR claim when only a write receipt exists', () => {
+    const cleaned = removeUnsupportedWorkoutComparisons(
+      'All logged. Seated Cable Row was a 5kg jump and a new PR.',
+      'Seated cable row - 65kgx8x3',
+      false,
+    );
+    expect(cleaned).toEqual({ response: 'All logged.', removed: true });
+    expect(removeUnsupportedWorkoutComparisons(
+      'That is a new PR.', 'I hit a new PR today', false,
+    ).removed).toBe(false);
+    expect(removeUnsupportedWorkoutComparisons(
+      'That is a new PR.', 'Compare this workout', true,
+    ).removed).toBe(false);
   });
 
   it('creates privacy-safe deterministic output evidence', () => {
