@@ -1323,7 +1323,11 @@ export class Gateway {
             // session string as a user ID.
             entries = scallopStore.getByUser(stateUserId, { category: mapCategory(type), limit: 100 });
           } else if (recent) {
-            entries = scallopStore.getByUser(stateUserId, { category: mapCategory(type), limit: Math.min(recent, 100) });
+            entries = scallopStore.getByUser(stateUserId, {
+              category: mapCategory(type),
+              limit: Math.min(recent, 100),
+              orderBy: 'recency',
+            });
           } else if (type) {
             entries = scallopStore.getByUser(stateUserId, { category: mapCategory(type), limit: 50 });
           } else {

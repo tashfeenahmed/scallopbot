@@ -191,6 +191,21 @@ describe('ScallopDatabase', () => {
     expect(user1All).toHaveLength(2);
   });
 
+  it('can order lightweight memory retrieval by actual recency instead of prominence', () => {
+    const seed = (content: string, documentDate: number, prominence: number) => db.addMemory({
+      userId: 'user1', content, category: 'fact', memoryType: 'regular', importance: 5,
+      confidence: 0.8, isLatest: true, documentDate, eventDate: null, prominence,
+      lastAccessed: null, accessCount: 0, sourceChunk: null, embedding: null, metadata: null,
+    });
+    seed('Old but prominent', Date.UTC(2026, 1, 1), 1);
+    seed('New but ordinary', Date.UTC(2026, 6, 15), 0.2);
+
+    expect(db.getMemoriesByUserLight('user1', { limit: 1 })[0].content)
+      .toBe('Old but prominent');
+    expect(db.getMemoriesByUserLight('user1', { limit: 1, orderBy: 'recency' })[0].content)
+      .toBe('New but ordinary');
+  });
+
   it('should add and retrieve relations', () => {
     const mem1 = db.addMemory({
       userId: 'user1',

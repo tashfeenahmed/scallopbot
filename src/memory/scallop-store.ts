@@ -368,6 +368,7 @@ export class ScallopMemoryStore {
       isLatest?: boolean;
       minProminence?: number;
       limit?: number;
+      orderBy?: 'prominence' | 'recency';
     } = {}
   ): ScallopMemoryEntryLight[] {
     return this.db.getMemoriesByUserLight(userId, {
@@ -375,6 +376,7 @@ export class ScallopMemoryStore {
       isLatest: options.isLatest,
       minProminence: options.minProminence ?? PROMINENCE_THRESHOLDS.DORMANT,
       limit: options.limit,
+      orderBy: options.orderBy,
     });
   }
 

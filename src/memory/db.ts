@@ -4167,6 +4167,8 @@ export class ScallopDatabase {
       limit?: number;
       offset?: number;
       includeAllSources?: boolean;
+      /** Prominence is the default; recency means document time, newest first. */
+      orderBy?: 'prominence' | 'recency';
     } = {}
   ): ScallopMemoryEntryLight[] {
     let query = `SELECT ${ScallopDatabase.LIGHT_COLUMNS} FROM memories WHERE user_id = ?`;
@@ -4195,7 +4197,9 @@ export class ScallopDatabase {
       query += ' AND is_latest = 1';
     }
 
-    query += ' ORDER BY prominence DESC, document_date DESC';
+    query += options.orderBy === 'recency'
+      ? ' ORDER BY document_date DESC, prominence DESC'
+      : ' ORDER BY prominence DESC, document_date DESC';
 
     if (options.limit) {
       query += ' LIMIT ?';

@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
+import type { ScallopDatabase } from '../memory/db.js';
 
 // Mock the telegram module to avoid actual bot creation
 vi.mock('../channels/telegram.js', () => ({
@@ -386,9 +387,7 @@ describe('Gateway', () => {
             importance: number;
             confidence: number;
           }): Promise<{ id: string }>;
-          getDatabase(): {
-            getMemory(id: string): { accessCount: number } | null;
-          };
+          getDatabase(): ScallopDatabase;
         };
       }).scallopMemoryStore;
       const ownerMemory = await store.add({
@@ -405,6 +404,19 @@ describe('Gateway', () => {
         importance: 8,
         confidence: 1,
       });
+      const database = store.getDatabase();
+      database.addMemory({
+        userId: 'default', content: 'Ancient but prominent synthetic note.', category: 'fact',
+        memoryType: 'regular', importance: 9, confidence: 1, isLatest: true,
+        documentDate: Date.UTC(2025, 0, 1), eventDate: null, prominence: 1,
+        lastAccessed: null, accessCount: 0, sourceChunk: null, embedding: null, metadata: null,
+      });
+      database.addMemory({
+        userId: 'default', content: 'Newest ordinary synthetic note.', category: 'fact',
+        memoryType: 'regular', importance: 5, confidence: 1, isLatest: true,
+        documentDate: Date.now() + 1_000, eventDate: null, prominence: 0.2,
+        lastAccessed: null, accessCount: 0, sourceChunk: null, embedding: null, metadata: null,
+      });
       const handler = gateway.getSkillRegistry().getSkill('memory_get')!.handler!;
 
       const ownerResult = await handler({
@@ -418,6 +430,12 @@ describe('Gateway', () => {
         workspace: testDir,
         sessionId: 'other-session',
         userId: 'telegram:user-beta',
+      });
+      const newestOnly = await handler({
+        args: { recent: 1 },
+        workspace: testDir,
+        sessionId: 'owner-session',
+        userId: 'telegram:owner-example',
       });
       const otherAccessCountBefore = store.getDatabase().getMemory(otherMemory.id)!.accessCount;
       const crossUserIdResult = await handler({
@@ -433,6 +451,8 @@ describe('Gateway', () => {
       expect(otherResult.output).toContain(otherMemory.id);
       expect(otherResult.output).toContain('Indigo');
       expect(otherResult.output).not.toContain('Saffron');
+      expect(newestOnly.output).toContain('Newest ordinary synthetic note.');
+      expect(newestOnly.output).not.toContain('Ancient but prominent synthetic note.');
       expect(crossUserIdResult.success).toBe(false);
       expect(crossUserIdResult.error).toContain('Memory not found');
       expect(store.getDatabase().getMemory(otherMemory.id)!.accessCount)
