@@ -588,6 +588,12 @@ describe('Agent', () => {
       expect(systemPrompt).toContain(testDir);
     });
 
+    it('instructs the default agent to omit user-excluded items instead of reciting them', async () => {
+      const { DEFAULT_SYSTEM_PROMPT } = await import('./agent.js');
+      expect(DEFAULT_SYSTEM_PROMPT).toContain('Honor exclusions literally');
+      expect(DEFAULT_SYSTEM_PROMPT).toContain('omit those items entirely');
+    });
+
     it('should load SOUL.md if present in workspace', async () => {
       const { Agent } = await import('./agent.js');
       const { SessionManager } = await import('./session.js');
