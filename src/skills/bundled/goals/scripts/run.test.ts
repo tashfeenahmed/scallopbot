@@ -96,4 +96,47 @@ describe('goals skill owner isolation', () => {
     expect(ownerResult.success).toBe(true);
     expect(ownerResult.output).toContain('Private foreign goal');
   });
+
+  it('keeps an abandoned overdue active goal out of the current view without deleting it', () => {
+    const db = new ScallopDatabase(dbPath);
+    const old = Date.now() - 60 * 24 * 60 * 60 * 1_000;
+    const goal = db.addMemory({
+      userId: 'owner-a',
+      content: 'Long abandoned campaign',
+      category: 'insight',
+      memoryType: 'regular',
+      importance: 8,
+      confidence: 1,
+      isLatest: true,
+      source: 'user',
+      documentDate: old,
+      eventDate: null,
+      prominence: 1,
+      lastAccessed: old,
+      accessCount: 0,
+      sourceChunk: null,
+      embedding: null,
+      metadata: {
+        goalType: 'goal', status: 'active', progress: 0,
+        dueDate: old + 7 * 24 * 60 * 60 * 1_000,
+      },
+    });
+    db.close();
+    const raw = new Database(dbPath);
+    raw.prepare('UPDATE memories SET created_at = ?, updated_at = ?, last_accessed = ? WHERE id = ?')
+      .run(old, old, old, goal.id);
+    raw.close();
+
+    const current = runSkill(dbPath, { action: 'list' }, 'owner-a');
+    expect(current.success).toBe(true);
+    expect(current.output).not.toContain('Long abandoned campaign');
+
+    const preserved = runSkill(dbPath, { action: 'list', scope: 'all' }, 'owner-a');
+    expect(preserved.success).toBe(true);
+    expect(preserved.output).toContain('Long abandoned campaign');
+
+    const explicitlyActive = runSkill(dbPath, { action: 'list', status: 'active' }, 'owner-a');
+    expect(explicitlyActive.output).toContain('Long abandoned campaign');
+    expect(goal.id).toBeTruthy();
+  });
 });

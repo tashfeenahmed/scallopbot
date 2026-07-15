@@ -125,7 +125,10 @@ The skill accepts JSON arguments via the `SKILL_ARGS` environment variable:
 ```
 
 `list` defaults to active items. Backlog and completed goals remain stored but
-are shown only when `status` or `scope: "all"` is explicitly requested.
+are shown only when `status` or `scope: "all"` is explicitly requested. An
+overdue active goal that has had no recent engagement is also historical: keep
+it out of the default current view, while preserving it for an explicit status,
+name, or full-history request.
 
 ### Show goal hierarchy
 

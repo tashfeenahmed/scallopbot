@@ -7,6 +7,7 @@
 import * as path from 'path';
 import Database from 'better-sqlite3';
 import { nanoid } from 'nanoid';
+import { isGoalLiveForAutonomy } from '../../../../memory/state-relevance.js';
 
 // Types
 interface GoalMetadata {
@@ -28,6 +29,7 @@ interface GoalItem {
   metadata: GoalMetadata;
   createdAt: number;
   updatedAt: number;
+  lastAccessed: number | null;
 }
 
 interface GoalArgs {
@@ -191,6 +193,7 @@ function getGoal(db: Database.Database, id: string): GoalItem | null {
     metadata,
     createdAt: row.created_at as number,
     updatedAt: row.updated_at as number,
+    lastAccessed: (row.last_accessed as number | null) ?? null,
   };
 }
 
@@ -471,6 +474,7 @@ function listItems(db: Database.Database, args: GoalArgs): SkillResult {
         metadata,
         createdAt: row.created_at as number,
         updatedAt: row.updated_at as number,
+        lastAccessed: (row.last_accessed as number | null) ?? null,
       } as GoalItem;
     })
     .filter((item): item is GoalItem => item !== null);
@@ -486,7 +490,7 @@ function listItems(db: Database.Database, args: GoalArgs): SkillResult {
   } else {
     // Backlog is preserved planning state, not a current priority. Callers
     // must explicitly request backlog/all instead of silently resurfacing it.
-    items = items.filter(i => i.metadata.status === 'active');
+    items = items.filter(i => isGoalLiveForAutonomy(i));
   }
 
   if (items.length === 0) {
@@ -494,7 +498,7 @@ function listItems(db: Database.Database, args: GoalArgs): SkillResult {
       success: true,
       output: args.status || args.scope === 'all'
         ? 'No items found matching the criteria.'
-        : 'No active goals or tasks. Backlog and completed items are preserved; request status="backlog" or scope="all" only when the user asks for them.',
+        : 'No current goals or tasks. Stale active, backlog, and completed items are preserved; request a status or scope="all" only when the user asks for historical state.',
       exitCode: 0,
     };
   }

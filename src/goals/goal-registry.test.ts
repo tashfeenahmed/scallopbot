@@ -22,6 +22,27 @@ afterEach(() => {
 });
 
 describe('durable goal registry', () => {
+  it('does not inject an abandoned overdue goal unless the request names it', async () => {
+    const dbPath = tempDatabasePath();
+    const db = new ScallopDatabase(dbPath);
+    const service = new GoalService({ db, logger });
+    const old = Date.now() - 60 * 24 * 60 * 60 * 1_000;
+    const goal = await service.createGoal('owner', {
+      title: 'Old YouTube metrics campaign',
+      status: 'active',
+      dueDate: old + 7 * 24 * 60 * 60 * 1_000,
+    });
+    const raw = new Database(dbPath);
+    raw.prepare('UPDATE memories SET created_at = ?, document_date = ?, last_accessed = ? WHERE id = ?')
+      .run(old, old, old, goal.id);
+    raw.close();
+
+    expect(await service.getGoalContext('owner', 'What is on my plate today?')).toBe('');
+    expect(await service.getGoalContext('owner', 'What happened to the YouTube metrics campaign?'))
+      .toContain('Old YouTube metrics campaign');
+    db.close();
+  });
+
   it('backfills a missing board-referenced identity without changing its ID or link', async () => {
     const dbPath = tempDatabasePath();
     new ScallopDatabase(dbPath).close();

@@ -30,6 +30,10 @@ import type {
   GoalRunResult,
 } from './types.js';
 import { isGoalItem } from './types.js';
+import {
+  hasRequestContentOverlap,
+  isGoalLiveForAutonomy,
+} from '../memory/state-relevance.js';
 
 /**
  * Options for GoalService
@@ -1241,7 +1245,10 @@ export class GoalService {
    * Get goal context for agent system prompt
    */
   async getGoalContext(userId: string, userMessage?: string): Promise<string> {
-    const activeGoals = await this.getActiveGoals(userId);
+    const activeGoals = (await this.getActiveGoals(userId)).filter(goal =>
+      isGoalLiveForAutonomy(goal)
+      || Boolean(userMessage && hasRequestContentOverlap(userMessage, goal.content))
+    );
     if (activeGoals.length === 0) {
       return '';
     }
@@ -1254,7 +1261,8 @@ export class GoalService {
     ];
     const isRelevant =
       !userMessage ||
-      goalKeywords.some((kw) => userMessage.toLowerCase().includes(kw));
+      goalKeywords.some((kw) => userMessage.toLowerCase().includes(kw)) ||
+      activeGoals.some(goal => hasRequestContentOverlap(userMessage, goal.content));
 
     if (!isRelevant) {
       // Minimal injection
