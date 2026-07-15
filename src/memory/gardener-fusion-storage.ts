@@ -5,6 +5,7 @@
 
 import type { ScallopMemoryStore } from './scallop-store.js';
 import type { ScallopDatabase, ScallopMemoryEntry, MemoryCategory } from './db.js';
+import { sourceMemoryFingerprint } from './source-fingerprint.js';
 
 export interface StoreFusedMemoryInput {
   scallopStore: ScallopMemoryStore;
@@ -28,6 +29,8 @@ export interface StoreFusedMemoryInput {
 export interface StoreFusedMemoryResult {
   fusedMemory: ScallopMemoryEntry;
   fusedProminence: number;
+  /** False when the same source set was already consolidated earlier. */
+  created: boolean;
 }
 
 const RELATIVE_DATE_RE = /\b(?:today|tomorrow|yesterday|next\s+(?:week|month|year)|last\s+(?:week|month|year))\b/gi;
@@ -69,6 +72,27 @@ export async function storeFusedMemory(
   input: StoreFusedMemoryInput,
   allMemories: ScallopMemoryEntry[],
 ): Promise<StoreFusedMemoryResult> {
+  const sourceFingerprint = sourceMemoryFingerprint(input.sourceMemoryIds);
+  const existing = allMemories.find(memory => {
+    if (
+      memory.userId !== input.userId
+      || !memory.isLatest
+      || memory.memoryType !== 'derived'
+      || memory.learnedFrom !== input.learnedFrom
+    ) return false;
+    const sourceIds = memory.metadata?.sourceIds;
+    return Array.isArray(sourceIds)
+      && sourceMemoryFingerprint(sourceIds.filter((id): id is string => typeof id === 'string'))
+        === sourceFingerprint;
+  });
+  if (existing) {
+    return {
+      fusedMemory: existing,
+      fusedProminence: existing.prominence,
+      created: false,
+    };
+  }
+
   const sourceMemories = allMemories.filter(m => input.sourceMemoryIds.includes(m.id));
   const temporal = normalizeFusedTemporalSummary(input.summary, sourceMemories);
   const fusedMemory = await input.scallopStore.add({
@@ -82,6 +106,7 @@ export async function storeFusedMemory(
       fusedAt: new Date().toISOString(),
       sourceCount: input.sourceMemoryIds.length,
       sourceIds: input.sourceMemoryIds,
+      sourceFingerprint,
       ...(temporal.temporalSourceDate
         ? { temporalSourceDate: temporal.temporalSourceDate, relativeDateCanonicalized: true }
         : {}),
@@ -115,5 +140,5 @@ export async function storeFusedMemory(
   const fusedProminence = Math.min(0.6, maxProminence + 0.1);
   input.db.updateProminences([{ id: fusedMemory.id, prominence: fusedProminence }]);
 
-  return { fusedMemory, fusedProminence };
+  return { fusedMemory, fusedProminence, created: true };
 }

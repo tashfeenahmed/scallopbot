@@ -198,6 +198,32 @@ describe('storeFusedMemory', () => {
     expect(metadata.sourceCount).toBe(2);
   });
 
+  it('stores one current synthesis for the same source set regardless of source order', async () => {
+    const m1 = seedMemory(db, { content: 'Tutors are recruited in Kenya', category: 'fact', prominence: 0.3 });
+    const m2 = seedMemory(db, { content: 'Students are recruited in the Middle East', category: 'event', prominence: 0.3 });
+    const first = await storeFusedMemory({
+      scallopStore: store, db, userId: 'user-1',
+      summary: 'The tutoring model connects Middle Eastern students with Kenyan tutors',
+      category: 'insight', importance: 7, confidence: 0.85,
+      sourceMemoryIds: [m1.id, m2.id], sourceChunk: `${m1.id} | ${m2.id}`,
+      learnedFrom: 'nrem_consolidation', extraMetadata: { nrem: true },
+    }, [m1, m2]);
+    const allMemories = db.getMemoriesByUser('user-1', { includeAllSources: true });
+    const repeated = await storeFusedMemory({
+      scallopStore: store, db, userId: 'user-1',
+      summary: 'Kenyan tutors serve students in the Middle East',
+      category: 'insight', importance: 7, confidence: 0.85,
+      sourceMemoryIds: [m2.id, m1.id], sourceChunk: `${m2.id} | ${m1.id}`,
+      learnedFrom: 'nrem_consolidation', extraMetadata: { nrem: true },
+    }, allMemories);
+
+    expect(first.created).toBe(true);
+    expect(repeated.created).toBe(false);
+    expect(repeated.fusedMemory.id).toBe(first.fusedMemory.id);
+    expect(db.getMemoriesByUser('user-1', { includeAllSources: true })
+      .filter(memory => memory.learnedFrom === 'nrem_consolidation')).toHaveLength(1);
+  });
+
   it('canonicalizes old relative dates from their source event instead of consolidation time', async () => {
     const aprilEvent = Date.parse('2026-04-08T12:00:00Z');
     const m1 = seedMemory(db, {
@@ -295,5 +321,32 @@ describe('storeFusedMemory', () => {
       outcome: 'canonicalized',
       memory_snapshot: expect.stringContaining('Final house cleaning today'),
     });
+  });
+
+  it('losslessly supersedes legacy NREM duplicates with the same sources on reopen', () => {
+    const m1 = seedMemory(db, { content: 'Tutors are in Kenya', category: 'fact', prominence: 0.3 });
+    const m2 = seedMemory(db, { content: 'Students are in the Middle East', category: 'event', prominence: 0.3 });
+    const addLegacy = (content: string, documentDate: number, sourceIds: string[]) => db.addMemory({
+      userId: 'user-1', content, category: 'insight', memoryType: 'derived',
+      importance: 7, confidence: 0.8, isLatest: true, source: 'user', documentDate,
+      eventDate: null, prominence: 0.6, lastAccessed: null, accessCount: 0,
+      sourceChunk: sourceIds.join(' | '), embedding: null,
+      metadata: { nrem: true, sourceIds }, learnedFrom: 'nrem_consolidation',
+    });
+    const older = addLegacy('First synthesis', Date.now() - 2_000, [m1.id, m2.id]);
+    const newer = addLegacy('Newer synthesis', Date.now() - 1_000, [m2.id, m1.id]);
+
+    store.close();
+    store = new ScallopMemoryStore({ dbPath: TEST_DB_PATH, logger });
+    db = store.getDatabase();
+
+    expect(db.getMemory(newer.id)).toMatchObject({ isLatest: true, memoryType: 'derived' });
+    expect(db.getMemory(older.id)).toMatchObject({ isLatest: false, memoryType: 'superseded' });
+    expect(db.raw<Record<string, unknown>>(
+      'SELECT * FROM nrem_source_dedupe_audit WHERE duplicate_memory_id = ?', [older.id],
+    )[0]).toMatchObject({ canonical_memory_id: newer.id });
+    expect(db.raw<{ count: number }>(
+      "SELECT COUNT(*) count FROM memories WHERE learned_from = 'nrem_consolidation'",
+    )[0].count).toBe(2);
   });
 });

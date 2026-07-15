@@ -264,31 +264,31 @@ describe('rerankResults', () => {
     await rerankResults('first', candidates, provider);
     await rerankResults('second', candidates, provider);
     await rerankResults('third', candidates, provider);
-    expect(provider.complete).toHaveBeenCalledTimes(2);
+    await rerankResults('fourth', candidates, provider);
+    expect(provider.complete).toHaveBeenCalledTimes(3);
   });
 
-  it('uses a durable route circuit across provider/process instances', async () => {
-    let state: { nextRetryAt: number } | null = null;
+  it('uses a durable route circuit across processes only after repeated failures', async () => {
+    let state: { failureCount: number; nextRetryAt: number } | null = null;
     const circuitStore = {
       getStructuredRouteCircuit: vi.fn(() => state),
       recordStructuredRouteFailure: vi.fn((_route: string, _code: string, now = 0) => {
-        state = { nextRetryAt: now + 60_000 };
+        state = { failureCount: (state?.failureCount ?? 0) + 1, nextRetryAt: now + 60_000 };
       }),
       clearStructuredRouteCircuit: vi.fn(() => { state = null; }),
     };
     const candidates = [{ id: 'm1', content: 'Memory', originalScore: 0.7 }];
-    const firstProcess = createMockProvider('not-json');
-    await rerankResults('first', candidates, firstProcess, {
-      circuitStore,
-      now: () => 1_000,
-    });
+    for (const query of ['first', 'second', 'third']) {
+      const failedProcess = createMockProvider('not-json');
+      await rerankResults(query, candidates, failedProcess, { circuitStore, now: () => 1_000 });
+      expect(failedProcess.complete).toHaveBeenCalledOnce();
+    }
 
     const restartedProcess = createMockProvider('[{"index":0,"score":1}]');
-    await rerankResults('second', candidates, restartedProcess, {
+    await rerankResults('fourth', candidates, restartedProcess, {
       circuitStore,
       now: () => 2_000,
     });
-    expect(firstProcess.complete).toHaveBeenCalledOnce();
     expect(restartedProcess.complete).not.toHaveBeenCalled();
     expect(circuitStore.recordStructuredRouteFailure).toHaveBeenCalledWith(
       'rerank:mock', 'invalid_json', 1_000,

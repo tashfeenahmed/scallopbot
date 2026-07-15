@@ -98,7 +98,7 @@ export async function runMemoryFusion(ctx: GardenerContext): Promise<{ totalFuse
         const result = await fuseMemoryCluster(cluster, ctx.fusionProvider);
         if (!result) continue;
 
-        await storeFusedMemory({
+        const stored = await storeFusedMemory({
           scallopStore: ctx.scallopStore,
           db: ctx.db,
           userId,
@@ -111,6 +111,8 @@ export async function runMemoryFusion(ctx: GardenerContext): Promise<{ totalFuse
           learnedFrom: 'consolidation',
           supersedeSources: true,
         }, allMemories);
+
+        if (!stored.created) continue;
 
         totalFused++;
         totalMerged += cluster.length;

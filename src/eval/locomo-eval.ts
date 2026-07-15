@@ -182,8 +182,9 @@ export function loadLoCoMoData(
 
       const qa = (conv.qa as Array<Record<string, unknown>>).map(q => ({
         question: q.question as string,
-        // Category 5 (adversarial) has null answers — unanswerable by design
-        answer: (q.answer as string | null) ?? '',
+        // Category 5 has null answers. Some temporal/count labels are numbers;
+        // normalize them once so the scorer never crashes on valid benchmark data.
+        answer: q.answer == null ? '' : String(q.answer),
         evidence: (q.evidence as string[] | null) ?? [],
         category: q.category as number,
       }));
@@ -318,6 +319,11 @@ async function answerQA(
     .join('\n');
 
   // Open-domain (category 3): allow parametric knowledge alongside context
+  const groundedReasoningInstruction = category === 4
+    ? 'Combine multiple explicit context facts when the question requires it, but never invent a missing fact.'
+    : category === 5
+      ? 'If the context does not directly state the answer, reply exactly "UNKNOWN"; do not infer one.'
+      : 'Do not invent facts that are absent from the context.';
   const systemPrompt = category === 3
     ? [
         'You are answering questions based on retrieved conversation memories and your general knowledge.',
@@ -329,7 +335,7 @@ async function answerQA(
     : [
         'You are answering questions based on retrieved conversation memories.',
         'Answer concisely using ONLY the provided context. If the answer is not in the context, say "UNKNOWN".',
-        'Do NOT guess or infer answers that are not explicitly stated in the context. If the context does not directly answer the question, say "UNKNOWN".',
+        groundedReasoningInstruction,
         '',
         'Context:',
         contextBlock,

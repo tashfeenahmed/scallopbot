@@ -57,6 +57,7 @@ describe('LoCoMo Evaluation', () => {
         // Category 5 (adversarial) has null answers — unanswerable by design
         if (qa.category !== 5) {
           expect(qa.answer).toBeTruthy();
+          expect(typeof qa.answer).toBe('string');
         }
         expect(qa.category).toBeGreaterThanOrEqual(1);
         expect(qa.category).toBeLessThanOrEqual(5);

@@ -18,6 +18,7 @@
 import type { ScallopMemoryEntry, MemoryRelation, MemoryCategory } from './db.js';
 import type { LLMProvider } from '../providers/types.js';
 import { findFusionClusters, buildFusionPrompt, parseFusionResponse, type RelationContextEntry } from './fusion.js';
+import { sourceMemoryFingerprint } from './source-fingerprint.js';
 
 // Re-export RelationContextEntry for backward compatibility
 export type { RelationContextEntry } from './fusion.js';
@@ -36,6 +37,8 @@ export interface NremConfig {
   minClusterSize: number;
   /** Maximum relations per memory in context (default: 3) */
   maxRelationsPerMemory: number;
+  /** Source sets already consolidated by an earlier cycle. */
+  sourceFingerprintsToSkip?: ReadonlySet<string>;
 }
 
 /** Default NREM configuration */
@@ -178,7 +181,11 @@ export async function nremConsolidate(
     crossCategory: true,
   });
 
-  if (clusters.length === 0) {
+  const pendingClusters = clusters.filter(cluster => !config.sourceFingerprintsToSkip?.has(
+    sourceMemoryFingerprint(cluster.map(memory => memory.id)),
+  ));
+
+  if (pendingClusters.length === 0) {
     return { clustersProcessed: 0, fusionResults: [], failures: 0, failureDetails: [] };
   }
 
@@ -187,7 +194,7 @@ export async function nremConsolidate(
   let failures = 0;
   const failureDetails: NonNullable<NremResult['failureDetails']> = [];
 
-  for (const cluster of clusters) {
+  for (const cluster of pendingClusters) {
     try {
       const relationContext = buildRelationContext(cluster, getRelations, config.maxRelationsPerMemory);
       const request = buildFusionPrompt(cluster, relationContext);
@@ -247,7 +254,7 @@ export async function nremConsolidate(
   }
 
   return {
-    clustersProcessed: clusters.length,
+    clustersProcessed: pendingClusters.length,
     fusionResults,
     failures,
     failureDetails,

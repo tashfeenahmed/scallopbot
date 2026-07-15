@@ -358,6 +358,12 @@ describe('SkillExecutor', () => {
       const old = Date.now() - 180 * 24 * 60 * 60 * 1_000;
       db.addMemory({
         userId: 'default', content: 'Met Struan to discuss the UXBR engagement.', category: 'event',
+        memoryType: 'superseded', importance: 6, confidence: 1, isLatest: false, source: 'user',
+        documentDate: old, eventDate: old, prominence: 1, lastAccessed: null,
+        accessCount: 0, sourceChunk: null, embedding: null, metadata: null,
+      });
+      db.addMemory({
+        userId: 'default', content: 'Annual Global Shapers meeting.', category: 'event',
         memoryType: 'regular', importance: 6, confidence: 1, isLatest: true, source: 'user',
         documentDate: old, eventDate: old, prominence: 1, lastAccessed: null,
         accessCount: 0, sourceChunk: null, embedding: null, metadata: null,
@@ -383,6 +389,61 @@ describe('SkillExecutor', () => {
       });
       expect(relevant.success).toBe(true);
       expect(relevant.output).toContain('Met Struan to discuss the UXBR engagement.');
+      expect(relevant.output).toContain('historical record (not current state)');
+      expect(relevant.output).not.toContain('Annual Global Shapers meeting.');
+    }, 30_000);
+
+    it('revives a directly relevant old goal together with its child milestones', async () => {
+      const dbPath = path.join(testDir, 'memories.db');
+      const db = new ScallopDatabase(dbPath);
+      const old = Date.now() - 150 * 24 * 60 * 60 * 1_000;
+      const root = db.addMemory({
+        userId: 'default', content: 'Become YouTube Famous - 100K Subscribers', category: 'insight',
+        memoryType: 'static_profile', importance: 8, confidence: 1, isLatest: true, source: 'user',
+        documentDate: old, eventDate: null, prominence: 1, lastAccessed: null,
+        accessCount: 0, sourceChunk: null, embedding: null,
+        metadata: { goalType: 'goal', status: 'backlog', progress: 0 },
+      });
+      for (const content of [
+        'Phase 1: Foundation (0-1K subs)',
+        'Phase 2: Momentum (1K-10K subs)',
+        'Phase 3: Breakout (10K-100K subs)',
+      ]) {
+        db.addMemory({
+          userId: 'default', content, category: 'insight', memoryType: 'static_profile',
+          importance: 7, confidence: 1, isLatest: true, source: 'user', documentDate: old,
+          eventDate: null, prominence: 1, lastAccessed: null, accessCount: 0,
+          sourceChunk: null, embedding: null,
+          metadata: { goalType: 'milestone', status: 'backlog', progress: 0, parentId: root.id },
+        });
+      }
+      db.addMemory({
+        userId: 'default', content: 'Test Goal', category: 'insight', memoryType: 'static_profile',
+        importance: 7, confidence: 1, isLatest: true, source: 'user', documentDate: old,
+        eventDate: null, prominence: 1, lastAccessed: null, accessCount: 0,
+        sourceChunk: null, embedding: null,
+        metadata: { goalType: 'goal', status: 'backlog', progress: 0 },
+      });
+      db.close();
+
+      const memoryScriptsDir = path.join(process.cwd(), 'src', 'skills', 'bundled', 'memory_search', 'scripts');
+      const memorySkill = createMockSkill({
+        name: 'memory_search', scriptsDir: memoryScriptsDir,
+        path: path.join(memoryScriptsDir, '..', 'SKILL.md'),
+        frontmatter: { name: 'memory_search', description: 'Memory search test' },
+      });
+      const result = await executor.execute(memorySkill, {
+        skillName: 'memory_search',
+        args: { query: 'YouTube subscriber goal growth phases' },
+        cwd: testDir, userId: 'default', sessionId: 'session',
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.output).toContain('Become YouTube Famous - 100K Subscribers');
+      expect(result.output).toContain('Phase 1: Foundation (0-1K subs)');
+      expect(result.output).toContain('Phase 2: Momentum (1K-10K subs)');
+      expect(result.output).toContain('Phase 3: Breakout (10K-100K subs)');
+      expect(result.output).not.toContain('Test Goal');
     }, 30_000);
 
     it('should execute .ts scripts with tsx', async () => {

@@ -38,6 +38,7 @@ import {
   NEVER_AUTHORITATIVE_EVIDENCE_TOOLS,
   verifyResponseEvidenceClaims,
 } from '../security/evidence-grounding.js';
+import { sourceMemoryFingerprint } from './source-fingerprint.js';
 
 const PERSISTED_MESSAGE_KIND_SQL = PERSISTED_SESSION_MESSAGE_KINDS
   .map(kind => `'${kind}'`)
@@ -1594,6 +1595,7 @@ export class ScallopDatabase {
     this.migrateAddSourceMemoryColumns();
     this.migrateSeparateRetrievalTelemetryFromFreshness();
     this.migrateRepairRelativeNremMemories();
+    this.migrateDeduplicateNremSourceSets();
 
     // Migration: Clean polluted memory entries (skill outputs, assistant responses stored as facts)
     this.migrateCleanPollutedMemories();
@@ -2352,6 +2354,68 @@ export class ScallopDatabase {
           'relative_nrem_memory_reanchored_to_unique_source_event_date', now,
         );
         canonicalize.run(repairedContent, eventDate, JSON.stringify(repairedMetadata), now, row.id);
+      }
+    });
+    migrate.immediate();
+  }
+
+  /**
+   * Older sleep cycles could consolidate the identical source cluster every
+   * night. Keep the newest synthesis current and preserve every earlier row as
+   * a superseded historical version with an additive audit receipt.
+   */
+  private migrateDeduplicateNremSourceSets(): void {
+    const migrate = this.db.transaction(() => {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS nrem_source_dedupe_audit (
+          duplicate_memory_id TEXT PRIMARY KEY,
+          canonical_memory_id TEXT NOT NULL,
+          source_fingerprint TEXT NOT NULL,
+          previous_memory_type TEXT NOT NULL,
+          previous_is_latest INTEGER NOT NULL,
+          repaired_at INTEGER NOT NULL
+        )
+      `);
+      const rows = this.db.prepare(`
+        SELECT id, user_id, memory_type, is_latest, metadata
+        FROM memories
+        WHERE learned_from = 'nrem_consolidation' AND is_latest = 1
+        ORDER BY user_id, document_date DESC, created_at DESC, id
+      `).all() as Record<string, unknown>[];
+      const audit = this.db.prepare(`
+        INSERT OR IGNORE INTO nrem_source_dedupe_audit (
+          duplicate_memory_id, canonical_memory_id, source_fingerprint,
+          previous_memory_type, previous_is_latest, repaired_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+      `);
+      const supersede = this.db.prepare(`
+        UPDATE memories
+        SET is_latest = 0, memory_type = 'superseded', updated_at = ?
+        WHERE id = ? AND is_latest = 1
+      `);
+      const canonicalBySourceSet = new Map<string, string>();
+      const repairedAt = Date.now();
+
+      for (const row of rows) {
+        const metadata = row.metadata == null
+          ? null
+          : parseDetailJSON(String(row.metadata));
+        const sourceIds = Array.isArray(metadata?.sourceIds)
+          ? metadata.sourceIds.filter((id): id is string => typeof id === 'string')
+          : [];
+        if (sourceIds.length < 2) continue;
+        const fingerprint = sourceMemoryFingerprint(sourceIds);
+        const key = `${String(row.user_id)}\u0000${fingerprint}`;
+        const canonicalId = canonicalBySourceSet.get(key);
+        if (!canonicalId) {
+          canonicalBySourceSet.set(key, String(row.id));
+          continue;
+        }
+        audit.run(
+          String(row.id), canonicalId, fingerprint,
+          String(row.memory_type), Number(row.is_latest), repairedAt,
+        );
+        supersede.run(repairedAt, row.id);
       }
     });
     migrate.immediate();

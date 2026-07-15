@@ -15,6 +15,7 @@ import { calculateBM25Score, buildDocFreqMap, SEARCH_WEIGHTS, type BM25Options }
 import { TFIDFEmbedder, OllamaEmbedder, cosineSimilarity } from '../../../../memory/embeddings.js';
 import { rerankResults, type RerankCandidate } from '../../../../memory/reranker.js';
 import {
+  isRecallRelevant,
   isMemoryLiveForContext,
   requestRelevanceScore,
 } from '../../../../memory/state-relevance.js';
@@ -34,6 +35,14 @@ interface SkillResult {
   error?: string;
   exitCode: number;
 }
+
+interface RankedMemory {
+  memory: ScallopMemoryEntry;
+  score: number;
+  semanticScore: number;
+}
+
+const DIRECT_HISTORY_RELEVANCE = 0.65;
 
 /**
  * Output result as JSON and exit
@@ -180,7 +189,7 @@ async function searchMemories(
   query: string,
   limit: number,
   circuitStore?: ScallopDatabase,
-): Promise<{ memory: ScallopMemoryEntry; score: number }[]> {
+): Promise<RankedMemory[]> {
   if (memories.length === 0) return [];
 
   const contentTexts = memories.map((m) => m.content);
@@ -216,7 +225,7 @@ async function searchMemories(
     tfidfQueryEmbedding = tfidfEmbedder.embedSync(query);
   }
 
-  const results: { memory: ScallopMemoryEntry; score: number }[] = [];
+  const results: RankedMemory[] = [];
 
   for (const memory of memories) {
     const keywordScore = calculateBM25Score(query, memory.content, bm25Options);
@@ -249,7 +258,7 @@ async function searchMemories(
       : withRecency;
 
     if (boostedScore > 0.05) {
-      results.push({ memory, score: boostedScore });
+      results.push({ memory, score: boostedScore, semanticScore });
     }
   }
 
@@ -287,7 +296,7 @@ async function searchMemories(
 /**
  * Format search results
  */
-function formatResults(results: { memory: ScallopMemoryEntry; score: number }[]): string {
+function formatResults(results: RankedMemory[]): string {
   if (results.length === 0) {
     return 'No memories found matching the query.';
   }
@@ -297,6 +306,9 @@ function formatResults(results: { memory: ScallopMemoryEntry; score: number }[])
     const lines: string[] = [];
     lines.push(`--- Result ${index + 1} (score: ${result.score.toFixed(3)}) ---`);
     lines.push(`Category: ${m.category}`);
+    if (m.memoryType === 'superseded') {
+      lines.push('Status: historical record (not current state)');
+    }
     lines.push(`Content: ${m.content}`);
     lines.push(`Stored: ${new Date(m.documentDate).toISOString()}`);
     if (m.eventDate) {
@@ -325,15 +337,28 @@ async function executeSearch(args: MemorySearchArgs): Promise<void> {
   try {
     db = new ScallopDatabase(dbPath);
 
-    // Get candidate memories (only latest versions — exclude superseded)
+    // Normal recall uses latest projections. A directly relevant historical
+    // event may also contribute its dated superseded record: consolidation can
+    // preserve the topic in a newer summary while leaving the only exact date
+    // on the older row. Those rows are labelled as historical in the result.
     const userId = process.env.SKILL_STATE_USER_ID || process.env.SKILL_USER_ID || 'default';
-    const allMemories = db.getMemoriesByUser(userId, {
+    const latestMemories = db.getMemoriesByUser(userId, {
       minProminence: 0.1,
       isLatest: true,
       // Assistant reflection is coaching for the agent, not something the
       // user said. It is available to diagnostics, never normal recall.
       includeAllSources: false,
     });
+    const historicalEvents = db.getMemoriesByUser(userId, {
+      minProminence: 0.1,
+      isLatest: false,
+      includeAllSources: false,
+    }).filter(memory =>
+      memory.memoryType === 'superseded'
+      && memory.eventDate !== null
+      && requestRelevanceScore(args.query, memory.content) >= DIRECT_HISTORY_RELEVANCE
+    );
+    const allMemories = [...latestMemories, ...historicalEvents];
 
     // Provenance is categorical; age is not. Old memories remain candidates
     // and the activation model decides whether relevance is strong enough to
@@ -366,17 +391,75 @@ async function executeSearch(args: MemorySearchArgs): Promise<void> {
     }
 
     const limit = Math.min(args.limit || 10, 50);
-    const results = (await searchMemories(candidates, args.query, limit, db))
-      .filter(result => result.memory.metadata?.goalType
-        // Structured goal projections do not enter ambient memory, but a
-        // direct natural topic/name query may still find the durable record.
-        ? requestRelevanceScore(args.query, result.memory.content) >= 0.5
-        : isMemoryLiveForContext(
-            result.memory,
-            args.query,
-            Date.now(),
-            Math.min(1, result.score),
-          ));
+    // Search more than the final display limit so a matched parent goal can
+    // naturally bring its concise child milestones into view.
+    const searched = await searchMemories(
+      candidates,
+      args.query,
+      Math.min(50, Math.max(limit, limit * 3)),
+      db,
+    );
+
+    const goalResults = searched.filter(result => result.memory.metadata?.goalType);
+    const activatedGoalIds = new Set(
+      goalResults
+        .filter(result => requestRelevanceScore(args.query, result.memory.content) >= 0.5)
+        .map(result => result.memory.id),
+    );
+    // Topic relevance propagates only through explicit goal ancestry, not to
+    // unrelated goals that happen to share generic lifecycle words.
+    let expanded = true;
+    while (expanded) {
+      expanded = false;
+      for (const result of goalResults) {
+        const parentId = typeof result.memory.metadata?.parentId === 'string'
+          ? result.memory.metadata.parentId
+          : undefined;
+        if (
+          activatedGoalIds.has(result.memory.id)
+          || (parentId && activatedGoalIds.has(parentId))
+        ) {
+          if (!activatedGoalIds.has(result.memory.id)) {
+            activatedGoalIds.add(result.memory.id);
+            expanded = true;
+          }
+          if (parentId && !activatedGoalIds.has(parentId)) {
+            activatedGoalIds.add(parentId);
+            expanded = true;
+          }
+        }
+      }
+    }
+
+    const results = searched
+      .filter(result => {
+        if (result.memory.metadata?.goalType) {
+          return activatedGoalIds.has(result.memory.id);
+        }
+        if (result.memory.memoryType === 'superseded') {
+          return result.memory.eventDate !== null
+            && requestRelevanceScore(args.query, result.memory.content) >= DIRECT_HISTORY_RELEVANCE;
+        }
+        // Once a directly named historical event has been found, companion
+        // current memories need the same direct topic evidence. This prevents
+        // generic semantic neighbors from bleeding into a precise recollection.
+        if (
+          historicalEvents.length > 0
+          && requestRelevanceScore(args.query, result.memory.content) < DIRECT_HISTORY_RELEVANCE
+        ) {
+          return false;
+        }
+        if (!isRecallRelevant(args.query, result.memory.content, result.semanticScore)) {
+          return false;
+        }
+        return isMemoryLiveForContext(
+          result.memory,
+          args.query,
+          Date.now(),
+          result.semanticScore,
+        );
+      })
+      .slice(0, limit);
 
     outputResult({
       success: true,

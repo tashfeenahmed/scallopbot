@@ -375,6 +375,27 @@ describe('nremConsolidate', () => {
     expect(result.fusionResults[0].learnedFrom).toBe('nrem_consolidation');
   });
 
+  it('does not call the provider again for an already-consolidated source set', async () => {
+    const memories = [
+      makeMemory({ id: 'm1', content: 'Interested in Rust programming', prominence: 0.3, category: 'fact' }),
+      makeMemory({ id: 'm2', content: 'Frustrated with Node.js memory leaks', prominence: 0.25, category: 'event' }),
+      makeMemory({ id: 'm3', content: 'Prefers type-safe languages', prominence: 0.2, category: 'preference' }),
+    ];
+    const relations = [
+      makeRelation('m1', 'm2', 'EXTENDS'),
+      makeRelation('m2', 'm3', 'EXTENDS'),
+    ];
+    const provider = createMockProvider('{}');
+
+    const result = await nremConsolidate(memories, buildGetRelations(relations), provider, {
+      sourceFingerprintsToSkip: new Set([JSON.stringify(['m1', 'm2', 'm3'])]),
+    });
+
+    expect(result.clustersProcessed).toBe(0);
+    expect(result.fusionResults).toEqual([]);
+    expect(provider.complete).not.toHaveBeenCalled();
+  });
+
   it('sets category to insight for cross-category clusters', async () => {
     const memories = [
       makeMemory({ id: 'm1', content: 'Interested in Rust programming', prominence: 0.3, category: 'fact', importance: 7 }),

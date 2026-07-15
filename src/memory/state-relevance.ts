@@ -19,11 +19,22 @@ const REQUEST_STOP_WORDS = new Set([
   'from', 'had', 'happen', 'happened', 'has', 'have', 'history', 'how', 'i',
   'in', 'is', 'it', 'last', 'latest', 'me', 'my', 'need', 'now', 'of', 'old',
   'on', 'or', 'our', 'past', 'plate', 'please', 'priorities', 'priority',
-  'recent', 'should', 'show', 'status', 'that', 'the', 'this', 'to', 'today',
+  'goal', 'goals', 'milestone', 'milestones', 'recent', 'should', 'show', 'status',
+  'task', 'tasks', 'that', 'the', 'this', 'to', 'today',
   'update', 'updates', 'us', 'was', 'we', 'were', 'what', 'when', 'where',
-  'whatever', 'which', 'who', 'why', 'will', 'with', 'work', 'working', 'would', 'you',
+  'whatever', 'which', 'who', 'why', 'will', 'with', 'work', 'workflow', 'workflows',
+  'working', 'would', 'you',
   'your', 'know', 'thing', 'things',
 ]);
+
+function normalizeContentTerm(term: string): string {
+  if (term.length > 4 && term.endsWith('ies')) return `${term.slice(0, -3)}y`;
+  if (term.length > 4 && term.endsWith('ses')) return term.slice(0, -1);
+  if (term.length > 4 && term.endsWith('s') && !/(?:ss|us|is)$/.test(term)) {
+    return term.slice(0, -1);
+  }
+  return term;
+}
 
 export interface ContextMemoryLike {
   content: string;
@@ -102,6 +113,7 @@ export function requestContentTerms(value: string): string[] {
     .toLocaleLowerCase('en-US')
     .replace(/[^\p{L}\p{N}]+/gu, ' ')
     .split(/\s+/)
+    .map(normalizeContentTerm)
     .filter(term => term.length >= 3 && !REQUEST_STOP_WORDS.has(term)))];
 }
 
@@ -121,6 +133,20 @@ export function requestRelevanceScore(request: string, content: string): number 
   const coverage = shared.length / requestTerms.length;
   const density = shared.length / Math.max(1, contentTerms.size);
   return clamp01(0.2 + 0.55 * coverage + 0.2 * Math.min(1, shared.length / 3) + 0.05 * density);
+}
+
+/**
+ * A retrieved row must have real topic evidence, not merely a high blended
+ * ranking score. Direct wording and strong semantic paraphrases are both
+ * accepted; a single generic keyword match is not.
+ */
+export function isRecallRelevant(
+  request: string,
+  content: string,
+  semanticRelevance: number,
+): boolean {
+  return requestRelevanceScore(request, content) >= 0.65
+    || clamp01(semanticRelevance) >= 0.7;
 }
 
 export function hasRequestContentOverlap(request: string, content: string): boolean {

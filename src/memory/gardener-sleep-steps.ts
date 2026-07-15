@@ -14,6 +14,7 @@ import { dream } from './dream.js';
 import type { DreamResult } from './dream.js';
 import { reflect } from './reflection.js';
 import { triggerHook } from '../hooks/hooks.js';
+import { sourceMemoryFingerprint } from './source-fingerprint.js';
 
 // ============ Step functions ============
 
@@ -48,6 +49,13 @@ export async function runDreamCycle(ctx: GardenerContext): Promise<void> {
       m.memoryType !== 'static_profile' &&
       m.memoryType !== 'derived'
     );
+    const existingNremSourceSets = new Set(allMemories.flatMap(memory => {
+      if (memory.memoryType !== 'derived' || memory.learnedFrom !== 'nrem_consolidation') return [];
+      const sourceIds = memory.metadata?.sourceIds;
+      if (!Array.isArray(sourceIds)) return [];
+      const validIds = sourceIds.filter((id): id is string => typeof id === 'string');
+      return validIds.length >= 2 ? [sourceMemoryFingerprint(validIds)] : [];
+    }));
 
     if (eligibleMemories.length >= 3) {
       const dreamResult: DreamResult = await dream(
@@ -55,6 +63,7 @@ export async function runDreamCycle(ctx: GardenerContext): Promise<void> {
         (id) => ctx.db.getRelations(id),
         ctx.fusionProvider,
         ctx.fusionProvider,
+        { nrem: { sourceFingerprintsToSkip: existingNremSourceSets } },
       );
 
       // ── Store NREM results ──
@@ -74,6 +83,8 @@ export async function runDreamCycle(ctx: GardenerContext): Promise<void> {
               learnedFrom: 'nrem_consolidation',
               extraMetadata: { nrem: true },
             }, allMemories);
+
+            if (!stored.created) continue;
 
             storedFusions.push({
               memoryId: stored.fusedMemory.id,

@@ -4,14 +4,49 @@ import {
   isGoalLiveForAutonomy,
   isGoalLiveForContext,
   isMemoryLiveForContext,
+  isRecallRelevant,
   memoryActivationScore,
   isProfileEntryLiveForContext,
+  requestContentTerms,
+  requestRelevanceScore,
 } from './state-relevance.js';
 
 const DAY = 24 * 60 * 60 * 1_000;
 const NOW = Date.UTC(2026, 6, 15, 12);
 
 describe('ambient state relevance', () => {
+  it('matches ordinary singular/plural topic wording without treating goal labels as topics', () => {
+    expect(requestContentTerms('YouTube subscriber goal growth phases')).toEqual([
+      'youtube', 'subscriber', 'growth', 'phase',
+    ]);
+    expect(requestRelevanceScore(
+      'YouTube subscriber goal growth phases',
+      'Become YouTube Famous - 100K Subscribers',
+    )).toBeGreaterThanOrEqual(0.5);
+    expect(requestRelevanceScore(
+      'YouTube subscriber goal growth phases',
+      'Test Goal',
+    )).toBe(0);
+  });
+
+  it('requires direct topic evidence or a genuinely strong semantic paraphrase for recall', () => {
+    expect(isRecallRelevant(
+      'What was my Struan meeting about?',
+      'Met Struan to discuss the UXBR engagement',
+      0.76,
+    )).toBe(true);
+    expect(isRecallRelevant(
+      'What was my Struan meeting about?',
+      'Annual Global Shapers meeting',
+      0.64,
+    )).toBe(false);
+    expect(isRecallRelevant(
+      'How do I like to unwind?',
+      'User relaxes by taking quiet evening walks',
+      0.71,
+    )).toBe(true);
+  });
+
   it('lets an old topic fade from general context but return on a natural direct mention', () => {
     expect(isMemoryLiveForContext({
       content: 'Prepare for the Struan client meeting',

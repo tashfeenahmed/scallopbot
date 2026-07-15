@@ -25,7 +25,7 @@ export interface RerankOptions {
 }
 
 export interface RerankCircuitStore {
-  getStructuredRouteCircuit(route: string): { nextRetryAt: number } | null;
+  getStructuredRouteCircuit(route: string): { failureCount?: number; nextRetryAt: number } | null;
   recordStructuredRouteFailure(route: string, errorCode: string, now?: number): unknown;
   clearStructuredRouteCircuit(route: string): void;
 }
@@ -62,8 +62,11 @@ const SCORE_THRESHOLD = 0.15;
 /** Default maximum candidates to send to the LLM */
 const DEFAULT_MAX_CANDIDATES = 20;
 const DEFAULT_CANDIDATE_CONTENT_CHARS = 320;
-const DEFAULT_TIMEOUT_MS = 5_000;
-const CIRCUIT_FAILURE_THRESHOLD = 2;
+// This is an auxiliary-call budget, not a whole-turn deadline. Ten concurrent
+// structured calls to ordinary cloud models can legitimately cross five
+// seconds; aborting them there caused a single slow response to suppress recall.
+const DEFAULT_TIMEOUT_MS = 10_000;
+const CIRCUIT_FAILURE_THRESHOLD = 3;
 const CIRCUIT_COOLDOWN_MS = 5 * 60 * 1000;
 
 interface RerankProviderHealth {
@@ -86,7 +89,9 @@ function circuitIsOpen(
 ): boolean {
   if (store) {
     try {
-      return (store.getStructuredRouteCircuit(rerankRoute(provider))?.nextRetryAt ?? 0) > now;
+      const circuit = store.getStructuredRouteCircuit(rerankRoute(provider));
+      return (circuit?.failureCount ?? 0) >= CIRCUIT_FAILURE_THRESHOLD
+        && circuit!.nextRetryAt > now;
     } catch {
       // Diagnostics must not break deterministic-score fallback.
     }
