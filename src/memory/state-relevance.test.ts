@@ -101,6 +101,20 @@ describe('ambient state relevance', () => {
       ...base, source: 'user', status: 'blocked', boardStatus: 'waiting',
     }, NOW)).toBe(false);
     expect(isBoardItemLiveForContext({
+      ...base,
+      message: 'Generate a YouTube metrics report',
+      triggerAt: NOW - 2 * DAY,
+      updatedAt: NOW,
+      source: 'agent', status: 'blocked', boardStatus: 'waiting',
+    }, 'what is on my plate today?', NOW)).toBe(false);
+    expect(isBoardItemLiveForContext({
+      ...base,
+      message: 'Generate a YouTube metrics report',
+      triggerAt: NOW - 2 * DAY,
+      updatedAt: NOW,
+      source: 'agent', status: 'blocked', boardStatus: 'waiting',
+    }, 'What blocked the YouTube report?', NOW)).toBe(true);
+    expect(isBoardItemLiveForContext({
       ...base, source: 'user', status: 'pending', boardStatus: 'backlog',
     }, NOW)).toBe(true);
 

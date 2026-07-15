@@ -230,10 +230,18 @@ export function boardItemActivationScore(
 
   const relevance = requestRelevanceScore(activeRequest, item.message ?? item.title ?? '');
   const freshness = temporalActivation(item.updatedAt || item.createdAt, 21 * DAY_MS, now);
+
+  // Waiting/blocked is a diagnostic lifecycle, not evidence that the user is
+  // actively thinking about the item. Recent worker retries or an overdue
+  // trigger must not put it back on the user's plate. A natural topic mention
+  // can still recall it without any special command.
+  if (item.status === 'blocked' || boardStatus === 'waiting') {
+    return clamp01(0.08 * freshness + 0.58 * relevance);
+  }
+
   let lifecycle = 0;
   if (item.status === 'processing' || boardStatus === 'in_progress') lifecycle = 0.65;
   else if (item.recurring || boardStatus === 'scheduled') lifecycle = 0.35;
-  else if (item.status === 'blocked' || boardStatus === 'waiting') lifecycle = 0.02;
   else if (item.source === 'agent') lifecycle = 0.02;
   else if (['inbox', 'backlog'].includes(boardStatus)) lifecycle = 0.18;
 
