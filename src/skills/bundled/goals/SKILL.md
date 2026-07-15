@@ -29,6 +29,10 @@ inputSchema:
       type: string
       enum: [backlog, active, completed]
       description: "Filter by status (for list) or set status (for update)"
+    scope:
+      type: string
+      enum: [current, all]
+      description: "List scope. Defaults to current (active only); use all only when the user explicitly asks for backlog/history/everything."
     due:
       type: string
       description: "Due date (e.g., 'next week', '2024-03-15', 'in 30 days')"
@@ -119,6 +123,9 @@ The skill accepts JSON arguments via the `SKILL_ARGS` environment variable:
   "status": "active"
 }
 ```
+
+`list` defaults to active items. Backlog and completed goals remain stored but
+are shown only when `status` or `scope: "all"` is explicitly requested.
 
 ### Show goal hierarchy
 

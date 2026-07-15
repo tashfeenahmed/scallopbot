@@ -10,6 +10,7 @@ import * as os from 'os';
 import * as fs from 'fs';
 import Database from 'better-sqlite3';
 import { nanoid } from 'nanoid';
+import { isBoardItemLiveForContext } from '../../../../memory/state-relevance.js';
 
 // ─── Types ────────────────────────────────────────────────────────────
 
@@ -99,6 +100,7 @@ interface BoardItem {
 
 interface BoardArgs {
   action: 'view' | 'add' | 'move' | 'update' | 'done' | 'archive' | 'detail' | 'snooze';
+  scope?: 'current' | 'all';
   column?: BoardStatus;
   priority?: Priority;
   label?: string;
@@ -576,6 +578,15 @@ function viewBoard(args: BoardArgs): SkillResult {
 
   let items = rows.map(r => rowToBoardItem(r, r.goal_id ? goalTitles.get(r.goal_id) : undefined));
 
+  const allScope = args.scope === 'all' || Boolean(args.column);
+  const preservedCount = allScope
+    ? 0
+    : items.filter(item => ACTIVE_COLUMNS.includes(item.boardStatus)
+      && !isBoardItemLiveForContext(item)).length;
+  if (!allScope) {
+    items = items.filter(item => isBoardItemLiveForContext(item));
+  }
+
   // Apply filters
   if (args.column) items = items.filter(i => i.boardStatus === args.column);
   if (args.priority) items = items.filter(i => i.priority === args.priority);
@@ -591,7 +602,7 @@ function viewBoard(args: BoardArgs): SkillResult {
   }
 
   // Format output
-  let output = '📋 YOUR BOARD\n';
+  let output = allScope ? '📋 FULL BOARD\n' : '📋 CURRENT BOARD\n';
 
   // Urgent items first
   const urgentItems = ACTIVE_COLUMNS.flatMap(col => columns[col]).filter(i => i.priority === 'urgent');
@@ -607,7 +618,10 @@ function viewBoard(args: BoardArgs): SkillResult {
   for (const col of ACTIVE_COLUMNS) {
     const colItems = columns[col].filter(i => i.priority !== 'urgent');
     if (colItems.length === 0) continue;
-    const label = col.replace('_', ' ').toUpperCase();
+    const onlyNudges = colItems.every(item => item.kind === 'nudge');
+    const label = col === 'scheduled' && onlyNudges
+      ? 'SCHEDULED REMINDERS (not current work priorities)'
+      : col.replace('_', ' ').toUpperCase();
     output += `\n${icons[col] || '▸'} ${label} (${columns[col].length})\n`;
     for (const item of colItems) output += formatItemLine(item);
   }
@@ -626,6 +640,9 @@ function viewBoard(args: BoardArgs): SkillResult {
   if (columns.backlog.length > 0) parts.push(`${columns.backlog.length} in backlog`);
   if (doneThisWeek > 0) parts.push(`${doneThisWeek} done this week`);
   if (parts.length > 0) output += `\n${parts.join(' · ')}`;
+  if (preservedCount > 0) {
+    output += `\n\n${preservedCount} older, blocked, completed, backlog, or agent-suggested item(s) are preserved outside the current view. Use scope="all" to inspect them; do not report them as current user priorities.`;
+  }
 
   db.close();
   return { success: true, output, exitCode: 0 };

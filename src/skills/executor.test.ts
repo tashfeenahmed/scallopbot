@@ -304,6 +304,54 @@ describe('SkillExecutor', () => {
       expect(payload.output).toContain('The canonical owner prefers cardamom coffee.');
     }, 30_000);
 
+    it('rejects empty recall and keeps assistant reflection out of normal memory search', async () => {
+      const dbPath = path.join(testDir, 'memories.db');
+      const db = new ScallopDatabase(dbPath);
+      db.addMemory({
+        userId: 'default', content: 'The user prefers concise status updates.', category: 'preference',
+        memoryType: 'regular', importance: 6, confidence: 1, isLatest: true, source: 'user',
+        documentDate: Date.now(), eventDate: null, prominence: 1, lastAccessed: null,
+        accessCount: 0, sourceChunk: null, embedding: null, metadata: null,
+      });
+      db.addMemory({
+        userId: 'default', content: 'The assistant should improve its workflow.', category: 'insight',
+        memoryType: 'derived', importance: 7, confidence: 1, isLatest: true, source: 'assistant',
+        documentDate: Date.now(), eventDate: null, prominence: 1, lastAccessed: null,
+        accessCount: 0, sourceChunk: null, embedding: null,
+        metadata: { audience: 'assistant' }, learnedFrom: 'self_reflection',
+      });
+      db.addMemory({
+        userId: 'default', content: 'Agent prefers to reuse old workflow advice.', category: 'preference',
+        memoryType: 'regular', importance: 6, confidence: 1, isLatest: true, source: 'user',
+        documentDate: Date.now(), eventDate: null, prominence: 1, lastAccessed: null,
+        accessCount: 0, sourceChunk: null, embedding: null, metadata: { subject: 'agent' },
+      });
+      db.close();
+
+      const memoryScriptsDir = path.join(process.cwd(), 'src', 'skills', 'bundled', 'memory_search', 'scripts');
+      const memorySkill = createMockSkill({
+        name: 'memory_search', scriptsDir: memoryScriptsDir,
+        path: path.join(memoryScriptsDir, '..', 'SKILL.md'),
+        frontmatter: { name: 'memory_search', description: 'Memory search test' },
+      });
+
+      const empty = await executor.execute(memorySkill, {
+        skillName: 'memory_search', args: { query: '' }, cwd: testDir,
+        userId: 'default', sessionId: 'session',
+      });
+      expect(empty.success).toBe(false);
+      expect(`${empty.output ?? ''} ${empty.error ?? ''}`).toContain('specific, non-empty query');
+
+      const searched = await executor.execute(memorySkill, {
+        skillName: 'memory_search', args: { query: 'concise status updates workflow' }, cwd: testDir,
+        userId: 'default', sessionId: 'session',
+      });
+      expect(searched.success).toBe(true);
+      expect(searched.output).toContain('The user prefers concise status updates.');
+      expect(searched.output).not.toContain('assistant should improve');
+      expect(searched.output).not.toContain('Agent prefers to reuse');
+    }, 30_000);
+
     it('should execute .ts scripts with tsx', async () => {
       // Arrange
       const script = `console.log("Hello from TypeScript");`;

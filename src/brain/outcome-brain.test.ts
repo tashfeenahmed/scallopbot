@@ -84,6 +84,43 @@ describe('OutcomeBrain', () => {
     }
   });
 
+  it('actually arbitrates a stateful foreground answer instead of rubber-stamping it', async () => {
+    const db = new ScallopDatabase(':memory:');
+    const router = routerDecision({
+      decision: 'send',
+      message: 'I do not have any confirmed current priorities yet.',
+      reason_code: 'stale_records_not_current',
+    });
+    try {
+      const brain = new OutcomeBrain({ db, logger: pino({ level: 'silent' }), router: router as any });
+      const decision = await brain.decideMessage({
+        source: 'foreground',
+        userId: 'user-1',
+        sessionId: 'session-1',
+        activeRequest: 'What is on my plate today?',
+        messages: ['Your months-old backlog item is your top priority today.'],
+        observations: [{
+          toolName: 'goals',
+          success: true,
+          output: 'No active goals. Older backlog goals are preserved outside current view.',
+        }],
+        evidenceVerified: true,
+      });
+
+      expect(decision).toMatchObject({
+        decision: 'send',
+        revised: true,
+        reasonCode: 'stale_records_not_current',
+      });
+      expect(router.executeWithFallback).toHaveBeenCalledTimes(1);
+      const request = router.executeWithFallback.mock.calls[0][0];
+      expect(request.messages[0].content).toContain('observations');
+      expect(request.messages[0].content).toContain('No active goals');
+    } finally {
+      db.close();
+    }
+  });
+
   it('durably suppresses a duplicate autonomous proposal before a second model call', async () => {
     const db = new ScallopDatabase(':memory:');
     const router = routerDecision({ decision: 'send', message: 'Your report is ready.', reason_code: 'useful_result' });

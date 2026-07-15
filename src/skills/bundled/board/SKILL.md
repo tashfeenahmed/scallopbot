@@ -13,6 +13,10 @@ inputSchema:
       type: string
       enum: [view, add, move, update, done, archive, detail, snooze]
       description: "Action to perform on the board"
+    scope:
+      type: string
+      enum: [current, all]
+      description: "View scope. Defaults to current live work; use all only when the user explicitly asks for history, backlog, blocked, or every item."
     column:
       type: string
       enum: [inbox, backlog, scheduled, in_progress, waiting, done, archived]

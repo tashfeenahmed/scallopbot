@@ -4,6 +4,7 @@ export {
   type OutcomeSource,
   type MessageOutcomeProposal,
   type MessageOutcomeDecision,
+  type OutcomeObservation,
   type ActionOutcomeProposal,
   type ActionOutcomeDecision,
   type FileOutcomeProposal,

@@ -16,6 +16,7 @@ import type {
 } from './types.js';
 import { computeBoardStatus, toBoardItem, toBoardItemDetail } from './types.js';
 import type { Logger } from 'pino';
+import { isBoardItemLiveForContext } from '../memory/state-relevance.js';
 
 const BOARD_COLUMNS: BoardStatus[] = [
   'inbox', 'backlog', 'scheduled', 'in_progress', 'waiting', 'done', 'archived',
@@ -507,6 +508,11 @@ export class BoardService {
   getBoardContext(userId: string, userMessage?: string, options?: { excludeGoalLinked?: boolean }): string {
     const board = this.getBoard(userId);
 
+    const fullInventoryRequested = Boolean(userMessage && (
+      /\b(?:board|kanban)\b/i.test(userMessage)
+      || /\b(?:all|every|everything|history|historical|archived?|backlog|blocked)\b[^\n]{0,40}\b(?:task|todo|item|work|reminder)/i.test(userMessage)
+    ));
+
     // When excludeGoalLinked is set, filter out items linked to goals
     // (they're already shown in the goal context section)
     if (options?.excludeGoalLinked) {
@@ -515,6 +521,22 @@ export class BoardService {
         board.counts[col] = board.columns[col].length;
       }
       // Recompute stats after filtering
+      const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+      board.stats.doneThisWeek = board.columns.done.filter(i => i.updatedAt > weekAgo).length;
+      board.stats.totalActive = ACTIVE_COLUMNS.reduce((sum, col) => sum + board.counts[col], 0);
+      board.stats.urgentCount = ACTIVE_COLUMNS
+        .flatMap(col => board.columns[col])
+        .filter(i => i.priority === 'urgent').length;
+    }
+
+    // Ambient planning context contains live work only. Old/blocked/suggested
+    // cards remain durable and are available when the user explicitly asks for
+    // the full inventory.
+    if (!fullInventoryRequested) {
+      for (const col of BOARD_COLUMNS) {
+        board.columns[col] = board.columns[col].filter(item => isBoardItemLiveForContext(item));
+        board.counts[col] = board.columns[col].length;
+      }
       const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
       board.stats.doneThisWeek = board.columns.done.filter(i => i.updatedAt > weekAgo).length;
       board.stats.totalActive = ACTIVE_COLUMNS.reduce((sum, col) => sum + board.counts[col], 0);

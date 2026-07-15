@@ -19,6 +19,7 @@ import {
   computeTopicSwitchRate,
   computeResponseLengthEvolution,
 } from './behavioral-signals.js';
+import { isProfileEntryLiveForContext } from './state-relevance.js';
 
 /**
  * Full user profile combining all three components
@@ -92,6 +93,9 @@ export class ProfileManager {
     const entries = this.db.getProfile(userId);
     const profile: Record<string, string> = {};
     for (const entry of entries) {
+      // Mood/focus are stored durably for history, but are not permanent
+      // identity. Do not let an old transient state become ambient truth.
+      if (!isProfileEntryLiveForContext(entry)) continue;
       profile[entry.key] = entry.value;
     }
     return profile;

@@ -61,7 +61,7 @@ ScallopBot's cognitive layer is organised into six subsystems, orchestrated by a
 |------|----------|------------|
 | **Pulse** | 5 min | Health monitoring, retrieval auditing, affect EMA update |
 | **Breath** | 6 h | Decay engine, memory fusion, forgetting |
-| **Sleep** | Nightly | Dream cycle (NREM+REM), self-reflection, SOUL re-distillation, gap scanning |
+| **Sleep** | Nightly | Dream cycle (NREM+REM), private self-reflection, guarded skill/prompt evolution, gap scanning |
 
 ### Bio-Inspired Dream Cycle
 
@@ -71,9 +71,9 @@ A two-phase sleep cycle runs during the nightly heartbeat. **NREM consolidation*
 
 Zero-cost emotion detection using AFINN-165 lexicon with VADER-style heuristics, mapped to the Russell circumplex model. A dual-EMA system tracks both session-level mood (2-hour half-life) and baseline mood trends (3-day half-life). An **affect guard** ensures emotional signals inform agent awareness without contaminating instructions.
 
-### Self-Reflection and SOUL Evolution
+### Self-Reflection and Guarded Evolution
 
-Nightly composite reflection analyses recent sessions across four dimensions (explanation, principles, procedures, advice). Extracted insights are merged into a living `SOUL.md` personality document, enabling continuous self-improvement through an evolving system prompt -- no model fine-tuning required.
+Nightly composite reflection analyses recent sessions across four dimensions (explanation, principles, procedures, advice). Its insights are stored as assistant-only evidence: they never enter user memory and never rewrite `SOUL.md` directly. Reusable behavioral or procedural changes must pass the separate evolution pipeline's held-out replay, privacy/safety checks, measured-improvement gate, version ledger, and rollback path.
 
 ### Proactive Intelligence
 
@@ -83,7 +83,7 @@ Generated outreach is realized immediately before delivery using current context
 
 ### Single Outcome Brain
 
-Foreground replies, proactive candidates, scheduled results, sub-agent completions, workflow steps, progress messages, and file deliveries all converge through one shared `OutcomeBrain` before public delivery or side effects. Producers only propose outcomes; the brain combines the active request with recent conversation, durable user facts/profile, board work, goals, source state, time, provenance, evidence, and recent decisions. It can approve, rewrite, suppress, or block, and records only hashed decision receipts—not prompts, messages, tool payloads, or private reasoning. Exact user-authored reminders remain deterministic, while inferred outreach fails closed if final arbitration is unavailable.
+Foreground replies, proactive candidates, scheduled results, sub-agent completions, workflow steps, progress messages, and file deliveries all converge through one shared `OutcomeBrain` before public delivery or side effects. Producers only propose outcomes; the brain combines the active request with recent conversation, current/relevant user facts and profile state, live board work, live goals, source state, time, provenance, tool observations, evidence, and recent decisions. Stateful foreground answers receive actual final model arbitration; simple no-tool conversation retains a fast deterministic boundary. It can approve, rewrite, suppress, or block, and records only hashed decision receipts—not prompts, messages, tool payloads, or private reasoning. Exact user-authored reminders remain deterministic, while inferred outreach fails closed if final arbitration is unavailable.
 
 ### Spreading Activation
 
@@ -93,7 +93,7 @@ ACT-R-inspired spreading activation over typed relation graphs (UPDATES, EXTENDS
 
 ### Hybrid Memory Engine
 
-SQLite-backed memory with ACID guarantees. Combines BM25 keyword scoring with semantic embeddings (Ollama/OpenAI) and optional LLM re-ranking. A complete memory lifecycle includes exponential decay with category-specific half-lives (14 days for events to 346 days for relationships), BFS-clustered fusion, and utility-based forgetting with soft-archive before hard-prune.
+SQLite-backed memory with ACID guarantees. Combines BM25 keyword scoring with semantic embeddings (Ollama/OpenAI) and optional LLM re-ranking. Ambient context uses short-term plus request-relevant recall instead of blindly injecting the most prominent memories. Assistant self-reflection, agent-subject facts, stale transient profiles, backlog goals, old blockers, and agent suggestions remain recoverable but cannot masquerade as current user state. The full lifecycle includes exponential decay with category-specific half-lives (14 days for events to 346 days for relationships), BFS-clustered fusion, and utility-based forgetting with soft-archive before hard-prune.
 
 ### Cost-Aware Model Routing
 
@@ -127,7 +127,7 @@ At 100 messages/day with Groq for fast-tier operations:
 | Affect classification | 100 | $0 (lexicon) |
 | Decay/fusion (Breath ticks) | 48 | $0.005 |
 | Dream cycle (nightly) | 15--20 | $0.005 |
-| Self-reflection (nightly) | 2 | $0.002 |
+| Self-reflection (nightly) | 1 | $0.001 |
 | Gap scanner (nightly) | 3--5 | $0.001 |
 | **Total** | | **$0.047--0.10** |
 
@@ -354,7 +354,7 @@ Actionable reminders automatically execute when they contain action words (check
 | **Associative retrieval** | -- | Spreading activation with typed edges |
 | **Dream cycle** | -- | NREM consolidation + REM exploration |
 | **Affect detection** | -- | AFINN-165 + VADER + dual-EMA + affect guard |
-| **Self-reflection** | -- | Composite reflection + SOUL re-distillation |
+| **Self-reflection** | -- | Private composite reflection feeding benchmarked, rollback-capable evolution |
 | **Proactive intelligence** | Basic Heartbeat | Gap scanner + inner thoughts + trust feedback loop |
 | **Background processing** | Heartbeat wake-up | 3-tier daemon (Pulse / Breath / Sleep) |
 | **Cost tracking & budgets** | -- | Built-in per-token tracking with daily/monthly limits |

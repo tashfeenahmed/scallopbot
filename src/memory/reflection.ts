@@ -27,6 +27,9 @@ export interface ReflectionConfig {
   minMessagesPerSession: number;
   /** Maximum word count for SOUL output before truncation (default: 600) */
   maxSoulWords: number;
+  /** Generate a SOUL rewrite. Runtime reflection disables this so behavioral
+   * changes must pass the benchmarked evolution pipeline. */
+  distillSoul: boolean;
 }
 
 /** A single reflection insight extracted from session analysis */
@@ -58,6 +61,7 @@ export const DEFAULT_REFLECTION_CONFIG: ReflectionConfig = {
   minSessions: 1,
   minMessagesPerSession: 3,
   maxSoulWords: 600,
+  distillSoul: true,
 };
 
 // ============ Prompt Builders ============
@@ -339,6 +343,10 @@ export async function reflect(
       sourceSessionIds: qualifyingSessionIds,
     }];
     principles = [];
+  }
+
+  if (!cfg.distillSoul) {
+    return { skipped: false, insights, updatedSoul: null };
   }
 
   // Step 5: LLM call 2 — SOUL re-distillation

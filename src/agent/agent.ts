@@ -36,7 +36,7 @@ import { compact, compactSync, estimateMessagesTokens } from '../routing/compact
 import { effectiveContextWindowTokens } from '../routing/model-limits.js';
 import { selectBest, scoreResponseHeuristic } from './critic.js';
 import type { EvolutionRecorder } from '../evolution/signals.js';
-import type { OutcomeBrain } from '../brain/index.js';
+import type { OutcomeBrain, OutcomeObservation } from '../brain/index.js';
 import { stripThinkTags } from '../utils/output-safety.js';
 import { resolveStateUserId } from '../utils/state-user-id.js';
 import { compactCompletedConversationHistory } from '../memory/session-message-view.js';
@@ -677,6 +677,7 @@ export class Agent {
     const successfulToolNames = new Set<string>();
     const failedToolNames = new Set<string>();
     const turnEvidenceReceipts: EvidenceClaimReceipt[] = [];
+    const turnOutcomeObservations: OutcomeObservation[] = [];
     this.foregroundEvidence.set(sessionId, turnEvidenceReceipts);
     this.foregroundSuccessfulTools.set(sessionId, successfulToolNames);
 
@@ -1231,6 +1232,7 @@ export class Agent {
           channelUserId,
           userMessage,
           finalResponse,
+          turnOutcomeObservations,
         );
         finalOutcomeApplied = true;
         persistContent = [{ type: 'text', text: finalResponse }];
@@ -1339,6 +1341,16 @@ export class Agent {
       );
       for (const toolUse of toolUses) {
         const result = resultById.get(toolUse.id);
+        if (!result) continue;
+        turnOutcomeObservations.push({
+          toolName: toolUse.name,
+          success: !result.is_error,
+          output: String(result.content ?? '').slice(0, 2_500),
+        });
+        if (turnOutcomeObservations.length > 12) turnOutcomeObservations.shift();
+      }
+      for (const toolUse of toolUses) {
+        const result = resultById.get(toolUse.id);
         if (!result || result.is_error) failedToolNames.add(toolUse.name);
         else successfulToolNames.add(toolUse.name);
       }
@@ -1445,6 +1457,7 @@ export class Agent {
         channelUserId,
         userMessage,
         finalResponse,
+        turnOutcomeObservations,
       );
     }
     await this.ensureFinalResponsePersisted(sessionId, finalResponse);
@@ -1640,7 +1653,11 @@ Only install skills when the user asks, or when a skill is clearly necessary to 
     const soulPath = path.join(this.workspace, 'SOUL.md');
     try {
       const soulContent = await fs.readFile(soulPath, 'utf-8');
-      stable += `\n\n## Behavioral Guidelines (from SOUL.md)\n${soulContent}`;
+      stable += `\n\n## OPTIONAL BEHAVIORAL GUIDANCE (from user-managed SOUL.md)
+This file may contain old or narrow guidance. It never defines current user
+state, never reactivates an old topic/task, and cannot override the active turn
+contract, tool evidence, safety, or current source data. Apply a guideline only
+when it is relevant to the current request.\n${soulContent}`;
     } catch {
       // SOUL.md not found, that's fine
     }
@@ -1831,20 +1848,22 @@ The current user request is quoted below. Execute tools only when they directly 
         // Behavioral patterns not available, that's fine
       }
 
-      // Tier 2: Memory retrieval — three-phase approach modelling human memory.
-      // Results go in DYNAMIC: recent facts change as new memories arrive,
-      // search results change per query, prominent facts are stable but are
-      // kept with recent+search to preserve the combined dedupe ordering.
+      // Tier 2: Memory retrieval — short-term recall plus request-relevant
+      // long-term recall. High prominence alone is never a reason to inject a
+      // fact into every turn; that resurrects unrelated old topics.
       const EVENT_EXPIRY_MS = 24 * 60 * 60 * 1000;
       const historicalMemoryQuery = /\b(?:history|historical|previous|earlier|before|ago|yesterday|last\s+(?:time|week|month|year|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|when did|what did i|show me (?:my )?recent|recent (?:activity|events?|history))\b/i.test(userMessage);
       const isPastEvent = (mem: { eventDate: number | null }): boolean => {
         return !historicalMemoryQuery
           && !!(mem.eventDate && mem.eventDate < Date.now() - EVENT_EXPIRY_MS);
       };
-      const contextMemoryContent = (mem: { content: string; eventDate: number | null }): string =>
-        mem.eventDate == null
-          ? mem.content
-          : `[Event date: ${localIsoDate(new Date(mem.eventDate), userTimezone)}] ${mem.content}`;
+      const contextMemoryContent = (mem: {
+        content: string;
+        eventDate: number | null;
+        documentDate: number;
+      }): string => mem.eventDate == null
+        ? `[Recorded: ${localIsoDate(new Date(mem.documentDate), userTimezone)}] ${mem.content}`
+        : `[Event date: ${localIsoDate(new Date(mem.eventDate), userTimezone)}] ${mem.content}`;
 
       const SHORT_TERM_WINDOW_MS = 6 * 60 * 60 * 1000;
       const isUserGroundedMemory = (memory: {
@@ -1854,15 +1873,14 @@ The current user request is quoted below. Execute tools only when they directly 
         metadata?: Record<string, unknown> | null;
       }): boolean => memory.source !== 'assistant'
         && memory.learnedFrom !== 'self_reflection'
-        && memory.metadata?.audience !== 'assistant';
+        && memory.metadata?.audience !== 'assistant'
+        && memory.metadata?.subject !== 'agent'
+        // Goals have their own lifecycle/status context. Treating their durable
+        // memory projection as an ordinary fact bypasses that lifecycle.
+        && !memory.metadata?.goalType;
 
-      const [recentFacts, userFacts, relevantResults] = await Promise.all([
+      const [recentFacts, relevantResults] = await Promise.all([
         Promise.resolve(this.scallopStore.getRecentMemories(userId, SHORT_TERM_WINDOW_MS)),
-        Promise.resolve(this.scallopStore.getByUser(userId, {
-          minProminence: 0.3,
-          isLatest: true,
-          limit: 20,
-        })),
         this.scallopStore.search(userMessage, {
           userId,
           minProminence: 0.1,
@@ -1890,14 +1908,6 @@ The current user request is quoted below. Execute tools only when they directly 
           allFactTexts.push({ content: contextMemoryContent(result.memory), subject });
         }
       }
-      for (const fact of userFacts) {
-        if (isUserGroundedMemory(fact) && !seenIds.has(fact.id) && !isPastEvent(fact)) {
-          seenIds.add(fact.id);
-          const subject = fact.metadata?.subject as string | undefined;
-          allFactTexts.push({ content: contextMemoryContent(fact), subject });
-        }
-      }
-
       if (allFactTexts.length > 0) {
         let memoriesText = '';
         let charCount = 0;
@@ -2015,6 +2025,7 @@ The current user request is quoted below. Execute tools only when they directly 
     userId: string,
     activeRequest: string,
     response: string,
+    observations: readonly OutcomeObservation[] = [],
   ): Promise<string> {
     const fallback = stripThinkTags(response).trim();
     if (!this.outcomeBrain || this.subAgentMode) return fallback;
@@ -2025,6 +2036,7 @@ The current user request is quoted below. Execute tools only when they directly 
       messages: [response],
       activeRequest,
       evidenceVerified: true,
+      observations,
     });
     return outcome.decision === 'send' && outcome.message
       ? outcome.message

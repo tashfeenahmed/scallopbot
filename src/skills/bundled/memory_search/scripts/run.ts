@@ -77,9 +77,16 @@ function parseArgs(): MemorySearchArgs {
 
   const argsObj = args as Record<string, unknown>;
 
-  if (!argsObj.query || typeof argsObj.query !== 'string') {
-    // Default to a broad query instead of erroring - the LLM sometimes omits this
-    argsObj.query = '*';
+  if (typeof argsObj.query !== 'string'
+    || !argsObj.query.trim()
+    || argsObj.query.trim() === '*'
+    || /^(?:all|everything|anything)$/i.test(argsObj.query.trim())) {
+    outputResult({
+      success: false,
+      output: '',
+      error: 'memory_search requires a specific, non-empty query tied to the current request',
+      exitCode: 1,
+    });
   }
 
   if (argsObj.limit !== undefined && (typeof argsObj.limit !== 'number' || argsObj.limit < 1)) {
@@ -171,19 +178,6 @@ async function searchMemories(
   circuitStore?: ScallopDatabase,
 ): Promise<{ memory: ScallopMemoryEntry; score: number }[]> {
   if (memories.length === 0) return [];
-
-  // When the LLM omits a query (the parser defaults it to '*') or asks for
-  // "everything", skip relevance scoring — there's no meaningful term to score
-  // against, and BM25 of '*' returns 0 for every doc, so the result list comes
-  // back empty even though we have plenty of memories. Return top-N by
-  // prominence instead so "what do you know about me" actually works.
-  const trimmed = query.trim();
-  if (trimmed === '' || trimmed === '*' || /^(all|everything|anything)$/i.test(trimmed)) {
-    return [...memories]
-      .sort((a, b) => (b.prominence ?? 0) - (a.prominence ?? 0))
-      .slice(0, limit)
-      .map((memory) => ({ memory, score: memory.prominence ?? 0 }));
-  }
 
   const contentTexts = memories.map((m) => m.content);
   const avgDocLength =
@@ -332,7 +326,9 @@ async function executeSearch(args: MemorySearchArgs): Promise<void> {
     const allMemories = db.getMemoriesByUser(userId, {
       minProminence: 0.1,
       isLatest: true,
-      includeAllSources: true,
+      // Assistant reflection is coaching for the agent, not something the
+      // user said. It is available to diagnostics, never normal recall.
+      includeAllSources: false,
     });
 
     // Filter out past events — only use structured eventDate, no keyword heuristics
@@ -340,6 +336,7 @@ async function executeSearch(args: MemorySearchArgs): Promise<void> {
     const now = Date.now();
     const filteredMemories = allMemories.filter(m => {
       if (m.eventDate && m.eventDate < now - EVENT_EXPIRY_MS) return false;
+      if (m.metadata?.audience === 'assistant' || m.metadata?.subject === 'agent') return false;
       return true;
     });
 

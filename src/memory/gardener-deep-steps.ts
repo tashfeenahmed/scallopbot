@@ -11,6 +11,7 @@ import {
   sessionBelongsToStateUser,
   stateIdentityCandidates,
 } from './gardener-context.js';
+import { isGoalLiveForAutonomy } from './state-relevance.js';
 import { storeFusedMemory } from './gardener-fusion-storage.js';
 import { getLastProactiveAt, createProactiveItem } from './gardener-scheduling.js';
 import { findFusionClusters, fuseMemoryCluster } from './fusion.js';
@@ -389,7 +390,8 @@ export async function runGoalDeadlineCheck(ctx: GardenerContext): Promise<void> 
     const goalService = new GoalService({ db: ctx.db, logger: ctx.logger });
     const userId = DEFAULT_USER_ID;
 
-    const activeGoals = await goalService.listGoals(userId, { status: 'active' });
+    const activeGoals = (await goalService.listGoals(userId, { status: 'active' }))
+      .filter(goal => isGoalLiveForAutonomy(goal));
     const goalsWithDueDates = activeGoals.filter(g => g.metadata.dueDate != null);
     if (goalsWithDueDates.length > 0) {
       // Include historical deliveries, not only currently pending rows. Each
@@ -479,7 +481,8 @@ export async function runInnerThoughts(ctx: GardenerContext): Promise<void> {
     // Load goals and board items for gap scanning
     const GoalService = (await import('../goals/goal-service.js')).GoalService;
     const goalService = new GoalService({ db: ctx.db, logger: ctx.logger });
-    const activeGoals = await goalService.listGoals(userId, { status: 'active' });
+    const activeGoals = (await goalService.listGoals(userId, { status: 'active' }))
+      .filter(goal => isGoalLiveForAutonomy(goal));
 
     const existingItems = ctx.db.getScheduledItemsByUser(userId);
     const boardItems = existingItems

@@ -3,8 +3,6 @@
  * Each function wraps its logic in try/catch with ctx.logger.warn() on failure.
  */
 
-import * as path from 'node:path';
-import * as fsPromises from 'node:fs/promises';
 import type { GardenerContext } from './gardener-context.js';
 import {
   DEFAULT_USER_ID,
@@ -168,7 +166,9 @@ export async function runDreamCycle(ctx: GardenerContext): Promise<void> {
 }
 
 /**
- * C2: Self-reflection (composite reflection -> SOUL.md re-distillation)
+ * C2: Self-reflection. Insights remain assistant-only evidence. Behavioral
+ * mutations are handled by the tested/rollback-capable evolution pipeline;
+ * reflection never rewrites the live SOUL prompt directly.
  */
 export async function runSelfReflection(ctx: GardenerContext): Promise<void> {
   if (!ctx.fusionProvider || !ctx.workspace || !hasExplicitSingleOwner(ctx)) return;
@@ -176,7 +176,6 @@ export async function runSelfReflection(ctx: GardenerContext): Promise<void> {
   try {
     const userId = DEFAULT_USER_ID;
     let totalInsights = 0;
-    let soulUpdated = false;
     const storedInsights: Array<{
       memoryId: string;
       content: string;
@@ -196,16 +195,9 @@ export async function runSelfReflection(ctx: GardenerContext): Promise<void> {
 
     if (todaySummaries.length === 0) return;
 
-    // Read current SOUL.md
-    let currentSoul: string | null = null;
-    const soulPath = path.join(ctx.workspace, 'SOUL.md');
-    try {
-      currentSoul = await fsPromises.readFile(soulPath, 'utf-8');
-    } catch {
-      // First run — SOUL.md doesn't exist yet
-    }
-
-    const result = await reflect(todaySummaries, currentSoul, ctx.fusionProvider);
+    const result = await reflect(todaySummaries, null, ctx.fusionProvider, {
+      distillSoul: false,
+    });
 
     if (result.skipped) {
       ctx.logger.debug({ userId, reason: result.skipReason }, 'Self-reflection skipped');
@@ -248,21 +240,10 @@ export async function runSelfReflection(ctx: GardenerContext): Promise<void> {
       }
     }
 
-    // Write updated SOUL.md
-    if (result.updatedSoul) {
-      try {
-        await fsPromises.writeFile(soulPath, result.updatedSoul, 'utf-8');
-        ctx.logger.info({ userId }, 'SOUL.md updated from self-reflection');
-        soulUpdated = true;
-      } catch (err) {
-        ctx.logger.warn({ error: (err as Error).message }, 'SOUL.md write failed');
-      }
-    }
-
     ctx.logger.info({
       userId,
       insightsGenerated: totalInsights,
-      soulUpdated,
+      soulUpdated: false,
       sessionsReflected: todaySummaries.length,
     }, 'Self-reflection complete');
 
@@ -274,7 +255,7 @@ export async function runSelfReflection(ctx: GardenerContext): Promise<void> {
         userId,
         insightsGenerated: result.insights.length,
         insightsStored: totalInsights,
-        soulUpdated,
+        soulUpdated: false,
         sessionsReflected: todaySummaries.length,
         insights: storedInsights,
       },

@@ -37,6 +37,7 @@ interface GoalArgs {
   parent_id?: string;
   id?: string;
   status?: 'backlog' | 'active' | 'completed';
+  scope?: 'current' | 'all';
   due?: string;
   checkin?: 'daily' | 'weekly' | 'biweekly' | 'monthly' | 'none';
   tags?: string[];
@@ -480,15 +481,20 @@ function listItems(db: Database.Database, args: GoalArgs): SkillResult {
   }
   if (args.status) {
     items = items.filter(i => i.metadata.status === args.status);
+  } else if (args.scope === 'all') {
+    // Explicit historical/full view keeps every durable status visible.
   } else {
-    // By default, exclude completed
-    items = items.filter(i => i.metadata.status !== 'completed');
+    // Backlog is preserved planning state, not a current priority. Callers
+    // must explicitly request backlog/all instead of silently resurfacing it.
+    items = items.filter(i => i.metadata.status === 'active');
   }
 
   if (items.length === 0) {
     return {
       success: true,
-      output: 'No items found matching the criteria.',
+      output: args.status || args.scope === 'all'
+        ? 'No items found matching the criteria.'
+        : 'No active goals or tasks. Backlog and completed items are preserved; request status="backlog" or scope="all" only when the user asks for them.',
       exitCode: 0,
     };
   }

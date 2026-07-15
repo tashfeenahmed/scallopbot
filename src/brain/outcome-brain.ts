@@ -15,6 +15,12 @@ import { extractJSON, extractResponseText } from '../proactive/proactive-utils.j
 import { sanitizeProactiveMessage } from '../proactive/message-safety.js';
 import { stripThinkTags } from '../utils/output-safety.js';
 import { resolveStateUserId } from '../utils/state-user-id.js';
+import {
+  isBoardItemLiveForContext,
+  isGoalLiveForAutonomy,
+  isMemoryLiveForContext,
+  isProfileEntryLiveForContext,
+} from '../memory/state-relevance.js';
 
 export type OutcomeSource =
   | 'foreground'
@@ -39,6 +45,15 @@ export interface MessageOutcomeProposal {
   explicitUserText?: boolean;
   /** A verified worker result remains deliverable if the arbiter model is unavailable. */
   evidenceVerified?: boolean;
+  /** Ephemeral bounded tool observations used by the final brain. Never stored
+   * in the outcome ledger. */
+  observations?: readonly OutcomeObservation[];
+}
+
+export interface OutcomeObservation {
+  toolName: string;
+  success: boolean;
+  output: string;
 }
 
 export interface MessageOutcomeDecision {
@@ -133,6 +148,9 @@ Use the complete bounded state snapshot together:
 
 Rules:
 - Send only a useful, timely, context-consistent message.
+- Treat only the snapshot's live/current state as current. Backlog, blocked,
+  archived, expired, assistant-suggested, or old records are historical unless
+  the active request explicitly asks for them.
 - Suppress stale, resolved, contradictory, duplicated, instruction-shaped, or purely internal drafts.
 - A verified task/sub-agent result should normally be delivered, but rewrite it naturally and disclose blockers honestly.
 - An exact user-authored reminder should retain its concrete meaning, date, time, names, and values.
@@ -251,11 +269,11 @@ export class OutcomeBrain {
       });
     }
 
-    // The foreground agent already performed the integrated model/tool loop.
-    // The shared brain still owns the final boundary, strips private reasoning,
-    // snapshots all live state, and records the decision without adding a
-    // second full-model turn to every conversational response.
-    if (proposal.source === 'foreground' || proposal.source === 'progress' || proposal.source === 'system') {
+    // Progress/system text is already a narrow outcome. Foreground turns with
+    // no tool state keep the conversational fast path. Stateful foreground
+    // answers are reviewed below with the same final brain used by workers.
+    if (proposal.source === 'progress' || proposal.source === 'system'
+      || (proposal.source === 'foreground' && !proposal.observations?.length)) {
       const message = sanitizedCandidates.join('\n\n');
       const revised = message !== proposal.messages.join('\n\n').trim();
       return this.finishMessageDecision({
@@ -381,6 +399,11 @@ export class OutcomeBrain {
             explicit_user_text: proposal.explicitUserText === true,
             evidence_verified: proposal.evidenceVerified === true,
             candidates,
+            observations: (proposal.observations ?? []).slice(-12).map(observation => ({
+              tool_name: bounded(observation.toolName, 120),
+              success: observation.success,
+              output: bounded(observation.output, 2_500),
+            })),
             state: context,
           }),
         }],
@@ -435,6 +458,7 @@ export class OutcomeBrain {
     const activeBoard = this.db.getScheduledItemsByUser(stateUserId)
       .filter(item => ['pending', 'processing', 'blocked'].includes(item.status)
         && !['done', 'archived'].includes(item.boardStatus ?? ''))
+      .filter(item => isBoardItemLiveForContext(item, at))
       .sort((a, b) => b.updatedAt - a.updatedAt)
       .slice(0, 12)
       .map(item => ({
@@ -449,6 +473,7 @@ export class OutcomeBrain {
     let activeGoals: Array<Record<string, unknown>> = [];
     try {
       activeGoals = (await this.goalService?.getActiveGoals(stateUserId) ?? [])
+        .filter(goal => isGoalLiveForAutonomy(goal, at))
         .slice(0, 8)
         .map(goal => ({
           title: bounded(goal.content, 240),
@@ -460,17 +485,23 @@ export class OutcomeBrain {
       this.logger.debug({ error: (error as Error).message }, 'Goal snapshot unavailable');
     }
     const userProfile = this.db.getProfile(stateUserId)
+      .filter(entry => isProfileEntryLiveForContext(entry, at))
       .slice(0, 20)
       .map(entry => ({ key: entry.key, value: bounded(entry.value, 300), confidence: entry.confidence }));
     const durableUserFacts = this.db.getMemoriesByUserLight(stateUserId, {
       isLatest: true,
       minProminence: 0.2,
-      limit: 12,
-    }).map(memory => ({
+      includeAllSources: false,
+    })
+      .filter(memory => isMemoryLiveForContext(memory, proposal.activeRequest ?? '', at))
+      .sort((a, b) => b.documentDate - a.documentDate)
+      .slice(0, 12)
+      .map(memory => ({
       content: bounded(memory.content, 400),
       category: memory.category,
       confidence: memory.confidence,
       eventDate: memory.eventDate,
+      recordedAt: memory.documentDate,
       updatedAt: memory.updatedAt,
     }));
     const scheduled = proposal.scheduledItemId
@@ -478,6 +509,7 @@ export class OutcomeBrain {
       : null;
     const sourceItem = scheduled ? {
       id: scheduled.id,
+      title: bounded(scheduled.message, 500),
       source: scheduled.source,
       provenance: scheduled.messageProvenance,
       kind: scheduled.kind,

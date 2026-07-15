@@ -261,13 +261,11 @@ describe('gardener multi-user privacy', () => {
       workspace,
     }));
 
-    expect(reflectionProvider.complete).toHaveBeenCalledTimes(2);
+    expect(reflectionProvider.complete).toHaveBeenCalledTimes(1);
     const reflectionPrompts = JSON.stringify(vi.mocked(reflectionProvider.complete).mock.calls);
     expect(reflectionPrompts).toContain('Project Juniper');
     expect(reflectionPrompts).not.toContain('Project Magnolia');
-    const soul = await fsPromises.readFile(path.join(workspace, 'SOUL.md'), 'utf8');
-    expect(soul).toContain('Synthetic Guidance');
-    expect(soul).not.toContain('Magnolia');
+    expect(fs.existsSync(path.join(workspace, 'SOUL.md'))).toBe(false);
     expect(db.getMemoriesByUser('default', { includeAllSources: true })
       .filter(memory => memory.learnedFrom === 'self_reflection')
       .every(memory => !memory.content.includes('Magnolia'))).toBe(true);

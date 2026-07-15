@@ -281,9 +281,9 @@ describe('BackgroundGardener self-reflection integration', () => {
     return tmpWorkspace;
   }
 
-  // ─── Test 1: Generate insights and create SOUL.md on first reflection ─────
+  // ─── Test 1: Generate private insights without mutating live prompts ─────
 
-  it('should generate insights and create SOUL.md on first reflection', async () => {
+  it('should generate insights without creating SOUL.md', async () => {
     cleanupTestDb();
     const workspace = await createTmpWorkspace();
     const fusionProvider = createReflectionProvider();
@@ -333,16 +333,16 @@ describe('BackgroundGardener self-reflection integration', () => {
     expect(insight.metadata!.topics).toBeDefined();
     expect(insight.metadata!.sourceSessionIds).toBeDefined();
 
-    // Verify: SOUL.md file created in workspace
+    // Reflection is evidence for the guarded evolution pipeline, not a direct
+    // prompt mutation.
     const soulPath = path.join(workspace, 'SOUL.md');
-    const soulContent = await fsPromises.readFile(soulPath, 'utf-8');
-    expect(soulContent).toContain('Behavioral Guidelines');
-    expect(soulContent.length).toBeGreaterThan(0);
+    await expect(fsPromises.access(soulPath)).rejects.toThrow();
+    expect(fusionProvider.complete).toHaveBeenCalledTimes(1);
   });
 
-  // ─── Test 2: Update existing SOUL.md with new reflections ─────
+  // ─── Test 2: Preserve user-managed SOUL.md ─────
 
-  it('should update existing SOUL.md with new reflections', async () => {
+  it('should never overwrite an existing user-managed SOUL.md', async () => {
     cleanupTestDb();
     const workspace = await createTmpWorkspace();
 
@@ -375,12 +375,11 @@ describe('BackgroundGardener self-reflection integration', () => {
 
     await gardener.sleepTick();
 
-    // Verify: SOUL.md content was updated (not the initial content)
+    // Verify: reflection did not mutate user-managed instructions.
     const updatedContent = await fsPromises.readFile(soulPath, 'utf-8');
-    expect(updatedContent).not.toBe(initialSoul);
-    expect(updatedContent).toContain('Updated');
+    expect(updatedContent).toBe(initialSoul);
 
-    // Verify: mock provider received existing SOUL content in the distillation prompt
+    // No SOUL distillation call is made; the evolution pipeline owns mutation.
     const completeCalls = (fusionProvider.complete as ReturnType<typeof vi.fn>).mock.calls;
     const soulDistillationCall = completeCalls.find(
       (call: unknown[]) => {
@@ -388,9 +387,8 @@ describe('BackgroundGardener self-reflection integration', () => {
         return req.system?.includes('behavioral guidelines distiller');
       }
     );
-    expect(soulDistillationCall).toBeDefined();
-    const soulReqMsg = (soulDistillationCall![0] as { messages: Array<{ content: string }> }).messages[0].content;
-    expect(soulReqMsg).toContain('Initial Guidelines');
+    expect(soulDistillationCall).toBeUndefined();
+    expect(completeCalls).toHaveLength(1);
   });
 
   // ─── Test 3: Skip reflection when no recent session summaries ─────

@@ -137,7 +137,7 @@ describe('E2E Cognitive Reflection & Gaps', () => {
       try { fs.rmSync(workspace, { recursive: true, force: true }); } catch { /* ignore */ }
     });
 
-    it('should generate insight memories and write SOUL.md', async () => {
+    it('should generate private insight memories without rewriting SOUL.md', async () => {
       await gardener.sleepTick();
 
       const db = scallopStore.getDatabase();
@@ -173,17 +173,10 @@ describe('E2E Cognitive Reflection & Gaps', () => {
       expect(Array.isArray(metadata.sourceSessionIds)).toBe(true);
       expect(metadata.sourceSessionIds.length).toBeGreaterThan(0);
 
-      // Assert SOUL.md was written to workspace
+      // Reflections feed the benchmarked evolution path; they never mutate the
+      // live prompt directly.
       const soulPath = path.join(workspace, 'SOUL.md');
-      expect(fs.existsSync(soulPath)).toBe(true);
-
-      const soulContent = fs.readFileSync(soulPath, 'utf-8');
-      // Assert SOUL.md contains relevant content
-      expect(soulContent).toContain('SOUL');
-      // Assert it is valid markdown (not JSON — should not start with '{')
-      expect(soulContent.trim().startsWith('{')).toBe(false);
-      // Assert it contains TypeScript-related content
-      expect(soulContent.toLowerCase()).toContain('typescript');
+      expect(fs.existsSync(soulPath)).toBe(false);
     }, 30000);
   });
 
