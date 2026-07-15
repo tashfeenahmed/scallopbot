@@ -115,8 +115,10 @@ describe('board skill owner-scoped item lookup', () => {
     `).run(old, old, item.id);
     raw.close();
 
-    expect(runSkill(dbPath, { action: 'view' }, 'owner-a').output)
-      .not.toContain('Resolve the Struan contract');
+    const current = runSkill(dbPath, { action: 'view' }, 'owner-a').output;
+    expect(current).not.toContain('Resolve the Struan contract');
+    expect(current).toContain('No current items.');
+    expect(current).not.toMatch(/activation|scope=/i);
     expect(runSkill(dbPath, { action: 'view', query: 'What happened with Struan?' }, 'owner-a').output)
       .toContain('Resolve the Struan contract');
     expect(runSkill(dbPath, { action: 'view', scope: 'all' }, 'owner-a').output)

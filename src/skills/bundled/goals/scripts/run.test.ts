@@ -130,6 +130,7 @@ describe('goals skill owner isolation', () => {
     const current = runSkill(dbPath, { action: 'list' }, 'owner-a');
     expect(current.success).toBe(true);
     expect(current.output).not.toContain('Long abandoned campaign');
+    expect(current.output).toBe('No current goals found.');
 
     const preserved = runSkill(dbPath, { action: 'list', scope: 'all' }, 'owner-a');
     expect(preserved.success).toBe(true);

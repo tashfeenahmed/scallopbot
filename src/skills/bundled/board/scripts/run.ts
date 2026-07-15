@@ -581,10 +581,6 @@ function viewBoard(args: BoardArgs): SkillResult {
 
   const allScope = args.scope === 'all' || Boolean(args.column);
   const activationQuery = args.query?.trim() ?? '';
-  const preservedCount = allScope
-    ? 0
-    : items.filter(item => ACTIVE_COLUMNS.includes(item.boardStatus)
-      && !isBoardItemLiveForContext(item, activationQuery)).length;
   if (!allScope) {
     items = items.filter(item => isBoardItemLiveForContext(item, activationQuery));
   }
@@ -605,6 +601,9 @@ function viewBoard(args: BoardArgs): SkillResult {
 
   // Format output
   let output = allScope ? '📋 FULL BOARD\n' : '📋 CURRENT BOARD\n';
+  if (items.length === 0) {
+    output += allScope ? '\nNo items found.' : '\nNo current items.';
+  }
 
   // Urgent items first
   const urgentItems = ACTIVE_COLUMNS.flatMap(col => columns[col]).filter(i => i.priority === 'urgent');
@@ -642,9 +641,6 @@ function viewBoard(args: BoardArgs): SkillResult {
   if (columns.backlog.length > 0) parts.push(`${columns.backlog.length} in backlog`);
   if (doneThisWeek > 0) parts.push(`${doneThisWeek} done this week`);
   if (parts.length > 0) output += `\n${parts.join(' · ')}`;
-  if (preservedCount > 0) {
-    output += `\n\n${preservedCount} low-activation item(s) remain preserved. They can return when their topic becomes relevant; scope="all" is the complete inventory.`;
-  }
 
   db.close();
   return { success: true, output, exitCode: 0 };

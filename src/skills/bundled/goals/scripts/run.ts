@@ -502,7 +502,7 @@ function listItems(db: Database.Database, args: GoalArgs): SkillResult {
       success: true,
       output: args.status || args.scope === 'all'
         ? 'No items found matching the criteria.'
-        : 'No naturally active or relevant goals found. Older records remain preserved and can return when their topic becomes relevant again.',
+        : 'No current goals found.',
       exitCode: 0,
     };
   }
