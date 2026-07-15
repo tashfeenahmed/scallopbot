@@ -22,6 +22,7 @@ interface GoalMetadata {
   progress?: number;
   checkinFrequency?: 'daily' | 'weekly' | 'biweekly' | 'monthly';
   lastCheckin?: number;
+  lastActivityAt?: number;
   tags?: string[];
 }
 
@@ -240,10 +241,11 @@ function updateProgress(db: Database.Database, id: string): void {
   if (!item) return;
 
   const progress = calculateProgress(db, id);
-  const newMetadata = { ...item.metadata, progress };
+  const now = Date.now();
+  const newMetadata = { ...item.metadata, progress, lastActivityAt: now };
 
   db.prepare('UPDATE memories SET metadata = ?, updated_at = ? WHERE id = ? AND user_id = ?')
-    .run(JSON.stringify(newMetadata), Date.now(), id, USER_ID);
+    .run(JSON.stringify(newMetadata), now, id, USER_ID);
 }
 
 // Schedule check-in
@@ -391,6 +393,7 @@ function createItem(db: Database.Database, args: GoalArgs): SkillResult {
     parentId: args.parent_id,
     dueDate: dueDate ?? undefined,
     progress: args.type === 'task' ? undefined : 0,
+    lastActivityAt: now,
     checkinFrequency: args.type === 'goal' && args.checkin && args.checkin !== 'none' ? args.checkin : undefined,
     tags: args.tags,
   };
@@ -543,9 +546,10 @@ function activateItem(db: Database.Database, args: GoalArgs): SkillResult {
     return { success: false, output: '', error: `Item ${args.id} not found`, exitCode: 1 };
   }
 
-  const newMetadata = { ...item.metadata, status: 'active' as const };
+  const activityAt = Date.now();
+  const newMetadata = { ...item.metadata, status: 'active' as const, lastActivityAt: activityAt };
   db.prepare('UPDATE memories SET metadata = ?, updated_at = ? WHERE id = ? AND user_id = ?')
-    .run(JSON.stringify(newMetadata), Date.now(), args.id, USER_ID);
+    .run(JSON.stringify(newMetadata), activityAt, args.id, USER_ID);
 
   // Schedule check-in for goals
   if (item.metadata.goalType === 'goal' && item.metadata.checkinFrequency) {
@@ -571,7 +575,12 @@ function completeItem(db: Database.Database, args: GoalArgs): SkillResult {
   }
 
   const now = Date.now();
-  const newMetadata = { ...item.metadata, status: 'completed' as const, completedAt: now };
+  const newMetadata = {
+    ...item.metadata,
+    status: 'completed' as const,
+    completedAt: now,
+    lastActivityAt: now,
+  };
   db.prepare('UPDATE memories SET metadata = ?, updated_at = ? WHERE id = ? AND user_id = ?')
     .run(JSON.stringify(newMetadata), now, args.id, USER_ID);
 
@@ -602,9 +611,15 @@ function reopenItem(db: Database.Database, args: GoalArgs): SkillResult {
     return { success: false, output: '', error: `Item ${args.id} not found`, exitCode: 1 };
   }
 
-  const newMetadata = { ...item.metadata, status: 'active' as const, completedAt: undefined };
+  const activityAt = Date.now();
+  const newMetadata = {
+    ...item.metadata,
+    status: 'active' as const,
+    completedAt: undefined,
+    lastActivityAt: activityAt,
+  };
   db.prepare('UPDATE memories SET metadata = ?, updated_at = ? WHERE id = ? AND user_id = ?')
-    .run(JSON.stringify(newMetadata), Date.now(), args.id, USER_ID);
+    .run(JSON.stringify(newMetadata), activityAt, args.id, USER_ID);
 
   // Update parent progress
   if (item.metadata.parentId) {
@@ -643,6 +658,7 @@ function updateItem(db: Database.Database, args: GoalArgs): SkillResult {
   }
 
   const newMetadata = { ...item.metadata };
+  newMetadata.lastActivityAt = now;
   if (args.status) {
     newMetadata.status = args.status;
     if (args.status === 'completed') {

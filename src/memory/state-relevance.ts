@@ -52,6 +52,11 @@ export interface ContextGoalLike {
     status?: string;
     dueDate?: number;
     progress?: number;
+    /** Semantic goal work, never an automatic check-in or storage migration. */
+    lastActivityAt?: number;
+    /** Automatic outreach telemetry; accepted for real rows but never reinforces activation. */
+    lastCheckin?: number;
+    execution?: { state?: string };
   };
 }
 
@@ -188,15 +193,20 @@ export function goalActivationScore(
   now: number = Date.now(),
 ): number {
   const status = goal.metadata.status ?? 'backlog';
+  const relevance = requestRelevanceScore(activeRequest, goal.content ?? '');
+  if (['blocked', 'waiting', 'budget_exhausted'].includes(goal.metadata.execution?.state ?? '')) {
+    return clamp01(0.58 * relevance);
+  }
   const lifecycle = status === 'active' ? 0.16 : status === 'backlog' ? 0.03 : 0;
-  const freshness = temporalActivation(goal.updatedAt ?? goal.createdAt, 45 * DAY_MS, now);
+  // Generic updated_at and lastCheckin also move during storage repairs and
+  // automatic outreach. Only semantic activity may refresh a goal.
+  const freshness = temporalActivation(goal.metadata.lastActivityAt ?? goal.createdAt, 45 * DAY_MS, now);
   const dueDate = goal.metadata.dueDate;
   const dueSignal = dueDate === undefined
     ? 0
     : dueDate >= now
       ? futureProximity(dueDate, 90 * DAY_MS, now)
       : temporalActivation(dueDate, 14 * DAY_MS, now);
-  const relevance = requestRelevanceScore(activeRequest, goal.content ?? '');
   const progress = clamp01((goal.metadata.progress ?? 0) / 100);
   return clamp01(lifecycle + 0.45 * freshness + 0.3 * dueSignal + 0.55 * relevance + 0.08 * progress);
 }

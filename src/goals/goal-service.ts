@@ -169,6 +169,7 @@ export class GoalService {
     if (options.contract) validateContract(options.contract);
     if (options.budget) validateBudget(options.budget);
 
+    const now = Date.now();
     const metadata: GoalMetadata = {
       goalType: 'goal',
       status: options.status ?? 'backlog',
@@ -176,6 +177,7 @@ export class GoalService {
       checkinFrequency: options.checkinFrequency,
       tags: options.tags,
       progress: 0,
+      lastActivityAt: now,
       contract: options.contract,
       budget: options.contract ? (options.budget ?? DEFAULT_GOAL_BUDGET) : options.budget,
       execution: options.contract ? initialExecution() : undefined,
@@ -192,7 +194,7 @@ export class GoalService {
       importance: 8, // Goals are high importance
       confidence: 1.0,
       isLatest: true,
-      documentDate: Date.now(),
+      documentDate: now,
       eventDate: options.dueDate ?? null,
       prominence: 1.0,
       lastAccessed: null,
@@ -228,6 +230,7 @@ export class GoalService {
       throw new Error(`Cannot add milestone to ${goal.metadata.goalType}`);
     }
 
+    const now = Date.now();
     const metadata: GoalMetadata = {
       goalType: 'milestone',
       status: options.status ?? 'backlog',
@@ -235,6 +238,7 @@ export class GoalService {
       dueDate: options.dueDate,
       tags: options.tags,
       progress: 0,
+      lastActivityAt: now,
     };
 
     const embedding = await this.generateEmbedding(options.title);
@@ -247,7 +251,7 @@ export class GoalService {
       importance: 7,
       confidence: 1.0,
       isLatest: true,
-      documentDate: Date.now(),
+      documentDate: now,
       eventDate: options.dueDate ?? null,
       prominence: 1.0,
       lastAccessed: null,
@@ -288,12 +292,14 @@ export class GoalService {
       throw new Error(`Cannot add task to ${milestone.metadata.goalType}`);
     }
 
+    const now = Date.now();
     const metadata: GoalMetadata = {
       goalType: 'task',
       status: options.status ?? 'backlog',
       parentId: milestoneId,
       dueDate: options.dueDate,
       tags: options.tags,
+      lastActivityAt: now,
     };
 
     const embedding = await this.generateEmbedding(options.title);
@@ -306,7 +312,7 @@ export class GoalService {
       importance: 6,
       confidence: 1.0,
       isLatest: true,
-      documentDate: Date.now(),
+      documentDate: now,
       eventDate: options.dueDate ?? null,
       prominence: 1.0,
       lastAccessed: null,
@@ -392,8 +398,9 @@ export class GoalService {
       return null;
     }
 
+    const activityAt = Date.now();
     const updates: Partial<ScallopMemoryEntry> = {};
-    const metadataUpdates: Partial<GoalMetadata> = {};
+    const metadataUpdates: Partial<GoalMetadata> = { lastActivityAt: activityAt };
 
     if (options.title !== undefined) {
       updates.content = options.title;
@@ -401,7 +408,7 @@ export class GoalService {
     if (options.status !== undefined) {
       metadataUpdates.status = options.status;
       if (options.status === 'completed') {
-        metadataUpdates.completedAt = Date.now();
+        metadataUpdates.completedAt = activityAt;
       }
     }
     if (options.dueDate !== undefined) {
@@ -574,7 +581,7 @@ export class GoalService {
       ? initialExecution()
       : { ...goal.metadata.execution, updatedAt: Date.now() };
     this.db.updateMemory(id, {
-      metadata: { ...goal.metadata, contract, budget, execution },
+      metadata: { ...goal.metadata, contract, budget, execution, lastActivityAt: execution.updatedAt },
     });
     return (await this.getGoal(id))!;
   }
@@ -643,6 +650,7 @@ export class GoalService {
         completedAt: verification.passed ? now : goal.metadata.completedAt,
         progress: verification.passed ? 100 : goal.metadata.progress,
         execution,
+        lastActivityAt: now,
       },
     });
     return verification;
@@ -793,6 +801,7 @@ export class GoalService {
             completedAt,
             progress: 100,
             execution,
+            lastActivityAt: completedAt,
           },
         });
         goal = (await this.getGoal(id))!;
@@ -847,7 +856,12 @@ export class GoalService {
     status?: GoalStatus,
   ): Promise<GoalItem> {
     this.db.updateMemory(goal.id, {
-      metadata: { ...goal.metadata, status: status ?? goal.metadata.status, execution },
+      metadata: {
+        ...goal.metadata,
+        status: status ?? goal.metadata.status,
+        execution,
+        lastActivityAt: execution.updatedAt,
+      },
     });
     return (await this.getGoal(goal.id))!;
   }
@@ -1104,8 +1118,9 @@ export class GoalService {
     const progress = await this.calculateProgress(id);
     const goal = await this.getGoal(id);
     if (goal) {
+      const activityAt = Date.now();
       this.db.updateMemory(id, {
-        metadata: { ...goal.metadata, progress },
+        metadata: { ...goal.metadata, progress, lastActivityAt: activityAt },
       });
     }
   }

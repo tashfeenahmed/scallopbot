@@ -110,6 +110,8 @@ export interface GoalMetadata {
   checkinFrequency?: CheckinFrequency;
   /** Last proactive check-in (epoch ms) */
   lastCheckin?: number;
+  /** Last semantic goal change or real execution step; automatic check-ins do not change it. */
+  lastActivityAt?: number;
   /** User-defined tags */
   tags?: string[];
   /** Optional acceptance contract for verified autonomous execution. */

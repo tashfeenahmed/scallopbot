@@ -3146,14 +3146,11 @@ export class ScallopDatabase {
     const migrate = this.db.transaction(() => {
       this.db.prepare(`
         UPDATE memories
-        SET is_latest = 1, memory_type = 'static_profile', prominence = 1.0,
-            updated_at = CASE
-              WHEN is_latest != 1 OR memory_type != 'static_profile' OR prominence != 1.0
-                THEN ? ELSE updated_at END
+        SET is_latest = 1, memory_type = 'static_profile', prominence = 1.0
         WHERE metadata IS NOT NULL AND json_valid(metadata)
           AND json_extract(metadata, '$.goalType') IN ('goal', 'milestone', 'task')
           AND COALESCE(json_extract(metadata, '$.status'), 'backlog') != 'completed'
-      `).run(Date.now());
+      `).run();
       this.db.exec(`
         CREATE TRIGGER IF NOT EXISTS trg_active_goal_memory_durability
         AFTER UPDATE OF is_latest, memory_type, prominence, metadata ON memories

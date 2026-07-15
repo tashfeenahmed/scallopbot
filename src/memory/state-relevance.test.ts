@@ -78,10 +78,28 @@ describe('ambient state relevance', () => {
     }, NOW)).toBe(false);
     expect(isGoalLiveForAutonomy({
       createdAt: NOW - 100 * DAY,
-      updatedAt: NOW - 90 * DAY,
-      lastAccessed: NOW - DAY,
+      updatedAt: NOW,
+      lastAccessed: NOW,
       metadata: { status: 'active', dueDate: NOW - 30 * DAY, progress: 20 },
     }, NOW)).toBe(false);
+    expect(isGoalLiveForAutonomy({
+      createdAt: NOW - 100 * DAY,
+      updatedAt: NOW,
+      lastAccessed: NOW,
+      metadata: {
+        status: 'active', dueDate: NOW - 30 * DAY, progress: 20,
+        // Automatic check-ins must not keep an abandoned goal alive.
+        lastCheckin: NOW,
+      },
+    }, NOW)).toBe(false);
+    expect(isGoalLiveForAutonomy({
+      createdAt: NOW - 100 * DAY,
+      updatedAt: NOW,
+      metadata: {
+        status: 'active', dueDate: NOW - 30 * DAY, progress: 20,
+        lastActivityAt: NOW,
+      },
+    }, NOW)).toBe(true);
 
     expect(isGoalLiveForContext({
       content: 'Prepare for the Struan meeting',

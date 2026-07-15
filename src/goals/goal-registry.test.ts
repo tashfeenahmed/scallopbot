@@ -22,6 +22,38 @@ afterEach(() => {
 });
 
 describe('durable goal registry', () => {
+  it('repairs legacy goal storage without pretending maintenance was goal activity', async () => {
+    const dbPath = tempDatabasePath();
+    const old = Date.now() - 60 * 24 * 60 * 60 * 1_000;
+    let db = new ScallopDatabase(dbPath);
+    const goal = db.addMemory({
+      userId: 'owner', content: 'Legacy YouTube reporting goal', category: 'insight',
+      memoryType: 'regular', importance: 8, confidence: 1, isLatest: true,
+      source: 'user', documentDate: old, eventDate: old + 7 * 24 * 60 * 60 * 1_000,
+      prominence: 0.4, lastAccessed: null, accessCount: 0, sourceChunk: null,
+      embedding: null, metadata: {
+        goalType: 'goal', status: 'active', progress: 0,
+        dueDate: old + 7 * 24 * 60 * 60 * 1_000,
+      },
+    });
+    db.close();
+    const raw = new Database(dbPath);
+    raw.prepare('UPDATE memories SET created_at = ?, updated_at = ? WHERE id = ?')
+      .run(old, old, goal.id);
+    raw.close();
+
+    db = new ScallopDatabase(dbPath);
+    const repaired = db.getMemory(goal.id)!;
+    expect(repaired.memoryType).toBe('static_profile');
+    expect(repaired.prominence).toBe(1);
+    expect(repaired.updatedAt).toBe(old);
+    const service = new GoalService({ db, logger });
+    expect(await service.getGoalContext('owner', 'What is on my plate today?')).toBe('');
+    expect(await service.getGoalContext('owner', 'What happened with the YouTube goal?'))
+      .toContain('Legacy YouTube reporting goal');
+    db.close();
+  });
+
   it('lets an old backlog goal fade generally and return on a natural topic mention', async () => {
     const dbPath = tempDatabasePath();
     const db = new ScallopDatabase(dbPath);
@@ -33,8 +65,12 @@ describe('durable goal registry', () => {
       dueDate: old + 7 * 24 * 60 * 60 * 1_000,
     });
     const raw = new Database(dbPath);
-    raw.prepare('UPDATE memories SET created_at = ?, updated_at = ?, document_date = ?, last_accessed = ? WHERE id = ?')
-      .run(old, old, old, old, goal.id);
+    raw.prepare(`
+      UPDATE memories
+      SET created_at = ?, updated_at = ?, document_date = ?, last_accessed = ?,
+          metadata = json_set(metadata, '$.lastActivityAt', ?)
+      WHERE id = ?
+    `).run(old, old, old, old, old, goal.id);
     raw.close();
 
     expect(await service.getGoalContext('owner', 'What is on my plate today?')).toBe('');
