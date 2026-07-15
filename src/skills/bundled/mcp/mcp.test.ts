@@ -14,6 +14,26 @@ import { SkillLoader } from '../../loader.js';
 const TEST_DIR = path.join(os.tmpdir(), `smartbot-mcp-test-${process.pid}-${Date.now()}`);
 const TEST_CONFIG_PATH = path.join(TEST_DIR, 'mcp.json');
 
+function isProcessRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+  } catch {
+    return false;
+  }
+  if (process.platform === 'linux') {
+    try {
+      const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+      const state = stat.slice(stat.lastIndexOf(')') + 2, stat.lastIndexOf(')') + 3);
+      // A zombie has terminated and cannot execute; PID 1 may reap it later on
+      // minimal CI/container systems, so kill(pid, 0) alone is misleading.
+      return state !== 'Z' && state !== 'X';
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
 function writeRawConfig(value: unknown, mode = 0o600): void {
   fs.mkdirSync(TEST_DIR, { recursive: true });
   fs.writeFileSync(TEST_CONFIG_PATH, JSON.stringify(value), { encoding: 'utf8', mode });
@@ -143,7 +163,8 @@ describe('executable MCP stdio skill', () => {
           pids.push(grandchild.pid);
         }
         fs.writeFileSync(process.env.PID_FILE, pids.join('\\n'));
-        process.on('SIGTERM', () => {});
+        // The server exits on SIGTERM while its grandchild resists it. Cleanup
+        // must inspect the whole process group rather than only this process.
         setInterval(() => {}, 1000);
       } else if (mode === 'flood') {
         process.stdout.write('x'.repeat(${MCP_LIMITS.maxInboundStdoutBytes + 1024}));
@@ -401,13 +422,7 @@ describe('executable MCP stdio skill', () => {
     expect(result.success).toBe(false);
     const pids = fs.readFileSync(pidFile, 'utf8').trim().split('\n').map(Number);
     for (const pid of pids) {
-      let alive = true;
-      try {
-        process.kill(pid, 0);
-      } catch {
-        alive = false;
-      }
-      expect(alive).toBe(false);
+      expect(isProcessRunning(pid)).toBe(false);
     }
   }, 5_000);
 });

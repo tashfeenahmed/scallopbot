@@ -419,12 +419,18 @@ class McpStdioClient {
     if (this.closePromise) return this.closePromise;
     this.closePromise = (async () => {
       this.rejectAll(new Error('MCP client closed'));
-      if (!this.hasExited()) {
+      if (this.isProcessTreeAlive()) {
         this.signalProcessTree('SIGTERM');
-        await Promise.race([this.exitPromise, delay(MCP_LIMITS.terminateGraceMs)]);
+        await this.waitForProcessTreeExit(MCP_LIMITS.terminateGraceMs);
+      }
+      // The direct server can exit on SIGTERM while a resistant grandchild in
+      // its detached process group stays alive. Check the group itself before
+      // deciding whether escalation is necessary.
+      if (this.isProcessTreeAlive()) {
+        this.signalProcessTree('SIGKILL');
+        await this.waitForProcessTreeExit(MCP_LIMITS.killGraceMs);
       }
       if (!this.hasExited()) {
-        this.signalProcessTree('SIGKILL');
         await Promise.race([this.exitPromise, delay(MCP_LIMITS.killGraceMs)]);
       }
       this.child.stdin.destroy();
@@ -564,6 +570,24 @@ class McpStdioClient {
 
   private hasExited(): boolean {
     return this.child.exitCode !== null || this.child.signalCode !== null;
+  }
+
+  private isProcessTreeAlive(): boolean {
+    const pid = this.child.pid;
+    if (!pid || process.platform === 'win32') return !this.hasExited();
+    try {
+      process.kill(-pid, 0);
+      return true;
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === 'EPERM';
+    }
+  }
+
+  private async waitForProcessTreeExit(timeoutMs: number): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (this.isProcessTreeAlive() && Date.now() < deadline) {
+      await delay(Math.min(20, Math.max(1, deadline - Date.now())));
+    }
   }
 
   private signalProcessTree(signal: NodeJS.Signals): void {
