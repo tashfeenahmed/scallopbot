@@ -69,6 +69,7 @@ interface SeedOptions {
   documentDate?: number;
   memoryType?: 'static_profile' | 'dynamic_profile' | 'regular' | 'derived' | 'superseded';
   category?: 'preference' | 'fact' | 'event' | 'relationship' | 'insight';
+  timesConfirmed?: number;
 }
 
 function seedMemory(database: ScallopDatabase, opts: SeedOptions = {}): string {
@@ -88,6 +89,7 @@ function seedMemory(database: ScallopDatabase, opts: SeedOptions = {}): string {
     sourceChunk: null,
     embedding: null,
     metadata: null,
+    timesConfirmed: opts.timesConfirmed ?? 1,
   });
   return entry.id;
 }
@@ -113,11 +115,12 @@ describe('archiveLowUtilityMemories', () => {
       documentDate: now - 30 * DAY_MS,
     });
 
-    // 30 days old, 5 accesses → higher utility, should NOT be archived
+    // 30 days old but repeatedly confirmed by the user → higher utility.
     const oldAccessed = seedMemory(database, {
-      content: 'old but frequently accessed',
-      prominence: 0.3,
+      content: 'old but genuinely reconfirmed',
+      prominence: 0.1,
       accessCount: 5,
+      timesConfirmed: 5,
       lastAccessed: now - 1 * DAY_MS,
       documentDate: now - 30 * DAY_MS,
     });
@@ -144,9 +147,9 @@ describe('archiveLowUtilityMemories', () => {
     expect(archivedMemory!.memoryType).toBe('superseded');
 
     // Verify the others are untouched
-    const accessedMemory = database.getMemory(oldAccessed);
-    expect(accessedMemory!.isLatest).toBe(true);
-    expect(accessedMemory!.memoryType).toBe('regular');
+    const confirmedMemory = database.getMemory(oldAccessed);
+    expect(confirmedMemory!.isLatest).toBe(true);
+    expect(confirmedMemory!.memoryType).toBe('regular');
 
     const youngMemory = database.getMemory(youngUnaccessed);
     expect(youngMemory!.isLatest).toBe(true);

@@ -254,10 +254,12 @@ export class ScallopMemoryStore {
             'Dedup: updated existing memory with longer content'
           );
         } else {
-          this.db.recordAccess(bestMatch.id);
+          // This path is reached because the user stated the same fact again;
+          // it is genuine confirmation, not merely an automatic lookup.
+          this.db.reinforceMemory(bestMatch.id);
           this.logger.debug(
             { existingId: bestMatch.id, similarity: bestSim },
-            'Dedup: boosted existing memory access count'
+            'Dedup: reinforced user-confirmed memory'
           );
         }
         return this.db.getMemory(bestMatch.id)!;
@@ -324,7 +326,7 @@ export class ScallopMemoryStore {
   get(id: string): ScallopMemoryEntry | null {
     const memory = this.db.getMemory(id);
     if (memory) {
-      // Record access for decay system
+      // Diagnostic retrieval telemetry only; it does not reinforce decay.
       this.db.recordAccess(id);
     }
     return memory;

@@ -351,7 +351,7 @@ describe('DecayEngine', () => {
     expect(prominence).toBe(1.0);
   });
 
-  it('should boost frequently accessed memories', () => {
+  it('should ignore automatic access and boost genuine user confirmation', () => {
     const memory1 = db.addMemory({
       userId: 'user1',
       content: 'Never accessed',
@@ -391,7 +391,10 @@ describe('DecayEngine', () => {
     const p1 = decay.calculateProminence(memory1);
     const p2 = decay.calculateProminence(memory2);
 
-    expect(p2).toBeGreaterThan(p1);
+    expect(p2).toBeCloseTo(p1, 8);
+
+    const confirmed = { ...memory2, timesConfirmed: 4, updatedAt: Date.now() };
+    expect(decay.calculateProminence(confirmed)).toBeGreaterThan(p1);
   });
 });
 

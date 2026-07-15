@@ -303,6 +303,40 @@ describe('Scenario 2: Duplicate fact reinforcement', () => {
     expect(reinforced2.confidence).toBeCloseTo(0.90);
   });
 
+  it('keeps automatic retrieval separate from genuine reinforcement', async () => {
+    const original = await store.add({
+      userId: 'default',
+      content: 'Works at Acme Corp',
+      category: 'fact',
+      importance: 6,
+      confidence: 0.8,
+    });
+    const before = db.getMemory(original.id)!;
+    const accessAt = before.updatedAt + 60_000;
+    const now = vi.spyOn(Date, 'now').mockReturnValue(accessAt);
+    try {
+      db.recordAccess(original.id);
+    } finally {
+      now.mockRestore();
+    }
+    const afterAccess = db.getMemory(original.id)!;
+    expect(afterAccess.accessCount).toBe(before.accessCount + 1);
+    expect(afterAccess.lastAccessed).toBe(accessAt);
+    expect(afterAccess.updatedAt).toBe(before.updatedAt);
+    expect(afterAccess.timesConfirmed).toBe(1);
+
+    await store.add({
+      userId: 'default',
+      content: 'Works at Acme Corp',
+      category: 'fact',
+      importance: 6,
+      confidence: 0.8,
+    });
+    const afterRestatement = db.getMemory(original.id)!;
+    expect(afterRestatement.timesConfirmed).toBe(2);
+    expect(afterRestatement.confidence).toBeGreaterThan(afterAccess.confidence);
+  });
+
   it('should increase resilience to decay for reinforced memories', async () => {
     // Store two facts: one reinforced, one not
     const factA = await store.add({

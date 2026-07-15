@@ -32,7 +32,7 @@ import type {
 import { isGoalItem } from './types.js';
 import {
   hasRequestContentOverlap,
-  isGoalLiveForAutonomy,
+  isGoalLiveForContext,
 } from '../memory/state-relevance.js';
 
 /**
@@ -1245,9 +1245,8 @@ export class GoalService {
    * Get goal context for agent system prompt
    */
   async getGoalContext(userId: string, userMessage?: string): Promise<string> {
-    const activeGoals = (await this.getActiveGoals(userId)).filter(goal =>
-      isGoalLiveForAutonomy(goal)
-      || Boolean(userMessage && hasRequestContentOverlap(userMessage, goal.content))
+    const activeGoals = (await this.listGoals(userId, { type: 'goal' })).filter(goal =>
+      isGoalLiveForContext(goal, userMessage ?? '')
     );
     if (activeGoals.length === 0) {
       return '';
@@ -1270,14 +1269,14 @@ export class GoalService {
     }
 
     // Full injection with hierarchy
-    let context = '\n\n## ACTIVE GOALS\n';
+    let context = '\n\n## RELEVANT GOAL STATE\n';
 
     for (const goal of activeGoals.slice(0, 3)) {
       const tree = await this.getGoalHierarchy(goal.id);
       if (!tree) continue;
 
       context += `\n### ${goal.content}\n`;
-      context += `Progress: ${tree.totalProgress}%`;
+      context += `Status: ${goal.metadata.status} | Progress: ${tree.totalProgress}%`;
       if (goal.metadata.dueDate) {
         const due = new Date(goal.metadata.dueDate).toLocaleDateString();
         const isOverdue = goal.metadata.dueDate < Date.now();

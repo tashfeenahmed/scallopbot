@@ -352,6 +352,39 @@ describe('SkillExecutor', () => {
       expect(searched.output).not.toContain('Agent prefers to reuse');
     }, 30_000);
 
+    it('lets an old event fade generally but return when its topic is naturally relevant', async () => {
+      const dbPath = path.join(testDir, 'memories.db');
+      const db = new ScallopDatabase(dbPath);
+      const old = Date.now() - 180 * 24 * 60 * 60 * 1_000;
+      db.addMemory({
+        userId: 'default', content: 'Met Struan to discuss the UXBR engagement.', category: 'event',
+        memoryType: 'regular', importance: 6, confidence: 1, isLatest: true, source: 'user',
+        documentDate: old, eventDate: old, prominence: 1, lastAccessed: null,
+        accessCount: 0, sourceChunk: null, embedding: null, metadata: null,
+      });
+      db.close();
+      const memoryScriptsDir = path.join(process.cwd(), 'src', 'skills', 'bundled', 'memory_search', 'scripts');
+      const memorySkill = createMockSkill({
+        name: 'memory_search', scriptsDir: memoryScriptsDir,
+        path: path.join(memoryScriptsDir, '..', 'SKILL.md'),
+        frontmatter: { name: 'memory_search', description: 'Memory search test' },
+      });
+
+      const generic = await executor.execute(memorySkill, {
+        skillName: 'memory_search', args: { query: 'what is on my plate today' }, cwd: testDir,
+        userId: 'default', sessionId: 'session',
+      });
+      expect(generic.success).toBe(true);
+      expect(generic.output).not.toContain('Struan');
+
+      const relevant = await executor.execute(memorySkill, {
+        skillName: 'memory_search', args: { query: 'Whatever happened with Struan?' }, cwd: testDir,
+        userId: 'default', sessionId: 'session',
+      });
+      expect(relevant.success).toBe(true);
+      expect(relevant.output).toContain('Met Struan to discuss the UXBR engagement.');
+    }, 30_000);
+
     it('should execute .ts scripts with tsx', async () => {
       // Arrange
       const script = `console.log("Hello from TypeScript");`;

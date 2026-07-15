@@ -93,7 +93,7 @@ ACT-R-inspired spreading activation over typed relation graphs (UPDATES, EXTENDS
 
 ### Hybrid Memory Engine
 
-SQLite-backed memory with ACID guarantees. Combines BM25 keyword scoring with semantic embeddings (Ollama/OpenAI) and optional LLM re-ranking. Ambient context uses short-term plus request-relevant recall instead of blindly injecting the most prominent memories. Assistant self-reflection, agent-subject facts, stale transient profiles, backlog goals, old blockers, and agent suggestions remain recoverable but cannot masquerade as current user state. The full lifecycle includes exponential decay with category-specific half-lives (14 days for events to 346 days for relationships), BFS-clustered fusion, and utility-based forgetting with soft-archive before hard-prune.
+SQLite-backed memory with ACID guarantees. Combines BM25 keyword scoring with semantic embeddings (Ollama/OpenAI) and optional LLM re-ranking. Recall uses smooth activation from temporal decay, lifecycle, genuine topic relevance, salience, and user confirmation: an old topic fades from general context but can return naturally when it becomes relevant, without magic "history" wording. Automatic retrieval is telemetry only and never reinforces freshness or utility. Assistant self-reflection and agent-subject facts remain separate from user memory. The lifecycle includes category-specific half-lives (14 days for events to 346 days for relationships), BFS-clustered fusion, and utility-based forgetting with soft-archive before hard-prune.
 
 ### Cost-Aware Model Routing
 
@@ -348,7 +348,7 @@ Actionable reminders automatically execute when they contain action words (check
 | Capability | OpenClaw | ScallopBot |
 |------------|----------|------------|
 | **Memory retrieval** | Vector + FTS5 hybrid | BM25 + semantic + LLM re-ranking |
-| **Memory decay** | -- | 4-factor exponential with category-specific half-lives |
+| **Memory decay** | -- | Natural activation + category half-lives + user-confirmation reinforcement |
 | **Memory consolidation** | -- | BFS-clustered fusion + NREM cross-category |
 | **Memory forgetting** | -- | Utility-based with soft-archive / hard-prune |
 | **Associative retrieval** | -- | Spreading activation with typed edges |

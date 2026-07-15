@@ -22,24 +22,25 @@ afterEach(() => {
 });
 
 describe('durable goal registry', () => {
-  it('does not inject an abandoned overdue goal unless the request names it', async () => {
+  it('lets an old backlog goal fade generally and return on a natural topic mention', async () => {
     const dbPath = tempDatabasePath();
     const db = new ScallopDatabase(dbPath);
     const service = new GoalService({ db, logger });
     const old = Date.now() - 60 * 24 * 60 * 60 * 1_000;
     const goal = await service.createGoal('owner', {
-      title: 'Old YouTube metrics campaign',
-      status: 'active',
+      title: 'Old Struan meeting follow-up',
+      status: 'backlog',
       dueDate: old + 7 * 24 * 60 * 60 * 1_000,
     });
     const raw = new Database(dbPath);
-    raw.prepare('UPDATE memories SET created_at = ?, document_date = ?, last_accessed = ? WHERE id = ?')
-      .run(old, old, old, goal.id);
+    raw.prepare('UPDATE memories SET created_at = ?, updated_at = ?, document_date = ?, last_accessed = ? WHERE id = ?')
+      .run(old, old, old, old, goal.id);
     raw.close();
 
     expect(await service.getGoalContext('owner', 'What is on my plate today?')).toBe('');
-    expect(await service.getGoalContext('owner', 'What happened to the YouTube metrics campaign?'))
-      .toContain('Old YouTube metrics campaign');
+    const recalled = await service.getGoalContext('owner', 'Whatever happened with Struan?');
+    expect(recalled).toContain('Old Struan meeting follow-up');
+    expect(recalled).toContain('Status: backlog');
     db.close();
   });
 

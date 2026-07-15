@@ -14,6 +14,10 @@ import {
 import { calculateBM25Score, buildDocFreqMap, SEARCH_WEIGHTS, type BM25Options } from '../../../../memory/bm25.js';
 import { TFIDFEmbedder, OllamaEmbedder, cosineSimilarity } from '../../../../memory/embeddings.js';
 import { rerankResults, type RerankCandidate } from '../../../../memory/reranker.js';
+import {
+  isMemoryLiveForContext,
+  requestRelevanceScore,
+} from '../../../../memory/state-relevance.js';
 import type { LLMProvider, CompletionRequest, CompletionResponse } from '../../../../providers/types.js';
 
 // Types
@@ -331,11 +335,10 @@ async function executeSearch(args: MemorySearchArgs): Promise<void> {
       includeAllSources: false,
     });
 
-    // Filter out past events — only use structured eventDate, no keyword heuristics
-    const EVENT_EXPIRY_MS = 24 * 60 * 60 * 1000;
-    const now = Date.now();
+    // Provenance is categorical; age is not. Old memories remain candidates
+    // and the activation model decides whether relevance is strong enough to
+    // bring them back naturally.
     const filteredMemories = allMemories.filter(m => {
-      if (m.eventDate && m.eventDate < now - EVENT_EXPIRY_MS) return false;
       if (m.metadata?.audience === 'assistant' || m.metadata?.subject === 'agent') return false;
       return true;
     });
@@ -363,7 +366,17 @@ async function executeSearch(args: MemorySearchArgs): Promise<void> {
     }
 
     const limit = Math.min(args.limit || 10, 50);
-    const results = await searchMemories(candidates, args.query, limit, db);
+    const results = (await searchMemories(candidates, args.query, limit, db))
+      .filter(result => result.memory.metadata?.goalType
+        // Structured goal projections do not enter ambient memory, but a
+        // direct natural topic/name query may still find the durable record.
+        ? requestRelevanceScore(args.query, result.memory.content) >= 0.5
+        : isMemoryLiveForContext(
+            result.memory,
+            args.query,
+            Date.now(),
+            Math.min(1, result.score),
+          ));
 
     outputResult({
       success: true,

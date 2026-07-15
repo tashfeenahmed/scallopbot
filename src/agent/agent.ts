@@ -40,6 +40,7 @@ import type { OutcomeBrain, OutcomeObservation } from '../brain/index.js';
 import { stripThinkTags } from '../utils/output-safety.js';
 import { resolveStateUserId } from '../utils/state-user-id.js';
 import { compactCompletedConversationHistory } from '../memory/session-message-view.js';
+import { isMemoryLiveForContext } from '../memory/state-relevance.js';
 import {
   assessToolCallForTurn,
   boundResponseToolCalls,
@@ -1851,12 +1852,6 @@ The current user request is quoted below. Execute tools only when they directly 
       // Tier 2: Memory retrieval — short-term recall plus request-relevant
       // long-term recall. High prominence alone is never a reason to inject a
       // fact into every turn; that resurrects unrelated old topics.
-      const EVENT_EXPIRY_MS = 24 * 60 * 60 * 1000;
-      const historicalMemoryQuery = /\b(?:history|historical|previous|earlier|before|ago|yesterday|last\s+(?:time|week|month|year|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|when did|what did i|show me (?:my )?recent|recent (?:activity|events?|history))\b/i.test(userMessage);
-      const isPastEvent = (mem: { eventDate: number | null }): boolean => {
-        return !historicalMemoryQuery
-          && !!(mem.eventDate && mem.eventDate < Date.now() - EVENT_EXPIRY_MS);
-      };
       const contextMemoryContent = (mem: {
         content: string;
         eventDate: number | null;
@@ -1885,9 +1880,6 @@ The current user request is quoted below. Execute tools only when they directly 
           userId,
           minProminence: 0.1,
           limit: 10,
-          ...(!historicalMemoryQuery
-            ? { excludeEventsBefore: Date.now() - EVENT_EXPIRY_MS }
-            : {}),
         }),
       ]);
 
@@ -1895,14 +1887,18 @@ The current user request is quoted below. Execute tools only when they directly 
       const allFactTexts: { content: string; subject?: string }[] = [];
 
       for (const fact of recentFacts) {
-        if (isUserGroundedMemory(fact) && !seenIds.has(fact.id) && !isPastEvent(fact)) {
+        if (isUserGroundedMemory(fact)
+          && isMemoryLiveForContext(fact, userMessage)
+          && !seenIds.has(fact.id)) {
           seenIds.add(fact.id);
           const subject = fact.metadata?.subject as string | undefined;
           allFactTexts.push({ content: contextMemoryContent(fact), subject });
         }
       }
       for (const result of relevantResults) {
-        if (isUserGroundedMemory(result.memory) && !seenIds.has(result.memory.id) && !isPastEvent(result.memory)) {
+        if (isUserGroundedMemory(result.memory)
+          && isMemoryLiveForContext(result.memory, userMessage, Date.now(), result.score)
+          && !seenIds.has(result.memory.id)) {
           seenIds.add(result.memory.id);
           const subject = result.memory.metadata?.subject as string | undefined;
           allFactTexts.push({ content: contextMemoryContent(result.memory), subject });

@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest';
 import {
   isBoardItemLiveForContext,
   isGoalLiveForAutonomy,
+  isGoalLiveForContext,
   isMemoryLiveForContext,
+  memoryActivationScore,
   isProfileEntryLiveForContext,
 } from './state-relevance.js';
 
@@ -10,22 +12,44 @@ const DAY = 24 * 60 * 60 * 1_000;
 const NOW = Date.UTC(2026, 6, 15, 12);
 
 describe('ambient state relevance', () => {
-  it('keeps old records recoverable without treating them as current', () => {
+  it('lets an old topic fade from general context but return on a natural direct mention', () => {
     expect(isMemoryLiveForContext({
-      content: 'Prepare for an old client meeting',
+      content: 'Prepare for the Struan client meeting',
+      category: 'event',
       source: 'user',
       documentDate: NOW - 120 * DAY,
-      eventDate: null,
+      eventDate: NOW - 120 * DAY,
       metadata: null,
     }, 'what is on my plate today?', NOW)).toBe(false);
 
     expect(isMemoryLiveForContext({
-      content: 'Prepare for an old client meeting',
+      content: 'Prepare for the Struan client meeting',
+      category: 'event',
       source: 'user',
       documentDate: NOW - 120 * DAY,
-      eventDate: null,
+      eventDate: NOW - 120 * DAY,
       metadata: null,
-    }, 'show the history of the client meeting', NOW)).toBe(true);
+    }, 'Whatever happened with Struan?', NOW)).toBe(true);
+  });
+
+  it('does not strengthen a memory merely because software retrieved it repeatedly', () => {
+    const base = {
+      content: 'Prepare for the Struan client meeting',
+      category: 'event',
+      source: 'user',
+      documentDate: NOW - 180 * DAY,
+      eventDate: NOW - 180 * DAY,
+      metadata: null,
+    };
+    const normal = memoryActivationScore(base, 'what is on my plate today?', NOW);
+    const repeatedlyRetrieved = memoryActivationScore({
+      ...base,
+      // Deliberately extra properties from a real memory row. Activation does
+      // not use machine retrieval telemetry as human reinforcement.
+      accessCount: 500,
+      lastAccessed: NOW,
+    }, 'what is on my plate today?', NOW);
+    expect(repeatedlyRetrieved).toBe(normal);
   });
 
   it('never exposes assistant self-reflection as user memory', () => {
@@ -54,9 +78,18 @@ describe('ambient state relevance', () => {
     }, NOW)).toBe(false);
     expect(isGoalLiveForAutonomy({
       createdAt: NOW - 100 * DAY,
+      updatedAt: NOW - 90 * DAY,
       lastAccessed: NOW - DAY,
       metadata: { status: 'active', dueDate: NOW - 30 * DAY, progress: 20 },
-    }, NOW)).toBe(true);
+    }, NOW)).toBe(false);
+
+    expect(isGoalLiveForContext({
+      content: 'Prepare for the Struan meeting',
+      createdAt: NOW - 200 * DAY,
+      updatedAt: NOW - 190 * DAY,
+      lastAccessed: NOW,
+      metadata: { status: 'active', dueDate: NOW - 180 * DAY, progress: 0 },
+    }, 'How did the Struan meeting go?', NOW)).toBe(true);
   });
 
   it('separates current work from suggestions, blockers, and old cards', () => {
@@ -70,6 +103,14 @@ describe('ambient state relevance', () => {
     expect(isBoardItemLiveForContext({
       ...base, source: 'user', status: 'pending', boardStatus: 'backlog',
     }, NOW)).toBe(true);
+
+    expect(isBoardItemLiveForContext({
+      ...base,
+      message: 'Resolve the Struan contract',
+      createdAt: NOW - 180 * DAY,
+      updatedAt: NOW - 180 * DAY,
+      source: 'user', status: 'blocked', boardStatus: 'waiting',
+    }, 'What happened with Struan?', NOW)).toBe(true);
   });
 
   it('expires transient profile state but preserves identity', () => {

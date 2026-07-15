@@ -1592,6 +1592,7 @@ export class ScallopDatabase {
 
     // Migration: Add source memory columns (learned_from, times_confirmed, contradiction_ids)
     this.migrateAddSourceMemoryColumns();
+    this.migrateSeparateRetrievalTelemetryFromFreshness();
     this.migrateRepairRelativeNremMemories();
 
     // Migration: Clean polluted memory entries (skill outputs, assistant responses stored as facts)
@@ -2181,6 +2182,77 @@ export class ScallopDatabase {
         console.warn(`[migration] migrateAddSourceMemoryColumns: ${error.message}`);
       }
     }
+  }
+
+  /**
+   * Older versions made every automatic lookup look like a content update by
+   * writing the same timestamp to last_accessed and updated_at. Repair the
+   * recoverable cases once; future lookups update retrieval telemetry only.
+   *
+   * Some public databases had already copied that contaminated timestamp into
+   * the durable goal registry. Repair both projections in one transaction and
+   * preserve the prior values in an additive audit table.
+   */
+  private migrateSeparateRetrievalTelemetryFromFreshness(): void {
+    const repairedAt = Date.now();
+    const migrate = this.db.transaction(() => {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS retrieval_freshness_repair_audit (
+          memory_id TEXT PRIMARY KEY,
+          previous_memory_updated_at INTEGER NOT NULL,
+          repaired_memory_updated_at INTEGER NOT NULL,
+          previous_goal_updated_at INTEGER,
+          repaired_goal_updated_at INTEGER,
+          last_accessed INTEGER NOT NULL,
+          repaired_at INTEGER NOT NULL
+        )
+      `);
+      this.db.prepare(`
+        INSERT OR IGNORE INTO retrieval_freshness_repair_audit (
+          memory_id, previous_memory_updated_at, repaired_memory_updated_at,
+          previous_goal_updated_at, repaired_goal_updated_at,
+          last_accessed, repaired_at
+        )
+        SELECT
+          m.id,
+          m.updated_at,
+          MAX(m.created_at, m.document_date),
+          g.updated_at,
+          CASE WHEN g.id IS NULL THEN NULL
+            ELSE MAX(g.created_at, m.created_at, m.document_date, COALESCE(g.completed_at, 0)) END,
+          m.last_accessed,
+          ?
+        FROM memories m
+        LEFT JOIN goal_registry g ON g.id = m.id
+        WHERE m.last_accessed IS NOT NULL
+          AND (m.updated_at = m.last_accessed OR g.updated_at = m.last_accessed)
+      `).run(repairedAt);
+      this.db.exec(`
+        UPDATE memories
+        SET updated_at = MAX(created_at, document_date)
+        WHERE last_accessed IS NOT NULL
+          AND updated_at = last_accessed;
+
+        UPDATE goal_registry
+        SET updated_at = (
+          SELECT MAX(
+            goal_registry.created_at,
+            memories.created_at,
+            memories.document_date,
+            COALESCE(goal_registry.completed_at, 0)
+          )
+          FROM memories
+          WHERE memories.id = goal_registry.id
+        )
+        WHERE EXISTS (
+          SELECT 1 FROM memories
+          WHERE memories.id = goal_registry.id
+            AND memories.last_accessed IS NOT NULL
+            AND goal_registry.updated_at = memories.last_accessed
+        );
+      `);
+    });
+    migrate.immediate();
   }
 
   /**
@@ -4319,19 +4391,16 @@ export class ScallopDatabase {
     }
   }
 
-  /**
-   * Record memory access (for decay system)
-   */
+  /** Record automatic retrieval telemetry without pretending the user reinforced the memory. */
   recordAccess(id: string): void {
     const now = Date.now();
     const stmt = this.db.prepare(`
       UPDATE memories SET
         last_accessed = ?,
-        access_count = access_count + 1,
-        updated_at = ?
+        access_count = access_count + 1
       WHERE id = ?
     `);
-    stmt.run(now, now, id);
+    stmt.run(now, id);
   }
 
   /**

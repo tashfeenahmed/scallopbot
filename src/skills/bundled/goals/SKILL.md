@@ -32,7 +32,10 @@ inputSchema:
     scope:
       type: string
       enum: [current, all]
-      description: "List scope. Defaults to current (active only); use all only when the user explicitly asks for backlog/history/everything."
+      description: "List scope. Defaults to naturally active work; use all for a complete durable inventory."
+    query:
+      type: string
+      description: "Natural topic/name from the user's request. Lets a relevant older goal return without dumping unrelated history."
     due:
       type: string
       description: "Due date (e.g., 'next week', '2024-03-15', 'in 30 days')"
@@ -124,11 +127,10 @@ The skill accepts JSON arguments via the `SKILL_ARGS` environment variable:
 }
 ```
 
-`list` defaults to active items. Backlog and completed goals remain stored but
-are shown only when `status` or `scope: "all"` is explicitly requested. An
-overdue active goal that has had no recent engagement is also historical: keep
-it out of the default current view, while preserving it for an explicit status,
-name, or full-history request.
+`list` defaults to naturally active items. Age, due date, lifecycle, and genuine
+topic relevance determine activation. Pass the user's topic/name as `query` so
+a relevant older goal can return naturally; unrelated old goals remain quiet.
+`scope: "all"` is only the complete durable inventory and does not affect storage.
 
 ### Show goal hierarchy
 

@@ -17,7 +17,7 @@ import { stripThinkTags } from '../utils/output-safety.js';
 import { resolveStateUserId } from '../utils/state-user-id.js';
 import {
   isBoardItemLiveForContext,
-  isGoalLiveForAutonomy,
+  isGoalLiveForContext,
   isMemoryLiveForContext,
   isProfileEntryLiveForContext,
 } from '../memory/state-relevance.js';
@@ -458,7 +458,7 @@ export class OutcomeBrain {
     const activeBoard = this.db.getScheduledItemsByUser(stateUserId)
       .filter(item => ['pending', 'processing', 'blocked'].includes(item.status)
         && !['done', 'archived'].includes(item.boardStatus ?? ''))
-      .filter(item => isBoardItemLiveForContext(item, at))
+      .filter(item => isBoardItemLiveForContext(item, proposal.activeRequest ?? '', at))
       .sort((a, b) => b.updatedAt - a.updatedAt)
       .slice(0, 12)
       .map(item => ({
@@ -473,7 +473,7 @@ export class OutcomeBrain {
     let activeGoals: Array<Record<string, unknown>> = [];
     try {
       activeGoals = (await this.goalService?.getActiveGoals(stateUserId) ?? [])
-        .filter(goal => isGoalLiveForAutonomy(goal, at))
+        .filter(goal => isGoalLiveForContext(goal, proposal.activeRequest ?? '', at))
         .slice(0, 8)
         .map(goal => ({
           title: bounded(goal.content, 240),

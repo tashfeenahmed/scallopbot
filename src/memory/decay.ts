@@ -3,7 +3,7 @@
  *
  * Implements brain-inspired memory decay:
  * - Older memories decay faster
- * - Frequently accessed memories decay slower
+ * - User-confirmed memories decay slower
  * - Different decay rates by memory type and category
  * - Smart forgetting (affects ranking, not deletion)
  */
@@ -16,9 +16,9 @@ import type { ScallopDatabase, ScallopMemoryEntry, ScallopMemoryType, MemoryCate
 export interface DecayConfig {
   /** Base decay rate (default: 0.97) */
   baseDecayRate?: number;
-  /** Access boost multiplier (default: 0.1) */
+  /** @deprecated Accepted for configuration compatibility; retrieval no longer reinforces memory. */
   accessBoostMultiplier?: number;
-  /** Maximum access count for boost calculation (default: 10) */
+  /** @deprecated Accepted for configuration compatibility; retrieval remains telemetry only. */
   maxAccessCount?: number;
   /** Custom decay rates by memory type */
   typeDecayRates?: Partial<Record<ScallopMemoryType, number>>;
@@ -52,10 +52,11 @@ const DEFAULT_CATEGORY_DECAY_RATES: Record<MemoryCategory, number> = {
  * Decay factor weights
  */
 const DECAY_WEIGHTS = {
-  age: 0.30,
-  accessFrequency: 0.25,
-  recencyOfAccess: 0.25,
-  semanticImportance: 0.20,
+  age: 0.55,
+  confirmationFrequency: 0.20,
+  confirmationRecency: 0.10,
+  semanticImportance: 0.10,
+  confidence: 0.05,
 };
 
 /**
@@ -95,7 +96,7 @@ export class DecayEngine {
   /**
    * Calculate prominence for a single memory
    *
-   * Additive weighted sum of age decay, access frequency, recency of access, and importance.
+   * Additive weighted sum of age, genuine confirmation, importance and confidence.
    * Each factor is normalized to [0, 1] before weighting to prevent saturation.
    */
   calculateProminence(memory: ScallopMemoryEntry): number {
@@ -107,12 +108,13 @@ export class DecayEngine {
     const now = Date.now();
 
     // Age factor
-    const ageMs = now - memory.documentDate;
+    const ageAnchor = memory.eventDate ?? memory.documentDate;
+    const ageMs = Math.max(0, now - ageAnchor);
     const ageDays = ageMs / (1000 * 60 * 60 * 24);
 
-    // Grace period: memories less than 1 day old with no access history
-    // start at full prominence — they need time to be discovered by search.
-    if (ageDays < 1 && memory.accessCount === 0) {
+    // Grace period: new memories need time to be understood and naturally
+    // reinforced; whether the software happened to retrieve them is irrelevant.
+    if (ageDays < 1) {
       return 1.0;
     }
 
@@ -120,49 +122,36 @@ export class DecayEngine {
     const typeRate = this.config.typeDecayRates[memory.memoryType] ?? this.config.baseDecayRate;
     const categoryRate = this.config.categoryDecayRates[memory.category] ?? this.config.baseDecayRate;
 
-    // Use the slower of the two rates (more preservation)
-    const decayRate = Math.max(typeRate, categoryRate);
+    // Category expresses how humans retain this kind of information. Memory
+    // type modifies exceptional states without allowing ordinary retrieval to
+    // turn a short-lived event into a permanent fact.
+    const decayRate = memory.memoryType === 'superseded'
+      ? Math.min(typeRate, categoryRate)
+      : memory.memoryType === 'derived'
+        ? Math.max(typeRate, categoryRate)
+        : categoryRate;
 
     // Age-based decay
     const ageDecay = Math.pow(decayRate, ageDays);
 
-    // Access boost: scales with how often the memory has been retrieved.
-    // Never-accessed memories (accessCount=0) get a reduced baseline — a memory
-    // that was stored but never retrieved is less valuable than one the system
-    // has actively used in responses.
-    const accessCount = Math.min(memory.accessCount, this.config.maxAccessCount);
-    const accessBoost = accessCount === 0
-      ? 0.5
-      : 1 + (this.config.accessBoostMultiplier * accessCount);
-
-    // Recency of access boost.
-    // Never-accessed memories get a neutral baseline (1.0) — the absence of any
-    // retrieval means there's no recency signal, but shouldn't double-penalize
-    // since accessBoost already handles the "never accessed" signal.
-    let recencyBoost = 1.0;
-    if (memory.lastAccessed) {
-      const lastAccessAgeDays = (now - memory.lastAccessed) / (1000 * 60 * 60 * 24);
-      // Boost decays over 7 days
-      recencyBoost = 1 + 0.3 * Math.exp(-lastAccessAgeDays / 7);
-    }
+    // Retrieval is machine behaviour, not evidence that the memory matters to
+    // the user. Only repeated user statements (timesConfirmed) reinforce it.
+    const confirmationCount = Math.max(1, memory.timesConfirmed ?? 1);
+    const confirmationFrequency = Math.min(1, Math.log2(1 + confirmationCount) / Math.log2(9));
+    const confirmationRecency = confirmationCount > 1
+      ? Math.exp(-Math.max(0, now - memory.updatedAt) / (30 * 24 * 60 * 60 * 1000))
+      : 0;
 
     // Importance weight: importance / 10
     const importanceWeight = memory.importance / 10;
 
-    // Normalize access factors to [0, 1] so weighted sum can't exceed 1.0.
-    // This prevents high-access memories from saturating at prominence=1.0
-    // and preserves meaningful differentiation across the full range.
-    const maxAccessBoost = 1 + (this.config.accessBoostMultiplier * this.config.maxAccessCount);
-    const maxRecencyBoost = 1.3; // 1 + 0.3 (recency coefficient)
-    const normalizedAccess = accessBoost / maxAccessBoost;
-    const normalizedRecency = recencyBoost / maxRecencyBoost;
-
     // Calculate weighted prominence (each factor in [0, 1], weights sum to 1.0)
     const prominence =
       ageDecay * DECAY_WEIGHTS.age +
-      normalizedAccess * DECAY_WEIGHTS.accessFrequency +
-      normalizedRecency * DECAY_WEIGHTS.recencyOfAccess +
-      importanceWeight * DECAY_WEIGHTS.semanticImportance;
+      confirmationFrequency * DECAY_WEIGHTS.confirmationFrequency +
+      confirmationRecency * DECAY_WEIGHTS.confirmationRecency +
+      importanceWeight * DECAY_WEIGHTS.semanticImportance +
+      memory.confidence * DECAY_WEIGHTS.confidence;
 
     // High-importance identity facts (importance >= 8) get moderate protection.
     // Floor at 0.2 (above DORMANT=0.1, below ACTIVE=0.5) so they remain searchable
@@ -337,12 +326,11 @@ export function createDecayEngine(config?: DecayConfig): DecayEngine {
 /**
  * Compute utility score for a memory.
  *
- * Formula: prominence × ln(2 + accessCount)
+ * Formula: prominence × ln(2 + confirmationCount)
  *
- * - prominence=0, any access → 0 (zero prominence = zero utility)
- * - any prominence, accessCount=0 → prominence × 0.69 (baseline from prominence)
- * - Higher access count logarithmically boosts utility
+ * Automatic retrieval never boosts retention. The second argument is the
+ * number of genuine user confirmations (normally timesConfirmed - 1).
  */
-export function computeUtilityScore(prominence: number, accessCount: number): number {
-  return prominence * Math.log(2 + accessCount);
+export function computeUtilityScore(prominence: number, confirmationCount: number): number {
+  return prominence * Math.log(2 + confirmationCount);
 }

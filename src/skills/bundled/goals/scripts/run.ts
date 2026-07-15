@@ -7,7 +7,10 @@
 import * as path from 'path';
 import Database from 'better-sqlite3';
 import { nanoid } from 'nanoid';
-import { isGoalLiveForAutonomy } from '../../../../memory/state-relevance.js';
+import {
+  isGoalLiveForAutonomy,
+  isGoalLiveForContext,
+} from '../../../../memory/state-relevance.js';
 
 // Types
 interface GoalMetadata {
@@ -40,6 +43,7 @@ interface GoalArgs {
   id?: string;
   status?: 'backlog' | 'active' | 'completed';
   scope?: 'current' | 'all';
+  query?: string;
   due?: string;
   checkin?: 'daily' | 'weekly' | 'biweekly' | 'monthly' | 'none';
   tags?: string[];
@@ -487,9 +491,9 @@ function listItems(db: Database.Database, args: GoalArgs): SkillResult {
     items = items.filter(i => i.metadata.status === args.status);
   } else if (args.scope === 'all') {
     // Explicit historical/full view keeps every durable status visible.
+  } else if (args.query?.trim()) {
+    items = items.filter(i => isGoalLiveForContext(i, args.query!.trim()));
   } else {
-    // Backlog is preserved planning state, not a current priority. Callers
-    // must explicitly request backlog/all instead of silently resurfacing it.
     items = items.filter(i => isGoalLiveForAutonomy(i));
   }
 
@@ -498,7 +502,7 @@ function listItems(db: Database.Database, args: GoalArgs): SkillResult {
       success: true,
       output: args.status || args.scope === 'all'
         ? 'No items found matching the criteria.'
-        : 'No current goals or tasks. Stale active, backlog, and completed items are preserved; request a status or scope="all" only when the user asks for historical state.',
+        : 'No naturally active or relevant goals found. Older records remain preserved and can return when their topic becomes relevant again.',
       exitCode: 0,
     };
   }

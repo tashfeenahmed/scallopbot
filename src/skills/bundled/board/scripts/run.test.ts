@@ -97,4 +97,29 @@ describe('board skill owner-scoped item lookup', () => {
       user_id: 'owner-a', status: 'dismissed', board_status: 'archived',
     });
   });
+
+  it('lets an old card fade generally and return through a natural topic mention', () => {
+    const db = new ScallopDatabase(dbPath);
+    const old = Date.now() - 180 * 24 * 60 * 60 * 1_000;
+    const item = db.addScheduledItem({
+      userId: 'owner-a', sessionId: null, source: 'user', kind: 'task', type: 'task',
+      message: 'Resolve the Struan contract', context: null, triggerAt: 0, recurring: null,
+      sourceMemoryId: null, boardStatus: 'waiting',
+    });
+    db.close();
+    const raw = new Database(dbPath);
+    raw.prepare(`
+      UPDATE scheduled_items
+      SET status = 'blocked', board_status = 'waiting', created_at = ?, updated_at = ?
+      WHERE id = ?
+    `).run(old, old, item.id);
+    raw.close();
+
+    expect(runSkill(dbPath, { action: 'view' }, 'owner-a').output)
+      .not.toContain('Resolve the Struan contract');
+    expect(runSkill(dbPath, { action: 'view', query: 'What happened with Struan?' }, 'owner-a').output)
+      .toContain('Resolve the Struan contract');
+    expect(runSkill(dbPath, { action: 'view', scope: 'all' }, 'owner-a').output)
+      .toContain('Resolve the Struan contract');
+  });
 });

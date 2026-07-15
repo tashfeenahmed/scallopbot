@@ -137,6 +137,11 @@ describe('goals skill owner isolation', () => {
 
     const explicitlyActive = runSkill(dbPath, { action: 'list', status: 'active' }, 'owner-a');
     expect(explicitlyActive.output).toContain('Long abandoned campaign');
+
+    const naturalRecall = runSkill(dbPath, {
+      action: 'list', query: 'How did the abandoned campaign go?',
+    }, 'owner-a');
+    expect(naturalRecall.output).toContain('Long abandoned campaign');
     expect(goal.id).toBeTruthy();
   });
 });

@@ -212,6 +212,7 @@ function seedStaleGoal(
     title?: string;
     daysOld?: number;
     dueDate?: number;
+    checkinFrequency?: 'daily' | 'weekly' | 'biweekly' | 'monthly';
     status?: string;
   },
 ) {
@@ -241,6 +242,8 @@ function seedStaleGoal(
       metadata: {
         goalType: 'goal',
         status: opts?.status ?? 'active',
+        ...(opts?.dueDate === undefined ? {} : { dueDate: opts.dueDate }),
+        ...(opts?.checkinFrequency === undefined ? {} : { checkinFrequency: opts.checkinFrequency }),
       },
     });
   } finally {
@@ -346,8 +349,14 @@ describe('BackgroundGardener gap scanner integration', () => {
 
     const db = store.getDatabase();
 
-    // Seed a stale goal (20 days old, exceeds 14-day STALE_THRESHOLD_DAYS)
-    seedStaleGoal(db, { title: 'Learn Rust programming', daysOld: 20 });
+    // The progress has gone stale, but an approaching deadline keeps the goal
+    // genuinely active enough to warrant proactive evaluation.
+    seedStaleGoal(db, {
+      title: 'Learn Rust programming',
+      daysOld: 20,
+      dueDate: Date.now() + 30 * 24 * 60 * 60 * 1000,
+      checkinFrequency: 'daily',
+    });
 
     // Seed a session summary so the user shows up in memory queries
     seedRecentSessionSummary(db);
@@ -542,8 +551,13 @@ describe('BackgroundGardener gap scanner integration', () => {
 
     const db = store.getDatabase();
 
-    // Seed a stale goal (will produce a signal)
-    seedStaleGoal(db, { daysOld: 20 });
+    // The progress has gone stale, while the future deadline makes this live
+    // work rather than an abandoned topic.
+    seedStaleGoal(db, {
+      daysOld: 20,
+      dueDate: Date.now() + 30 * 24 * 60 * 60 * 1000,
+      checkinFrequency: 'daily',
+    });
 
     // Seed session summary
     seedRecentSessionSummary(db);

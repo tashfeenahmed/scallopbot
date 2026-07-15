@@ -1,15 +1,15 @@
 /**
  * Utility Score — enhanced forgetting metric (Phase 29).
  *
- * Replaces simple prominence-threshold pruning with access-history-weighted
- * utility scoring per Hu et al.
+ * Replaces simple prominence-threshold pruning with confirmation-weighted
+ * utility scoring.
  *
- * Formula: utilityScore = prominence × log(2 + accessCount)
+ * Formula: utilityScore = prominence × log(2 + confirmationCount)
  *
  * The log(2 + x) base ensures never-accessed memories (accessCount=0) still
  * get a prominence-proportional utility (~prominence × 0.69) rather than
- * collapsing to zero. Frequently-accessed memories get logarithmically
- * boosted. This is a SEPARATE metric from prominence — prominence drives
+ * collapsing to zero. User-confirmed memories get logarithmically boosted;
+ * automatic retrieval never does. This is a SEPARATE metric from prominence — prominence drives
  * decay/ranking, utility score drives deletion decisions.
  */
 
@@ -38,6 +38,7 @@ export interface LowUtilityMemory {
   content: string;
   prominence: number;
   accessCount: number;
+  confirmationCount: number;
   utilityScore: number;
   category: MemoryCategory;
   ageDays: number;
@@ -60,6 +61,7 @@ interface UtilityRow {
   id: string;
   prominence: number;
   access_count: number;
+  times_confirmed: number;
   category: string;
   memory_type: string;
   document_date: number;
@@ -100,7 +102,7 @@ export function findLowUtilityMemories(
   const ageCutoff = now - minAgeDays * DAY_MS;
 
   const rows = db.raw<UtilityRow>(
-    `SELECT id, prominence, access_count, category, memory_type, document_date, content
+    `SELECT id, prominence, access_count, times_confirmed, category, memory_type, document_date, content
      FROM memories
      WHERE is_latest = 1
        AND memory_type != 'static_profile'
@@ -116,7 +118,8 @@ export function findLowUtilityMemories(
       continue;
     }
 
-    const utility = computeUtilityScore(row.prominence, row.access_count);
+    const confirmationCount = Math.max(0, (row.times_confirmed ?? 1) - 1);
+    const utility = computeUtilityScore(row.prominence, confirmationCount);
 
     if (utility < utilityThreshold) {
       const ageDays = Math.floor((now - row.document_date) / DAY_MS);
@@ -128,6 +131,7 @@ export function findLowUtilityMemories(
         content,
         prominence: row.prominence,
         accessCount: row.access_count,
+        confirmationCount,
         utilityScore: utility,
         category: row.category as MemoryCategory,
         ageDays,

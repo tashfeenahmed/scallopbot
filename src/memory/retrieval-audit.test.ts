@@ -33,6 +33,7 @@ interface SeedOptions {
   accessCount?: number;
   lastAccessed?: number | null;
   documentDate?: number;
+  timesConfirmed?: number;
 }
 
 function seedMemory(database: ScallopDatabase, opts: SeedOptions = {}): string {
@@ -52,6 +53,7 @@ function seedMemory(database: ScallopDatabase, opts: SeedOptions = {}): string {
     sourceChunk: null,
     embedding: null,
     metadata: null,
+    timesConfirmed: opts.timesConfirmed ?? 1,
   });
   return entry.id;
 }
@@ -74,11 +76,11 @@ describe('auditRetrievalHistory', () => {
     expect(result.candidatesForDecay).toEqual([]);
   });
 
-  it('returns neverRetrieved=0, staleRetrieved=0 when all memories recently accessed', () => {
+  it('does not mistake recent automatic access for user confirmation', () => {
     const database = createTestDb();
     const now = Date.now();
 
-    // Old memories (created 10 days ago) but accessed recently
+    // Old memories were looked up recently but never re-stated by the user.
     seedMemory(database, {
       content: 'active memory 1',
       prominence: 0.8,
@@ -96,10 +98,10 @@ describe('auditRetrievalHistory', () => {
 
     const result = auditRetrievalHistory(database);
 
-    expect(result.neverRetrieved).toBe(0);
+    expect(result.neverRetrieved).toBe(2);
     expect(result.staleRetrieved).toBe(0);
     expect(result.totalAudited).toBe(2);
-    expect(result.candidatesForDecay).toEqual([]);
+    expect(result.candidatesForDecay).toHaveLength(2);
   });
 
   it('does NOT flag a memory created 1 day ago that was never accessed (too young)', () => {
@@ -143,11 +145,12 @@ describe('auditRetrievalHistory', () => {
     expect(result.candidatesForDecay).toContain(id);
   });
 
-  it('flags a memory accessed 45 days ago with prominence 0.6 as staleRetrieved', () => {
+  it('does not flag an old memory that the user genuinely reconfirmed recently', () => {
     const database = createTestDb();
     const now = Date.now();
 
-    // Created 60 days ago, last accessed 45 days ago → stale
+    // Created 60 days ago and automatically accessed 45 days ago, then the
+    // user stated the same fact again now.
     const id = seedMemory(database, {
       content: 'stale memory',
       prominence: 0.6,
@@ -155,12 +158,14 @@ describe('auditRetrievalHistory', () => {
       lastAccessed: now - 45 * DAY_MS,
       documentDate: now - 60 * DAY_MS,
     });
+    database.reinforceMemory(id);
 
     const result = auditRetrievalHistory(database);
 
-    expect(result.staleRetrieved).toBe(1);
+    expect(result.neverRetrieved).toBe(0);
+    expect(result.staleRetrieved).toBe(0);
     expect(result.totalAudited).toBe(1);
-    expect(result.candidatesForDecay).toContain(id);
+    expect(result.candidatesForDecay).not.toContain(id);
   });
 
   it('does NOT audit a memory with prominence 0.3 (below 0.5 threshold)', () => {

@@ -101,6 +101,7 @@ interface BoardItem {
 interface BoardArgs {
   action: 'view' | 'add' | 'move' | 'update' | 'done' | 'archive' | 'detail' | 'snooze';
   scope?: 'current' | 'all';
+  query?: string;
   column?: BoardStatus;
   priority?: Priority;
   label?: string;
@@ -579,12 +580,13 @@ function viewBoard(args: BoardArgs): SkillResult {
   let items = rows.map(r => rowToBoardItem(r, r.goal_id ? goalTitles.get(r.goal_id) : undefined));
 
   const allScope = args.scope === 'all' || Boolean(args.column);
+  const activationQuery = args.query?.trim() ?? '';
   const preservedCount = allScope
     ? 0
     : items.filter(item => ACTIVE_COLUMNS.includes(item.boardStatus)
-      && !isBoardItemLiveForContext(item)).length;
+      && !isBoardItemLiveForContext(item, activationQuery)).length;
   if (!allScope) {
-    items = items.filter(item => isBoardItemLiveForContext(item));
+    items = items.filter(item => isBoardItemLiveForContext(item, activationQuery));
   }
 
   // Apply filters
@@ -641,7 +643,7 @@ function viewBoard(args: BoardArgs): SkillResult {
   if (doneThisWeek > 0) parts.push(`${doneThisWeek} done this week`);
   if (parts.length > 0) output += `\n${parts.join(' · ')}`;
   if (preservedCount > 0) {
-    output += `\n\n${preservedCount} older, blocked, completed, backlog, or agent-suggested item(s) are preserved outside the current view. Use scope="all" to inspect them; do not report them as current user priorities.`;
+    output += `\n\n${preservedCount} low-activation item(s) remain preserved. They can return when their topic becomes relevant; scope="all" is the complete inventory.`;
   }
 
   db.close();

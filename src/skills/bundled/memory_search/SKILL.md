@@ -105,6 +105,7 @@ The skill returns JSON to stdout:
 
 - **Hybrid search**: Combines BM25 keyword matching with semantic similarity
 - **Default type**: Searches "fact" type by default (not raw logs)
-- **Recency boost**: Recent memories ranked higher by default
+- **Natural activation**: Fresh memories surface easily; old memories fade but can return from a genuinely relevant topic/name without special history wording
+- **Real reinforcement**: User confirmation strengthens memory; automatic retrieval does not
 - **User boost**: Facts about the user get 1.5x score boost
 - **Relevance scoring**: Results sorted by combined relevance score

@@ -16,7 +16,10 @@ inputSchema:
     scope:
       type: string
       enum: [current, all]
-      description: "View scope. Defaults to current live work; use all only when the user explicitly asks for history, backlog, blocked, or every item."
+      description: "View scope. Defaults to naturally active work; use all for a complete durable inventory."
+    query:
+      type: string
+      description: "Natural topic/name from the user's request. Lets a relevant older item return without dumping unrelated history."
     column:
       type: string
       enum: [inbox, backlog, scheduled, in_progress, waiting, done, archived]

@@ -1,8 +1,8 @@
 /**
  * Tests for utility score computation (Phase 29 enhanced forgetting).
  *
- * Formula: utilityScore = prominence × log(2 + accessCount)
- * Combines memory freshness (prominence) with retrieval frequency (accessCount)
+ * Formula: utilityScore = prominence × log(2 + confirmationCount)
+ * Combines memory freshness with genuine user confirmation
  * to produce a single metric for deletion decisions.
  *
  * Uses real in-memory ScallopDatabase instances.
@@ -38,6 +38,7 @@ interface SeedOptions {
   documentDate?: number;
   memoryType?: 'static_profile' | 'dynamic_profile' | 'regular' | 'derived' | 'superseded';
   category?: 'preference' | 'fact' | 'event' | 'relationship' | 'insight';
+  timesConfirmed?: number;
 }
 
 function seedMemory(database: ScallopDatabase, opts: SeedOptions = {}): string {
@@ -57,6 +58,7 @@ function seedMemory(database: ScallopDatabase, opts: SeedOptions = {}): string {
     sourceChunk: null,
     embedding: null,
     metadata: null,
+    timesConfirmed: opts.timesConfirmed ?? 1,
   });
   return entry.id;
 }
@@ -68,8 +70,8 @@ afterEach(() => {
 // ============ computeUtilityScore Tests ============
 
 describe('computeUtilityScore', () => {
-  it('returns prominence-based baseline when accessCount is 0 (never accessed)', () => {
-    // prominence=0.5, accessCount=0 → 0.5 × log(2) ≈ 0.347
+  it('returns a prominence-based baseline when there are no repeat confirmations', () => {
+    // prominence=0.5, confirmationCount=0 → 0.5 × log(2) ≈ 0.347
     expect(computeUtilityScore(0.5, 0)).toBeCloseTo(0.5 * Math.log(2), 5);
   });
 
@@ -78,22 +80,22 @@ describe('computeUtilityScore', () => {
     expect(computeUtilityScore(0.0, 100)).toBeCloseTo(0.0, 5);
   });
 
-  it('computes correctly for prominence=0.5, accessCount=1', () => {
+  it('computes correctly for prominence=0.5, confirmationCount=1', () => {
     // 0.5 × log(3) ≈ 0.549
     expect(computeUtilityScore(0.5, 1)).toBeCloseTo(0.5 * Math.log(3), 5);
   });
 
-  it('computes correctly for prominence=0.8, accessCount=5', () => {
+  it('computes correctly for prominence=0.8, confirmationCount=5', () => {
     // 0.8 × log(7) ≈ 1.556
     expect(computeUtilityScore(0.8, 5)).toBeCloseTo(0.8 * Math.log(7), 5);
   });
 
-  it('computes correctly for prominence=0.3, accessCount=3', () => {
+  it('computes correctly for prominence=0.3, confirmationCount=3', () => {
     // 0.3 × log(5) ≈ 0.483
     expect(computeUtilityScore(0.3, 3)).toBeCloseTo(0.3 * Math.log(5), 5);
   });
 
-  it('returns prominence × log(2) for accessCount=0', () => {
+  it('returns prominence × log(2) for confirmationCount=0', () => {
     // 1.0 × log(2) ≈ 0.693 — never-accessed memories get a non-zero baseline
     expect(computeUtilityScore(1.0, 0)).toBeCloseTo(Math.log(2), 5);
   });
@@ -164,6 +166,38 @@ describe('findLowUtilityMemories', () => {
     expect(result[0].utilityScore).toBeCloseTo(0.1 * Math.log(2), 5);
     expect(result[0].prominence).toBe(0.1);
     expect(result[0].accessCount).toBe(0);
+    expect(result[0].confirmationCount).toBe(0);
+  });
+
+  it('does not let repeated automatic retrieval rescue a fading memory', () => {
+    const database = createTestDb();
+    const now = Date.now();
+    seedMemory(database, {
+      content: 'old result repeatedly selected by the system',
+      prominence: 0.1,
+      accessCount: 500,
+      lastAccessed: now,
+      timesConfirmed: 1,
+      documentDate: now - 180 * DAY_MS,
+    });
+
+    const [result] = findLowUtilityMemories(database);
+    expect(result).toMatchObject({ accessCount: 500, confirmationCount: 0 });
+    expect(result.utilityScore).toBeCloseTo(0.1 * Math.log(2), 5);
+  });
+
+  it('does preserve a fading memory the user genuinely reconfirmed', () => {
+    const database = createTestDb();
+    const now = Date.now();
+    seedMemory(database, {
+      content: 'old fact stated by the user several times',
+      prominence: 0.1,
+      accessCount: 0,
+      timesConfirmed: 5,
+      documentDate: now - 180 * DAY_MS,
+    });
+
+    expect(findLowUtilityMemories(database)).toEqual([]);
   });
 
   it('excludes static_profile memories always', () => {
