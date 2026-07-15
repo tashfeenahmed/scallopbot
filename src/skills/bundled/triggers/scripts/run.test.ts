@@ -75,6 +75,8 @@ describe('triggers skill ownership and retention', () => {
   it('lists only pending automatic triggers owned by the canonical state user', () => {
     const db = new ScallopDatabase(dbPath);
     addItem(db, 'default', 'agent', 'Owner automatic follow-up');
+    const farFuture = 400 * 24 * 60 * 60 * 1000;
+    addItem(db, 'default', 'agent', 'Future automatic follow-up', 'pending', farFuture);
     addItem(db, 'default', 'user', 'Owner explicit reminder');
     addItem(db, 'other-user', 'agent', 'Other user automatic follow-up');
     addItem(db, 'default', 'agent', 'Already delivered automatic follow-up', 'fired');
@@ -84,6 +86,10 @@ describe('triggers skill ownership and retention', () => {
 
     expect(result.success).toBe(true);
     expect(result.output).toContain('Owner automatic follow-up');
+    expect(result.output).toContain('Automatic triggers due or approaching');
+    expect(result.output).toContain('Future automatic triggers (scheduled; not current work priorities)');
+    expect(result.output).toContain('Future automatic follow-up');
+    expect(result.output).toContain(String(new Date(Date.now() + farFuture).getFullYear()));
     expect(result.output).not.toContain('Owner explicit reminder');
     expect(result.output).not.toContain('Other user automatic follow-up');
     expect(result.output).not.toContain('Already delivered automatic follow-up');

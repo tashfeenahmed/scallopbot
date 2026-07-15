@@ -1,6 +1,6 @@
 ---
 name: triggers
-description: View and cancel proactive triggers - these are AUTOMATIC follow-ups extracted from conversations about events, trips, and commitments (different from user-set reminders)
+description: View and cancel automatic follow-up schedules. Future entries are schedules, not evidence that something is a current priority.
 user-invocable: true
 triggers: [triggers, proactive, follow-ups]
 scripts:
@@ -41,7 +41,7 @@ The bot extracts these and creates follow-up triggers to check in on them.
 ## When to Use
 
 Use the triggers skill to:
-- **List triggers**: See all pending proactive follow-ups
+- **List triggers**: See all automatic follow-up schedules, grouped into approaching and future items
 - **Cancel one**: Remove a specific trigger you don't want
 - **Cancel all**: Clear all pending triggers
 

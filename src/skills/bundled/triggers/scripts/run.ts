@@ -32,6 +32,8 @@ interface SkillInput {
   trigger_id?: string;
 }
 
+const CURRENT_TRIGGER_WINDOW_MS = 24 * 60 * 60 * 1000;
+
 // Stateful bundled skills use the canonical storage identity while preserving
 // SKILL_USER_ID for channel-specific communication and integrations.
 const USER_ID = process.env.SKILL_STATE_USER_ID || process.env.SKILL_USER_ID || 'default';
@@ -75,6 +77,7 @@ function formatTriggerTime(timestamp: number): string {
       weekday: 'short',
       month: 'short',
       day: 'numeric',
+      year: 'numeric',
     });
     return `${dateStr} at ${timeStr}`;
   }
@@ -93,16 +96,26 @@ function listTriggers(db: Database.Database, userId: string): string {
     return 'No pending automatic triggers.\n\nAutomatic triggers are created when you mention events, commitments, or goals in conversation.';
   }
 
-  const lines = ['**Pending automatic triggers:**\n'];
+  const now = Date.now();
+  const current = triggers.filter(trigger => trigger.trigger_at <= now + CURRENT_TRIGGER_WINDOW_MS);
+  const future = triggers.filter(trigger => trigger.trigger_at > now + CURRENT_TRIGGER_WINDOW_MS);
+  const lines: string[] = [];
+  const append = (heading: string, entries: TriggerEntry[]) => {
+    if (entries.length === 0) return;
+    if (lines.length > 0) lines.push('');
+    lines.push(`**${heading}:**\n`);
+    for (const trigger of entries) {
+      const timeStr = formatTriggerTime(trigger.trigger_at);
+      const shortId = trigger.id.substring(0, 8);
+      const sourceTag = trigger.source === 'user' ? 'reminder' : trigger.type;
+      const kindTag = (trigger.kind === 'task') ? ' [task]' : (trigger.kind === 'nudge' ? ' [nudge]' : '');
+      lines.push(`- [${shortId}] **${trigger.message}** (${sourceTag}${kindTag})`);
+      lines.push(`  Triggers: ${timeStr}`);
+    }
+  };
 
-  for (const trigger of triggers) {
-    const timeStr = formatTriggerTime(trigger.trigger_at);
-    const shortId = trigger.id.substring(0, 8);
-    const sourceTag = trigger.source === 'user' ? 'reminder' : trigger.type;
-    const kindTag = (trigger.kind === 'task') ? ' [task]' : (trigger.kind === 'nudge' ? ' [nudge]' : '');
-    lines.push(`- [${shortId}] **${trigger.message}** (${sourceTag}${kindTag})`);
-    lines.push(`  Triggers: ${timeStr}`);
-  }
+  append('Automatic triggers due or approaching', current);
+  append('Future automatic triggers (scheduled; not current work priorities)', future);
 
   lines.push(`\n*To cancel an item, use: cancel with trigger_id*`);
 
