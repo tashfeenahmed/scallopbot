@@ -592,6 +592,8 @@ describe('Agent', () => {
       const { DEFAULT_SYSTEM_PROMPT } = await import('./agent.js');
       expect(DEFAULT_SYSTEM_PROMPT).toContain('Honor exclusions literally');
       expect(DEFAULT_SYSTEM_PROMPT).toContain('omit those items entirely');
+      expect(DEFAULT_SYSTEM_PROMPT).toContain('A past memory is not an unfinished task');
+      expect(DEFAULT_SYSTEM_PROMPT).toContain('current goal/board state');
     });
 
     it('should load SOUL.md if present in workspace', async () => {
