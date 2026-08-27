@@ -503,6 +503,7 @@ src/
 ├── dashboard/      # Systemd config generator, crash recovery
 ├── gateway/        # Server orchestration and channel initialization
 ├── media/          # PDF, image, URL processing
+├── mcp-server/     # Stdio MCP server exposing memory to MCP clients
 ├── memory/         # Hybrid search, fact extraction, decay engine, profiles
 ├── proactive/      # Unified scheduler for reminders and triggers
 ├── providers/      # LLM provider implementations (7 providers)
