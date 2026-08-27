@@ -14,6 +14,8 @@
   <a href="https://github.com/tashfeenahmed/scallopbot/releases"><img src="https://img.shields.io/github/v/release/tashfeenahmed/scallopbot?style=for-the-badge" alt="GitHub release"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge" alt="MIT License"></a>
   <a href="https://nodejs.org"><img src="https://img.shields.io/badge/node-%3E%3D24-brightgreen?style=for-the-badge" alt="Node.js"></a>
+  <a href="https://github.com/tashfeenahmed/scallopbot/stargazers"><img src="https://img.shields.io/github/stars/tashfeenahmed/scallopbot?style=for-the-badge" alt="GitHub stars"></a>
+  <a href="https://github.com/tashfeenahmed/scallopbot/forks"><img src="https://img.shields.io/github/forks/tashfeenahmed/scallopbot?style=for-the-badge" alt="GitHub forks"></a>
 </p>
 
 <p align="center">
@@ -22,7 +24,7 @@
 
 ---
 
-Open-source personal AI agents like [OpenClaw](https://github.com/openclaw/openclaw) excel at tool orchestration but lack genuine cognitive depth: no memory lifecycle, no self-reflection, no autonomous reasoning. ScallopBot addresses this cognition gap with a bio-inspired cognitive architecture that maintains full compatibility with the OpenClaw skill ecosystem.
+Open-source personal AI agents like [OpenClaw](https://github.com/openclaw/openclaw) excel at tool orchestration but lack genuine cognitive depth: no memory lifecycle, no self-reflection, no autonomous reasoning. ScallopBot addresses this cognition gap with a bio-inspired cognitive architecture that maintains full compatibility with the OpenClaw skill ecosystem. Runs at an estimated $0.06--0.10/day in model spend -- see the [cost comparison](https://scallopbot.com/cost).
 
 ScallopBot runs on your own server, routes each request to the cheapest model that can handle it, tracks every cent in real time, and fails over across 7 LLM providers automatically. It connects to Telegram, Discord, WhatsApp, Slack, Signal, Matrix, a CLI, and a REST/WebSocket API -- all from a single Node.js process.
 
@@ -35,7 +37,7 @@ Evaluated on the [LoCoMo](https://github.com/snap-research/locomo) long-conversa
 | Metric | OpenClaw | ScallopBot | Improvement |
 |--------|:--------:|:----------:|:-----------:|
 | **F1** | 0.38 | **0.48** | +26% |
-| **Exact Match** | 0.24 | **0.30** | +25% |
+| **Exact Match** | 0.24 | **0.30** | +22% |
 
 **F1 by question category:**
 
@@ -52,6 +54,27 @@ Evaluated on the [LoCoMo](https://github.com/snap-research/locomo) long-conversa
 | Adversarial | 0.77 | **0.97** | +0.20 |
 
 Adversarial questions show the largest gain (+0.20) driven by cognitive pipeline features and strict answering constraints. Multi-hop benefits from memory fusion and NREM dream consolidation.
+
+Figures are the QA-item-weighted average over all 1,049 items (ScallopBot F1 0.4784 / EM
+0.3003, OpenClaw F1 0.3801 / EM 0.2469). Both arms use the same strict QA-answerer prompt.
+The harness lives in [`src/eval/`](src/eval/); full methodology is in the
+[paper](Paper2026.pdf).
+
+## Quick Start
+
+```bash
+git clone https://github.com/tashfeenahmed/scallopbot.git
+cd scallopbot
+npm install
+
+cp .env.example .env
+# Add at least one LLM provider API key
+
+npm run build
+node dist/cli.js start
+```
+
+Requires Node.js 24+.
 
 ## Cognitive Architecture
 
@@ -132,22 +155,6 @@ At 100 messages/day with Groq for fast-tier operations:
 | **Total** | | **$0.047--0.10** |
 
 The entire cognitive pipeline -- dreams, reflection, affect, gap scanning -- adds approximately $0.02/day to the base conversation cost.
-
-## Quick Start
-
-```bash
-git clone https://github.com/tashfeenahmed/scallopbot.git
-cd scallopbot
-npm install
-
-cp .env.example .env
-# Add at least one LLM provider API key
-
-npm run build
-node dist/cli.js start
-```
-
-Requires Node.js 24+.
 
 ## Providers
 
