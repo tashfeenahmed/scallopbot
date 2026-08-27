@@ -76,6 +76,57 @@ node dist/cli.js start
 
 Requires Node.js 24+.
 
+## MCP
+
+ScallopBot is MCP-native in both directions: it **consumes** MCP servers through the
+bundled [`mcp` skill](src/skills/bundled/mcp/), and it **exposes its own memory** as an MCP
+server. Point Claude Code, Codex, or any other MCP client at it and that client reads and
+writes the same memory the bot uses -- store something from your editor, and the bot
+recalls it in Telegram.
+
+Three tools are exposed:
+
+| Tool | Purpose |
+|------|---------|
+| `memory_store` | Store a memory, with optional tags, importance (1--10) and event timestamp |
+| `memory_recall` | Hybrid BM25 + embedding retrieval for a query |
+| `memory_temporal` | "What happened between X and Y" over an explicit window or a named range |
+
+ScallopBot is not published to npm, so the server runs from your local checkout. Build
+once (`npm run build`), then register the absolute path to `dist/mcp-server/index.js`.
+
+**Claude Code:**
+
+```bash
+claude mcp add scallopbot \
+  --env SCALLOPBOT_DB=/path/to/scallopbot/memories.db \
+  -- node /path/to/scallopbot/dist/mcp-server/index.js
+```
+
+**Codex** — in `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.scallopbot]
+command = "node"
+args = ["/path/to/scallopbot/dist/mcp-server/index.js"]
+env = { SCALLOPBOT_DB = "/path/to/scallopbot/memories.db" }
+```
+
+| Env var | Default | Meaning |
+|---------|---------|---------|
+| `SCALLOPBOT_DB` | `MEMORY_DB_PATH`, else `./memories.db` | Path to the memory database |
+| `SCALLOPBOT_USER` | `default` | Memory owner, for multi-user deployments |
+| `LOG_LEVEL` | `warn` | Server logs go to stderr; stdout is the JSON-RPC channel |
+
+**Safe to run alongside the bot.** The database is in WAL mode, so readers never block the
+writer. The server sets `PRAGMA busy_timeout=5000` to wait out the bot's write lock rather
+than failing on `SQLITE_BUSY`, and it never holds a write transaction across an `await` --
+so a slow embedding call can't stall the running bot.
+
+The standalone server starts without any API keys. With no embedding provider configured,
+`memory_recall` falls back to BM25 keyword scoring and says so in its output rather than
+silently degrading.
+
 ## Cognitive Architecture
 
 ScallopBot's cognitive layer is organised into six subsystems, orchestrated by a three-tier heartbeat daemon:

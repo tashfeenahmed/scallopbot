@@ -4,6 +4,9 @@
   "description": "An economical and smart bot architecture",
   "main": "dist/index.js",
   "type": "module",
+  "bin": {
+    "scallopbot-mcp": "dist/mcp-server/index.js"
+  },
   "engines": {
     "node": ">=24.0.0"
   },
