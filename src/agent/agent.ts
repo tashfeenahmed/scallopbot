@@ -64,6 +64,7 @@ import { ApprovalStore, APPROVAL_PROMPT_HINT } from './approvals.js';
 import {
   assessToolCallForTurn,
   describeToolCallForUser,
+  describeToolCallPlainly,
   boundResponseToolCalls,
   digestToolOutput,
   hasUnverifiedSuccessClaim,
@@ -2652,7 +2653,7 @@ The current user request is quoted below. Execute tools only when they directly 
         tool_use_id: toolUse.id,
         content: typedToolError(
           'BLOCKED_ESCALATION',
-          `${BLOCKED_ESCALATION_MESSAGE} Not run: ${described}. Ask exactly: "Do you want me to do this: ${described}? (yes/no)"`,
+          `${BLOCKED_ESCALATION_MESSAGE} Not run: ${described}. Ask exactly: "Do you want me to ${describeToolCallPlainly(toolUse)}? (yes/no)"`,
         ),
         is_error: true,
       };
@@ -2713,7 +2714,7 @@ The current user request is quoted below. Execute tools only when they directly 
         if (blocks && blocks.length < 20) blocks.push(blockedTargetFromToolCall(toolUse));
         // Offer the user a one-tap approval (once / session / always / no)
         // instead of a dead end. Hard-floor calls get no prompt.
-        const description = describeToolCallForUser(toolUse);
+        const description = describeToolCallPlainly(toolUse);
         const pending = this.approvals.registerPending({
           sessionId,
           userId: approvalUserId,

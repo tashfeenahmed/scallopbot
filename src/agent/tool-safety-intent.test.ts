@@ -223,7 +223,7 @@ describe('B1: truly unrequested writes stay blocked', () => {
   it('names the tool and payload in the block reason so the model can ask precisely', () => {
     const verdict = assessToolCallForTurn(gymCreate, { userMessage: 'Hey', timezone: TZ, now: NOW });
     expect(verdict.reason).toContain('notion create: database_id=1801c5f6-386c-927e-228b-2a0b29321df0, Name=Pectoral machine, Date=2026-08-20, Sets=3, Reps=6, Weight (kg)=45');
-    expect(verdict.reason).toMatch(/e\.g\. 'Do you want me to create notion create: .* now\?'/);
+    expect(verdict.reason).toMatch(/e\.g\. 'Do you want me to add "Pectoral machine" \(.*\) in notion now\?'/);
     expect(verdict.code).toBeUndefined();
   });
 });

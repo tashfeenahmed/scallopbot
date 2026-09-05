@@ -685,13 +685,42 @@ export function describeToolCallForUser(toolUse: ToolUseContent): string {
   return parts.length > 0 ? `${head}: ${parts.join(', ')}` : head;
 }
 
+/**
+ * Human phrasing of a tool call for a yes/no question shown to the user:
+ * `add "Leg Press" (Sets=3, Reps=9, Weight (kg)=110, Date=2026-08-21) in notion`.
+ * Ids are dropped; the technical form stays in describeToolCallForUser().
+ */
+export function describeToolCallPlainly(toolUse: ToolUseContent): string {
+  if (toolUse.name === 'bash' || toolUse.name === 'run_code') {
+    return `run ${describeToolCallForUser(toolUse)}`;
+  }
+  const technical = describeToolCallForUser(toolUse);
+  const colon = technical.indexOf(': ');
+  const fields = colon >= 0
+    ? technical.slice(colon + 2).split(', ').filter(entry => !/^(?:[a-z_]*id|page|database_id|data_source_id)=/i.test(entry))
+    : [];
+  const titleIndex = fields.findIndex(entry => /^(?:name|title|exercise|subject)=/i.test(entry));
+  const title = titleIndex >= 0 ? fields.splice(titleIndex, 1)[0].replace(/^[^=]+=/, '') : '';
+  const action = (actionFromInput(toolUse.input) ?? '').toLowerCase();
+  const verb = /^(?:create|add|insert|log|record|save|write|note|track|book|schedule|register|submit)$/.test(action) ? 'add'
+    : /^(?:update|edit|set|mark|complete)$/.test(action) ? 'update'
+    : /^(?:delete|remove|archive|cancel)$/.test(action) ? 'delete'
+    : /^(?:send|post|publish|reply|email|share)$/.test(action) ? 'send'
+    : action || 'run';
+  const where = typeof toolUse.input.database === 'string' && toolUse.input.database.trim()
+    ? `in ${toolUse.input.database.trim()}`
+    : `in ${toolUse.name}`;
+  const detail = fields.length > 0 ? ` (${fields.join(', ')})` : '';
+  return `${verb} ${title ? `"${title}"` : 'this'}${detail} ${where}`;
+}
+
 function externalBlockReason(toolUse: ToolUseContent): string {
   const summary = describeToolCallForUser(toolUse);
-  const verb = toolMutationAction(toolUse) ?? 'do';
+  const plain = describeToolCallPlainly(toolUse);
   return `BLOCKED: this write (${summary}) was not requested in the current message. `
     + 'Do not retry it with another tool (bash/curl/spawn_agent/execute_goal/workflows are blocked by the same policy) '
     + 'and do not claim it was done. Reply to the user with ONE short question that names the exact action, '
-    + `e.g. 'Do you want me to ${verb} ${summary} now?' — their 'yes' authorizes it.`;
+    + `e.g. 'Do you want me to ${plain} now?' — their 'yes' authorizes it.`;
 }
 
 function localBlockReason(toolUse: ToolUseContent): string {

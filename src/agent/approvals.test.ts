@@ -282,7 +282,7 @@ describe('Agent approval flow', () => {
       expect(handler).not.toHaveBeenCalled();
       expect(result.pendingApproval).toBeDefined();
       expect(result.pendingApproval!.id).toHaveLength(8);
-      expect(result.pendingApproval!.question).toMatch(/^Do you want me to notion create: /);
+      expect(result.pendingApproval!.question).toMatch(/^Do you want me to add "/);
       expect(approvals.getPending(session.id)?.id).toBe(result.pendingApproval!.id);
 
       // The model saw the hint on the tool error so it asks once, not twice.
