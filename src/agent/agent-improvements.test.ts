@@ -1520,6 +1520,30 @@ describe('Agent improvements integration', () => {
       expect(result.response).not.toMatch(/^Logged:/);
     });
 
+    it('catches "Got it — logged …" too (production 5 Sep 2026, second attempt)', async () => {
+      const { Agent } = await import('./agent.js');
+      const { SessionManager } = await import('./session.js');
+      const CLAIM = 'Got it — logged **Test entry six (delete me)**: 3 sets × 8 reps @ 20kg.';
+      const provider = seqProvider([endTurn(CLAIM), endTurn(CLAIM)]);
+      const sessions = new SessionManager(db);
+      const session = await sessions.createSession();
+      const agent = new Agent({ provider, sessionManager: sessions, workspace: testDir, logger: pino({ level: 'silent' }), maxIterations: 4 });
+      const result = await agent.processMessage(session.id, 'Test entry six (delete me) 3x8x20kg');
+      expect(provider.complete).toHaveBeenCalledTimes(2);
+      expect(result.response).toMatch(/^I have not written this anywhere yet\./);
+    });
+
+    it('answers a bare "yes" that the model leaves empty with "Okay."', async () => {
+      const { Agent } = await import('./agent.js');
+      const { SessionManager } = await import('./session.js');
+      const provider = seqProvider([endTurn('[DONE]'), endTurn(''), endTurn('')]);
+      const sessions = new SessionManager(db);
+      const session = await sessions.createSession();
+      const agent = new Agent({ provider, sessionManager: sessions, workspace: testDir, logger: pino({ level: 'silent' }), maxIterations: 5 });
+      const result = await agent.processMessage(session.id, 'yes');
+      expect(result.response).toBe('Okay.');
+    });
+
     it('leaves a read-only answer alone even when it contains "logged"', async () => {
       const { Agent } = await import('./agent.js');
       const { SessionManager } = await import('./session.js');

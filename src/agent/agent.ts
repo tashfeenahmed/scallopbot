@@ -31,7 +31,7 @@ import { primaryChatProvider, modelIdentityPrompt } from './identity.js';
 import { ToolLoopDetector, type ToolLoopDetectorConfig } from './tool-loop-detector.js';
 import {
   appendPolicyBlockTruth,
-  claimsOwnCompletedWrite,
+  claimsWriteOnPayloadTurn,
   hasUnverifiedActionPromise,
   honestUnwrittenReply,
   mentionsFalsePolicyCause,
@@ -1158,7 +1158,11 @@ export class Agent {
         // the user see silence. This is a graceful "I tried" rather than the
         // earlier user-facing fallback that told them to do work.
         if (!finalResponse.trim() && emptyEndTurnRetries > 0) {
-          finalResponse = "I worked through that but my final reply came back empty — give me a moment and try once more, or rephrase if it keeps happening.";
+          // A bare acknowledgement ("yes", "ok", "thanks") with nothing pending
+          // deserves a plain "Okay.", not an apology about an empty reply.
+          finalResponse = /^\s*(?:yes|yep|yeah|ok(?:ay)?|sure|thanks|thank you|cheers|great|cool|fine|no)\s*[.!]?\s*$/i.test(userMessage)
+            ? 'Okay.'
+            : "I worked through that but my final reply came back empty — give me a moment and try once more, or rephrase if it keeps happening.";
         }
 
         // A model may skip the requested write entirely and still say "done".
@@ -1182,7 +1186,7 @@ export class Agent {
         // classified the turn.
         const draftClaimsWrite = successfulMutationSignatures.size === 0
           && messageCarriesWritePayload(turnToolSafety.userMessage)
-          && claimsOwnCompletedWrite(finalResponse);
+          && claimsWriteOnPayloadTurn(finalResponse);
         if (
           (draftPromisesWrite
             || draftClaimsWrite
@@ -1313,7 +1317,7 @@ export class Agent {
           completionReason = 'tool_loop';
         } else if (successfulMutationSignatures.size === 0
           && (hasUnverifiedActionPromise(finalResponse)
-            || (messageCarriesWritePayload(turnToolSafety.userMessage) && claimsOwnCompletedWrite(finalResponse)))) {
+            || (messageCarriesWritePayload(turnToolSafety.userMessage) && claimsWriteOnPayloadTurn(finalResponse)))) {
           // The corrective continuation did not produce a tool call: strip the
           // promise/claim and say plainly that nothing was written.
           this.logger.warn({ sessionId }, 'Receipt-less write promise in final reply — replaced with honest text');

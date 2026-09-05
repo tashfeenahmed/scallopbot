@@ -59,7 +59,7 @@ export function hasUnverifiedActionPromise(response: string): boolean {
 const DONE_VERB = String.raw`(?:logged|done|added|saved|created|sent|updated|recorded|scheduled|noted|marked|deleted|removed|archived|posted|published|booked|tracked|stored|entered|submitted|synced)`;
 /** "Logged: …", "Done!", "✅ Added…", "All logged", "I've saved…", "I logged…". */
 const OWN_COMPLETION = new RegExp(
-  String.raw`(?:^|[.!?:;\n]\s*|[-*•]\s+)(?:[✅✔️☑️]\s*)?(?:all\s+|both\s+|everything\s+)?${DONE_VERB}\b`
+  String.raw`(?:^|[.!?:;,\n—–-]\s*|[-*•]\s+|\b(?:got\s+it|okay|ok|sure|great|perfect|alright)[,!.]?\s+)(?:[✅✔️☑️]\s*)?(?:all\s+|both\s+|everything\s+)?${DONE_VERB}\b`
   + String.raw`|\bi(?:['’]ve|\s+have)?\s+(?:just\s+|now\s+|already\s+)?${DONE_VERB}\b`
   + String.raw`|(?:^|\s)[✅✔️]`,
   'i',
@@ -73,6 +73,17 @@ const OWN_COMPLETION = new RegExp(
 export function claimsOwnCompletedWrite(response: string): boolean {
   return sentencesOf(response).some(sentence =>
     !CONDITIONAL.test(sentence) && OWN_COMPLETION.test(sentence) && hasUnverifiedSuccessClaim(sentence));
+}
+
+/**
+ * Stricter rule for a turn whose user message is itself a write payload
+ * ("Leg press 3x8x110kg"): with no tool receipt, any non-negated success
+ * wording ("logged", "saved", "done", "✅") is an unbacked claim — the model
+ * has nothing else it could truthfully be reporting on.
+ */
+export function claimsWriteOnPayloadTurn(response: string): boolean {
+  return sentencesOf(response).some(sentence =>
+    !CONDITIONAL.test(sentence) && (hasUnverifiedSuccessClaim(sentence) || /[✅✔️]/.test(sentence)));
 }
 
 export const UNWRITTEN_LINE = 'I have not written this anywhere yet.';
