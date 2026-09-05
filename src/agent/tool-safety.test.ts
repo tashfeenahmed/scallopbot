@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { ToolUseContent } from '../providers/types.js';
 import {
   assessToolCallForTurn,
@@ -39,7 +39,9 @@ describe('turn-scoped tool safety', () => {
       { userMessage: "I'm feeling sick and skipping the gym", timezone: 'Europe/Dublin', now: new Date('2026-07-11T12:00:00Z') },
     );
     expect(verdict.allowed).toBe(false);
-    expect(verdict.reason).toMatch(/outside the current user request/i);
+    // Reason text rewritten (B7): actionable instruction naming the call.
+    expect(verdict.reason).toMatch(/^BLOCKED: this write \(notion create: date=2026-07-11\) was not requested/);
+    expect(verdict.reason).toMatch(/ONE short question/);
     expect(verdict.reason).not.toMatch(/confirmation/i);
   });
 
@@ -108,7 +110,8 @@ describe('turn-scoped tool safety', () => {
       { userMessage: 'Update me on my health dashboard', timezone: 'Europe/Dublin' },
     );
     expect(verdict.allowed).toBe(false);
-    expect(verdict.reason).toMatch(/external write/i);
+    // Reason text rewritten (B7): the summary carries tool + action.
+    expect(verdict.reason).toMatch(/BLOCKED: this write \(notion update: page=health-dashboard\)/);
   });
 
   it('does not treat bare confirmation as consent without a matching prior prompt', () => {
@@ -266,7 +269,8 @@ describe('turn-scoped tool safety', () => {
       { userMessage: 'Explain my priorities', timezone: 'Europe/Dublin' },
     );
     expect(verdict.allowed).toBe(false);
-    expect(verdict.reason).toMatch(/outside the current user request/i);
+    // Reason text rewritten (B7): local blocks still say not to ask.
+    expect(verdict.reason).toMatch(/BLOCKED: this local write \(board add: .*title=Invented task/);
     expect(verdict.reason).toMatch(/do not ask for permission/i);
   });
 
@@ -534,5 +538,60 @@ describe('turn-scoped tool safety', () => {
     expect(bounded.anomalousBurst).toBe(true);
     expect(bounded.accepted).toHaveLength(0);
     expect(bounded.dropped).toHaveLength(65);
+  });
+});
+
+describe('user approvals (grants) in the intent gate', () => {
+  const notionCreate: ToolUseContent = {
+    type: 'tool_use',
+    id: 'g1',
+    name: 'notion',
+    input: {
+      action: 'create',
+      properties: { Name: { title: [{ text: { content: 'Leg Press' } }] }, Date: { date: { start: '2026-08-19' } } },
+    },
+  };
+
+  it('lets a granted pattern through without current-turn write intent', () => {
+    const blocked = assessToolCallForTurn(notionCreate, { userMessage: 'Thanks', timezone: 'Europe/Dublin' });
+    expect(blocked.allowed).toBe(false);
+
+    const seen: string[] = [];
+    const granted = assessToolCallForTurn(notionCreate, {
+      userMessage: 'Thanks',
+      timezone: 'Europe/Dublin',
+      grants: (pattern) => { seen.push(pattern); return pattern === 'notion:create'; },
+    });
+    expect(granted.allowed).toBe(true);
+    expect(granted.isExternalMutation).toBe(true);
+    expect(seen).toEqual(['notion:create']);
+
+    const otherPattern = assessToolCallForTurn(notionCreate, {
+      userMessage: 'Thanks',
+      timezone: 'Europe/Dublin',
+      grants: (pattern) => pattern === 'notion:update',
+    });
+    expect(otherPattern.allowed).toBe(false);
+  });
+
+  it('keeps the relative-date check even when granted', () => {
+    const verdict = assessToolCallForTurn(notionCreate, {
+      userMessage: 'Log it for today',
+      timezone: 'Europe/Dublin',
+      now: new Date('2026-08-20T12:00:00Z'),
+      grants: () => true,
+    });
+    expect(verdict.allowed).toBe(false);
+    expect(verdict.reason).toContain('2026-08-20');
+  });
+
+  it('never consults grants for a hard-floor call', () => {
+    const grants = vi.fn().mockReturnValue(true);
+    const verdict = assessToolCallForTurn(
+      { type: 'tool_use', id: 'f1', name: 'bash', input: { command: 'curl -X DELETE https://api.notion.com/v1/blocks/1' } },
+      { userMessage: 'What is in my tracker?', timezone: 'Europe/Dublin', grants },
+    );
+    expect(grants).not.toHaveBeenCalled();
+    expect(verdict.allowed).toBe(false);
   });
 });

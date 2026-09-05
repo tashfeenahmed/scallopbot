@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { ToolUseContent } from '../providers/types.js';
 import type { Skill } from '../skills/types.js';
+import { grantPatternFor } from './approvals.js';
 
 /** Safety context is scoped to the latest genuine user turn. */
 export interface TurnToolSafetyContext {
@@ -14,6 +15,12 @@ export interface TurnToolSafetyContext {
   continuationMutationTool?: string;
   timezone: string;
   now?: Date;
+  /**
+   * User approvals (once / this session / always) keyed by the coarse grant
+   * pattern from `grantPatternFor`. A granted mutation skips the intent gate
+   * but still receives the relative-date consistency check.
+   */
+  grants?: (pattern: string) => boolean;
 }
 
 export interface ToolSafetyAssessment {
@@ -48,25 +55,49 @@ const KNOWN_LOCAL_MUTATING_TOOLS = new Set([
   'apply_patch', 'board', 'edit_file', 'git', 'goals', 'manage_skills',
   'multi_edit', 'npm', 'reminder', 'run_code', 'triggers', 'write_file',
 ]);
-const READ_ONLY_ACTION = /^(?:check|describe|fetch|get|inspect|list|read|search|show|status|view)$/i;
+const READ_ONLY_ACTION = /^(?:check|count|describe|detail|details|dry_run|exists|export|fetch|get|help|history|inspect|known|list|preview|query|read|schema|search|show|stats|status|summary|view)$/i;
 
 const MUTATING_ACTION = /^(?:add|append|archive|book|cancel|commit|complete|create|delete|deploy|document|edit|email|insert|install|invite|log|mark|move|note|post|publish|push|record|register|remove|reply|save|schedule|send|set|share|submit|sync|track|update|upload|write)$/i;
-const EXPLICIT_CONFIRMATION =
-  /^\s*(?:yes|yep|yeah|confirm(?:ed)?|go ahead|do it|please do|ok(?:ay)?|proceed|sounds good)\s*[.!]?\s*$/i;
+/**
+ * A short reply that affirms or re-instructs the write the assistant most
+ * recently proposed or failed on: "Yes", "Yes try again. You can", "You have
+ * the access - use the skill", "Try adding it like u did for others", "Add
+ * them", "Do it", "It's done. Mark it". Bound to a prior proposal/failure or
+ * the session's established mutation tool by the caller; never sufficient
+ * alone.
+ */
+const AFFIRMATIVE_OPENER =
+  /^\s*(?:yes|yep|yeah|yup|sure|ok(?:ay)?|confirm(?:ed)?|please(?:\s+do)?|go ahead|do it|do that|proceed|sounds good|go for it|try again|absolutely|of course|it['’]?s done|done)\b/i;
+const RE_INSTRUCTION =
+  /\b(?:try(?:\s+(?:it|that|this|them))?\s+(?:again|adding|logging|writing|saving|creating|recording|once more)|use\s+the\s+(?:skill|tool|integration|api)|you\s+(?:have|do\s+have|['’]ve\s+got)\s+(?:the\s+)?(?:access|permission)|like\s+(?:you|u)\s+did|(?:add|log|record|save|write|create|mark|note|track|post|send|update)\s+(?:it|them|these|those|this|that)\b|go\s+ahead|you\s+can\b|(?:just\s+)?do\s+it(?:\s+(?:the\s+same\s+way|again|like\s+before|anyway))?|the\s+same\s+way|(?:there\s+is|there['’]?s)\s+no\s+(?:restriction|block|limit|problem|issue)|no\s+restriction|you\s+did\s+it(?:\s+before)?|you['’]?ve\s+done\s+(?:it|this)\s+before)/i;
+const AFFIRMATIVE_NEGATION =
+  /\b(?:don['’]?t|do\s+not|no\s+need|not\s+yet|wait|hold\s+on|stop|cancel|never\s*mind|instead|but\s+not)\b/i;
 const INFORMATIONAL_UPDATE_REQUEST =
   /\b(?:update|brief|tell|catch)\s+(?:me|us)\s+(?:on|about|regarding)\b/i;
+/** A sentence or line that opens with a read-only verb or question word. */
+const READ_ONLY_REQUEST =
+  /(?:^|[.!?;,:\n])\s*(?:(?:can|could|would|will)\s+(?:you|u)\s+)?(?:please\s+)?(?:check|show|view|list|find|search|read|describe|inspect|look\s+up|get|fetch|what|which|how|did|is|are|was|were|do\s+i|have\s+i|remind\s+me\s+what|explain|summari[sz]e)\b/i;
 const WRITE_ACTIONS =
   'add|archive|book|cancel|complete|create|delete|deploy|document|edit|email|insert|install|invite|log|mark|note|post|publish|push|record|register|remove|reply|save|schedule|send|set|share|submit|sync|track|update|upload|write';
+// Sentence starts include line starts (m flag) and the punctuation class
+// includes newline, so "Leg ext - 50kgx8x3\n\nLog in notion tracker" and
+// "In my notion tracker log this for today" both count as direct requests.
 const DIRECT_WRITE_REQUEST = new RegExp(
-  `(?:^\\s*(?:(?:please\\s+)?|(?:(?:can|could|would|will)\\s+you\\s+(?:please\\s+)?)|(?:i\\s+(?:want|need|would like)\\s+you\\s+to\\s+))(${WRITE_ACTIONS})\\b)`
+  `(?:^\\s*(?:(?:please\\s+)?|(?:(?:can|could|would|will)\\s+(?:you|u)\\s+(?:please\\s+)?)|(?:i\\s+(?:want|need|would like)\\s+you\\s+to\\s+))(${WRITE_ACTIONS})\\b)`
   + `|(?:\\b(?:and|then)\\s+(?:please\\s+)?(${WRITE_ACTIONS})\\b)`
-  + `|(?:[.!?;,:]\\s*(?:please\\s+)?(${WRITE_ACTIONS})\\b)`
-  + `|(?:\\b(?:asked|told)\\s+you\\s+to\\s+(${WRITE_ACTIONS})\\b)`,
-  'i',
+  + `|(?:[.!?;,:\\n]\\s*(?:please\\s+)?(${WRITE_ACTIONS})\\b)`
+  + `|(?:\\b(?:asked|told)\\s+you\\s+to\\s+(${WRITE_ACTIONS})\\b)`
+  + `|(?:\\b(${WRITE_ACTIONS})\\s+(?:it|this|these|those|them)\\b)`,
+  'im',
 );
-const ANY_WRITE_ACTION = new RegExp(`\\b(${WRITE_ACTIONS})\\b`, 'i');
+/** Write verbs in a prior assistant message, including simple past/gerund forms. */
+const ANY_WRITE_ACTION_FORM = new RegExp(`\\b(${WRITE_ACTIONS})(?:ged|ed|ing|es|s|d)?\\b`, 'ig');
+/** The assistant proposed, asked about, or said it was ready to do a write. */
 const CONFIRMATION_REQUEST =
-  /\b(?:(?:shall|should|may|can)\s+i|(?:do|would)\s+you\s+(?:want|like)\s+me\s+to|confirm(?:ation)?|permission|okay\s+to|ok\s+to)\b/i;
+  /\b(?:(?:shall|should|may|can|could)\s+i|(?:do\s+you\s+|would\s+you\s+)?(?:want|like)\s+me\s+to|confirm(?:ation)?|permission|okay\s+to|ok\s+to|ready\s+to\s+(?:add|log|write|save|record|create|send|update)|(?:all|them|these|those|it|that|those\s+\w+)\s+now\?|now\?)/i;
+/** The assistant reported that a write failed or was blocked. */
+const FAILURE_REPORT =
+  /\b(?:couldn['’]?t|could\s+not|wasn['’]?t\s+able|unable|blocked|failed|didn['’]?t\s+(?:work|go\s+through|succeed)|error|restriction|not\s+(?:able|allowed|permitted)|permission\s+denied|404|403)\b/i;
 const LOCAL_ACTIONS = `${WRITE_ACTIONS}|append|build|change|commit|compile|copy|deploy|execute|export|fix|format|generate|implement|install|make|mkdir|modify|move|patch|push|refactor|render|rename|restore|run|test|touch|upload|work`;
 const DIRECT_LOCAL_REQUEST = new RegExp(
   `(?:^\\s*(?:(?:please\\s+)?|(?:(?:can|could|would|will)\\s+(?:you|u)\\s+(?:please\\s+)?)|(?:i\\s+(?:want|need|would like)\\s+you\\s+to\\s+))(${LOCAL_ACTIONS})\\b)`
@@ -225,7 +256,9 @@ export function isLikelyMutation(toolUse: ToolUseContent, skill?: Skill | null):
   if (declared?.readOnly) return false;
   if (READ_ONLY_TOOLS.has(toolUse.name.toLowerCase())) return false;
 
-  const action = actionFromInput(toolUse.input);
+  // Shell/code tools are classified by command analysis only: a leading
+  // `export`/`cd`/`echo` word says nothing about what the command mutates.
+  const action = toolUse.name === 'bash' || toolUse.name === 'run_code' ? null : actionFromInput(toolUse.input);
   if (action && READ_ONLY_ACTION.test(action)) return false;
   if (action && MUTATING_ACTION.test(action)) return true;
   if (toolUse.name === 'bash') {
@@ -374,24 +407,78 @@ function actionsCompatible(requested: string, actual: string | null): boolean {
   return groups.some(group => group.has(requested) && group.has(actual));
 }
 
-function directRequestedAction(message: string): string | null {
-  const match = message.match(DIRECT_WRITE_REQUEST);
-  const direct = (match?.slice(1).find(Boolean) ?? '').toLowerCase();
-  if (direct) return direct;
+/**
+ * Every write verb the user directly asked for, in message order. A gym log
+ * such as "Set 3 ...\nLog it" carries an incidental "set" before the real
+ * "log", so callers pick the first verb compatible with the tool call.
+ */
+function directRequestedActions(message: string): string[] {
+  const found: string[] = [];
+  const push = (verb: string | undefined, index = 0) => {
+    const lower = verb?.toLowerCase();
+    if (!lower || found.includes(lower)) return;
+    // "Yes but don't log it yet" is not a request to log.
+    const preceding = message.slice(Math.max(0, index - 24), index);
+    if (/\b(?:don['’]?t|do\s+not|never|not|without|no\s+need\s+to)\s*(?:please\s+)?[.!?;,:]?\s*$/i.test(preceding)) return;
+    found.push(lower);
+  };
+  for (const match of message.matchAll(new RegExp(DIRECT_WRITE_REQUEST.source, 'gim'))) {
+    push(match.slice(1).find(Boolean), match.index);
+  }
 
   // Natural requests often include a discourse prefix ("For today, can you
   // log...") or explicit authorization language. They are just as clear as an
   // imperative and must not force the user into a magic-word loop.
   const naturalPatterns = [
-    new RegExp(`\\b(?:can|could|would|will)\\s+(?:you|u)\\s+(?:please\\s+)?(${WRITE_ACTIONS})\\b`, 'i'),
-    new RegExp(`^\\s*(?:yes|yep|yeah|ok(?:ay)?|sure|confirmed?)[,!]?\\s+(?:please\\s+)?(${WRITE_ACTIONS})\\b`, 'i'),
-    new RegExp(`\\b(?:authorize|instruct|ask|tell)\\s+(?:you|the\\s+agent|this\\s+bot)\\s+to\\s+(${WRITE_ACTIONS})\\b`, 'i'),
+    new RegExp(`\\b(?:can|could|would|will)\\s+(?:you|u)\\s+(?:please\\s+)?(${WRITE_ACTIONS})\\b`, 'gi'),
+    new RegExp(`^\\s*(?:yes|yep|yeah|ok(?:ay)?|sure|confirmed?)[,!]?\\s+(?:please\\s+)?(${WRITE_ACTIONS})\\b`, 'gi'),
+    new RegExp(`\\b(?:authorize|instruct|ask|tell)\\s+(?:you|the\\s+agent|this\\s+bot)\\s+to\\s+(${WRITE_ACTIONS})\\b`, 'gi'),
   ];
   for (const pattern of naturalPatterns) {
-    const natural = message.match(pattern)?.[1]?.toLowerCase();
-    if (natural) return natural;
+    for (const match of message.matchAll(pattern)) push(match[1]);
   }
-  return null;
+  return found;
+}
+
+function directRequestedAction(message: string): string | null {
+  return directRequestedActions(message)[0] ?? null;
+}
+
+/** Numbers with x/× or units (kg/min/reps...) or a multi-line list. */
+function hasStructuredPayload(message: string): boolean {
+  return /\b\d+(?:\.\d+)?(?:\s*[a-z%]+)?(?:\s*(?:x|×)\s*\d+(?:\.\d+)?(?:\s*[a-z%]+)?)+\b/i.test(message)
+    || /\b\d+(?:\.\d+)?\s*(?:kg|kgs|lb|lbs|min|mins|minutes|reps?|sets?|km|sec|secs)\b/i.test(message)
+    || isTaskList(message);
+}
+
+function hasReadOnlyRequest(message: string): boolean {
+  return READ_ONLY_REQUEST.test(message);
+}
+
+function isAffirmativeFollowUp(message: string): boolean {
+  const text = message.trim();
+  if (!text || text.length > 160) return false;
+  if (AFFIRMATIVE_NEGATION.test(text)) return false;
+  return AFFIRMATIVE_OPENER.test(text) || RE_INSTRUCTION.test(text);
+}
+
+/** The assistant either proposed a write or reported one failing/blocked. */
+function priorMessageProposesOrFailsWrite(previousAssistantMessage: string | undefined): boolean {
+  if (!previousAssistantMessage) return false;
+  return CONFIRMATION_REQUEST.test(previousAssistantMessage) || FAILURE_REPORT.test(previousAssistantMessage);
+}
+
+/** Base form of the last write verb in a prior assistant message, if any. */
+function lastPriorWriteAction(previousAssistantMessage: string): string | null {
+  const direct = directRequestedAction(previousAssistantMessage);
+  if (direct) return direct;
+  const last = [...previousAssistantMessage.matchAll(ANY_WRITE_ACTION_FORM)].at(-1)?.[1];
+  return last ? last.toLowerCase() : null;
+}
+
+function sameTool(continuationMutationTool: string | undefined, toolUse: ToolUseContent): boolean {
+  return !!continuationMutationTool
+    && continuationMutationTool.toLocaleLowerCase('en-US') === toolUse.name.toLocaleLowerCase('en-US');
 }
 
 function hasExplicitLocalMutationIntent(message: string): boolean {
@@ -458,21 +545,45 @@ function isCorrectiveFollowUp(message: string, previousAssistantMessage?: string
   return correction && priorArtifactAction;
 }
 
+/**
+ * An affirmative or re-instructing reply authorizes the write the assistant
+ * most recently proposed or failed on. Binding is to (a) the prior assistant
+ * message proposing/asking/failing on this tool or target, or (b) the exact
+ * tool that already completed a verified write in this session.
+ */
 function isBoundTargetedConfirmation(
   message: string,
   previousAssistantMessage: string | undefined,
   toolUse: ToolUseContent,
   skill?: Skill | null,
+  continuationMutationTool?: string,
 ): boolean {
-  if (!EXPLICIT_CONFIRMATION.test(message) || !previousAssistantMessage) return false;
-  if (!CONFIRMATION_REQUEST.test(previousAssistantMessage)) return false;
-  if (!toolTargetMentioned(previousAssistantMessage, toolUse, skill)) return false;
-  // Prefer a direct target-specific request ("Confirm: send the PDF") over
-  // incidental safety prose such as "external write" earlier in the message.
-  const priorAction = directRequestedAction(previousAssistantMessage)
-    ?? [...previousAssistantMessage.matchAll(new RegExp(ANY_WRITE_ACTION.source, 'ig'))]
-      .at(-1)?.[1]?.toLowerCase();
-  return !!priorAction && actionsCompatible(priorAction, toolMutationAction(toolUse));
+  if (!isAffirmativeFollowUp(message)) return false;
+  if (sameTool(continuationMutationTool, toolUse)) return true;
+  if (!previousAssistantMessage || !priorMessageProposesOrFailsWrite(previousAssistantMessage)) return false;
+  // A proposal or failure that names this tool/target is enough on its own;
+  // "I couldn't log that to Notion" needs no write verb from the list.
+  if (toolTargetMentioned(previousAssistantMessage, toolUse, skill)) return true;
+  // Otherwise ("Want me to add them all now?") bind through the proposed
+  // action so a bare "yes" cannot authorize an unrelated destination.
+  const priorAction = lastPriorWriteAction(previousAssistantMessage);
+  const actual = toolMutationAction(toolUse);
+  return !!priorAction && !!actual && actionsCompatible(priorAction, actual);
+}
+
+/**
+ * Session-established workflow: the same tool already completed a verified
+ * write this session and the user now sends more structured data ("Pectoral
+ * machine - 40kg x9x3") without any read-only verb.
+ */
+function isWorkflowContinuation(
+  message: string,
+  toolUse: ToolUseContent,
+  continuationMutationTool?: string,
+): boolean {
+  return sameTool(continuationMutationTool, toolUse)
+    && hasStructuredPayload(message)
+    && !hasReadOnlyRequest(message);
 }
 
 function hasExplicitExternalWriteIntent(
@@ -487,32 +598,108 @@ function hasExplicitExternalWriteIntent(
   // current turn. It still receives payload-sensitivity and idempotency checks.
   if (toolUse.name === 'send_message') return true;
   if (toolUse.name === 'send_file') {
-    if (isBoundTargetedConfirmation(message, previousAssistantMessage, toolUse, skill)) return true;
+    if (isBoundTargetedConfirmation(message, previousAssistantMessage, toolUse, skill, continuationMutationTool)) return true;
     const action = directRequestedAction(message);
     return !!action
       && actionsCompatible(action, 'send')
       && /\b(?:attach|download|file|image|pdf|photo|report|send|share|spreadsheet|video|workbook)\b/i.test(message);
   }
-  if (isBoundTargetedConfirmation(message, previousAssistantMessage, toolUse, skill)) return true;
+  if (isBoundTargetedConfirmation(message, previousAssistantMessage, toolUse, skill, continuationMutationTool)) return true;
+  if (isWorkflowContinuation(message, toolUse, continuationMutationTool)) return true;
   if (
     previousAssistantMessage
     && turnRequiresMutationReceipt(message, previousAssistantMessage, continuationMutationTool)
     && (
       toolTargetMentioned(previousAssistantMessage, toolUse, skill)
-      || continuationMutationTool?.toLocaleLowerCase('en-US') === toolUse.name.toLocaleLowerCase('en-US')
+      || sameTool(continuationMutationTool, toolUse)
     )
   ) {
     return true;
   }
 
-  const requestedAction = directRequestedAction(message);
-  if (!requestedAction || !actionsCompatible(requestedAction, toolMutationAction(toolUse))) return false;
+  const actual = toolMutationAction(toolUse);
+  const requestedAction = directRequestedActions(message)
+    .find(action => actionsCompatible(action, actual));
+  if (!requestedAction) return false;
   const targetIndependent = /^(?:book|deploy|document|invite|log|note|push|record|register|reply|schedule|share|submit|sync|track|upload)$/.test(requestedAction);
   const explicitPronoun = new RegExp(
-    `^\\s*(?:please\\s+)?(?:${WRITE_ACTIONS})\\s+(?:it|that|this|those|these)\\b`,
-    'i',
+    `(?:^|[.!?;,:\\n])\\s*(?:please\\s+)?(?:${WRITE_ACTIONS})\\s+(?:it|that|this|those|these|them)\\b`
+    + `|\\b(?:${WRITE_ACTIONS})\\s+(?:it|this|those|these|them)\\b`,
+    'im',
   ).test(message);
   return targetIndependent || explicitPronoun || toolTargetMentioned(message, toolUse, skill);
+}
+
+/**
+ * One-line, human-phrasable summary of a tool call ("notion create: name=Leg
+ * Press, date=2026-07-11, sets=3") so a blocked model can name the exact
+ * action when it asks the user.
+ */
+export function describeToolCallForUser(toolUse: ToolUseContent): string {
+  const input = toolUse.input ?? {};
+  const action = actionFromInput(input);
+  const parts: string[] = [];
+  if (toolUse.name === 'bash' || toolUse.name === 'run_code') {
+    const command = executableContent(toolUse).replace(/\s+/g, ' ').trim();
+    const method = command.match(/\b(?:-X|--request|--method[=\s])\s*['"]?(POST|PUT|PATCH|DELETE)\b/i)?.[1]
+      ?? command.match(/\b(POST|PUT|PATCH|DELETE)\b/i)?.[1];
+    const url = command.match(/https?:\/\/[^\s'"\\]+/i)?.[0];
+    const tail = [method?.toUpperCase(), url].filter(Boolean).join(' ')
+      || command.slice(0, 80);
+    return `${toolUse.name}: ${tail}`;
+  }
+  const interesting = /^(?:title|name|exercise|date|day|when|start|type|sets|reps|weight|duration|status|column|notes?|subject|to|recipient|message|body|content|text|page|database|path|file_path|kind|id)(?:[^a-z0-9]|$)/i;
+  const typedWrapper = /^(?:text|title|rich_text|date|number|select|start|content|plain_text)$/i;
+  const seen = new Set<string>();
+  const visit = (value: unknown, key: string, depth: number): void => {
+    if (parts.length >= 6 || depth > 5) return;
+    if (value === null || value === undefined) return;
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item, key, depth + 1);
+      return;
+    }
+    if (typeof value === 'object') {
+      for (const [childKey, child] of Object.entries(value as Record<string, unknown>)) {
+        // Notion-style typed wrappers ({date:{start}}, {title:[{text:{content}}]})
+        // carry the meaningful key one level up, but only once we are inside a
+        // named property: a property literally called "Date" is the label.
+        const label = interesting.test(key) && typedWrapper.test(childKey) ? key : childKey;
+        visit(child, label, depth + 1);
+      }
+      return;
+    }
+    if (!interesting.test(key) || key === 'action') return;
+    if (typeof value === 'string' && !value.trim()) return;
+    const rendered = String(value).replace(/\s+/g, ' ').trim().slice(0, 60);
+    const entry = `${key}=${rendered}`;
+    if (!seen.has(entry)) {
+      seen.add(entry);
+      parts.push(entry);
+    }
+  };
+  for (const [key, value] of Object.entries(input)) {
+    if (['action', 'operation', 'method', 'command'].includes(key)) continue;
+    visit(value, key, 0);
+  }
+  const head = action ? `${toolUse.name} ${action}` : toolUse.name;
+  return parts.length > 0 ? `${head}: ${parts.join(', ')}` : head;
+}
+
+function externalBlockReason(toolUse: ToolUseContent): string {
+  const summary = describeToolCallForUser(toolUse);
+  const verb = toolMutationAction(toolUse) ?? 'do';
+  return `BLOCKED: this write (${summary}) was not requested in the current message. `
+    + 'Do not retry it with another tool (bash/curl/spawn_agent/execute_goal/workflows are blocked by the same policy) '
+    + 'and do not claim it was done. Reply to the user with ONE short question that names the exact action, '
+    + `e.g. 'Do you want me to ${verb} ${summary} now?' — their 'yes' authorizes it.`;
+}
+
+function localBlockReason(toolUse: ToolUseContent): string {
+  const summary = describeToolCallForUser(toolUse);
+  return `BLOCKED: this local write (${summary}) was not requested in the current message. `
+    + 'Do not retry it with another tool and do not ask for permission to do it; '
+    + 'answer the user\'s actual request without this side effect. '
+    + 'If the request cannot be met without it, tell the user in ONE sentence what you would need to change and stop.';
 }
 
 /**
@@ -530,15 +717,31 @@ export function assessToolCallForTurn(
   const signature = toolCallSignature(toolUse);
   const message = currentInstruction(context.userMessage);
   if (!isMutation) return { allowed: true, isMutation, isExternalMutation, signature };
+  // An explicit user approval (button tap or typed "yes" to the approval
+  // prompt) covers this kind of call; hard-floor calls have no pattern.
+  const grantPattern = grantPatternFor(toolUse);
+  if (grantPattern && context.grants?.(grantPattern)) {
+    return relativeDateMismatch(toolUse, message, context, { isMutation, isExternalMutation, signature })
+      ?? { allowed: true, isMutation, isExternalMutation, signature };
+  }
   if (!isExternalMutation) {
+    // A bare "yes" after "Should I add these tasks to your board?" authorizes
+    // the proposed local write when the proposal names this tool.
+    const affirmedLocalProposal = isAffirmativeFollowUp(message)
+      && priorMessageProposesOrFailsWrite(context.previousAssistantMessage)
+      && toolTargetMentioned(context.previousAssistantMessage ?? '', toolUse, skill);
     if (hasExplicitLocalMutationIntent(message)
       || hasImplicitPlanningMutationIntent(message, context.previousAssistantMessage, toolUse)
-      || isCorrectiveFollowUp(message, context.previousAssistantMessage)) {
+      || isCorrectiveFollowUp(message, context.previousAssistantMessage)
+      || affirmedLocalProposal) {
       if (planningToolClaimsCompletion(toolUse) && !currentTurnStatesCompletion(message)) {
+        const summary = describeToolCallForUser(toolUse);
         return {
           allowed: false,
           code: 'TASK_COMPLETION_EVIDENCE_REQUIRED',
-          reason: 'The tool call marks a current task complete, but the current user turn does not say it is complete. Create or keep it pending; never infer today’s completion from older memory.',
+          reason: `BLOCKED: this call (${summary}) marks a task complete, but the current user message does not say it is done. `
+            + 'Retry the same call with the task pending/in progress instead; never infer today\'s completion from older memory. '
+            + 'If you are unsure whether it is done, ask the user ONE short question naming the task.',
           isMutation,
           isExternalMutation,
           signature,
@@ -548,7 +751,7 @@ export function assessToolCallForTurn(
     }
     return {
       allowed: false,
-      reason: 'This local write is outside the current user request. Do not execute it and do not ask for permission; continue only with the requested outcome.',
+      reason: localBlockReason(toolUse),
       isMutation,
       isExternalMutation,
       signature,
@@ -564,30 +767,38 @@ export function assessToolCallForTurn(
   if (!explicitIntent) {
     return {
       allowed: false,
-      reason: 'This external write is outside the current user request. Do not execute it and do not ask for permission to expand scope; continue only with the requested outcome or ask what outcome the user wants.',
+      reason: externalBlockReason(toolUse),
       isMutation,
       isExternalMutation,
       signature,
     };
   }
 
+  return relativeDateMismatch(toolUse, message, context, { isMutation, isExternalMutation, signature })
+    ?? { allowed: true, isMutation, isExternalMutation, signature };
+}
+
+/** "today"/"yesterday"/"tomorrow" in the request must match every date argument. */
+function relativeDateMismatch(
+  toolUse: ToolUseContent,
+  message: string,
+  context: TurnToolSafetyContext,
+  base: Pick<ToolSafetyAssessment, 'isMutation' | 'isExternalMutation' | 'signature'>,
+): ToolSafetyAssessment | null {
   const now = context.now ?? new Date();
   const expectedDate = expectedRelativeDate(message, now, context.timezone);
-  if (expectedDate) {
-    const suppliedDates = collectDateArguments(toolUse.input);
-    const mismatched = suppliedDates.find((date) => date !== expectedDate);
-    if (mismatched) {
-      return {
-        allowed: false,
-        reason: `The user said a relative day, but the tool arguments use ${mismatched}. The deterministic date for this turn is ${expectedDate} in ${context.timezone}. Correct the arguments before writing.`,
-        isMutation,
-        isExternalMutation,
-        signature,
-      };
-    }
-  }
-
-  return { allowed: true, isMutation, isExternalMutation, signature };
+  if (!expectedDate) return null;
+  const suppliedDates = collectDateArguments(toolUse.input);
+  const mismatched = suppliedDates.find((date) => date !== expectedDate);
+  if (!mismatched) return null;
+  const word = message.match(/\b(?:yesterday|tomorrow|today)\b/i)?.[0].toLowerCase() ?? 'a relative day';
+  return {
+    allowed: false,
+    reason: `BLOCKED: the user said '${word}', but the ${toolUse.name} arguments use ${mismatched}. `
+      + `'${word}' in ${context.timezone} is ${expectedDate}. `
+      + `Retry the same ${toolUse.name} call now with every date argument set to ${expectedDate}; do not ask the user and do not switch tools.`,
+    ...base,
+  };
 }
 
 /** Strong evidence checks for tools whose process exited successfully. */
@@ -630,21 +841,25 @@ export function turnRequiresMutationReceipt(
   // "use" may execute tools without changing state. Treating those as writes
   // caused the agent to repeat successful read-only tool calls and could consume
   // mock/provider responses without ever producing a final answer.
-  if (directRequestedAction(message) && !INFORMATIONAL_UPDATE_REQUEST.test(message)) return true;
+  if (INFORMATIONAL_UPDATE_REQUEST.test(message)) return false;
+  if (directRequestedAction(message)) return true;
 
   if (isTaskList(message) && /\b(?:priorit|plan|task|deadline|today|board)\b/i.test(previousAssistantMessage ?? '')) {
     return true;
   }
 
-  const previous = previousAssistantMessage ?? '';
-  const priorWriteHandoff = /\b(?:add|added|create|created|log|logged|record|recorded|save|saved|schedule|scheduled|send|sent|update|updated|want me to)\b/i.test(previous)
-    && /\b(?:anything else|want me to|another|more|next)\b/i.test(previous);
-  const continuesMutationThread = (!!continuationMutationTool || priorWriteHandoff)
-    && /\b(?:add|added|anything else|create|created|log|logged|record|recorded|save|saved|schedule|scheduled|send|sent|update|updated|want me to)\b/i.test(previous);
-  if (!continuesMutationThread) return false;
+  // Session-established workflow: more structured data after a verified write
+  // by the same tool must again end in a tool receipt, whatever the last
+  // assistant reply said.
+  const structuredPayload = hasStructuredPayload(message) && !hasReadOnlyRequest(message);
+  if (continuationMutationTool && structuredPayload) return true;
 
-  const affirmative = EXPLICIT_CONFIRMATION.test(message);
-  const structuredPayload = /\b\d+(?:\.\d+)?(?:\s*[a-z%]+)?(?:\s*(?:x|×)\s*\d+(?:\.\d+)?(?:\s*[a-z%]+)?)+\b/i.test(message)
-    || isTaskList(message);
-  return affirmative || structuredPayload;
+  const previous = previousAssistantMessage ?? '';
+  const priorWriteThread = /\b(?:add|added|adding|create|created|creating|log|logged|logging|record|recorded|save|saved|schedule|scheduled|send|sent|update|updated|write|written|track|tracked|entries|entry)\b/i.test(previous);
+  if (!priorWriteThread) return false;
+  const priorWriteHandoff = /\b(?:anything else|want me to|another|more|next)\b/i.test(previous);
+  const affirmative = isAffirmativeFollowUp(message)
+    && (priorMessageProposesOrFailsWrite(previous) || priorWriteHandoff || !!continuationMutationTool);
+  if (affirmative) return true;
+  return structuredPayload && (priorWriteHandoff || !!continuationMutationTool);
 }
