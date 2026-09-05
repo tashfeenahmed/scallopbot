@@ -63,9 +63,10 @@ describe('Config Schema', () => {
         expect(result.data.tools.loopDetection).toEqual({
           maxCallsPerResponse: 64,
           historySize: 30,
-          warningThreshold: 10,
-          criticalThreshold: 20,
-          circuitBreakerThreshold: 30,
+          // Interactive-chat defaults lowered 5 Sep 2026 (identical failing calls repeated 3-6x on the Pi).
+          warningThreshold: 3,
+          criticalThreshold: 5,
+          circuitBreakerThreshold: 8,
         });
         expect(result.data.logging.level).toBe('info');
         expect(result.data.providers.anthropic.model).toBe('claude-sonnet-4-20250514');

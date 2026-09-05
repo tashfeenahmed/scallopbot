@@ -1,7 +1,8 @@
 import { join } from 'path';
-import { Bot, Context, InputFile } from 'grammy';
+import { Bot, Context, InlineKeyboard, InputFile } from 'grammy';
 import type { Logger } from 'pino';
-import type { Agent, ProgressCallback } from '../agent/agent.js';
+import type { Agent, AgentResult, ProgressCallback } from '../agent/agent.js';
+import type { ApprovalScope } from '../agent/approvals.js';
 import type { SessionManager } from '../agent/session.js';
 import type { ScallopDatabase } from '../memory/db.js';
 import type { Attachment } from './types.js';
@@ -22,6 +23,32 @@ import {
 const MAX_MESSAGE_LENGTH = 4096;
 const TYPING_INTERVAL = 5000; // 5 seconds
 const MAX_QUEUE_SIZE = 10;
+
+/** Callback-data prefix for approval buttons: `apv:<id>:<once|session|always|deny>`. */
+export const APPROVAL_CALLBACK_PREFIX = 'apv';
+export type ApprovalChoice = ApprovalScope | 'deny';
+
+/** Four-button prompt attached to the reply that asked for a blocked write. */
+export function approvalKeyboard(approvalId: string): InlineKeyboard {
+  const data = (choice: ApprovalChoice) => `${APPROVAL_CALLBACK_PREFIX}:${approvalId}:${choice}`;
+  return new InlineKeyboard()
+    .text('✅ Yes, once', data('once'))
+    .text('✅ This session', data('session'))
+    .row()
+    .text('✅ Always', data('always'))
+    .text('❌ No', data('deny'));
+}
+
+export function parseApprovalCallback(data: string): { id: string; choice: ApprovalChoice } | null {
+  const match = data.match(/^apv:([A-Za-z0-9_-]{1,16}):(once|session|always|deny)$/);
+  return match ? { id: match[1], choice: match[2] as ApprovalChoice } : null;
+}
+
+const APPROVAL_SCOPE_LABEL: Record<ApprovalScope, string> = {
+  once: 'once',
+  session: 'this session',
+  always: 'always',
+};
 
 // Escalating context-pressure warnings, keyed by the turn's total input tokens.
 // Ordered highest-first so we always fire the most severe tier that applies.
@@ -455,6 +482,38 @@ export class TelegramChannel {
       });
     });
 
+    // /approvals command - list or clear standing ("always") approvals
+    this.bot.command('approvals', async (ctx) => {
+      const userId = ctx.from?.id.toString();
+      if (!userId) return;
+
+      if (!this.isUserAllowed(userId)) {
+        await this.sendUnauthorized(ctx);
+        return;
+      }
+
+      await this.handleApprovalsCommand(ctx, userId, typeof ctx.match === 'string' ? ctx.match : '');
+    });
+
+    // Approval buttons (once / this session / always / no) under a blocked-write reply
+    this.bot.on('callback_query:data', async (ctx) => {
+      const userId = ctx.from?.id.toString();
+      const data = ctx.callbackQuery.data;
+      if (!userId || !parseApprovalCallback(data)) {
+        await ctx.answerCallbackQuery().catch(() => {});
+        return;
+      }
+
+      if (!this.isUserAllowed(userId)) {
+        await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {});
+        return;
+      }
+
+      this.handleApprovalCallback(ctx, userId, data).catch((err) => {
+        this.logger.error({ userId, error: (err as Error).message }, 'Unhandled error in approval callback');
+      });
+    });
+
     // Error handler
     this.bot.catch((err) => {
       this.logger.error({ error: err.message }, 'Bot error');
@@ -543,7 +602,8 @@ export class TelegramChannel {
       '/settings - View your configuration\n' +
       '/setup - Reconfigure the bot\n' +
       '/new - Start new conversation history\n' +
-      '/verbose - Toggle debug output\n\n' +
+      '/verbose - Toggle debug output\n' +
+      '/approvals - List standing approvals (/approvals clear to revoke)\n\n' +
       '<b>What I can do:</b>\n' +
       '- Read and write files on the server\n' +
       '- Execute shell commands\n' +
@@ -963,16 +1023,7 @@ export class TelegramChannel {
 
       clearInterval(typingInterval);
 
-      const formattedResponse = formatMarkdownToHtml(result.response);
-      const chunks = splitMessage(formattedResponse).filter(c => c.trim());
-
-      for (const chunk of chunks) {
-        try {
-          await ctx.reply(chunk, { parse_mode: 'HTML' });
-        } catch {
-          await ctx.reply(chunk.replace(/<[^>]*>/g, ''));
-        }
-      }
+      await this.sendAgentResponse(ctx, result);
 
       await this.maybeWarnContext(sessionId, ctx, result.tokenUsage.peakInputTokens ?? result.tokenUsage.inputTokens);
 
@@ -1069,16 +1120,7 @@ export class TelegramChannel {
 
       clearInterval(typingInterval);
 
-      const formattedResponse = formatMarkdownToHtml(result.response);
-      const chunks = splitMessage(formattedResponse).filter(c => c.trim());
-
-      for (const chunk of chunks) {
-        try {
-          await ctx.reply(chunk, { parse_mode: 'HTML' });
-        } catch {
-          await ctx.reply(chunk.replace(/<[^>]*>/g, ''));
-        }
-      }
+      await this.sendAgentResponse(ctx, result);
 
       await this.maybeWarnContext(sessionId, ctx, result.tokenUsage.peakInputTokens ?? result.tokenUsage.inputTokens);
 
@@ -1267,16 +1309,7 @@ export class TelegramChannel {
 
       clearInterval(typingInterval);
 
-      const formattedResponse = formatMarkdownToHtml(result.response);
-      const chunks = splitMessage(formattedResponse).filter(c => c.trim());
-
-      for (const chunk of chunks) {
-        try {
-          await ctx.reply(chunk, { parse_mode: 'HTML' });
-        } catch {
-          await ctx.reply(chunk.replace(/<[^>]*>/g, ''));
-        }
-      }
+      await this.sendAgentResponse(ctx, result);
 
       await this.maybeWarnContext(sessionId, ctx, result.tokenUsage.peakInputTokens ?? result.tokenUsage.inputTokens);
 
@@ -1410,17 +1443,7 @@ export class TelegramChannel {
 
       clearInterval(typingInterval);
 
-      const formattedResponse = formatMarkdownToHtml(result.response);
-      const chunks = splitMessage(formattedResponse).filter(c => c.trim());
-
-      for (const chunk of chunks) {
-        try {
-          await ctx.reply(chunk, { parse_mode: 'HTML' });
-        } catch (parseError) {
-          this.logger.warn({ error: (parseError as Error).message }, 'HTML parse failed, sending plain text');
-          await ctx.reply(chunk.replace(/<[^>]*>/g, ''));
-        }
-      }
+      await this.sendAgentResponse(ctx, result);
 
       await this.maybeWarnContext(sessionId, ctx, result.tokenUsage.peakInputTokens ?? result.tokenUsage.inputTokens);
 
@@ -1529,6 +1552,154 @@ export class TelegramChannel {
    * Build an onProgress callback for the given user.
    * When verbose mode is off, returns a no-op. When on, sends formatted debug messages.
    */
+  /**
+   * Deliver an agent reply in Telegram-sized chunks. When the turn left a
+   * blocked write waiting on the user, the approval buttons ride on the last
+   * chunk so answering costs one tap.
+   */
+  private async sendAgentResponse(ctx: Context, result: AgentResult): Promise<void> {
+    const formattedResponse = formatMarkdownToHtml(result.response);
+    let chunks = splitMessage(formattedResponse).filter(c => c.trim());
+    const pending = result.pendingApproval;
+    if (pending && chunks.length === 0) {
+      chunks = [formatMarkdownToHtml(pending.question)];
+    }
+
+    for (let index = 0; index < chunks.length; index++) {
+      const chunk = chunks[index];
+      const isLast = index === chunks.length - 1;
+      const options: Parameters<Context['reply']>[1] = pending && isLast
+        ? { parse_mode: 'HTML', reply_markup: approvalKeyboard(pending.id) }
+        : { parse_mode: 'HTML' };
+      try {
+        await ctx.reply(chunk, options);
+      } catch (parseError) {
+        this.logger.warn({ error: (parseError as Error).message }, 'HTML parse failed, sending plain text');
+        const plain = chunk.replace(/<[^>]*>/g, '');
+        if (pending && isLast) {
+          await ctx.reply(plain, { reply_markup: approvalKeyboard(pending.id) });
+        } else {
+          await ctx.reply(plain);
+        }
+      }
+    }
+  }
+
+  /** One tap on the approval keyboard: grant or deny, mark the prompt, then let the agent act. */
+  private async handleApprovalCallback(ctx: Context, userId: string, data: string): Promise<void> {
+    const parsed = parseApprovalCallback(data);
+    if (!parsed) {
+      await ctx.answerCallbackQuery().catch(() => {});
+      return;
+    }
+    const store = this.agent.getApprovalStore();
+    const prefixedUserId = `telegram:${userId}`;
+    const pending = store.findPendingById(parsed.id);
+    if (!pending) {
+      await ctx.answerCallbackQuery({ text: 'This request expired; just ask again.' }).catch(() => {});
+      return;
+    }
+    if (pending.userId !== prefixedUserId) {
+      this.logger.warn({ userId, approvalId: parsed.id }, 'Approval button pressed by a different user');
+      await ctx.answerCallbackQuery({ text: 'This request belongs to someone else.' }).catch(() => {});
+      return;
+    }
+
+    const originalText = (ctx.callbackQuery?.message as { text?: string } | undefined)?.text ?? '';
+    const markPrompt = async (marker: string): Promise<void> => {
+      try {
+        await ctx.editMessageText(`${originalText}\n\n${marker}`.trim());
+      } catch (err) {
+        this.logger.debug({ err: (err as Error).message }, 'Could not edit approval prompt (non-critical)');
+      }
+    };
+
+    if (parsed.choice === 'deny') {
+      store.deny(parsed.id, 'User tapped No');
+      this.logger.info({ userId, approvalId: parsed.id, pattern: pending.pattern }, 'Approval denied');
+      await ctx.answerCallbackQuery({ text: 'Not done.' }).catch(() => {});
+      await markPrompt('❌ not done');
+      await this.runApprovalTurn(ctx, userId, pending.sessionId, `No, don't ${pending.description}.`);
+      return;
+    }
+
+    const scope = parsed.choice;
+    store.approve(parsed.id, scope);
+    // If the user started a new conversation since the prompt, the agent turn
+    // runs in the current session; carry the grant over so the call passes.
+    const currentSessionId = await this.getOrCreateSession(userId);
+    if (currentSessionId !== pending.sessionId) {
+      store.grant(prefixedUserId, currentSessionId, pending.pattern, scope);
+    }
+    const label = APPROVAL_SCOPE_LABEL[scope];
+    this.logger.info({ userId, approvalId: parsed.id, pattern: pending.pattern, scope }, 'Approval granted');
+    await ctx.answerCallbackQuery({ text: `Approved (${label}).` }).catch(() => {});
+    await markPrompt(`✅ approved (${label})`);
+    await this.runApprovalTurn(ctx, userId, currentSessionId, `Yes — ${pending.question}`);
+  }
+
+  /** Run a normal agent turn for a synthetic user message produced by an approval tap. */
+  private async runApprovalTurn(ctx: Context, userId: string, sessionId: string, text: string): Promise<void> {
+    const execute = async (): Promise<void> => {
+      const typingInterval = this.startTypingIndicator(ctx);
+      try {
+        const onProgress = this.buildOnProgress(userId, ctx);
+        const shouldStop = () => this.stopRequests.has(userId);
+        const providerOverride = this.getProviderForUser(userId);
+        const result = await this.agent.processMessage(sessionId, text, undefined, onProgress, shouldStop, providerOverride);
+        this.stopRequests.delete(userId);
+        clearInterval(typingInterval);
+        await this.sendAgentResponse(ctx, result);
+        await this.maybeWarnContext(sessionId, ctx, result.tokenUsage.peakInputTokens ?? result.tokenUsage.inputTokens);
+        await this.sendPendingVoiceAttachments(ctx, sessionId);
+      } catch (error) {
+        clearInterval(typingInterval);
+        this.logger.error({ userId, error: (error as Error).message }, 'Failed to process approval turn');
+        await ctx.reply('Sorry, I encountered an error processing your message. Please try again.').catch(() => {});
+      }
+    };
+
+    if (this.activeProcessing.has(userId)) {
+      this.enqueue(userId, { type: 'text', execute });
+      return;
+    }
+    this.activeProcessing.add(userId);
+    try {
+      await execute();
+    } finally {
+      await this.drainQueue(userId);
+    }
+  }
+
+  /** /approvals lists standing ("always") grants; `/approvals clear [pattern]` revokes them. */
+  private async handleApprovalsCommand(ctx: Context, userId: string, args: string): Promise<void> {
+    const store = this.agent.getApprovalStore();
+    const prefixedUserId = `telegram:${userId}`;
+    const escape = (text: string) => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const arg = args.trim();
+
+    if (/^clear\b/i.test(arg)) {
+      const pattern = arg.replace(/^clear\s*/i, '').trim();
+      const removed = store.clearAlways(prefixedUserId, pattern || undefined);
+      await ctx.reply(removed > 0
+        ? `Cleared ${removed} standing approval${removed === 1 ? '' : 's'}.`
+        : 'No standing approvals to clear.');
+      return;
+    }
+
+    const grants = store.listAlways(prefixedUserId);
+    if (grants.length === 0) {
+      await ctx.reply('No standing approvals. When I ask before a write, tap "Always" to add one.');
+      return;
+    }
+    const lines = grants.map(grant =>
+      `• <code>${escape(grant.pattern)}</code> — since ${new Date(grant.grantedAt).toISOString().slice(0, 10)}`);
+    await ctx.reply(
+      `<b>Standing approvals</b>\n${lines.join('\n')}\n\nUse /approvals clear [pattern] to revoke.`,
+      { parse_mode: 'HTML' },
+    );
+  }
+
   private buildOnProgress(userId: string, ctx: Context): ProgressCallback {
     if (!this.verboseUsers.has(userId)) {
       return async () => {};
@@ -1685,6 +1856,7 @@ export class TelegramChannel {
         { command: 'setup', description: 'Reconfigure bot (name, personality, timezone)' },
         { command: 'new', description: 'Start a new conversation' },
         { command: 'verbose', description: 'Toggle debug output (memory, tools, thinking)' },
+        { command: 'approvals', description: 'List or clear standing write approvals' },
       ]);
     } catch (err) {
       this.logger.warn({ err: (err as Error).message }, 'setMyCommands failed (non-critical, continuing startup)');

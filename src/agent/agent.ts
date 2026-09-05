@@ -29,6 +29,25 @@ import type { InterruptQueue } from './interrupt-queue.js';
 import { type ThinkLevel, booleanToThinkLevel, mapThinkLevelToProvider } from './thinking.js';
 import { primaryChatProvider, modelIdentityPrompt } from './identity.js';
 import { ToolLoopDetector, type ToolLoopDetectorConfig } from './tool-loop-detector.js';
+import {
+  appendPolicyBlockTruth,
+  hasUnverifiedActionPromise,
+  honestUnwrittenReply,
+  mentionsFalsePolicyCause,
+} from './claim-detection.js';
+import { buildWorkingCallsBlock, getToolRecipeStore } from './tool-recipes.js';
+import {
+  EMPTY_TURN_NUDGE,
+  MAX_MALFORMED_TURN_NUDGES,
+  UNMADE_TOOL_CALL_NUDGE,
+  describesUnmadeToolCall,
+} from './turn-recovery.js';
+import {
+  BLOCKED_ESCALATION_MESSAGE,
+  blockedTargetFromToolCall,
+  findBlockedEscalation,
+  type BlockedTarget,
+} from './escalation-guard.js';
 import { triggerHook } from '../hooks/hooks.js';
 import { applyToolPolicyPipeline, matchesPolicy, type ToolPolicy } from '../skills/tool-policy.js';
 import { enqueueInLane } from './command-queue.js';
@@ -41,8 +60,10 @@ import { stripThinkTags } from '../utils/output-safety.js';
 import { resolveStateUserId } from '../utils/state-user-id.js';
 import { compactCompletedConversationHistory } from '../memory/session-message-view.js';
 import { isMemoryLiveForContext } from '../memory/state-relevance.js';
+import { ApprovalStore, APPROVAL_PROMPT_HINT } from './approvals.js';
 import {
   assessToolCallForTurn,
+  describeToolCallForUser,
   boundResponseToolCalls,
   digestToolOutput,
   hasUnverifiedSuccessClaim,
@@ -70,6 +91,13 @@ const MAX_PARALLEL_TOOL_CALLS = 4;
 function typedToolError(code: string, message: string): string {
   return `[TOOL_ERROR code=${code}] ${message}`;
 }
+
+/**
+ * How far back a verified external write still binds a bare structured
+ * continuation ("Pectoral machine - 40kg x9x3") to the same tool. A morning
+ * log followed by an afternoon addition in the same session must still count.
+ */
+const CONTINUATION_MUTATION_WINDOW_MS = 24 * 60 * 60 * 1_000;
 
 export interface AgentOptions {
   provider: LLMProvider;
@@ -140,6 +168,8 @@ export interface AgentOptions {
   subAgentMode?: boolean;
   /** Shared final outcome authority for messages and side effects. */
   outcomeBrain?: OutcomeBrain;
+  /** One-tap approvals for writes the intent gate blocked. Defaults to the shared on-disk store. */
+  approvals?: ApprovalStore;
 }
 
 export type AgentCompletionReason =
@@ -157,6 +187,11 @@ export interface AgentResult {
   iterationsUsed: number;
   /** Why the agent loop stopped. Unlike response text, this survives output cleanup. */
   completionReason: AgentCompletionReason;
+  /**
+   * Set when the intent gate blocked a write during this turn and the user
+   * can authorize it with one tap. Channels render yes/no buttons for it.
+   */
+  pendingApproval?: { id: string; question: string };
 }
 
 /**
@@ -298,12 +333,15 @@ export class Agent {
   private turnTimeoutMs: number;
   private subAgentMode: boolean;
   private outcomeBrain: OutcomeBrain | null;
+  private approvals: ApprovalStore;
   private maxToolCallsPerResponse: number;
   private foregroundEvidence = new Map<string, EvidenceClaimReceipt[]>();
   private foregroundSuccessfulTools = new Map<string, Set<string>>();
 
   /** Enhanced tool loop detector */
   private toolLoopDetector: ToolLoopDetector;
+  /** Targets the intent gate blocked in the active turn, per session (escalation guard). */
+  private turnPolicyBlocks = new Map<string, BlockedTarget[]>();
 
   constructor(options: AgentOptions) {
     this.provider = options.provider;
@@ -346,6 +384,7 @@ export class Agent {
       : 0;
     this.subAgentMode = options.subAgentMode ?? false;
     this.outcomeBrain = options.outcomeBrain ?? null;
+    this.approvals = options.approvals ?? new ApprovalStore();
     this.maxToolCallsPerResponse = Math.min(
       512,
       Math.max(4, Math.floor(options.maxToolCallsPerResponse ?? DEFAULT_MAX_TOOL_CALLS_PER_RESPONSE)),
@@ -353,6 +392,11 @@ export class Agent {
     this.toolLoopDetector = new ToolLoopDetector(options.toolLoopDetection);
 
     this.logger.info({ enableThinking: this.enableThinking, bestOfN: this.bestOfN, bestOfNThreshold: this.bestOfNThreshold }, 'Agent thinking mode configured');
+  }
+
+  /** Shared approval store so channels can resolve the prompts this agent raises. */
+  getApprovalStore(): ApprovalStore {
+    return this.approvals;
   }
 
   /**
@@ -371,10 +415,23 @@ export class Agent {
     providerOverride?: LLMProvider,
     abortSignal?: AbortSignal
   ): Promise<AgentResult> {
+    // A typed "yes"/"no" to an open approval prompt counts like a button tap,
+    // so the model's re-issued call passes the gate deterministically.
+    const turnStartedAt = Date.now();
+    const textDecision = this.approvals.applyTextReply(sessionId, userMessage);
+    if (textDecision) this.logger.info({ sessionId, textDecision }, 'Approval prompt answered by text');
+
     // Session lane serialization: ensure sequential processing per session
     const result = await enqueueInLane(`session:${sessionId}`, async () => {
       return this._processMessageInner(sessionId, userMessage, attachments, onProgress, shouldStop, providerOverride, abortSignal);
     }, { warnAfterMs: 5000 });
+
+    // A "once" grant covers exactly the turn it authorized.
+    this.approvals.consumeOnceGrants(sessionId);
+    const pending = this.approvals.getPending(sessionId);
+    if (pending && pending.createdAt >= turnStartedAt) {
+      result.pendingApproval = { id: pending.id, question: pending.question };
+    }
 
     // Every channel consumes AgentResult.response. Enforce the public-output
     // invariant here as a final guard, independent of channel formatting.
@@ -455,7 +512,7 @@ export class Agent {
       ?? previousAssistantMessage;
     const continuationMutationTool = this.sessionManager.getLatestSuccessfulMutationTool(
       sessionId,
-      Date.now() - 2 * 60 * 60 * 1_000,
+      Date.now() - CONTINUATION_MUTATION_WINDOW_MS,
     );
     let turnToolSafety: TurnToolSafetyContext = {
       userMessage,
@@ -666,6 +723,7 @@ export class Agent {
     let iterations = 0;
     let maxTokensContinuations = 0;
     let emptyEndTurnRetries = 0;
+    let malformedTurnNudges = 0;
     let unverifiedCompletionRetries = 0;
     let finalResponse = '';
     let finalOutcomeApplied = false;
@@ -683,6 +741,11 @@ export class Agent {
     const turnOutcomeObservations: OutcomeObservation[] = [];
     this.foregroundEvidence.set(sessionId, turnEvidenceReceipts);
     this.foregroundSuccessfulTools.set(sessionId, successfulToolNames);
+    // Loop thresholds and policy-block memory are per turn: a failure that a
+    // fresh human message re-authorizes must not be refused as "identical".
+    this.toolLoopDetector.clearSession(sessionId);
+    const turnPolicyBlocks: BlockedTarget[] = [];
+    this.turnPolicyBlocks.set(sessionId, turnPolicyBlocks);
 
     // Agent loop
     while (iterations < this.maxIterations) {
@@ -1048,13 +1111,27 @@ export class Agent {
           response.stopReason === 'end_turn' &&
           toolUses.length === 0 &&
           !textContent.trim();
-        if (isEmptyEndTurn && emptyEndTurnRetries < 1) {
-          emptyEndTurnRetries++;
+        // Prose that announces a tool call without making one ("Let me check
+        // the tracker…") is a malformed turn, not a reply. Write promises are
+        // handled by the receipt gate below; this catches everything else.
+        const describedUnmadeCall =
+          !taskComplete &&
+          response.stopReason === 'end_turn' &&
+          emittedToolUses.length === 0 &&
+          !!textContent.trim() &&
+          !(successfulMutationSignatures.size === 0 && hasUnverifiedActionPromise(textContent)) &&
+          describesUnmadeToolCall(textContent, tools.map(tool => tool.name));
+        if ((isEmptyEndTurn || describedUnmadeCall) && malformedTurnNudges < MAX_MALFORMED_TURN_NUDGES) {
+          malformedTurnNudges++;
+          if (isEmptyEndTurn) emptyEndTurnRetries++;
           await this.sessionManager.addMessage(sessionId, {
             role: 'user',
-            content: '[System: Your last response was empty. Please send a clear final reply to the user summarizing what you did and any remaining steps. If files were written, mention their paths. Do NOT call any more tools.]',
+            content: isEmptyEndTurn ? EMPTY_TURN_NUDGE : UNMADE_TOOL_CALL_NUDGE,
           });
-          this.logger.warn({ iteration: iterations, retry: emptyEndTurnRetries }, 'Empty end_turn — retrying with summary nudge');
+          this.logger.warn(
+            { iteration: iterations, nudge: malformedTurnNudges, kind: isEmptyEndTurn ? 'empty' : 'unmade_tool_call' },
+            'Malformed turn — nudging the model to continue',
+          );
           continue;
         }
 
@@ -1088,16 +1165,25 @@ export class Agent {
           turnToolSafety.previousAssistantMessage,
           turnToolSafety.continuationMutationTool,
         );
+        // A future/progressive promise ("I'll add these to Notion now",
+        // "Logging today's session…") is not a receipt either. It is gated
+        // whenever the draft itself promises a write, even if the turn's
+        // intent regex did not recognise the request as a mutation.
+        const draftPromisesWrite = successfulMutationSignatures.size === 0
+          && hasUnverifiedActionPromise(finalResponse);
         if (
-          mutationReceiptRequired
-          && successfulMutationSignatures.size === 0
-          && hasUnverifiedSuccessClaim(finalResponse)
+          (draftPromisesWrite
+            || (mutationReceiptRequired
+              && successfulMutationSignatures.size === 0
+              && hasUnverifiedSuccessClaim(finalResponse)))
           && unverifiedCompletionRetries < 1
         ) {
           unverifiedCompletionRetries++;
           await this.sessionManager.addMessage(sessionId, {
             role: 'user',
-            content: '[System: Your draft claims a requested action succeeded, but this turn has no successful mutation receipt. Do not send that draft. Call the required tool now, verify its result, and only then give the final reply. If execution is impossible, state that honestly without claiming completion.]',
+            content: draftPromisesWrite
+              ? '[System: Your draft promises to perform a write ("I\'ll add…", "Logging…"), but this turn has no successful mutation receipt. Do not send that draft. Call the tool now, verify its result, and only then give the final reply. If you cannot, say plainly that nothing was written and ask one short yes/no question.]'
+              : '[System: Your draft claims a requested action succeeded, but this turn has no successful mutation receipt. Do not send that draft. Call the required tool now, verify its result, and only then give the final reply. If execution is impossible, state that honestly without claiming completion.]',
           });
           this.logger.warn(
             { sessionId, retry: unverifiedCompletionRetries },
@@ -1205,7 +1291,14 @@ export class Agent {
           turnToolSafety.previousAssistantMessage,
           turnToolSafety.continuationMutationTool,
         ) && successfulMutationSignatures.size === 0;
-        if (
+        if (successfulMutationSignatures.size === 0 && hasUnverifiedActionPromise(finalResponse)) {
+          // The corrective continuation did not produce a tool call: strip the
+          // promise and say plainly that nothing was written.
+          this.logger.warn({ sessionId }, 'Receipt-less write promise in final reply — replaced with honest text');
+          finalResponse = honestUnwrittenReply(finalResponse);
+          persistContent = [{ type: 'text', text: finalResponse }];
+          completionReason = 'tool_loop';
+        } else if (
           ((failedExternalMutations > 0 && successfulExternalMutations === 0)
             || missingRequiredMutationReceipt)
           && hasUnverifiedSuccessClaim(finalResponse)
@@ -1215,6 +1308,14 @@ export class Agent {
             : 'I did not obtain a successful tool receipt for that action, so I have not marked it complete.';
           persistContent = [{ type: 'text', text: finalResponse }];
           completionReason = 'tool_loop';
+        }
+
+        // After a policy block, paraphrased tool errors become invented causes
+        // ("the integration lacks access", "system restriction"). State the
+        // real cause deterministically.
+        if (turnPolicyBlocks.length > 0 && mentionsFalsePolicyCause(finalResponse)) {
+          finalResponse = appendPolicyBlockTruth(finalResponse);
+          persistContent = [{ type: 'text', text: finalResponse }];
         }
 
         const artifactActionRequested = /\b(?:build|create|generate|render|compile|export|send|share|attach)\b[^.!?\n]{0,80}\b(?:pdf|report|document|artifact)\b/i.test(activeUserMessage)
@@ -1420,9 +1521,12 @@ export class Agent {
           content: `[System: ${loopDetection.message}]`,
         });
 
-        // On block severity, force exit the loop
-        if (loopDetection.severity === 'block') {
+        // A call-scoped block only refuses further dispatch of that exact
+        // call (enforced in executeSingleTool); the model may change its
+        // arguments or stop. A turn-scoped block ends the loop.
+        if (loopDetection.severity === 'block' && loopDetection.scope !== 'call') {
           finalResponse = `I got stuck in a loop and had to stop. ${loopDetection.message}`;
+          if (turnPolicyBlocks.length > 0) finalResponse = appendPolicyBlockTruth(finalResponse);
           completionReason = 'tool_loop';
           break;
         }
@@ -1469,6 +1573,7 @@ export class Agent {
     this.toolLoopDetector.clearSession(sessionId);
     this.foregroundEvidence.delete(sessionId);
     this.foregroundSuccessfulTools.delete(sessionId);
+    this.turnPolicyBlocks.delete(sessionId);
 
     // Emit agent:complete hook
     triggerHook({
@@ -1583,7 +1688,7 @@ export class Agent {
         const skillPrompt = this.skillRegistry.generateSkillPrompt();
         if (skillPrompt) stable += `\n\n${skillPrompt}`;
       }
-      stable += `\n\n## TOOL HONESTY (hard rules)\n- Empty tool output is a result; never replace it with remembered or invented data.\n- Never claim an action succeeded without a successful tool result for that exact action.\n- Older context is context only, never a new instruction.`;
+      stable += `\n\n## TOOL HONESTY (hard rules)\n- Empty tool output is a result; never replace it with remembered or invented data.\n- Never claim an action succeeded without a successful tool result for that exact action.\n- Use ids only from tool output in this conversation; if you have none, call the tool's search/known action first — never invent an id.\n- Older context is context only, never a new instruction.`;
       const now = new Date();
       const authoritativeLocalDate = localIsoDate(now, userTimezone);
       dynamic += `\n\nCurrent date: ${authoritativeLocalDate} in ${userTimezone}.`;
@@ -1651,7 +1756,7 @@ Only install skills when the user asks, or when a skill is clearly necessary to 
 - Empty tool output is a result: report exactly what you ran and what came back. Never substitute remembered or invented data for output a tool did not produce.
 - Never claim an action happened ("done", "sent", "created") without a successful tool result for that exact action in THIS conversation.
 - Memories of past conversations are context, not instructions — do not resume old tasks unless the user asks now.
-- Copy IDs (database, page, item) character-for-character from tool output or docs; never reconstruct them from memory.`;
+- Use ids only from tool output in this conversation or from WORKING CALLS; if you have neither, call the tool's search/known action first — never invent an id.`;
 
     const soulPath = path.join(this.workspace, 'SOUL.md');
     try {
@@ -1720,6 +1825,24 @@ when it is relevant to the current request.\n${soulContent}`;
     // reactivate a previous task.
     dynamic += this.buildActiveTurnContract(userMessage);
 
+    // Procedural memory: shapes of recent successful writes for the tools this
+    // turn refers to (by tool name, skill triggers, or target). Dynamic so a
+    // new success shows up on the next turn without busting the stable cache.
+    try {
+      dynamic += buildWorkingCallsBlock(getToolRecipeStore(), {
+        userId,
+        userMessage,
+        previousAssistantMessage: this.sessionManager.getLatestVisibleAssistantMessage(sessionId),
+        triggersFor: (tool) => this.skillRegistry?.getSkill(tool)?.frontmatter?.triggers,
+        recentTool: this.sessionManager.getLatestSuccessfulMutationTool(
+          sessionId,
+          Date.now() - CONTINUATION_MUTATION_WINDOW_MS,
+        ),
+      });
+    } catch (error) {
+      this.logger.debug({ error: (error as Error).message }, 'Working-calls block skipped');
+    }
+
     // Model self-identity: tell the bot which model it actually runs on, derived
     // from the active chat provider, so it answers "which model are you?"
     // truthfully instead of confabulating a name from memory context. Dynamic so
@@ -1754,7 +1877,9 @@ The current user request is quoted below. Execute tools only when they directly 
 - Ask a question only when an essential factual value or target is genuinely missing or ambiguous. Ask for the missing fact, not for permission.
 - A task/priorities list given in reply to a planning check-in should be captured on the board immediately; schedule any time-bound item as a nudge. Do not ask whether to add it.
 - Never mark a current-day task done from an older memory or prior-day accomplishment. Completion must be stated in the active user turn.
-- Treat every external write as uncompleted until its exact tool result proves success.
+- You MUST use tools to take action. Never describe or promise what you would do ("I'll add this to Notion now") — either call the tool in this turn or say plainly that it is not done. Every external write stays uncompleted until its exact tool result proves success.
+- Match reply length to the ask: a one-line log gets a one-line confirmation with the exact values written; no restating the request, no narrating tool calls.
+- If a tool returns BLOCKED or a SAFETY_* error, ask the user one short yes/no question naming the exact action; do not try other tools.
 - Choose capabilities from their current names, descriptions, schemas, and skill instructions; domain-specific behavior belongs in the relevant skill, not in the core agent.
 - Prefer a matching typed capability over hand-written shell/API calls. Inspect the capability's schema before a structured write and never guess field names or types.
 - When the answer depends on the current contents of an external source, use the matching available read capability. Treat recalled memory as context, not proof of current source state, and do not substitute an unrelated capability.
@@ -2493,6 +2618,46 @@ The current user request is quoted below. Execute tools only when they directly 
       };
     }
 
+    // An exact tool+args that already failed repeatedly this turn is refused
+    // before dispatch; retrying it cannot change the outcome.
+    const identicalBlock = this.toolLoopDetector.isCallBlocked(sessionId, toolUse.name, toolUse.input);
+    if (identicalBlock) {
+      this.logger.warn(
+        { toolName: toolUse.name, count: identicalBlock.count, family: identicalBlock.failureFamily },
+        'Refused identical tool call that already failed repeatedly this turn',
+      );
+      return {
+        type: 'tool_result',
+        tool_use_id: toolUse.id,
+        content: typedToolError(
+          'IDENTICAL_CALL_BLOCKED',
+          `Identical call already failed ${identicalBlock.count} times; change the arguments or stop. Tell the user exactly what failed and, if authorization is missing, ask one short yes/no question.`,
+        ),
+        is_error: true,
+      };
+    }
+
+    // The intent gate already blocked a write to this target in the active
+    // turn. Reaching it through bash/run_code/write_file/workflow/sub-agent is
+    // the same write under the same policy.
+    const escalation = findBlockedEscalation(toolUse, this.turnPolicyBlocks.get(sessionId) ?? []);
+    if (escalation) {
+      this.logger.warn(
+        { toolName: toolUse.name, blockedTool: escalation.tool },
+        'Blocked escalation to an already policy-blocked target',
+      );
+      const described = describeToolCallForUser(toolUse);
+      return {
+        type: 'tool_result',
+        tool_use_id: toolUse.id,
+        content: typedToolError(
+          'BLOCKED_ESCALATION',
+          `${BLOCKED_ESCALATION_MESSAGE} Not run: ${described}. Ask exactly: "Do you want me to do this: ${described}? (yes/no)"`,
+        ),
+        is_error: true,
+      };
+    }
+
     // Resolve skill — with auto-repair for hallucinated names
     let skill = this.skillRegistry?.getSkill(toolUse.name) || null;
 
@@ -2507,6 +2672,12 @@ The current user request is quoted below. Execute tools only when they directly 
       }
     }
 
+    // Approvals the user already gave (button tap or typed "yes") for this
+    // kind of call let it through the intent gate; hard floors never match.
+    const approvalUserId = userId ?? 'default';
+    if (turnSafety) {
+      turnSafety = { ...turnSafety, grants: pattern => this.approvals.has(approvalUserId, sessionId, pattern) };
+    }
     let safety = turnSafety ? assessToolCallForTurn(toolUse, turnSafety, skill) : null;
     if (turnSafety && this.outcomeBrain) {
       const decision = await this.outcomeBrain.decideAction({
@@ -2533,15 +2704,32 @@ The current user request is quoted below. Execute tools only when they directly 
         { toolName: toolUse.name, reason: safety.reason },
         'Blocked tool call at current-turn safety boundary',
       );
+      const code = safety.code ?? (safety.isExternalMutation
+        ? 'SAFETY_EXTERNAL_INTENT_REQUIRED'
+        : 'SAFETY_LOCAL_INTENT_REQUIRED');
+      let blockReason = safety.reason ?? 'Tool call was not authorized for the active turn.';
+      if (/^SAFETY_(?:EXTERNAL|LOCAL)_INTENT_REQUIRED$/.test(code)) {
+        const blocks = this.turnPolicyBlocks.get(sessionId);
+        if (blocks && blocks.length < 20) blocks.push(blockedTargetFromToolCall(toolUse));
+        // Offer the user a one-tap approval (once / session / always / no)
+        // instead of a dead end. Hard-floor calls get no prompt.
+        const description = describeToolCallForUser(toolUse);
+        const pending = this.approvals.registerPending({
+          sessionId,
+          userId: approvalUserId,
+          toolUse,
+          question: `Do you want me to ${description}?`,
+          description,
+        });
+        if (pending) {
+          blockReason = `${blockReason} ${APPROVAL_PROMPT_HINT}`;
+          this.logger.info({ approvalId: pending.id, pattern: pending.pattern }, 'Registered pending approval');
+        }
+      }
       return {
         type: 'tool_result',
         tool_use_id: toolUse.id,
-        content: typedToolError(
-          safety.code ?? (safety.isExternalMutation
-            ? 'SAFETY_EXTERNAL_INTENT_REQUIRED'
-            : 'SAFETY_LOCAL_INTENT_REQUIRED'),
-          safety.reason ?? 'Tool call was not authorized for the active turn.',
-        ),
+        content: typedToolError(code, blockReason),
         is_error: true,
       };
     }
@@ -2764,6 +2952,21 @@ The current user request is quoted below. Execute tools only when they directly 
         }
         if (resultSuccess && safety?.isMutation) {
           successfulMutationSignatures?.add(safety.signature);
+        }
+        if (safety?.isMutation) {
+          // Procedural memory: remember the shape of a working write (and the
+          // error family that preceded it) for future WORKING CALLS prompts.
+          try {
+            const recipeUserId = resolveStateUserId(userId, this.canonicalSingleUserIds);
+            const recipeInput = toolUse.input as Record<string, unknown>;
+            if (resultSuccess) {
+              getToolRecipeStore().recordSuccess(recipeUserId, resolvedToolName, recipeInput);
+            } else {
+              getToolRecipeStore().noteFailure(recipeUserId, resolvedToolName, recipeInput, resultContent);
+            }
+          } catch (error) {
+            this.logger.debug({ error: (error as Error).message }, 'Tool recipe update skipped');
+          }
         }
         if (operationId) {
           const resultDigest = digestToolOutput(evidenceContent).outputDigest;

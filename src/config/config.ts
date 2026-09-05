@@ -199,9 +199,9 @@ const toolLoopDetectionSchema = z.object({
   /** Reject one anomalously large model-authored burst; this is not a per-turn limit. */
   maxCallsPerResponse: z.number().int().min(4).max(512).default(64),
   historySize: z.number().int().min(4).max(1_000).default(30),
-  warningThreshold: z.number().int().min(2).max(500).default(10),
-  criticalThreshold: z.number().int().min(3).max(750).default(20),
-  circuitBreakerThreshold: z.number().int().min(4).max(1_000).default(30),
+  warningThreshold: z.number().int().min(2).max(500).default(3),
+  criticalThreshold: z.number().int().min(3).max(750).default(5),
+  circuitBreakerThreshold: z.number().int().min(4).max(1_000).default(8),
 });
 
 const toolPolicySchema = z.object({
@@ -213,9 +213,9 @@ const toolPolicySchema = z.object({
   loopDetection: toolLoopDetectionSchema.default({
     maxCallsPerResponse: 64,
     historySize: 30,
-    warningThreshold: 10,
-    criticalThreshold: 20,
-    circuitBreakerThreshold: 30,
+    warningThreshold: 3,
+    criticalThreshold: 5,
+    circuitBreakerThreshold: 8,
   }),
 });
 
@@ -393,9 +393,9 @@ export const configSchema = z.object({
     loopDetection: {
       maxCallsPerResponse: 64,
       historySize: 30,
-      warningThreshold: 10,
-      criticalThreshold: 20,
-      circuitBreakerThreshold: 30,
+      warningThreshold: 3,
+      criticalThreshold: 5,
+      circuitBreakerThreshold: 8,
     },
   }),
   gateway: gatewaySchema.default({ port: DEFAULT_API_PORT, host: DEFAULT_HOST }),

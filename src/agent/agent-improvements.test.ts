@@ -6,6 +6,8 @@ import { pino } from 'pino';
 import type { CompletionResponse, LLMProvider } from '../providers/types.js';
 import { ScallopDatabase } from '../memory/db.js';
 import { toolOperationIdentity } from './tool-safety.js';
+import { getToolRecipeStore, resetToolRecipeStore } from './tool-recipes.js';
+import { EMPTY_TURN_NUDGE, UNMADE_TOOL_CALL_NUDGE } from './turn-recovery.js';
 import {
   buildEvidenceExecutionContext,
   digestEvidenceClaim,
@@ -38,9 +40,14 @@ describe('Agent improvements integration', () => {
   beforeEach(async () => {
     testDir = await fs.mkdtemp(path.join(os.tmpdir(), 'scallopbot-improve-test-'));
     db = new ScallopDatabase(path.join(testDir, 'test.db'));
+    // Tool recipes persist per data dir; isolate every test from the others.
+    process.env.SCALLOPBOT_DATA_DIR = testDir;
+    resetToolRecipeStore();
   });
   afterEach(async () => {
     db.close();
+    delete process.env.SCALLOPBOT_DATA_DIR;
+    resetToolRecipeStore();
     await fs.rm(testDir, { recursive: true, force: true });
   });
 
@@ -1114,7 +1121,8 @@ describe('Agent improvements integration', () => {
       expect(result.response).toContain('omitted factual figures');
     });
 
-    it('stops changing tools after six identical safety failures', async () => {
+    // Was six: the per-turn failure-family breaker now ends the loop at the 4th failure.
+    it('stops changing tools after four identical safety failures', async () => {
       const { Agent } = await import('./agent.js');
       const { SessionManager } = await import('./session.js');
       let calls = 0;
@@ -1141,10 +1149,216 @@ describe('Agent improvements integration', () => {
       const agent = new Agent({ provider, sessionManager: sessions, skillRegistry: registry as any, workspace: testDir, logger: pino({ level: 'silent' }), maxIterations: 20 });
       const result = await agent.processMessage(session.id, 'Explain why PDF creation failed; do not change files');
       expect(result.completionReason).toBe('tool_loop');
-      expect(provider.complete).toHaveBeenCalledTimes(6);
+      expect(provider.complete).toHaveBeenCalledTimes(4);
       expect(runCode.handler).not.toHaveBeenCalled();
       expect(result.response).toMatch(/Repeated failure circuit breaker/i);
     });
+  });
+
+  describe('receipt-less promises, identical-call refusal and escalation guard', () => {
+    const NOTION_REQUEST = 'For today, can you log my gym session in our Notion tracker? It was 14 kg, 8 reps, 3 sets.';
+    const PROMISE = "Logging today's session (2026-08-10):\n- Pectoral machine 45kg x6x3\n\nI'll get these into Notion now.";
+
+    function bashRegistry(handler: ReturnType<typeof vi.fn>) {
+      const skill = {
+        name: 'bash', description: 'Shell', path: '/tmp/bash/SKILL.md', source: 'workspace' as const,
+        frontmatter: { name: 'bash', description: 'Shell' }, content: '', available: true,
+        hasScripts: true, handler,
+      };
+      return {
+        getSkill: vi.fn((name: string) => name === 'bash' ? skill : null),
+        getToolDefinitions: vi.fn(() => [{ name: 'bash', description: 'Shell', input_schema: { type: 'object', properties: {} } }]),
+        generateSkillPrompt: vi.fn(() => ''),
+      };
+    }
+
+    const notionCurl = (id: string) => ({
+      content: [{
+        type: 'tool_use' as const, id, name: 'bash', input: {
+          command: `curl -s -X POST https://api.notion.com/v1/pages --data '{"properties":{"Weight":{"number":14}}}'`,
+        },
+      }],
+      stopReason: 'tool_use' as const, usage: { inputTokens: 5, outputTokens: 5 }, model: 'mock',
+    });
+
+    it('replaces a receipt-less write promise with an honest reply after one corrective retry', async () => {
+      const { Agent } = await import('./agent.js');
+      const { SessionManager } = await import('./session.js');
+      const handler = vi.fn().mockResolvedValue({ success: true, output: 'never called' });
+      const provider = seqProvider([endTurn(PROMISE), endTurn(PROMISE)]);
+      const sessions = new SessionManager(db);
+      const session = await sessions.createSession();
+      const agent = new Agent({
+        provider, sessionManager: sessions, skillRegistry: bashRegistry(handler) as any,
+        workspace: testDir, logger: pino({ level: 'silent' }), maxIterations: 4,
+      });
+
+      // "log" sits mid-sentence, so this must not depend on the intent regex
+      // recognising the turn as a mutation: the draft itself promises one.
+      const result = await agent.processMessage(
+        session.id,
+        'In my notion tracker log this for today\n\nPectoral machine 45kgx6x3',
+      );
+
+      expect(provider.complete).toHaveBeenCalledTimes(2);
+      expect(JSON.stringify((provider.complete as ReturnType<typeof vi.fn>).mock.calls[1][0]))
+        .toContain('Your draft promises to perform a write');
+      expect(handler).not.toHaveBeenCalled();
+      expect(result.response).toMatch(/^I have not written this anywhere yet\./);
+      expect(result.response).toContain('Pectoral machine 45kg x6x3');
+      expect(result.response).not.toMatch(/I'll|Logging today/);
+      expect(result.completionReason).toBe('tool_loop');
+    });
+
+    it('lets the model recover from a promise by calling the tool on the corrective retry', async () => {
+      const { Agent } = await import('./agent.js');
+      const { SessionManager } = await import('./session.js');
+      const handler = vi.fn().mockResolvedValue({ success: true, output: '{"object":"page","id":"workout-1"}' });
+      const provider = seqProvider([
+        endTurn("I'll add these to Notion now."),
+        notionCurl('promise-then-write'),
+        endTurn('Logged your session to Notion.'),
+      ]);
+      const sessions = new SessionManager(db);
+      const session = await sessions.createSession();
+      const agent = new Agent({
+        provider, sessionManager: sessions, skillRegistry: bashRegistry(handler) as any,
+        workspace: testDir, logger: pino({ level: 'silent' }), maxIterations: 4,
+      });
+
+      const result = await agent.processMessage(session.id, NOTION_REQUEST);
+
+      expect(provider.complete).toHaveBeenCalledTimes(3);
+      expect(handler).toHaveBeenCalledTimes(1);
+      expect(result.response).toBe('Logged your session to Notion.');
+      expect(result.completionReason).toBe('natural_end');
+    });
+
+    it('never sends "All logged" for a bare Yes to a proactive proposal when no tool ran', async () => {
+      const { Agent } = await import('./agent.js');
+      const { SessionManager } = await import('./session.js');
+      const handler = vi.fn().mockResolvedValue({ success: true, output: '{"success":true}' });
+      const skill = {
+        name: 'notion', description: 'Typed Notion API', path: '/tmp/notion/SKILL.md', source: 'workspace' as const,
+        frontmatter: { name: 'notion', description: 'Typed Notion API' }, content: '', available: true,
+        hasScripts: true, handler,
+      };
+      const registry = {
+        getSkill: vi.fn((name: string) => name === 'notion' ? skill : null),
+        getToolDefinitions: vi.fn(() => [{ name: 'notion', description: 'Typed Notion API', input_schema: { type: 'object', properties: {} } }]),
+        generateSkillPrompt: vi.fn(() => ''),
+      };
+      // The 14 Jul transcript: proposal → "Yes!" → "All logged! ✅" with no tool call.
+      const provider = seqProvider([endTurn('All logged! ✅'), endTurn('All logged! ✅')]);
+      const sessions = new SessionManager(db);
+      const session = await sessions.createSession();
+      db.addSessionMessage(
+        session.id, 'assistant',
+        'Want me to add those last two exercises to your workout log?',
+        'assistant_final',
+      );
+      const agent = new Agent({
+        provider, sessionManager: sessions, skillRegistry: registry as any,
+        workspace: testDir, logger: pino({ level: 'silent' }), maxIterations: 3,
+      });
+
+      const result = await agent.processMessage(
+        session.id,
+        '[Replying to You (assistant): "Want me to add those last two exercises to your workout log?"]\n\nYes!',
+      );
+
+      expect(handler).not.toHaveBeenCalled();
+      expect(provider.complete).toHaveBeenCalledTimes(2);
+      expect(result.response).not.toMatch(/All logged/);
+      expect(result.response).toMatch(/have not|did not/i);
+      expect(result.completionReason).toBe('tool_loop');
+    });
+
+    it('refuses the identical failing call after three tries and ends the turn on the fourth', async () => {
+      const { Agent } = await import('./agent.js');
+      const { SessionManager } = await import('./session.js');
+      const handler = vi.fn().mockResolvedValue({
+        success: false, output: '', error: 'HTTP 400 body.properties.Name.id should be defined',
+      });
+      let calls = 0;
+      const provider: LLMProvider = {
+        name: 'retry-mock', isAvailable: () => true,
+        complete: vi.fn(async () => notionCurl(`same-${calls++}`)),
+      };
+      const sessions = new SessionManager(db);
+      const session = await sessions.createSession();
+      const agent = new Agent({
+        provider, sessionManager: sessions, skillRegistry: bashRegistry(handler) as any,
+        workspace: testDir, logger: pino({ level: 'silent' }), maxIterations: 20,
+      });
+
+      const result = await agent.processMessage(session.id, NOTION_REQUEST);
+
+      expect(handler).toHaveBeenCalledTimes(3);
+      expect(provider.complete).toHaveBeenCalledTimes(4);
+      const transcript = JSON.stringify(await sessions.getSession(session.id));
+      expect(transcript).toContain('Identical call already failed 3 times; change the arguments or stop');
+      expect(transcript).toContain('will be refused from now on');
+      expect(result.completionReason).toBe('tool_loop');
+      expect(result.response).toMatch(/Repeated failure circuit breaker/i);
+    });
+
+    it('short-circuits bash escalation to a policy-blocked target and states the real cause', async () => {
+      const { Agent } = await import('./agent.js');
+      const { SessionManager } = await import('./session.js');
+      const notionHandler = vi.fn().mockResolvedValue({ success: true, output: '{"success":true}' });
+      const bashHandler = vi.fn().mockResolvedValue({ success: true, output: '{"object":"page"}' });
+      const skills: Record<string, any> = {
+        notion: {
+          name: 'notion', description: 'Typed Notion API', path: '/tmp/notion/SKILL.md', source: 'workspace' as const,
+          frontmatter: { name: 'notion', description: 'Typed Notion API' }, content: '', available: true,
+          hasScripts: true, handler: notionHandler,
+        },
+        bash: {
+          name: 'bash', description: 'Shell', path: '/tmp/bash/SKILL.md', source: 'workspace' as const,
+          frontmatter: { name: 'bash', description: 'Shell' }, content: '', available: true,
+          hasScripts: true, handler: bashHandler,
+        },
+      };
+      const registry = {
+        getSkill: vi.fn((name: string) => skills[name] ?? null),
+        getToolDefinitions: vi.fn(() => Object.keys(skills).map(name => ({ name, description: name, input_schema: { type: 'object', properties: {} } }))),
+        generateSkillPrompt: vi.fn(() => ''),
+      };
+      const provider = seqProvider([
+        {
+          content: [{
+            type: 'tool_use', id: 'unrequested-notion', name: 'notion',
+            input: { action: 'create', database_id: '1801c5f6-386c-927e-228b-2a0b29321df0', properties: { Name: 'Leg press' } },
+          }],
+          stopReason: 'tool_use', usage: { inputTokens: 5, outputTokens: 5 }, model: 'mock',
+        },
+        notionCurl('escalate-curl'),
+        endTurn('The clawdbot integration lacks access to the database. Please share the database with the integration and add it manually.'),
+      ]);
+      const sessions = new SessionManager(db);
+      const session = await sessions.createSession();
+      const agent = new Agent({
+        provider, sessionManager: sessions, skillRegistry: registry as any,
+        workspace: testDir, logger: pino({ level: 'silent' }), maxIterations: 5,
+      });
+
+      const result = await agent.processMessage(
+        session.id,
+        'Explain why my last Notion log failed; do not change anything.',
+      );
+
+      expect(notionHandler).not.toHaveBeenCalled();
+      expect(bashHandler).not.toHaveBeenCalled();
+      const transcript = JSON.stringify(await sessions.getSession(session.id));
+      expect(transcript).toContain('SAFETY_EXTERNAL_INTENT_REQUIRED');
+      expect(transcript).toContain('BLOCKED_ESCALATION: the same policy applies to every tool. Ask the user the one-line confirmation question instead.');
+      expect(result.response).toContain('not because of any integration, permission, or platform limit');
+      expect(result.response).toContain('Reply "yes"');
+    });
+  });
+
+  describe('Kimi stress regressions (context bounding)', () => {
 
     it('bounds the active-turn working set instead of replaying every large result', async () => {
       const { Agent } = await import('./agent.js');
@@ -1185,6 +1399,177 @@ describe('Agent improvements integration', () => {
       expect(requestSizes).toHaveLength(10);
       expect(requestSizes[7]).toBeLessThan(requestSizes[6]);
       expect(Math.max(...requestSizes.slice(7))).toBeLessThan(requestSizes[6] * 1.4);
+    });
+  });
+
+  describe('tool recipes (procedural memory)', () => {
+    const GYM_DB = '1801c5f6-386c-927e-228b-2a0b29321df0';
+
+    function notionRegistry(handler: ReturnType<typeof vi.fn>) {
+      const skill = {
+        name: 'notion', description: 'Notion API', path: '/tmp/notion/SKILL.md', source: 'workspace' as const,
+        frontmatter: { name: 'notion', description: 'Notion API', triggers: ['notion', 'database', 'tracker'] },
+        content: '', available: true, hasScripts: true, handler,
+      };
+      return {
+        getSkill: vi.fn((name: string) => name === 'notion' ? skill : null),
+        getToolDefinitions: vi.fn(() => [{ name: 'notion', description: 'Notion API', input_schema: { type: 'object', properties: {} } }]),
+        generateSkillPrompt: vi.fn(() => ''),
+      };
+    }
+
+    const systemPromptOf = (provider: LLMProvider, call: number): string =>
+      JSON.stringify((provider.complete as ReturnType<typeof vi.fn>).mock.calls[call][0].system ?? '');
+
+    it('records a successful mutating call and injects WORKING CALLS on the next turn that mentions the tool', async () => {
+      const { Agent } = await import('./agent.js');
+      const { SessionManager } = await import('./session.js');
+      const handler = vi.fn().mockResolvedValue({ success: true, output: '{"success":true,"id":"page-1"}' });
+      const provider = seqProvider([
+        {
+          content: [{
+            type: 'tool_use', id: 'notion-1', name: 'notion',
+            input: { action: 'create', database_id: GYM_DB, notion_token: 'secret-x', properties: { Name: 'Leg Press', Date: '2026-08-21', Type: 'Machine', Sets: 3, Reps: 9, 'Weight (kg)': 110 } },
+          }],
+          stopReason: 'tool_use', usage: { inputTokens: 5, outputTokens: 5 }, model: 'mock',
+        },
+        endTurn('Logged: Leg Press 110kg x9x3.'),
+        endTurn('Logged: Pectoral machine 40kg x9x3.'),
+      ]);
+      const sessions = new SessionManager(db);
+      const session = await sessions.createSession();
+      const agent = new Agent({
+        provider, sessionManager: sessions, skillRegistry: notionRegistry(handler) as any,
+        workspace: testDir, logger: pino({ level: 'silent' }), maxIterations: 4,
+      });
+
+      await agent.processMessage(session.id, 'Log in notion tracker: Leg Press 110kg x9x3');
+      expect(handler).toHaveBeenCalledTimes(1);
+      // First turn had no recipe yet.
+      expect(systemPromptOf(provider, 0)).not.toContain('## WORKING CALLS');
+
+      const recipes = getToolRecipeStore().list('default', 'notion');
+      expect(recipes).toHaveLength(1);
+      expect(recipes[0].action).toBe('create');
+      expect(recipes[0].targetSummary).toBe(`database_id ${GYM_DB}`);
+      expect(recipes[0].inputShape.properties).toMatchObject({ Name: 'string', Date: 'date', Sets: 'number' });
+      expect(JSON.stringify(recipes[0].exampleInput)).not.toContain('secret-x');
+      // Persisted to the configured data dir with owner-only permissions.
+      const file = path.join(testDir, 'tool-recipes.json');
+      expect(((await fs.stat(file)).mode & 0o777)).toBe(0o600);
+
+      // Second turn: a bare data continuation after the bot's Notion confirmation.
+      await agent.processMessage(session.id, 'Pectoral machine - 40kg x9x3');
+      const prompt = systemPromptOf(provider, 2);
+      expect(prompt).toContain('## WORKING CALLS (recent successes');
+      expect(prompt).toContain(`notion create → database_id ${GYM_DB}, properties {Name: string, Date: date, Type: string, Sets: number, Reps: number, Weight (kg): number}`);
+      expect(prompt).toContain('Use ids only from tool output in this conversation or from WORKING CALLS');
+    });
+
+    it('does not record failed mutating calls but keeps the error family for the next success', async () => {
+      const { Agent } = await import('./agent.js');
+      const { SessionManager } = await import('./session.js');
+      const handler = vi.fn()
+        .mockResolvedValueOnce({ success: false, output: '', error: 'HTTP 404 object_not_found: Could not find database with ID: bogus. Make sure the relevant pages and databases are shared' })
+        .mockResolvedValueOnce({ success: true, output: '{"success":true,"id":"page-2"}' });
+      const provider = seqProvider([
+        {
+          content: [{ type: 'tool_use', id: 'n-fail', name: 'notion', input: { action: 'create', database_id: 'bogus', properties: { Name: 'Row' } } }],
+          stopReason: 'tool_use', usage: { inputTokens: 5, outputTokens: 5 }, model: 'mock',
+        },
+        {
+          content: [{ type: 'tool_use', id: 'n-ok', name: 'notion', input: { action: 'create', database_id: GYM_DB, properties: { Name: 'Row', Sets: 3 } } }],
+          stopReason: 'tool_use', usage: { inputTokens: 5, outputTokens: 5 }, model: 'mock',
+        },
+        endTurn('Logged: Row.'),
+      ]);
+      const sessions = new SessionManager(db);
+      const session = await sessions.createSession();
+      const agent = new Agent({
+        provider, sessionManager: sessions, skillRegistry: notionRegistry(handler) as any,
+        workspace: testDir, logger: pino({ level: 'silent' }), maxIterations: 5,
+      });
+
+      await agent.processMessage(session.id, 'Log in notion: Row 3 sets');
+      const [recipe] = getToolRecipeStore().list('default', 'notion');
+      expect(recipe.successCount).toBe(1);
+      expect(recipe.targetSummary).toBe(`database_id ${GYM_DB}`);
+      expect(recipe.lastFailureHint).toBe('not_found (HTTP 404)');
+    });
+  });
+
+  describe('malformed-turn recovery nudges', () => {
+    it('nudges an empty end_turn with "continue exactly where you left off" and returns the follow-up', async () => {
+      const { Agent } = await import('./agent.js');
+      const { SessionManager } = await import('./session.js');
+      const provider = seqProvider([
+        { content: [], stopReason: 'end_turn', usage: { inputTokens: 5, outputTokens: 0 }, model: 'mock' },
+        endTurn('The capital of France is Paris.'),
+      ]);
+      const sessions = new SessionManager(db);
+      const session = await sessions.createSession();
+      const agent = new Agent({ provider, sessionManager: sessions, workspace: testDir, logger: pino({ level: 'silent' }), maxIterations: 4 });
+
+      const result = await agent.processMessage(session.id, 'What is the capital of France?');
+      expect(result.response).toBe('The capital of France is Paris.');
+      expect(provider.complete).toHaveBeenCalledTimes(2);
+      const secondRequest = (provider.complete as ReturnType<typeof vi.fn>).mock.calls[1][0];
+      const nudge = secondRequest.messages.at(-1);
+      expect(nudge.role).toBe('user');
+      expect(nudge.content).toBe(EMPTY_TURN_NUDGE);
+    });
+
+    it('nudges "Let me check…" prose that made no tool call, then runs the call', async () => {
+      const { Agent } = await import('./agent.js');
+      const { SessionManager } = await import('./session.js');
+      const handler = vi.fn().mockResolvedValue({ success: true, output: '{"results":[{"Name":"Leg Press","Sets":3}]}' });
+      const skill = {
+        name: 'notion', description: 'Notion API', path: '/tmp/notion/SKILL.md', source: 'workspace' as const,
+        frontmatter: { name: 'notion', description: 'Notion API' }, content: '', available: true, hasScripts: true, handler,
+      };
+      const registry = {
+        getSkill: vi.fn((name: string) => name === 'notion' ? skill : null),
+        getToolDefinitions: vi.fn(() => [{ name: 'notion', description: 'Notion API', input_schema: { type: 'object', properties: {} } }]),
+        generateSkillPrompt: vi.fn(() => ''),
+      };
+      const provider = seqProvider([
+        endTurn('Let me check the tracker for your last session.'),
+        {
+          content: [{ type: 'tool_use', id: 'q1', name: 'notion', input: { action: 'query', database_id: 'db-1' } }],
+          stopReason: 'tool_use', usage: { inputTokens: 5, outputTokens: 5 }, model: 'mock',
+        },
+        endTurn('Your last session was Leg Press, 3 sets.'),
+      ]);
+      const sessions = new SessionManager(db);
+      const session = await sessions.createSession();
+      const agent = new Agent({
+        provider, sessionManager: sessions, skillRegistry: registry as any,
+        workspace: testDir, logger: pino({ level: 'silent' }), maxIterations: 5,
+      });
+
+      const result = await agent.processMessage(session.id, 'What did I do last session?');
+      expect(result.response).toBe('Your last session was Leg Press, 3 sets.');
+      expect(handler).toHaveBeenCalledTimes(1);
+      const secondRequest = (provider.complete as ReturnType<typeof vi.fn>).mock.calls[1][0];
+      expect(secondRequest.messages.at(-1).content).toBe(UNMADE_TOOL_CALL_NUDGE);
+    });
+
+    it('stops after two nudges instead of looping', async () => {
+      const { Agent } = await import('./agent.js');
+      const { SessionManager } = await import('./session.js');
+      const provider = seqProvider([
+        endTurn('Let me check the calendar now.'),
+        endTurn('Let me check the calendar now.'),
+        endTurn('Let me check the calendar now.'),
+        endTurn('should never be reached'),
+      ]);
+      const sessions = new SessionManager(db);
+      const session = await sessions.createSession();
+      const agent = new Agent({ provider, sessionManager: sessions, workspace: testDir, logger: pino({ level: 'silent' }), maxIterations: 6 });
+
+      const result = await agent.processMessage(session.id, 'What is on my calendar today?');
+      expect(provider.complete).toHaveBeenCalledTimes(3);
+      expect(result.response).toBe('Let me check the calendar now.');
     });
   });
 });

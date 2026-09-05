@@ -425,23 +425,36 @@ describe('Agent', () => {
       const { Agent } = await import('./agent.js');
       const { SessionManager } = await import('./session.js');
             
-      // Provider that always returns tool use (infinite loop scenario)
+      // Provider that always returns tool use (infinite loop scenario). Each
+      // call varies and succeeds, so only the iteration budget can stop it;
+      // repeated identical failures are now stopped earlier by the loop breaker.
+      let n = 0;
       const infiniteProvider: LLMProvider = {
         name: 'infinite',
         isAvailable: () => true,
-        complete: vi.fn().mockResolvedValue({
+        complete: vi.fn().mockImplementation(async () => ({
           content: [
             {
               type: 'tool_use',
-              id: 'tool-infinite',
+              id: `tool-infinite-${n}`,
               name: 'bash',
-              input: { command: 'echo loop' },
+              input: { command: `echo loop ${n++}` },
             },
           ],
           stopReason: 'tool_use',
           usage: { inputTokens: 10, outputTokens: 10 },
           model: 'test-model',
-        }),
+        })),
+      };
+      const bashSkill = {
+        name: 'bash', description: 'Shell', path: '/tmp/bash/SKILL.md', source: 'workspace' as const,
+        frontmatter: { name: 'bash', description: 'Shell' }, content: '', available: true, hasScripts: true,
+        handler: vi.fn(async ({ args }: { args: { command: string } }) => ({ success: true, output: args.command })),
+      };
+      const registry = {
+        getSkill: vi.fn((name: string) => name === 'bash' ? bashSkill : null),
+        getToolDefinitions: vi.fn(() => [{ name: 'bash', description: 'Shell', input_schema: { type: 'object', properties: {} } }]),
+        generateSkillPrompt: vi.fn(() => ''),
       };
 
       const sessionManager = new SessionManager(db);
@@ -450,6 +463,7 @@ describe('Agent', () => {
       const agent = new Agent({
         provider: infiniteProvider,
         sessionManager,
+        skillRegistry: registry as any,
                 workspace: testDir,
         logger,
         maxIterations: 5, // Low limit for testing

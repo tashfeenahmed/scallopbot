@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { TelegramChannel } from './telegram.js';
+import { parseProactiveReplyAction } from '../proactive/feedback.js';
 
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -85,6 +86,29 @@ describe('Telegram proactive source replies', () => {
     expect(addMessage).toHaveBeenNthCalledWith(2, 'telegram-session', {
       role: 'assistant', content: 'Archived “Publish Project Atlas launch update”.',
     });
+  });
+
+  it('routes an affirmative reply to an action proposal through the agent turn, never a canned confirmation', async () => {
+    // 14 Jul regression: "Want me to add those last two exercises?" → "Yes!"
+    // must reach the agent (with tools) rather than short-circuit to a canned
+    // "All logged" style confirmation. Only archive/done/snooze are canned.
+    expect(parseProactiveReplyAction('Yes!')).toBeNull();
+    expect(parseProactiveReplyAction('Yes, add them')).toBeNull();
+
+    const { channel, addMessage, processMessage } = makeChannel({ matched: true });
+    const ctx = makeContext('Yes!');
+    ctx.message.reply_to_message.text = 'Want me to add those last two exercises to your workout log?';
+
+    await channel.processTextCore(ctx);
+
+    expect(channel.onUserMessage).toHaveBeenCalledTimes(1);
+    expect(processMessage).toHaveBeenCalledTimes(1);
+    expect(processMessage.mock.calls[0][0]).toBe('telegram-session');
+    expect(processMessage.mock.calls[0][1]).toContain('Yes!');
+    expect(processMessage.mock.calls[0][1]).toContain('Want me to add those last two exercises to your workout log?');
+    // No deterministic confirmation row; the agent turn owns the transcript.
+    expect(addMessage).not.toHaveBeenCalledWith('telegram-session', expect.objectContaining({ role: 'assistant' }));
+    expect(ctx.reply).toHaveBeenCalledWith('Normal agent response', { parse_mode: 'HTML' });
   });
 
   it('runs the agent and engagement hook exactly once when a direct reply has no trusted source action', async () => {

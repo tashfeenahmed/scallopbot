@@ -634,9 +634,9 @@ export class Gateway {
       maxToolCallsPerResponse: this.config.tools?.loopDetection?.maxCallsPerResponse ?? 64,
       toolLoopDetection: {
         historySize: this.config.tools?.loopDetection?.historySize ?? 30,
-        warningThreshold: this.config.tools?.loopDetection?.warningThreshold ?? 10,
-        criticalThreshold: this.config.tools?.loopDetection?.criticalThreshold ?? 20,
-        circuitBreakerThreshold: this.config.tools?.loopDetection?.circuitBreakerThreshold ?? 30,
+        warningThreshold: this.config.tools?.loopDetection?.warningThreshold ?? 3,
+        criticalThreshold: this.config.tools?.loopDetection?.criticalThreshold ?? 5,
+        circuitBreakerThreshold: this.config.tools?.loopDetection?.circuitBreakerThreshold ?? 8,
       },
       foregroundCallTimeoutMs: this.config.agent.foregroundCallTimeoutMs,
       turnTimeoutMs: this.config.agent.turnTimeoutMs,

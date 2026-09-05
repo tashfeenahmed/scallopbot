@@ -151,33 +151,62 @@ describe('ToolLoopDetector', () => {
   });
 
   describe('repeated failure family detection', () => {
-    it('warns and then blocks changing tools that hit the same typed boundary error', () => {
-      for (let i = 0; i < 3; i++) {
+    const TYPED = '[TOOL_ERROR code=SAFETY_LOCAL_INTENT_REQUIRED] Explicit change request required.';
+
+    // Interactive-chat escalation: warning at the 2nd failure of a family and a
+    // turn-ending block at the 4th across any arguments (was 3 and 6).
+    it('warns at the second failure and ends the turn at the fourth across changing tools', () => {
+      for (let i = 0; i < 2; i++) {
         detector.recordToolCall(SESSION, `tool_${i}`, { attempt: i }, `typed-${i}`);
-        detector.recordToolOutcome(
-          SESSION,
-          `typed-${i}`,
-          '[TOOL_ERROR code=SAFETY_LOCAL_INTENT_REQUIRED] Explicit change request required.',
-        );
+        detector.recordToolOutcome(SESSION, `typed-${i}`, TYPED);
       }
       expect(detector.detect(SESSION)).toMatchObject({
-        kind: 'repeated_failure', severity: 'warning', count: 3,
+        kind: 'repeated_failure', severity: 'warning', count: 2,
       });
 
-      for (let i = 3; i < 6; i++) {
-        detector.recordToolCall(SESSION, `different_${i}`, { attempt: i }, `typed-${i}`);
-        detector.recordToolOutcome(
-          SESSION,
-          `typed-${i}`,
-          '[TOOL_ERROR code=SAFETY_LOCAL_INTENT_REQUIRED] Explicit change request required.',
-        );
-      }
+      detector.recordToolCall(SESSION, 'tool_2', { attempt: 2 }, 'typed-2');
+      detector.recordToolOutcome(SESSION, 'typed-2', TYPED);
+      expect(detector.detect(SESSION)).toMatchObject({ severity: 'warning', count: 3 });
+
+      detector.recordToolCall(SESSION, 'tool_3', { attempt: 3 }, 'typed-3');
+      detector.recordToolOutcome(SESSION, 'typed-3', TYPED);
       expect(detector.detect(SESSION)).toMatchObject({
-        kind: 'repeated_failure', severity: 'block', count: 6,
+        kind: 'repeated_failure', severity: 'block', scope: 'turn', count: 4,
       });
     });
 
-    it('resets after a successful result', () => {
+    it('refuses only the exact call after three identical failures', () => {
+      const args = { command: 'curl -X POST https://api.notion.com/v1/pages' };
+      for (let i = 0; i < 3; i++) {
+        detector.recordToolCall(SESSION, 'bash', args, `same-${i}`);
+        detector.recordToolOutcome(SESSION, `same-${i}`, 'Error: HTTP 400 body.properties.Name.id should be defined');
+      }
+      expect(detector.detect(SESSION)).toMatchObject({
+        kind: 'repeated_failure', severity: 'block', scope: 'call', toolName: 'bash', count: 3,
+      });
+      expect(detector.isCallBlocked(SESSION, 'bash', { ...args })).toMatchObject({ toolName: 'bash', count: 3 });
+      expect(detector.isCallBlocked(SESSION, 'bash', { command: 'curl -X POST https://api.notion.com/v1/pages -d x' })).toBeNull();
+      expect(detector.isCallBlocked(SESSION, 'run_code', args)).toBeNull();
+    });
+
+    it('carries the original family through a refused identical retry into the turn breaker', () => {
+      const args = { action: 'create', database_id: 'gym' };
+      for (let i = 0; i < 3; i++) {
+        detector.recordToolCall(SESSION, 'notion', args, `n-${i}`);
+        detector.recordToolOutcome(SESSION, `n-${i}`, TYPED);
+      }
+      detector.recordToolCall(SESSION, 'notion', args, 'n-refused');
+      detector.recordToolOutcome(
+        SESSION,
+        'n-refused',
+        '[TOOL_ERROR code=IDENTICAL_CALL_BLOCKED] Identical call already failed 3 times; change the arguments or stop.',
+      );
+      expect(detector.detect(SESSION)).toMatchObject({
+        kind: 'repeated_failure', severity: 'block', scope: 'turn', count: 4,
+      });
+    });
+
+    it('resets the warning streak after a success but keeps the per-turn family total', () => {
       for (let i = 0; i < 3; i++) {
         detector.recordToolCall(SESSION, 'run_code', { attempt: i }, `failure-${i}`);
         detector.recordToolOutcome(SESSION, `failure-${i}`, '[TOOL_ERROR code=POLICY] denied');
@@ -185,6 +214,44 @@ describe('ToolLoopDetector', () => {
       detector.recordToolCall(SESSION, 'read_file', { path: 'ok' }, 'success');
       detector.recordToolOutcome(SESSION, 'success', 'verified output');
       expect(detector.detect(SESSION)?.kind).not.toBe('repeated_failure');
+
+      detector.recordToolCall(SESSION, 'run_code', { attempt: 9 }, 'failure-9');
+      detector.recordToolOutcome(SESSION, 'failure-9', '[TOOL_ERROR code=POLICY] denied');
+      expect(detector.detect(SESSION)).toMatchObject({
+        kind: 'repeated_failure', severity: 'block', scope: 'turn', count: 4,
+      });
+    });
+
+    it('clearSession forgets identical-call blocks so a new turn can retry', () => {
+      const args = { action: 'create' };
+      for (let i = 0; i < 3; i++) {
+        detector.recordToolCall(SESSION, 'notion', args, `n-${i}`);
+        detector.recordToolOutcome(SESSION, `n-${i}`, TYPED);
+      }
+      expect(detector.isCallBlocked(SESSION, 'notion', args)).not.toBeNull();
+      detector.clearSession(SESSION);
+      expect(detector.isCallBlocked(SESSION, 'notion', args)).toBeNull();
+    });
+  });
+
+  describe('interactive defaults', () => {
+    it('warns at 3 identical no-progress calls, blocks at 5, and breaks at 8', () => {
+      const defaults = new ToolLoopDetector();
+      const run = (n: number) => {
+        for (let i = 0; i < n; i++) {
+          defaults.recordToolCall(SESSION, 'web_search', { q: 'same' }, `d-${i}`);
+          defaults.recordToolOutcome(SESSION, `d-${i}`, 'same result');
+        }
+      };
+      run(2);
+      expect(defaults.detect(SESSION)).toBeNull();
+      run(1);
+      expect(defaults.detect(SESSION)).toMatchObject({ kind: 'no_progress', severity: 'warning', count: 3 });
+      run(2);
+      expect(defaults.detect(SESSION)).toMatchObject({ kind: 'no_progress', severity: 'block', count: 5 });
+      defaults.clearSession(SESSION);
+      run(9);
+      expect(defaults.detect(SESSION)).toMatchObject({ kind: 'circuit_breaker', severity: 'block' });
     });
   });
 
