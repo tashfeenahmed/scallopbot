@@ -56,6 +56,25 @@ export function hasUnverifiedActionPromise(response: string): boolean {
   return sentencesOf(response).some(isPromiseSentence);
 }
 
+const DONE_VERB = String.raw`(?:logged|done|added|saved|created|sent|updated|recorded|scheduled|noted|marked|deleted|removed|archived|posted|published|booked|tracked|stored|entered|submitted|synced)`;
+/** "Logged: …", "Done!", "✅ Added…", "All logged", "I've saved…", "I logged…". */
+const OWN_COMPLETION = new RegExp(
+  String.raw`(?:^|[.!?:;\n]\s*|[-*•]\s+)(?:[✅✔️☑️]\s*)?(?:all\s+|both\s+|everything\s+)?${DONE_VERB}\b`
+  + String.raw`|\bi(?:['’]ve|\s+have)?\s+(?:just\s+|now\s+|already\s+)?${DONE_VERB}\b`
+  + String.raw`|(?:^|\s)[✅✔️]`,
+  'i',
+);
+
+/**
+ * True when the reply asserts that the assistant itself completed a write
+ * ("Logged: Leg Press 3×8", "Done!", "I've added it"). Descriptions of what
+ * the user did ("You logged 3 sets on Monday") and negations do not count.
+ */
+export function claimsOwnCompletedWrite(response: string): boolean {
+  return sentencesOf(response).some(sentence =>
+    !CONDITIONAL.test(sentence) && OWN_COMPLETION.test(sentence) && hasUnverifiedSuccessClaim(sentence));
+}
+
 export const UNWRITTEN_LINE = 'I have not written this anywhere yet.';
 
 /**

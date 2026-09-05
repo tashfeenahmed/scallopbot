@@ -859,6 +859,18 @@ export function hasUnverifiedSuccessClaim(response: string): boolean {
  * backed by a successful tool receipt. This also covers terse continuations
  * bound to the exact integration that most recently completed a write.
  */
+/**
+ * True when the user's message itself looks like a write payload: a set/rep/kg
+ * line, a task list, or an explicit write verb. Used to hold a draft reply that
+ * claims a write happened to a tool receipt even when the intent regexes did
+ * not classify the turn.
+ */
+export function messageCarriesWritePayload(userMessage: string): boolean {
+  const message = currentInstruction(userMessage);
+  if (hasReadOnlyRequest(message)) return false;
+  return hasStructuredPayload(message) || directRequestedActions(message).length > 0;
+}
+
 export function turnRequiresMutationReceipt(
   userMessage: string,
   previousAssistantMessage?: string,

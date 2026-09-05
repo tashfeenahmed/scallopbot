@@ -31,6 +31,7 @@ import { primaryChatProvider, modelIdentityPrompt } from './identity.js';
 import { ToolLoopDetector, type ToolLoopDetectorConfig } from './tool-loop-detector.js';
 import {
   appendPolicyBlockTruth,
+  claimsOwnCompletedWrite,
   hasUnverifiedActionPromise,
   honestUnwrittenReply,
   mentionsFalsePolicyCause,
@@ -65,6 +66,7 @@ import {
   assessToolCallForTurn,
   describeToolCallForUser,
   describeToolCallPlainly,
+  messageCarriesWritePayload,
   boundResponseToolCalls,
   digestToolOutput,
   hasUnverifiedSuccessClaim,
@@ -1107,11 +1109,13 @@ export class Agent {
         // no tool calls — common after a long tool loop where the model gave up or
         // burned its budget on reasoning_content). Don't dump silence on the user;
         // re-prompt once for a final summary using the work the model already did.
+        // A reply consisting only of the [DONE] control marker is empty as well
+        // (small models answer "yes" with a bare marker); without this the
+        // outcome brain suppresses the empty text and the user sees an error.
         const isEmptyEndTurn =
-          !taskComplete &&
           response.stopReason === 'end_turn' &&
           toolUses.length === 0 &&
-          !textContent.trim();
+          !this.stripDoneMarker(textContent).trim();
         // Prose that announces a tool call without making one ("Let me check
         // the tracker…") is a malformed turn, not a reply. Write promises are
         // handled by the receipt gate below; this catches everything else.
@@ -1172,8 +1176,16 @@ export class Agent {
         // intent regex did not recognise the request as a mutation.
         const draftPromisesWrite = successfulMutationSignatures.size === 0
           && hasUnverifiedActionPromise(finalResponse);
+        // "Logged: Leg Press 3×8" with no tool call at all is the same lie in
+        // the past tense. Hold it to a receipt whenever the user's message
+        // looked like a write payload, regardless of how the intent regex
+        // classified the turn.
+        const draftClaimsWrite = successfulMutationSignatures.size === 0
+          && messageCarriesWritePayload(turnToolSafety.userMessage)
+          && claimsOwnCompletedWrite(finalResponse);
         if (
           (draftPromisesWrite
+            || draftClaimsWrite
             || (mutationReceiptRequired
               && successfulMutationSignatures.size === 0
               && hasUnverifiedSuccessClaim(finalResponse)))
@@ -1182,8 +1194,8 @@ export class Agent {
           unverifiedCompletionRetries++;
           await this.sessionManager.addMessage(sessionId, {
             role: 'user',
-            content: draftPromisesWrite
-              ? '[System: Your draft promises to perform a write ("I\'ll add…", "Logging…"), but this turn has no successful mutation receipt. Do not send that draft. Call the tool now, verify its result, and only then give the final reply. If you cannot, say plainly that nothing was written and ask one short yes/no question.]'
+            content: draftPromisesWrite || draftClaimsWrite
+              ? '[System: Your draft promises or claims a write ("I\'ll add…", "Logging…", "Logged: …"), but this turn has no successful mutation receipt. Do not send that draft. Call the tool now, verify its result, and only then give the final reply. If you cannot, say plainly that nothing was written and ask one short yes/no question.]'
               : '[System: Your draft claims a requested action succeeded, but this turn has no successful mutation receipt. Do not send that draft. Call the required tool now, verify its result, and only then give the final reply. If execution is impossible, state that honestly without claiming completion.]',
           });
           this.logger.warn(
@@ -1292,21 +1304,27 @@ export class Agent {
           turnToolSafety.previousAssistantMessage,
           turnToolSafety.continuationMutationTool,
         ) && successfulMutationSignatures.size === 0;
-        if (successfulMutationSignatures.size === 0 && hasUnverifiedActionPromise(finalResponse)) {
+        if (
+          failedExternalMutations > 0 && successfulExternalMutations === 0
+          && hasUnverifiedSuccessClaim(finalResponse)
+        ) {
+          finalResponse = 'I could not verify that external action, so I have not marked it complete. The tool reported a failure or required clarification.';
+          persistContent = [{ type: 'text', text: finalResponse }];
+          completionReason = 'tool_loop';
+        } else if (successfulMutationSignatures.size === 0
+          && (hasUnverifiedActionPromise(finalResponse)
+            || (messageCarriesWritePayload(turnToolSafety.userMessage) && claimsOwnCompletedWrite(finalResponse)))) {
           // The corrective continuation did not produce a tool call: strip the
-          // promise and say plainly that nothing was written.
+          // promise/claim and say plainly that nothing was written.
           this.logger.warn({ sessionId }, 'Receipt-less write promise in final reply — replaced with honest text');
           finalResponse = honestUnwrittenReply(finalResponse);
           persistContent = [{ type: 'text', text: finalResponse }];
           completionReason = 'tool_loop';
         } else if (
-          ((failedExternalMutations > 0 && successfulExternalMutations === 0)
-            || missingRequiredMutationReceipt)
+          missingRequiredMutationReceipt
           && hasUnverifiedSuccessClaim(finalResponse)
         ) {
-          finalResponse = failedExternalMutations > 0
-            ? 'I could not verify that external action, so I have not marked it complete. The tool reported a failure or required clarification.'
-            : 'I did not obtain a successful tool receipt for that action, so I have not marked it complete.';
+          finalResponse = 'I did not obtain a successful tool receipt for that action, so I have not marked it complete.';
           persistContent = [{ type: 'text', text: finalResponse }];
           completionReason = 'tool_loop';
         }
@@ -2153,6 +2171,9 @@ The current user request is quoted below. Execute tools only when they directly 
   ): Promise<string> {
     const fallback = stripThinkTags(response).trim();
     if (!this.outcomeBrain || this.subAgentMode) return fallback;
+    // Nothing to arbitrate: an empty foreground reply must not surface as an
+    // alarming "could not produce a safe response" line.
+    if (!fallback) return 'Okay.';
     const outcome = await this.outcomeBrain.decideMessage({
       source: 'foreground',
       userId,

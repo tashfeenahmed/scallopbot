@@ -1202,7 +1202,7 @@ describe('Agent improvements integration', () => {
 
       expect(provider.complete).toHaveBeenCalledTimes(2);
       expect(JSON.stringify((provider.complete as ReturnType<typeof vi.fn>).mock.calls[1][0]))
-        .toContain('Your draft promises to perform a write');
+        .toContain('Your draft promises or claims a write');
       expect(handler).not.toHaveBeenCalled();
       expect(result.response).toMatch(/^I have not written this anywhere yet\./);
       expect(result.response).toContain('Pectoral machine 45kg x6x3');
@@ -1498,6 +1498,42 @@ describe('Agent improvements integration', () => {
     });
   });
 
+  describe('receipt-less completion claims on a payload turn', () => {
+    it('holds "Logged: …" with no tool call to a receipt and replaces it honestly', async () => {
+      const { Agent } = await import('./agent.js');
+      const { SessionManager } = await import('./session.js');
+      const CLAIM = 'Logged: Test entry four (delete me) — 3 sets × 8 reps @ 16kg.';
+      const provider = seqProvider([endTurn(CLAIM), endTurn(CLAIM)]);
+      const sessions = new SessionManager(db);
+      const session = await sessions.createSession();
+      const agent = new Agent({ provider, sessionManager: sessions, workspace: testDir, logger: pino({ level: 'silent' }), maxIterations: 4 });
+
+      // No verb, no continuation tool: the intent regex does not classify this
+      // as a mutation, but the payload shape plus a past-tense claim must still
+      // require a receipt (production 5 Sep 2026: this reply had no tool call).
+      const result = await agent.processMessage(session.id, 'Test entry four (delete me) 3x8x16kg');
+
+      expect(provider.complete).toHaveBeenCalledTimes(2);
+      expect(JSON.stringify((provider.complete as ReturnType<typeof vi.fn>).mock.calls[1][0]))
+        .toContain('promises or claims a write');
+      expect(result.response).toMatch(/^I have not written this anywhere yet\./);
+      expect(result.response).not.toMatch(/^Logged:/);
+    });
+
+    it('leaves a read-only answer alone even when it contains "logged"', async () => {
+      const { Agent } = await import('./agent.js');
+      const { SessionManager } = await import('./session.js');
+      const provider = seqProvider([endTurn('Today you logged Leg Press 3×8 @ 110kg and Stairmaster 8 min.')]);
+      const sessions = new SessionManager(db);
+      const session = await sessions.createSession();
+      const agent = new Agent({ provider, sessionManager: sessions, workspace: testDir, logger: pino({ level: 'silent' }), maxIterations: 4 });
+
+      const result = await agent.processMessage(session.id, 'What did I log today?');
+      expect(provider.complete).toHaveBeenCalledTimes(1);
+      expect(result.response).toContain('Today you logged');
+    });
+  });
+
   describe('malformed-turn recovery nudges', () => {
     it('nudges an empty end_turn with "continue exactly where you left off" and returns the follow-up', async () => {
       const { Agent } = await import('./agent.js');
@@ -1517,6 +1553,20 @@ describe('Agent improvements integration', () => {
       const nudge = secondRequest.messages.at(-1);
       expect(nudge.role).toBe('user');
       expect(nudge.content).toBe(EMPTY_TURN_NUDGE);
+    });
+
+    it('treats a bare [DONE] marker as an empty turn and nudges once', async () => {
+      const { Agent } = await import('./agent.js');
+      const { SessionManager } = await import('./session.js');
+      const provider = seqProvider([endTurn('[DONE]'), endTurn('Okay — nothing else to do. [DONE]')]);
+      const sessions = new SessionManager(db);
+      const session = await sessions.createSession();
+      const agent = new Agent({ provider, sessionManager: sessions, workspace: testDir, logger: pino({ level: 'silent' }), maxIterations: 4 });
+
+      const result = await agent.processMessage(session.id, 'yes');
+      expect(provider.complete).toHaveBeenCalledTimes(2);
+      expect((provider.complete as ReturnType<typeof vi.fn>).mock.calls[1][0].messages.at(-1).content).toBe(EMPTY_TURN_NUDGE);
+      expect(result.response).toBe('Okay — nothing else to do.');
     });
 
     it('nudges "Let me check…" prose that made no tool call, then runs the call', async () => {
