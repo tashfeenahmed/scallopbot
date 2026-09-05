@@ -9,7 +9,10 @@
 
 import type { LLMProvider, CompletionRequest } from '../providers/types.js';
 import { completionBudgetForPurpose } from '../routing/model-limits.js';
-import { extractResponseText } from '../proactive/proactive-utils.js';
+import {
+  completeWithTruncationRetry,
+  type TruncationRetryLogger,
+} from '../providers/completion-retry.js';
 
 /**
  * A fact to be classified
@@ -94,10 +97,12 @@ export class RelationshipClassifier {
   private provider: LLMProvider;
   /** Maximum facts to classify in a single batch (to avoid token limits) */
   private maxBatchSize: number;
+  private logger?: TruncationRetryLogger;
 
-  constructor(provider: LLMProvider, options?: { maxBatchSize?: number }) {
+  constructor(provider: LLMProvider, options?: RelationshipClassifierOptions) {
     this.provider = provider;
     this.maxBatchSize = options?.maxBatchSize ?? 10;
+    this.logger = options?.logger;
   }
 
   /**
@@ -122,13 +127,23 @@ export class RelationshipClassifier {
       const request: CompletionRequest = {
         messages: [{ role: 'user', content: prompt }],
         temperature: 0.1, // Low temperature for consistent classification
-        maxTokens: completionBudgetForPurpose(this.provider, 'relation_classify', 768),
+        // Purpose default (1536) — the old 768 was eaten entirely by reasoning
+        // on qwen3.6-plus. Thinking is explicitly off: this is a schema-only
+        // background route.
+        maxTokens: completionBudgetForPurpose(this.provider, 'relation_classify'),
+        enableThinking: false,
         purpose: 'relation_classify',
       };
 
-      const response = await this.provider.complete(request);
-      const content = extractResponseText(response.content);
-      return this.parseClassificationResponse(content);
+      const { parsed } = await completeWithTruncationRetry(this.provider, request, {
+        parse: (text) => this.parseClassificationResponse(text),
+        logger: this.logger,
+      });
+      return parsed ?? {
+        classification: 'NEW',
+        confidence: 0.5,
+        reason: 'Failed to parse classification response',
+      };
     } catch (error) {
       // Default to NEW on error
       return {
@@ -181,24 +196,34 @@ export class RelationshipClassifier {
         maxTokens: completionBudgetForPurpose(
           this.provider,
           'relation_classify',
-          Math.max(1024, 320 + newFacts.length * 180)
+          Math.max(1536, 320 + newFacts.length * 180)
         ),
+        enableThinking: false,
         purpose: 'relation_classify',
       };
 
-      const response = await this.provider.complete(request);
-      const content = extractResponseText(response.content);
-      const parsed = this.parseBatchClassificationResponse(content, newFacts.length);
+      // One retry with a doubled budget handles the common case (the model
+      // spent the budget on reasoning). If it is STILL truncated, the payload
+      // itself is too large for the budget, so halve the batch as before.
+      const { parsed, truncated } = await completeWithTruncationRetry(this.provider, request, {
+        parse: (text) => this.parseBatchClassificationResponse(text, newFacts.length),
+        logger: this.logger,
+      });
 
-      const parseFailed = parsed.some((r) => r.reason === 'Failed to parse batch response');
-      if (response.stopReason === 'max_tokens' && parseFailed && newFacts.length > 1) {
+      if (parsed) return parsed;
+
+      if (truncated && newFacts.length > 1) {
         const midpoint = Math.ceil(newFacts.length / 2);
         const first = await this.classifyBatch(newFacts.slice(0, midpoint), existingFacts);
         const second = await this.classifyBatch(newFacts.slice(midpoint), existingFacts);
         return [...first, ...second];
       }
 
-      return parsed;
+      return newFacts.map(() => ({
+        classification: 'NEW' as const,
+        confidence: 0.5,
+        reason: 'Failed to parse batch response',
+      }));
     } catch (error) {
       // Default all to NEW on error
       return newFacts.map(() => ({
@@ -284,9 +309,10 @@ Classify ALL new facts. Respond with a JSON array:
   }
 
   /**
-   * Parse the classification response
+   * Parse the classification response. Returns null when the payload is
+   * unusable so the caller can decide between retrying and defaulting to NEW.
    */
-  private parseClassificationResponse(content: string): ClassificationResult {
+  private parseClassificationResponse(content: string): ClassificationResult | null {
     try {
       // Extract JSON from response
       const jsonMatch = content.match(/\{[\s\S]*\}/);
@@ -309,19 +335,16 @@ Classify ALL new facts. Respond with a JSON array:
         reason: parsed.reason ?? 'No reason provided',
       };
     } catch {
-      // Default to NEW on parse failure
-      return {
-        classification: 'NEW',
-        confidence: 0.5,
-        reason: 'Failed to parse classification response',
-      };
+      return null;
     }
   }
 
   /**
-   * Parse batch classification response
+   * Parse batch classification response. Returns null when no usable JSON
+   * envelope came back (truncated/empty/garbage); individual entries that are
+   * missing or invalid still default to NEW.
    */
-  private parseBatchClassificationResponse(content: string, expectedCount: number): ClassificationResult[] {
+  private parseBatchClassificationResponse(content: string, expectedCount: number): ClassificationResult[] | null {
     const defaultResult = (): ClassificationResult => ({
       classification: 'NEW',
       confidence: 0.5,
@@ -330,16 +353,12 @@ Classify ALL new facts. Respond with a JSON array:
 
     try {
       const jsonMatch = content.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) {
-        return Array(expectedCount).fill(null).map(defaultResult);
-      }
+      if (!jsonMatch) return null;
 
       const parsed = JSON.parse(jsonMatch[0]);
       const classifications = parsed.classifications;
 
-      if (!Array.isArray(classifications)) {
-        return Array(expectedCount).fill(null).map(defaultResult);
-      }
+      if (!Array.isArray(classifications)) return null;
 
       const validClassifications = ['NEW', 'UPDATES', 'EXTENDS'];
       const results: ClassificationResult[] = [];
@@ -361,7 +380,7 @@ Classify ALL new facts. Respond with a JSON array:
 
       return results;
     } catch {
-      return Array(expectedCount).fill(null).map(defaultResult);
+      return null;
     }
   }
 
@@ -373,6 +392,8 @@ Classify ALL new facts. Respond with a JSON array:
 export interface RelationshipClassifierOptions {
   /** Maximum facts to classify in a single batch (default: 10) */
   maxBatchSize?: number;
+  /** Sink for truncation-retry diagnostics (pino-compatible warn/error). */
+  logger?: TruncationRetryLogger;
 }
 
 /**

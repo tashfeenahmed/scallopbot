@@ -9,6 +9,8 @@
 import type { Logger } from 'pino';
 import type { CompletionRequest, LLMProvider } from '../providers/types.js';
 import type { CostTracker } from '../routing/cost.js';
+import { completionBudgetForPurpose } from '../routing/model-limits.js';
+import { completeWithTruncationRetry } from '../providers/completion-retry.js';
 import { resolveStateUserId } from '../utils/state-user-id.js';
 import { cosineSimilarity, type EmbeddingProvider } from './embeddings.js';
 import type { ScallopMemoryStore } from './scallop-store.js';
@@ -566,6 +568,7 @@ export class LLMFactExtractor {
     if (options.useRelationshipClassifier !== false) {
       this.relationshipClassifier = createRelationshipClassifier(this.provider, {
         maxBatchSize: this.resourceLimits.maxClassificationBatchSize,
+        logger: this.logger,
       });
       this.logger.debug('LLM relationship classifier enabled with batch classification');
     }
@@ -614,15 +617,25 @@ export class LLMFactExtractor {
       }
       prompt += `User message:\n${message}\n\nExtract facts and triggers (JSON only):`;
 
-      // Call LLM to extract facts and triggers. Cap max_tokens so thinking-heavy
-      // models (qwen3.6) don't burn the entire budget on reasoning_content and
-      // return empty JSON. 1500 is plenty for even a long facts+triggers payload.
+      // Call LLM to extract facts and triggers. The purpose budget (2048 by
+      // default, capped to the model) keeps thinking-heavy models (qwen3.6)
+      // from burning the whole budget on reasoning; if the response is still
+      // cut off at max_tokens and unparseable, completeWithTruncationRetry
+      // retries once with a doubled budget and a "JSON only" nudge. Each
+      // attempt gets its own deadline.
       let response: Awaited<ReturnType<LLMProvider['complete']>>;
+      let parsedPayload: ReturnType<LLMFactExtractor['parseResponse']> = null;
       try {
-        response = await completeWithinDeadline(this.provider, {
+        const deadlineProvider: LLMProvider = {
+          name: this.provider.name,
+          model: this.provider.model,
+          isAvailable: () => this.provider.isAvailable(),
+          complete: (req) => completeWithinDeadline(this.provider, req, this.requestTimeoutMs, 'fact_extraction_timeout'),
+        };
+        const attempt = await completeWithTruncationRetry(deadlineProvider, {
           messages: [{ role: 'user', content: prompt }],
           temperature: 0.1,
-          maxTokens: 1500,
+          maxTokens: completionBudgetForPurpose(this.provider, 'fact_extract'),
           enableThinking: false,
           structuredOutput: {
             name: 'fact_and_trigger_extraction',
@@ -630,17 +643,26 @@ export class LLMFactExtractor {
             strict: true,
           },
           purpose: 'fact_extract',
-        }, this.requestTimeoutMs, 'fact_extraction_timeout');
+        }, {
+          parse: (text) => {
+            const candidate = this.parseResponse(text, { quiet: true });
+            return candidate && Array.isArray(candidate.facts) ? candidate : null;
+          },
+          logger: this.logger,
+        });
+        response = attempt.response;
+        parsedPayload = attempt.parsed;
       } catch (error) {
         this.recordStructuredRouteFailure(route, error);
         throw error;
       }
 
-      // Parse response - handle ContentBlock[] response
+      // Parse response - handle ContentBlock[] response. Re-parse loudly when
+      // the retry helper found nothing usable so the usual diagnostics fire.
       const responseText = Array.isArray(response.content)
         ? response.content.map(block => 'text' in block ? block.text : '').join('')
         : String(response.content);
-      const parsed = this.parseResponse(responseText);
+      const parsed = parsedPayload ?? this.parseResponse(responseText);
       if (!parsed || !Array.isArray(parsed.facts)) {
         const error = new Error('fact_extraction_invalid_json');
         this.recordStructuredRouteFailure(route, error);
@@ -2253,7 +2275,7 @@ Respond with JSON only:
     }
   }
 
-  private parseResponse(content: string): {
+  private parseResponse(content: string, options?: { quiet?: boolean }): {
     facts: ExtractedFactWithEmbedding[];
     proactive_triggers?: Array<{
       type: 'event_prep' | 'commitment_check' | 'goal_checkin' | 'follow_up';
@@ -2270,28 +2292,33 @@ Respond with JSON only:
       priority?: 'urgent' | 'high' | 'medium' | 'low';
     }>;
   } | null {
+    const quiet = options?.quiet === true;
     if (!content || content.trim().length === 0) {
-      this.logger.warn('LLM returned empty response during fact extraction');
+      if (!quiet) this.logger.warn('LLM returned empty response during fact extraction');
       return null;
     }
 
     // Try to extract JSON from response
     const jsonMatch = content.match(/\{[\s\S]*\}/);
     if (!jsonMatch) {
-      this.logger.warn(
-        { contentPreview: content.substring(0, 200) },
-        'LLM response contained no JSON object — facts may have been lost'
-      );
+      if (!quiet) {
+        this.logger.warn(
+          { contentPreview: content.substring(0, 200) },
+          'LLM response contained no JSON object — facts may have been lost'
+        );
+      }
       return null;
     }
 
     try {
       return JSON.parse(jsonMatch[0]);
     } catch (err) {
-      this.logger.error(
-        { error: (err as Error).message, contentPreview: content.substring(0, 200) },
-        'Failed to parse JSON from LLM response — facts were lost'
-      );
+      if (!quiet) {
+        this.logger.error(
+          { error: (err as Error).message, contentPreview: content.substring(0, 200) },
+          'Failed to parse JSON from LLM response — facts were lost'
+        );
+      }
       return null;
     }
   }

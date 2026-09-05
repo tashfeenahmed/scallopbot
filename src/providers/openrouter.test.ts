@@ -1,5 +1,5 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { OpenRouterProvider } from './openrouter.js';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { OpenRouterProvider, reasoningOffEffortForModel } from './openrouter.js';
 import type { CompletionRequest } from './types.js';
 
 // Mock fetch
@@ -627,6 +627,79 @@ describe('OpenRouterProvider', () => {
       });
 
       expect(response.usage.cachedInputTokens).toBeUndefined();
+    });
+  });
+
+  describe('reasoning-off effort override', () => {
+    afterEach(() => {
+      delete process.env.OPENROUTER_REASONING_OFF_EFFORT;
+    });
+
+    it("defaults to 'none' but uses 'minimal' for Gemini, which rejects 'none'", () => {
+      expect(reasoningOffEffortForModel('qwen/qwen3.6-plus', {})).toBe('none');
+      expect(reasoningOffEffortForModel('google/gemini-3.7-flash', {})).toBe('minimal');
+    });
+
+    it('honours a global env override', () => {
+      expect(reasoningOffEffortForModel('qwen/qwen3.6-plus', { OPENROUTER_REASONING_OFF_EFFORT: 'minimal' })).toBe('minimal');
+      // Garbage values fall back to the default rather than breaking calls.
+      expect(reasoningOffEffortForModel('qwen/qwen3.6-plus', { OPENROUTER_REASONING_OFF_EFFORT: 'lots' })).toBe('none');
+    });
+
+    it('honours per-model and prefix overrides in the env map', () => {
+      const env = { OPENROUTER_REASONING_OFF_EFFORT: 'none, qwen/qwen3.6-plus=minimal, deepseek/*=low' };
+      expect(reasoningOffEffortForModel('qwen/qwen3.6-plus', env)).toBe('minimal');
+      expect(reasoningOffEffortForModel('QWEN/QWEN3.6-PLUS', env)).toBe('minimal');
+      expect(reasoningOffEffortForModel('qwen/qwen3.6-flash', env)).toBe('none');
+      expect(reasoningOffEffortForModel('deepseek/deepseek-r1', env)).toBe('low');
+      // An explicit env default beats the built-in Gemini override.
+      expect(reasoningOffEffortForModel('google/gemini-3.7-flash', env)).toBe('none');
+    });
+
+    it('sends the overridden effort with exclude:true when thinking is disabled', async () => {
+      process.env.OPENROUTER_REASONING_OFF_EFFORT = 'qwen/qwen3.6-plus=minimal';
+      const qwenProvider = new OpenRouterProvider({ apiKey: 'test-key', model: 'qwen/qwen3.6-plus' });
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          choices: [{ message: { content: '{"ok":true}' }, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 1, completion_tokens: 1 }, model: 'qwen/qwen3.6-plus',
+        }),
+      });
+
+      await qwenProvider.complete({
+        messages: [{ role: 'user', content: 'Return JSON' }],
+        enableThinking: false,
+      });
+
+      const body = JSON.parse(String((mockFetch.mock.calls[0][1] as RequestInit).body));
+      expect(body.reasoning).toEqual({ effort: 'minimal', exclude: true });
+    });
+
+    it('surfaces hidden reasoning tokens from usage so truncation is diagnosable', async () => {
+      const qwenProvider = new OpenRouterProvider({ apiKey: 'test-key', model: 'qwen/qwen3.6-plus' });
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          choices: [{ message: { content: '' }, finish_reason: 'length' }],
+          usage: {
+            prompt_tokens: 900,
+            completion_tokens: 1026,
+            completion_tokens_details: { reasoning_tokens: 1024 },
+          },
+          model: 'qwen/qwen3.6-plus',
+        }),
+      });
+
+      const response = await qwenProvider.complete({
+        messages: [{ role: 'user', content: 'Return JSON' }],
+        enableThinking: false,
+        maxTokens: 1024,
+      });
+
+      expect(response.stopReason).toBe('max_tokens');
+      expect(response.usage.outputTokens).toBe(1026);
+      expect(response.usage.reasoningTokens).toBe(1024);
     });
   });
 

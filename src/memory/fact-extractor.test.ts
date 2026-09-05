@@ -1289,3 +1289,84 @@ describe('Combined fact + trigger extraction', () => {
     expect(profileManager.setStaticValue).toHaveBeenCalledWith('default', 'location', 'Owner City');
   });
 });
+
+describe('fact extraction truncation retry (B6)', () => {
+  const reply = (text: string, stopReason: string, outputTokens = 10) => ({
+    content: [{ type: 'text', text }],
+    stopReason,
+    usage: { inputTokens: 100, outputTokens },
+    model: 'qwen/qwen3.6-plus',
+  });
+
+  it('uses the fact_extract purpose budget instead of a hard-coded 1500', async () => {
+    const provider = createMockProvider(JSON.stringify({ facts: [] }));
+    const extractor = new LLMFactExtractor({
+      provider,
+      scallopStore: createMockScallopStore(),
+      logger: createMockLogger(),
+      useRelationshipClassifier: false,
+    });
+
+    await extractor.extractFacts('hello there', 'user-123');
+
+    expect(provider.complete).toHaveBeenCalledWith(expect.objectContaining({
+      maxTokens: 2048,
+      enableThinking: false,
+      purpose: 'fact_extract',
+    }));
+  });
+
+  it('retries once with a doubled budget when the reply is cut off at max_tokens', async () => {
+    const complete = vi.fn()
+      .mockResolvedValueOnce(reply('', 'max_tokens', 2050))
+      .mockResolvedValueOnce(reply(JSON.stringify({
+        facts: [{ content: 'Lives in Springfield', subject: 'user', category: 'location' }],
+      }), 'end_turn'));
+    const provider = { name: 'openrouter', model: 'qwen/qwen3.6-plus', complete, isAvailable: () => true } as unknown as LLMProvider;
+    const logger = createMockLogger();
+    const db = createMockDatabase();
+    const extractor = new LLMFactExtractor({
+      provider,
+      scallopStore: createMockScallopStore(db),
+      logger,
+      useRelationshipClassifier: false,
+    });
+
+    const result = await extractor.extractFacts('I live in Springfield', 'user-123');
+
+    expect(complete).toHaveBeenCalledTimes(2);
+    expect(complete.mock.calls[0][0].maxTokens).toBe(2048);
+    expect(complete.mock.calls[1][0].maxTokens).toBe(4096);
+    expect(complete.mock.calls[1][0].enableThinking).toBe(false);
+    expect(complete.mock.calls[1][0].signal).toEqual(expect.any(AbortSignal));
+    expect(String(complete.mock.calls[1][0].messages[0].content)).toContain('Return ONLY the JSON.');
+    expect(result.error).toBeUndefined();
+    expect(result.facts.map((f) => f.content)).toEqual(['Lives in Springfield']);
+    expect(db.recordStructuredRouteFailure).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ purpose: 'fact_extract', attempt: 1, nextMaxTokens: 4096 }),
+      expect.stringContaining('truncated'),
+    );
+  });
+
+  it('records invalid_json when both attempts are truncated', async () => {
+    const complete = vi.fn()
+      .mockResolvedValueOnce(reply('', 'max_tokens'))
+      .mockResolvedValueOnce(reply('{"facts": [', 'max_tokens'));
+    const provider = { name: 'openrouter', model: 'qwen/qwen3.6-plus', complete, isAvailable: () => true } as unknown as LLMProvider;
+    const db = createMockDatabase();
+    const extractor = new LLMFactExtractor({
+      provider,
+      scallopStore: createMockScallopStore(db),
+      logger: createMockLogger(),
+      useRelationshipClassifier: false,
+      now: () => 1_705_320_000_000,
+    });
+
+    const result = await extractor.extractFacts('I live in Springfield', 'user-123');
+
+    expect(complete).toHaveBeenCalledTimes(2);
+    expect(result.error).toBe('fact_extraction_invalid_json');
+    expect(db.recordStructuredRouteFailure).toHaveBeenCalledWith('fact_extract:openrouter', 'invalid_json', 1_705_320_000_000);
+  });
+});

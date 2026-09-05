@@ -25,6 +25,66 @@ const REASONING_MODELS = new Set([
   'deepseek/deepseek-r1:free',
 ]);
 
+/**
+ * Reasoning effort sent when a caller sets enableThinking:false.
+ *
+ * OpenRouter's contract is `reasoning: { effort: 'none', exclude: true }`, but
+ * some backends reject or ignore 'none' (Gemini did from 31 Aug 2026; the
+ * working value there is 'minimal'). Rather than hard-code per-model guesses,
+ * the effort is resolved from:
+ *   1. env OPENROUTER_REASONING_OFF_EFFORT — either a single effort applied to
+ *      every model (`minimal`) or a comma-separated map of `model=effort`
+ *      entries with an optional bare default, e.g.
+ *      `none,qwen/qwen3.6-plus=minimal,google/gemini*=minimal`
+ *      (a trailing `*` matches a model-id prefix; matching is case-insensitive);
+ *   2. the built-in map below (Gemini → 'minimal', known-broken with 'none');
+ *   3. 'none'.
+ */
+export type ReasoningOffEffort = 'none' | 'minimal' | 'low';
+const REASONING_OFF_EFFORTS = new Set<ReasoningOffEffort>(['none', 'minimal', 'low']);
+const DEFAULT_REASONING_OFF_EFFORT: ReasoningOffEffort = 'none';
+const BUILTIN_REASONING_OFF_OVERRIDES: Array<[prefix: string, effort: ReasoningOffEffort]> = [
+  ['google/gemini', 'minimal'],
+];
+
+function parseReasoningOffEffort(value: string | undefined): ReasoningOffEffort | undefined {
+  const normalized = value?.trim().toLowerCase();
+  return normalized && REASONING_OFF_EFFORTS.has(normalized as ReasoningOffEffort)
+    ? (normalized as ReasoningOffEffort)
+    : undefined;
+}
+
+/** Resolve the reasoning effort to send for enableThinking:false on `model`. */
+export function reasoningOffEffortForModel(
+  model: string,
+  env: NodeJS.ProcessEnv = process.env
+): ReasoningOffEffort {
+  const id = model.trim().toLowerCase();
+  let envDefault: ReasoningOffEffort | undefined;
+  const raw = env.OPENROUTER_REASONING_OFF_EFFORT;
+  if (raw) {
+    for (const entry of raw.split(',')) {
+      const trimmed = entry.trim();
+      if (!trimmed) continue;
+      const eq = trimmed.indexOf('=');
+      if (eq === -1) {
+        envDefault = parseReasoningOffEffort(trimmed) ?? envDefault;
+        continue;
+      }
+      const pattern = trimmed.slice(0, eq).trim().toLowerCase();
+      const effort = parseReasoningOffEffort(trimmed.slice(eq + 1));
+      if (!effort || !pattern) continue;
+      const matches = pattern.endsWith('*')
+        ? id.startsWith(pattern.slice(0, -1))
+        : id === pattern;
+      if (matches) return effort;
+    }
+  }
+  if (envDefault) return envDefault;
+  const builtin = BUILTIN_REASONING_OFF_OVERRIDES.find(([prefix]) => id.startsWith(prefix));
+  return builtin ? builtin[1] : DEFAULT_REASONING_OFF_EFFORT;
+}
+
 export interface ProviderCharacteristics {
   speed: 'fast' | 'standard' | 'slow';
   costPerMillionTokens: number;
@@ -80,6 +140,9 @@ interface OpenRouterResponse {
     completion_tokens: number;
     prompt_tokens_details?: {
       cached_tokens?: number;
+    };
+    completion_tokens_details?: {
+      reasoning_tokens?: number;
     };
   };
   model: string;
@@ -164,12 +227,12 @@ export class OpenRouterProvider implements LLMProvider {
       max_tokens: isReasoning ? (request.maxTokens || 8192) : (request.maxTokens || 4096),
       usage: { include: true },
       // OpenRouter otherwise infers reasoning from the model. An explicit
-      // false is a hard route contract for schema-only background work.
+      // false is a hard route contract for schema-only background work; the
+      // effort used for "off" is per-model (see reasoningOffEffortForModel).
       ...(request.enableThinking !== undefined && {
-        reasoning: {
-          effort: request.enableThinking ? 'high' : 'none',
-          ...(request.enableThinking === false && { exclude: true }),
-        },
+        reasoning: request.enableThinking
+          ? { effort: 'high' }
+          : { effort: reasoningOffEffortForModel(this.model), exclude: true },
       }),
     };
 
@@ -357,6 +420,9 @@ export class OpenRouterProvider implements LLMProvider {
     }
 
     const cachedInputTokens = data.usage.prompt_tokens_details?.cached_tokens;
+    // Reasoning tokens count against max_tokens even when `exclude: true`
+    // hides them from the response, so surface them for truncation diagnostics.
+    const reasoningTokens = data.usage.completion_tokens_details?.reasoning_tokens;
 
     return {
       content,
@@ -365,6 +431,7 @@ export class OpenRouterProvider implements LLMProvider {
         inputTokens: data.usage.prompt_tokens,
         outputTokens: data.usage.completion_tokens,
         ...(cachedInputTokens !== undefined && { cachedInputTokens }),
+        ...(typeof reasoningTokens === 'number' && { reasoningTokens }),
       },
       model: data.model,
     };

@@ -44,11 +44,18 @@ const KNOWN_LIMITS: Record<string, ModelTokenLimits> = {
   'llama-3.3-70b-versatile': { contextWindowTokens: 128_000, maxOutputTokens: 8_192 },
 };
 
+// Default output budgets per background purpose. These must leave headroom
+// for models that emit some reasoning even when asked not to: on the Pi,
+// qwen/qwen3.6-plus relation_classify calls capped at 1024 tokens hit
+// max_tokens 20/20 times (all reasoning, no JSON). The truncation retry in
+// src/providers/completion-retry.ts doubles the budget once, so the max caps
+// below are sized to allow at least one doubling of these defaults.
 const PURPOSE_DEFAULT_OUTPUT: Record<string, number> = {
   session_summary: 1_200,
   session_summary_retry: 2_400,
   rerank: 1_024,
-  relation_classify: 1_024,
+  relation_classify: 1_536,
+  fact_extract: 2_048,
   compaction_summary: 1_024,
 };
 
@@ -56,9 +63,15 @@ const PURPOSE_MAX_OUTPUT: Record<string, number> = {
   session_summary: 4_096,
   session_summary_retry: 8_192,
   rerank: 4_096,
-  relation_classify: 4_096,
+  relation_classify: 6_144,
+  fact_extract: 8_192,
   compaction_summary: 4_096,
 };
+
+/** Default output budget for a purpose (before model caps). Exposed for tests/diagnostics. */
+export function purposeDefaultOutputTokens(purpose: string): number | undefined {
+  return PURPOSE_DEFAULT_OUTPUT[purpose];
+}
 
 function normalizeModelId(model: string): string {
   return model.trim().toLowerCase();

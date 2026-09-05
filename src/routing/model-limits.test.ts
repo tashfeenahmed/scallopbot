@@ -42,3 +42,16 @@ describe('model token limits', () => {
     expect(completionBudgetForPurpose({ name: 'tiny', model: 'tiny' }, 'session_summary', 2_000)).toBe(900);
   });
 });
+
+describe('purpose budgets for background memory calls', () => {
+  it('gives relation_classify and fact_extract enough headroom for reasoning-prone models', () => {
+    const provider = { name: 'openrouter', model: 'qwen/qwen3.6-plus' };
+    expect(completionBudgetForPurpose(provider, 'relation_classify')).toBe(1_536);
+    expect(completionBudgetForPurpose(provider, 'fact_extract')).toBe(2_048);
+    // One truncation-retry doubling must fit under the purpose cap.
+    expect(completionBudgetForPurpose(provider, 'relation_classify', 3_072)).toBe(3_072);
+    expect(completionBudgetForPurpose(provider, 'fact_extract', 4_096)).toBe(4_096);
+    // ...but the cap still bounds runaway requests.
+    expect(completionBudgetForPurpose(provider, 'relation_classify', 50_000)).toBe(6_144);
+  });
+});
