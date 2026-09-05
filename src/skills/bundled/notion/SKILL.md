@@ -1,6 +1,6 @@
 ---
 name: notion
-description: Typed Notion API access for searching, inspecting schemas, querying data sources, and verified page writes. Prefer this over raw curl or notion-cli.
+description: Typed Notion API access. Remembers databases across turns, accepts plain values for properties (Sets:3, Date:"2026-08-21"), and returns compact verified results. Prefer this over raw curl or notion-cli.
 user-invocable: true
 triggers: [notion, database, tracker]
 scripts:
@@ -10,25 +10,29 @@ inputSchema:
   properties:
     action:
       type: string
-      enum: [search, schema, query, create, update]
+      enum: [known, search, schema, query, create, update]
+      description: known=list remembered databases (no network); search; schema; query; create; update
+    database:
+      type: string
+      description: Database title or fragment, e.g. "gym tracker". Resolved from memory or search. Use this when you do not have an ID.
+    database_id:
+      type: string
+      description: Database ID (dashed or undashed). Never invent one; use database instead.
+    data_source_id:
+      type: string
+      description: Data-source ID (dashed or undashed)
     query:
       type: string
       description: Search text for action=search
     object_type:
       type: string
       enum: [page, data_source]
-    database_id:
-      type: string
-      description: Database ID; query/schema automatically resolve its current data source
-    data_source_id:
-      type: string
-      description: Current Notion data-source ID
     page_id:
       type: string
       description: Page ID for action=update
     properties:
       type: object
-      description: Exact typed Notion properties for create/update; inspect schema first
+      description: Property values for create/update. Plain values are fine and are typed from the schema automatically - Name:"Leg Press", Sets:3, Reps:"8", Date:"2026-08-21", Type:"Cardio", Done:true. Property names are matched case-insensitively.
     filter:
       type: object
     sorts:
@@ -41,6 +45,9 @@ inputSchema:
       maximum: 100
     start_cursor:
       type: string
+    verbose:
+      type: boolean
+      description: schema only - include the raw Notion payload
   required: [action]
 metadata:
   openclaw:
@@ -55,40 +62,42 @@ metadata:
 
 # Typed Notion API
 
-Use this tool instead of raw shell requests. It handles Notion API version
-`2025-09-03`, resolves a database to its current data source, checks HTTP status,
-and returns structured JSON.
+Handles Notion API version `2025-09-03`, resolves databases, types property
+values from the schema, checks HTTP status, and returns compact JSON.
 
-Workflow:
+Workflow for a write (one call is usually enough):
 
-1. `search` when the database ID is unknown.
-2. `schema` before writing; never guess property names or types.
-3. `query` for existing rows.
-4. `create` or `update`, then trust completion only when the tool returns success.
+1. `create` with `database` (a title such as "gym tracker") or a known
+   `database_id`/`data_source_id`, and plain `properties`. The tool looks the
+   database up in its memory or by search, fetches the schema, and types the
+   values for you. The result includes `resolved_from` when it resolved a title.
+2. Only if the database is unknown: `known` (remembered databases, free) or
+   `search`. Never invent an ID.
+3. `schema` only when a property error asks for it; errors already list the
+   valid property names and types.
+4. Trust completion only when the tool returns `success: true` with a `page_id`.
 
-Search returns explicit `database_id` and `data_source_id` fields. Pass the
-matching field to later calls. The client also recovers safely when a returned
-data-source ID is accidentally supplied as `database_id`; do not interpret that
-identifier mismatch as a permission problem or ask the user to re-share an
-integration unless both typed paths genuinely fail.
+`create`/`update` return `{page_id, url, title, properties}` with flat values.
+An `Unknown database id` error means the ID does not exist; it lists the
+databases the tool knows. It is not a permission problem unless the error says
+HTTP 401 or 403.
 
 Query responses are compact and date-sorted. For repeated entities, use
 `result.stats_by_title[].latest` for the newest dated record and `maxima` for
 numeric records. Never infer a personal record, improvement, increase, or trend
-from an arbitrary row or from response order. A comparison is factual only when
-the returned latest/max evidence supports it. Preserve user-supplied titles and
+from an arbitrary row or from response order. Preserve user-supplied titles and
 labels exactly on writes; do not add modalities such as “Dumbbell” or “each arm”.
 
 Examples:
 
 ```json
-{"action":"schema","database_id":"..."}
+{"action":"create","database":"gym tracker","properties":{"Name":"Pectoral machine","Date":"2026-08-21","Type":"Machine","Sets":3,"Reps":6,"Weight (kg)":45}}
 ```
 
 ```json
-{"action":"query","database_id":"...","filter":{"property":"Date","date":{"equals":"2026-07-13"}}}
+{"action":"query","database":"gym tracker","filter":{"property":"Date","date":{"equals":"2026-07-13"}}}
 ```
 
 ```json
-{"action":"create","database_id":"...","properties":{"Name":{"title":[{"text":{"content":"Example"}}]}}}
+{"action":"known"}
 ```
