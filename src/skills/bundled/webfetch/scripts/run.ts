@@ -4,6 +4,7 @@
  * Fetches a URL and extracts text content from HTML.
  */
 import { unusableWebContentReason } from './content-quality.js';
+import { BlockedUrlError, checkUrlIsPublic, safeFetch } from '../../../../security/url-safety.js';
 
 export {};
 
@@ -25,39 +26,6 @@ const TIMEOUT_MS = 30000;
 function outputResult(result: SkillResult): void {
   console.log(JSON.stringify(result));
   process.exit(result.success ? 0 : 1);
-}
-
-/**
- * Check if a hostname resolves to a private/internal IP.
- * Blocks SSRF to private networks.
- */
-function isPrivateUrl(urlStr: string): boolean {
-  try {
-    const parsed = new URL(urlStr);
-    const hostname = parsed.hostname;
-
-    // Block obvious private IPs
-    const privatePatterns = [
-      /^127\./,
-      /^10\./,
-      /^172\.(1[6-9]|2\d|3[01])\./,
-      /^192\.168\./,
-      /^0\./,
-      /^169\.254\./,  // Link-local
-      /^::1$/,
-      /^fc00:/i,
-      /^fe80:/i,
-      /^localhost$/i,
-    ];
-
-    for (const pattern of privatePatterns) {
-      if (pattern.test(hostname)) return true;
-    }
-
-    return false;
-  } catch {
-    return true; // Block invalid URLs
-  }
 }
 
 /**
@@ -136,9 +104,11 @@ async function main(): Promise<void> {
     return;
   }
 
-  // SSRF protection
-  if (isPrivateUrl(args.url)) {
-    outputResult({ success: false, output: '', error: 'URL points to private/internal network (blocked for security)', exitCode: 1 });
+  // SSRF protection. Literal IPs and every address the hostname resolves to are
+  // checked here; safeFetch re-checks each redirect hop.
+  const verdict = await checkUrlIsPublic(args.url);
+  if (!verdict.safe) {
+    outputResult({ success: false, output: '', error: verdict.reason, exitCode: 1 });
     return;
   }
 
@@ -148,13 +118,12 @@ async function main(): Promise<void> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
-    const response = await fetch(args.url, {
+    const response = await safeFetch(args.url, {
       signal: controller.signal,
       headers: {
         'User-Agent': 'SmartBot/1.0 (WebFetch Skill)',
         'Accept': 'text/html, application/json, text/plain, */*',
       },
-      redirect: 'follow',
     });
 
     clearTimeout(timeout);
@@ -205,7 +174,10 @@ async function main(): Promise<void> {
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    if (msg.includes('abort')) {
+    if (e instanceof BlockedUrlError) {
+      // A public first hop may still redirect somewhere internal.
+      outputResult({ success: false, output: '', error: msg, exitCode: 1 });
+    } else if (msg.includes('abort')) {
       outputResult({ success: false, output: '', error: `Request timed out after ${TIMEOUT_MS / 1000}s`, exitCode: 1 });
     } else {
       outputResult({ success: false, output: '', error: `Fetch failed: ${msg}`, exitCode: 1 });

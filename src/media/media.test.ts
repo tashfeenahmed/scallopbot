@@ -3,6 +3,13 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+// The SSRF guard resolves hostnames before fetching. Stub the resolver so these
+// unit tests stay offline and deterministic.
+vi.mock('node:dns/promises', () => ({
+  lookup: vi.fn().mockResolvedValue([{ address: '93.184.216.34', family: 4 }]),
+}));
+
 import {
   extractUrls,
   fetchLink,

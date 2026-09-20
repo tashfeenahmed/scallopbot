@@ -6,6 +6,7 @@
  */
 
 import type { PDFContent, DocumentContent, MediaProcessingResult } from './types.js';
+import { safeFetch } from '../security/url-safety.js';
 import { safeImport } from '../utils/dynamic-import.js';
 
 /** Maximum PDF size (50MB) */
@@ -72,7 +73,7 @@ export async function fetchPdf(
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeout);
 
-    const response = await fetch(url, {
+    const response = await safeFetch(url, {
       signal: controller.signal,
       headers: {
         Accept: 'application/pdf',

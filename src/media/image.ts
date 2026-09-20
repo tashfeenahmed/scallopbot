@@ -7,6 +7,7 @@
 
 import { createHash } from 'crypto';
 import type { ImageContent, MediaProcessingResult, ClaudeImageBlock } from './types.js';
+import { safeFetch } from '../security/url-safety.js';
 
 /** Maximum image size for vision APIs (20MB) */
 const MAX_IMAGE_SIZE = 20 * 1024 * 1024;
@@ -79,7 +80,7 @@ export async function fetchImage(
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeout);
 
-    const response = await fetch(url, {
+    const response = await safeFetch(url, {
       signal: controller.signal,
       headers: {
         Accept: 'image/*',
