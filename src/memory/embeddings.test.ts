@@ -2,7 +2,7 @@
  * Tests for Vector Embeddings
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   TFIDFEmbedder,
   OpenAIEmbedder,
@@ -362,6 +362,46 @@ describe('OllamaEmbedder', () => {
     it('should return true', () => {
       const embedder = new OllamaEmbedder();
       expect(embedder.isAvailable()).toBe(true);
+    });
+  });
+
+  describe('embed', () => {
+    afterEach(() => {
+      vi.unstubAllGlobals();
+    });
+
+    it('bounds the request with an abort deadline', async () => {
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ embedding: [0.1, 0.2, 0.3] }),
+      });
+      vi.stubGlobal('fetch', fetchMock);
+
+      const embedder = new OllamaEmbedder({ timeoutMs: 1234 });
+      await expect(embedder.embed('hello')).resolves.toEqual([0.1, 0.2, 0.3]);
+
+      const init = fetchMock.mock.calls[0][1] as { signal?: AbortSignal };
+      expect(init.signal).toBeInstanceOf(AbortSignal);
+    });
+
+    it('rejects a 200 response that carries no vector instead of returning undefined', async () => {
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ error: 'model not found' }),
+      }));
+
+      const embedder = new OllamaEmbedder();
+      await expect(embedder.embed('hello')).rejects.toThrow(/malformed embedding payload/);
+    });
+
+    it('rejects a vector containing non-finite numbers', async () => {
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ embedding: [0.1, null, 0.3] }),
+      }));
+
+      const embedder = new OllamaEmbedder();
+      await expect(embedder.embed('hello')).rejects.toThrow(/malformed embedding payload/);
     });
   });
 });
