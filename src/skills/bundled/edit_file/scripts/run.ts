@@ -6,6 +6,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import { isWithin } from '../../_shared/pathguard.js';
 
 interface EditFileArgs {
   path: string;
@@ -30,7 +31,7 @@ function validatePath(filePath: string, workspaceRoot: string): { valid: boolean
   const resolved = path.resolve(workspaceRoot, filePath);
 
   // Check if path stays within workspace
-  if (!resolved.startsWith(workspaceRoot)) {
+  if (!isWithin(workspaceRoot, resolved)) {
     return { valid: false, resolved, reason: 'Path escapes workspace' };
   }
 
@@ -47,7 +48,7 @@ function validatePath(filePath: string, workspaceRoot: string): { valid: boolean
     if (fs.existsSync(resolved)) {
       const realPath = fs.realpathSync(resolved);
       const realBase = fs.realpathSync(workspaceRoot);
-      if (!realPath.startsWith(realBase)) {
+      if (!isWithin(realBase, realPath)) {
         return { valid: false, resolved, reason: 'Symlink escapes workspace' };
       }
     }
