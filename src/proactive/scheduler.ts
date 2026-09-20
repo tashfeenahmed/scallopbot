@@ -1012,7 +1012,18 @@ export class UnifiedScheduler {
     let leaseActive = true;
     const renew = (): boolean => {
       if (!leaseActive) return false;
-      leaseActive = this.boardService.heartbeatTask(item.id, leaseToken, this.taskLeaseMs);
+      // Also runs from a setInterval below, where a throw becomes an uncaught
+      // exception. A failed heartbeat write is transient: keep the lease we
+      // already hold and let the next beat retry.
+      try {
+        leaseActive = this.boardService.heartbeatTask(item.id, leaseToken, this.taskLeaseMs);
+      } catch (error) {
+        this.logger.warn(
+          { itemId: item.id, error: (error as Error).message },
+          'Scheduled task lease heartbeat failed'
+        );
+        return leaseActive;
+      }
       if (!leaseActive) this.logger.warn({ itemId: item.id }, 'Scheduled task lease was lost');
       return leaseActive;
     };

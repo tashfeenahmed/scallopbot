@@ -149,7 +149,18 @@ export class BackgroundGardener {
     this.running = true;
     try {
       this.timer = setInterval(() => {
-        this.lightTick();
+        // A throw here escapes into the timer queue and becomes an uncaught
+        // exception, which takes the whole bot down. Decay and the tier checks
+        // touch SQLite, so a transient lock or I/O error is expected; skip the
+        // tick and try again on the next one.
+        try {
+          this.lightTick();
+        } catch (error) {
+          this.logger.error(
+            { error: (error as Error).message },
+            'Background gardener tick failed; continuing with the next tick'
+          );
+        }
       }, this.interval);
 
       this.logger.info({ intervalMs: this.interval }, 'Background gardener started (tiered consolidation)');

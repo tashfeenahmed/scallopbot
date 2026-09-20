@@ -906,14 +906,24 @@ export class Gateway {
 
     // Start unified scheduler (after trigger sources are registered)
     if (this.unifiedScheduler) {
-      void this.unifiedScheduler.start();
+      // Nothing awaits this, so a rejection would be an unhandled rejection
+      // and terminate the process instead of leaving the rest of the gateway
+      // (channels, agent) running.
+      void this.unifiedScheduler.start().catch(error => {
+        this.logger.error(
+          { error: (error as Error).message },
+          'Unified scheduler failed to start'
+        );
+      });
     }
 
     // Push completed background children immediately. The durable outbox also
-    // drains completions produced just before a restart.
-    await this.drainSubAgentDeliveries();
+    // drains completions produced just before a restart. A failure to claim or
+    // release outbox rows must not abort startup or, on the interval, crash the
+    // process — the next tick retries in a second.
+    await this.drainSubAgentDeliveriesSafely();
     this.subAgentDeliveryTimer = setInterval(() => {
-      void this.drainSubAgentDeliveries();
+      void this.drainSubAgentDeliveriesSafely();
     }, 1_000);
 
     this.isRunning = true;
@@ -1723,6 +1733,18 @@ export class Gateway {
 
     this.logger.warn({ userId: rawUserId }, 'Cannot resolve unprefixed recipient across multiple transports');
     return { source: null, rawUserId };
+  }
+
+  /** drainSubAgentDeliveries with the outer claim/release path guarded. */
+  private async drainSubAgentDeliveriesSafely(): Promise<void> {
+    try {
+      await this.drainSubAgentDeliveries();
+    } catch (error) {
+      this.logger.error(
+        { error: (error as Error).message },
+        'Sub-agent delivery drain failed'
+      );
+    }
   }
 
   /**
