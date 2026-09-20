@@ -575,9 +575,14 @@ export class ApiChannel implements Channel, TriggerSource {
    * Check if a request is authenticated.
    * Returns true if:
    * - No auth is configured (no db and no apiKey) — backward compat
-   * - authService exists but setup is not complete — allow pre-setup access
-   * - Valid session cookie
    * - Valid API key
+   * - Valid session cookie
+   *
+   * Every credential here is something the caller must possess. Request
+   * headers a client chooses for itself (Origin, Referer) are not credentials
+   * and must never grant access; the browser UI reaches these endpoints with
+   * its own SameSite=Strict session cookie, which is sent on same-origin
+   * fetches and on same-site `<a download>` navigations alike.
    */
   private checkAuthentication(req: IncomingMessage): boolean {
     const hasApiKey = !!this.config.apiKey;
@@ -596,13 +601,6 @@ export class ApiChannel implements Channel, TriggerSource {
 
     // Check session cookie
     if (hasAuth && this.authService!.validateRequest(req)) return true;
-
-    // Same-origin exemption for specific GET endpoints (file downloads, costs, graph)
-    const url = new URL(req.url || '/', `http://${req.headers.host}`);
-    const urlPath = url.pathname;
-    const method = req.method?.toUpperCase();
-    const sameOriginExempt = (urlPath === '/api/files' || urlPath === '/api/costs' || urlPath === '/api/memories/graph') && method === 'GET';
-    if (sameOriginExempt && this.isSameOriginRequest(req)) return true;
 
     return false;
   }
@@ -1259,21 +1257,6 @@ export class ApiChannel implements Channel, TriggerSource {
       totalRequests: history.length,
       dailyHistory,
     });
-  }
-
-  /**
-   * Check if request is from same origin (served by this server)
-   */
-  private isSameOriginRequest(req: IncomingMessage): boolean {
-    const referer = req.headers.referer;
-    if (!referer) return false;
-    try {
-      const refererUrl = new URL(referer);
-      const host = req.headers.host || '';
-      return refererUrl.host === host;
-    } catch {
-      return false;
-    }
   }
 
   /**
