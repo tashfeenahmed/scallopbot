@@ -280,6 +280,33 @@ describe('DiscordChannel', () => {
       expect(mockAgent.processMessage).not.toHaveBeenCalled();
     });
 
+    it('should stop the typing interval when the agent fails', async () => {
+      vi.useFakeTimers();
+      try {
+        (mockAgent.processMessage as any).mockRejectedValueOnce(new Error('agent down'));
+        const sendTyping = vi.fn().mockResolvedValue(undefined);
+        const mockMessage = {
+          author: { id: 'user-123', bot: false },
+          content: 'Hello in DM',
+          channel: { type: 1, send: vi.fn().mockResolvedValue(undefined), sendTyping },
+          mentions: { has: vi.fn().mockReturnValue(false) },
+          reply: vi.fn().mockResolvedValue(undefined),
+          guild: null,
+        };
+
+        await channel.handleMessage(mockMessage as any);
+
+        // The failed turn must have cleared its typing interval: advancing
+        // time well past the 5s cadence must not fire sendTyping again
+        // (once for the initial ping, zero times after the failure).
+        const callsAfterFailure = sendTyping.mock.calls.length;
+        vi.advanceTimersByTime(60_000);
+        expect(sendTyping.mock.calls.length).toBe(callsAfterFailure);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('should respond to DMs without mention', async () => {
       const mockMessage = {
         author: { id: 'user-123', bot: false },
