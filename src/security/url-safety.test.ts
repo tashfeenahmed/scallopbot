@@ -30,6 +30,42 @@ describe('isPrivateIpAddress', () => {
     }
     expect(isPrivateIpAddress('2606:4700:4700::1111')).toBe(false);
   });
+
+  it('flags loopback and private targets written in hex or expanded form', () => {
+    // Every one of these is 127.0.0.1, 192.168.1.1 or 169.254.169.254 wearing
+    // a different IPv6 spelling. A text-prefix check misses all of them:
+    // '::ffff:7f00:1' shares no prefix with '::1', 'fc', 'fe80' or 'ff'.
+    for (const address of [
+      '0:0:0:0:0:0:0:1',      // loopback, fully expanded
+      '::ffff:7f00:1',        // IPv4-mapped loopback in hex
+      '::ffff:c0a8:101',      // IPv4-mapped 192.168.1.1
+      '::ffff:a9fe:a9fe',     // IPv4-mapped cloud metadata
+      '::7f00:1',             // IPv4-compatible loopback
+      '64:ff9b::7f00:1',      // NAT64-wrapped loopback
+      '2002:7f00:1::',        // 6to4-wrapped loopback
+      '0064:ff9b:0000:0000:0000:0000:7f00:0001',
+    ]) {
+      expect(isPrivateIpAddress(address), address).toBe(true);
+    }
+  });
+
+  it('still allows public IPv6, including a 6to4 wrapper around a public v4', () => {
+    for (const address of [
+      '2606:4700:4700::1111',
+      '2001:4860:4860::8888',
+      '::ffff:93.184.216.34',
+      '::ffff:5db8:d822',     // IPv4-mapped 93.184.216.34 in hex
+      '2002:5db8:d822::',     // 6to4 around a public v4
+    ]) {
+      expect(isPrivateIpAddress(address), address).toBe(false);
+    }
+  });
+
+  it('fails closed on malformed IPv6-looking input', () => {
+    for (const address of ['1:2:3', 'gggg::1', '::1::2', 'not-an-ip']) {
+      expect(isPrivateIpAddress(address), address).toBe(true);
+    }
+  });
 });
 
 describe('checkUrlIsPublic', () => {
@@ -51,6 +87,12 @@ describe('checkUrlIsPublic', () => {
     // 2130706433 === 127.0.0.1; the old regex allow-list never matched this.
     lookupMock.mockResolvedValue([{ address: '127.0.0.1', family: 4 }]);
     expect(await checkUrlIsPublic('http://2130706433/')).toMatchObject({ safe: false });
+  });
+
+  it('rejects a bracketed IPv6 literal that spells loopback in hex', async () => {
+    expect(await checkUrlIsPublic('http://[::ffff:7f00:1]:3000/api/files?path=.env'))
+      .toMatchObject({ safe: false });
+    expect(lookupMock).not.toHaveBeenCalled();
   });
 
   it('rejects a hostname that resolves to a private address', async () => {

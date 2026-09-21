@@ -62,19 +62,81 @@ function isPrivateIpv4(address: string): boolean {
   return false;
 }
 
+/**
+ * Expand an IPv6 literal into its eight 16-bit groups.
+ *
+ * Prefix matching on the text form is not enough: loopback alone can be
+ * written `::1`, `0:0:0:0:0:0:0:1`, `::ffff:127.0.0.1` or `::ffff:7f00:1`,
+ * and only the first two look like loopback. Compare numerically instead.
+ * Returns null when the input is not a well-formed IPv6 literal.
+ */
+function ipv6Groups(address: string): number[] | null {
+  let text = address.toLowerCase().replace(/%.*$/, ''); // Drop any zone index.
+
+  // A trailing dotted quad (::ffff:127.0.0.1) is the final two groups.
+  const dotted = text.match(/(\d{1,3}(?:\.\d{1,3}){3})$/);
+  if (dotted) {
+    const octets = ipv4Octets(dotted[1]!);
+    if (!octets) return null;
+    const hi = ((octets[0]! << 8) | octets[1]!).toString(16);
+    const lo = ((octets[2]! << 8) | octets[3]!).toString(16);
+    text = text.slice(0, -dotted[1]!.length) + `${hi}:${lo}`;
+  }
+
+  const halves = text.split('::');
+  if (halves.length > 2) return null;
+
+  const parseGroups = (part: string): number[] | null => {
+    if (part === '') return [];
+    const groups: number[] = [];
+    for (const group of part.split(':')) {
+      if (!/^[0-9a-f]{1,4}$/.test(group)) return null;
+      groups.push(parseInt(group, 16));
+    }
+    return groups;
+  };
+
+  const head = parseGroups(halves[0]!);
+  if (!head) return null;
+  if (halves.length === 1) return head.length === 8 ? head : null;
+
+  const tail = parseGroups(halves[1]!);
+  if (!tail) return null;
+  const fill = 8 - head.length - tail.length;
+  if (fill < 0) return null;
+  return [...head, ...Array<number>(fill).fill(0), ...tail];
+}
+
+/** Judge the IPv4 address carried inside two IPv6 groups. */
+function embeddedIpv4IsPrivate(hi: number, lo: number): boolean {
+  return isPrivateIpv4([hi >> 8, hi & 0xff, lo >> 8, lo & 0xff].join('.'));
+}
+
 function isPrivateIpv6(address: string): boolean {
-  const normalized = address.toLowerCase().replace(/%.*$/, ''); // Drop any zone index.
-  if (normalized === '::1' || normalized === '::') return true;
+  const groups = ipv6Groups(address);
+  if (!groups) return true; // Unparseable: fail closed.
 
-  // IPv4-mapped / IPv4-compatible forms such as ::ffff:127.0.0.1 tunnel an
-  // IPv4 target through an IPv6 literal, so judge the embedded address.
-  const embedded = normalized.match(/(\d{1,3}(?:\.\d{1,3}){3})$/);
-  if (embedded) return isPrivateIpv4(embedded[1]);
+  if (groups.every(group => group === 0)) return true; // :: unspecified
 
-  const head = normalized.split(':')[0];
-  if (head.startsWith('fc') || head.startsWith('fd')) return true; // fc00::/7 unique-local
-  if (/^fe[89ab]/.test(head)) return true; // fe80::/10 link-local
-  if (head.startsWith('ff')) return true; // ff00::/8 multicast
+  // ::ffff:a.b.c.d (IPv4-mapped) and ::a.b.c.d (IPv4-compatible, which also
+  // covers ::1) tunnel an IPv4 target through an IPv6 literal.
+  if (groups.slice(0, 5).every(group => group === 0) && (groups[5] === 0xffff || groups[5] === 0)) {
+    return embeddedIpv4IsPrivate(groups[6]!, groups[7]!);
+  }
+  // 64:ff9b::/96 and 64:ff9b:1::/48 NAT64 carry the IPv4 target in the tail.
+  if (groups[0] === 0x64 && groups[1] === 0xff9b) {
+    return embeddedIpv4IsPrivate(groups[6]!, groups[7]!);
+  }
+  // 2002::/16 6to4 carries it in the two groups after the prefix.
+  if (groups[0] === 0x2002) return embeddedIpv4IsPrivate(groups[1]!, groups[2]!);
+  // 2001:0::/32 Teredo likewise wraps an IPv4 endpoint.
+  if (groups[0] === 0x2001 && groups[1] === 0) return true;
+  // 100::/64 discard-only.
+  if (groups[0] === 0x0100 && groups[1] === 0 && groups[2] === 0 && groups[3] === 0) return true;
+
+  if ((groups[0]! & 0xfe00) === 0xfc00) return true; // fc00::/7 unique-local
+  if ((groups[0]! & 0xffc0) === 0xfe80) return true; // fe80::/10 link-local
+  if ((groups[0]! & 0xff00) === 0xff00) return true; // ff00::/8 multicast
   return false;
 }
 
