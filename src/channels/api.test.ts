@@ -600,6 +600,19 @@ describe('ApiChannel', () => {
 
       expect(res.status).toBe(401);
     });
+
+    // A Referer is chosen by the caller, so it can never stand in for a
+    // credential. These three GETs used to be exempt from auth whenever the
+    // header happened to match Host, which handed anyone who could reach the
+    // port an unauthenticated read of any workspace file.
+    it('should not accept a forged Referer in place of a credential', async () => {
+      const referer = { Referer: `http://127.0.0.1:${authPort}/index.html` };
+
+      for (const path of ['/api/files?path=.env', '/api/costs', '/api/memories/graph']) {
+        const res = await makeAuthRequest(path, 'GET', undefined, referer);
+        expect(res.status, path).toBe(401);
+      }
+    });
   });
 
   describe('WebSocket', () => {
