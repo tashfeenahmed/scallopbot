@@ -121,6 +121,21 @@ describe('glob skill', () => {
     expect(result.error).toContain('Path blocked');
   });
 
+  it('should error on a sibling directory that shares the workspace name prefix', () => {
+    // Regression: startsWith(workspace) let '/tmp/x-evil' through when the
+    // workspace was '/tmp/x' (same prefix, different directory).
+    const sibling = tmpDir + '-evil';
+    fs.mkdirSync(sibling, { recursive: true });
+    fs.writeFileSync(path.join(sibling, 'secret.ts'), 'no');
+    try {
+      const result = runSkill({ pattern: '*.ts', path: sibling }, tmpDir);
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Path blocked');
+    } finally {
+      fs.rmSync(sibling, { recursive: true, force: true });
+    }
+  });
+
   it('should return sorted results', () => {
     fs.writeFileSync(path.join(tmpDir, 'c.ts'), 'c');
     fs.writeFileSync(path.join(tmpDir, 'a.ts'), 'a');

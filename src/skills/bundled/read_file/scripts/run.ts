@@ -6,6 +6,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import { isWithin, isWithinAny } from '../../_shared/pathguard.js';
 
 interface ReadFileArgs {
   path: string;
@@ -48,7 +49,7 @@ function validatePath(filePath: string, workspaceRoot: string): { valid: boolean
   ];
 
   // Check if path is within any allowed root
-  const isAllowed = allowedRoots.some(root => resolved.startsWith(root));
+  const isAllowed = isWithinAny(resolved, allowedRoots);
   if (!isAllowed) {
     return { valid: false, resolved, reason: 'Path outside allowed directories' };
   }
@@ -60,7 +61,7 @@ function validatePath(filePath: string, workspaceRoot: string): { valid: boolean
       const realAllowed = allowedRoots.some(root => {
         try {
           const realRoot = fs.realpathSync(root);
-          return realPath.startsWith(realRoot);
+          return isWithin(realRoot, realPath);
         } catch {
           return false;
         }
