@@ -6,6 +6,7 @@
  */
 
 import type { LinkContent, MediaProcessingResult } from './types.js';
+import { safeFetch } from '../security/url-safety.js';
 
 /** Default configuration */
 const DEFAULT_CONFIG = {
@@ -74,7 +75,7 @@ export async function fetchLink(
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), cfg.timeout);
 
-    const response = await fetch(url, {
+    const response = await safeFetch(url, {
       headers: {
         'User-Agent': cfg.userAgent,
         Accept:
@@ -82,7 +83,6 @@ export async function fetchLink(
         'Accept-Language': 'en-US,en;q=0.5',
       },
       signal: controller.signal,
-      redirect: 'follow',
     });
 
     clearTimeout(timeoutId);
