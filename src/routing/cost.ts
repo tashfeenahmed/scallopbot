@@ -184,6 +184,15 @@ export class CostTracker {
   private usageHistory: UsageRecord[] = [];
   private db?: ScallopDatabase;
 
+  /**
+   * In-memory retention window. The constructor only loads this much history
+   * from SQLite, so keeping more in RAM after that buys nothing: daily and
+   * monthly spend need at most a month, and older rows are still in the
+   * database. Without eviction the array grew on every completion for the
+   * lifetime of a 24/7 process — an unbounded memory leak.
+   */
+  private static readonly RETENTION_MS = 31 * 24 * 60 * 60 * 1000;
+
   constructor(options: CostTrackerOptions) {
     this.dailyBudget = options.dailyBudget;
     this.monthlyBudget = options.monthlyBudget;
@@ -286,6 +295,7 @@ export class CostTracker {
     };
 
     this.usageHistory.push(record);
+    this.evictExpiredRecords();
 
     // Persist to SQLite if available
     if (this.db) {
@@ -314,6 +324,18 @@ export class CostTracker {
       provider,
       sessionId,
     });
+  }
+
+  /**
+   * Drop records older than the retention window from the in-memory array.
+   * Records are appended in time order, so eviction is a shift from the front.
+   * The durable copy in SQLite is untouched.
+   */
+  private evictExpiredRecords(): void {
+    const cutoff = Date.now() - CostTracker.RETENTION_MS;
+    while (this.usageHistory.length && this.usageHistory[0]!.timestamp.getTime() < cutoff) {
+      this.usageHistory.shift();
+    }
   }
 
   getDailySpend(): number {
