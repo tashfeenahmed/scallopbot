@@ -69,6 +69,69 @@ function calculateNextCheckin(frequency: CheckinFrequency): number {
 const DEFAULT_GOAL_BUDGET: GoalBudget = { maxTurns: 10 };
 const MAX_PERSISTED_OUTPUT_CHARS = 4_000;
 
+const UNBOUNDED_QUANTIFIER_AFTER = /^[+*]|\{\d+,(?:\d+)?\}/;
+
+/**
+ * Structural ReDoS detector: does the pattern contain a group that is itself
+ * quantified while its body (at any nesting depth) also contains an unbounded
+ * quantifier? Patterns like `(a+)+`, `((a|b)*)+` or `(x?(a+))+` blow up
+ * exponentially on non-matching input, which would hang goal verification.
+ * This replaces a flat text regex that missed every nested variant.
+ */
+export function hasNestedQuantifier(pattern: string): boolean {
+  // stacks[depth] = { quantified: whether an unbounded quantifier appeared in
+  // the group body so far; childQuantified: whether a closed inner group
+  // reported one }.
+  type Frame = { quantified: boolean; childQuantified: boolean };
+  const stack: Frame[] = [];
+  let current: Frame = { quantified: false, childQuantified: false };
+
+  for (let i = 0; i < pattern.length; i++) {
+    const ch = pattern[i];
+    if (ch === '\\') { i++; continue; }
+    if (ch === '[') {
+      // Skip the character class body (it absorbs `*`/`+`/parens).
+      while (i < pattern.length) {
+        i++;
+        if (pattern[i] === '\\') { i++; continue; }
+        if (pattern[i] === ']') break;
+      }
+      continue;
+    }
+    if (ch === '(') {
+      stack.push(current);
+      current = { quantified: false, childQuantified: false };
+      continue;
+    }
+    if (ch === ')') {
+      // Look at what follows the closing paren: an unbounded quantifier here
+      // combined with a quantified body (direct or from an inner group) is the
+      // catastrophic-backtracking shape.
+      const rest = pattern.slice(i + 1);
+      const quantified = UNBOUNDED_QUANTIFIER_AFTER.test(rest);
+      const bodyQuantified = current.quantified || current.childQuantified;
+      if (quantified && bodyQuantified) return true;
+      const parent = stack.pop()!;
+      if (bodyQuantified || quantified) parent.childQuantified = true;
+      current = parent;
+      continue;
+    }
+    if (ch === '*' || ch === '+') {
+      current.quantified = true;
+      // A quantified atom that is itself a group was already accounted for via
+      // childQuantified; a bare `*`/`+` on a char is only dangerous once the
+      // enclosing group is quantified too, handled at `)`.
+      continue;
+    }
+    const brace = /^\{\d+,(?:\d+)?\}/.exec(pattern.slice(i));
+    if (brace) {
+      current.quantified = true;
+      i += brace[0].length - 1;
+    }
+  }
+  return false;
+}
+
 function validateContract(contract: GoalContract): void {
   if (!Array.isArray(contract.acceptanceCriteria) || contract.acceptanceCriteria.length === 0) {
     throw new Error('A verified goal requires at least one acceptance criterion');
@@ -99,10 +162,7 @@ function validateContract(contract: GoalContract): void {
       throw new Error(`Acceptance criterion ${criterion.id} has an overlong expected value`);
     }
     if (criterion.kind === 'regex') {
-      if (
-        criterion.expected!.length > 256 ||
-        /\([^)]*(?:[+*]|\{\d+(?:,\d*)?\})[^)]*\)\s*(?:[+*]|\{\d+(?:,\d*)?\})/.test(criterion.expected!)
-      ) {
+      if (criterion.expected!.length > 256 || hasNestedQuantifier(criterion.expected!)) {
         throw new Error(`Acceptance criterion ${criterion.id} has a potentially unsafe regular expression`);
       }
       try {
