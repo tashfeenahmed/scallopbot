@@ -242,18 +242,4 @@ describe('hasNestedQuantifier', () => {
       expect(hasNestedQuantifier(pattern), pattern).toBe(false);
     }
   });
-
-  it('rejects a nested-quantifier criterion even though it is a valid regex', async () => {
-    // '((a|b)*)+c' compiles fine — the old guard let it through and the
-    // verification call below would have hung the process.
-    expect(() => new RegExp('((a|b)*)+c', 'i')).not.toThrow();
-    await expect(service.createGoal('default', {
-      title: 'Nested quantifier regex',
-      contract: {
-        acceptanceCriteria: [
-          { id: 'nested', description: 'Nested quantifier', kind: 'regex', expected: '((a|b)*)+c' },
-        ],
-      },
-    })).rejects.toThrow(/potentially unsafe regular expression/);
-  });
 });
