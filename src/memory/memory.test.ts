@@ -47,6 +47,22 @@ describe('BackgroundGardener', () => {
       expect(mockScallopStore.processDecay).toHaveBeenCalled();
     });
 
+    it('survives a tick that throws and keeps ticking', async () => {
+      // processDecay() is the first statement of lightTick() and is not inside
+      // a try block; before this guard the SQLite error escaped the setInterval
+      // callback as an uncaught exception and killed the process.
+      mockScallopStore.processDecay
+        .mockImplementationOnce(() => { throw new Error('database is locked'); })
+        .mockReturnValue({ updated: 0, archived: 0 });
+
+      gardener.start();
+
+      await vi.advanceTimersByTimeAsync(2500);
+
+      expect(mockScallopStore.processDecay.mock.calls.length).toBeGreaterThan(1);
+      expect(mockLogger.error).toHaveBeenCalled();
+    });
+
     it('should not run when stopped', async () => {
       gardener.start();
       gardener.stop();
