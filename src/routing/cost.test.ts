@@ -434,6 +434,30 @@ describe('CostTracker', () => {
       tracker = new CostTracker({});
     });
 
+    it('evicts records older than the retention window instead of growing forever', () => {
+      const record = (sessionId: string) =>
+        tracker.recordUsage({
+          model: 'claude-sonnet-4-20250514',
+          inputTokens: 1000,
+          outputTokens: 500,
+          provider: 'anthropic',
+          sessionId,
+        });
+
+      record('old-1');
+      vi.setSystemTime(new Date('2024-01-16T12:00:00Z'));
+      record('old-2');
+
+      // 40 days later: both earlier records are past the 31-day retention.
+      vi.setSystemTime(new Date('2024-02-25T12:00:00Z'));
+      record('recent');
+
+      const history = tracker.getUsageHistory();
+      expect(history.map((r) => r.sessionId)).toEqual(['recent']);
+      // Eviction is front-trim in time order; the newest record always survives.
+      expect(tracker.getMonthlySpend()).toBeGreaterThan(0);
+    });
+
     it('should return usage history with timestamps', () => {
       tracker.recordUsage({
         model: 'claude-sonnet-4-20250514',
