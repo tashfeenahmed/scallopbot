@@ -229,6 +229,30 @@ export interface OpenAIEmbedderOptions {
   apiKey: string;
   model?: string;
   baseUrl?: string;
+  /** Per-request deadline in ms (default: 60_000) */
+  timeoutMs?: number;
+}
+
+/**
+ * Default deadline for an embedding HTTP call.
+ *
+ * `fetch` has no timeout of its own. A wedged embedding backend (an Ollama
+ * container that stopped answering, a dropped tunnel to a remote host) leaves
+ * the promise pending until the OS gives up on the socket, which can be many
+ * minutes. Every embed() call sits on a user-facing path — store.add() during a
+ * turn, the query embedding inside search(), the gardener's backfill — so a
+ * hang there is a hung reply, not a slow one. A deadline turns it into a
+ * rejection the existing callers already degrade from (keyword-only search,
+ * "storing without embedding").
+ */
+const EMBEDDING_TIMEOUT_MS = 60_000;
+
+/** Reject a payload that is not a usable vector instead of storing garbage. */
+function assertEmbeddingVector(value: unknown, source: string): number[] {
+  if (!Array.isArray(value) || value.length === 0 || !value.every(n => typeof n === 'number' && Number.isFinite(n))) {
+    throw new Error(`${source} returned a malformed embedding payload`);
+  }
+  return value as number[];
 }
 
 export class OpenAIEmbedder implements EmbeddingProvider {
@@ -238,11 +262,13 @@ export class OpenAIEmbedder implements EmbeddingProvider {
   private apiKey: string;
   private model: string;
   private baseUrl: string;
+  private timeoutMs: number;
 
   constructor(options: OpenAIEmbedderOptions) {
     this.apiKey = options.apiKey;
     this.model = options.model || 'text-embedding-3-small';
     this.baseUrl = options.baseUrl || 'https://api.openai.com/v1';
+    this.timeoutMs = options.timeoutMs ?? EMBEDDING_TIMEOUT_MS;
 
     // Update dimension based on model
     if (this.model === 'text-embedding-3-large') {
@@ -267,6 +293,7 @@ export class OpenAIEmbedder implements EmbeddingProvider {
         model: this.model,
         input: text,
       }),
+      signal: AbortSignal.timeout(this.timeoutMs),
     });
 
     if (!response.ok) {
@@ -274,10 +301,10 @@ export class OpenAIEmbedder implements EmbeddingProvider {
     }
 
     const data = (await response.json()) as {
-      data: Array<{ embedding: number[] }>;
+      data?: Array<{ embedding?: unknown }>;
     };
 
-    return data.data[0].embedding;
+    return assertEmbeddingVector(data.data?.[0]?.embedding, 'OpenAI');
   }
 
   async embedBatch(texts: string[]): Promise<number[][]> {
@@ -291,6 +318,7 @@ export class OpenAIEmbedder implements EmbeddingProvider {
         model: this.model,
         input: texts,
       }),
+      signal: AbortSignal.timeout(this.timeoutMs),
     });
 
     if (!response.ok) {
@@ -298,11 +326,17 @@ export class OpenAIEmbedder implements EmbeddingProvider {
     }
 
     const data = (await response.json()) as {
-      data: Array<{ embedding: number[]; index: number }>;
+      data?: Array<{ embedding?: unknown; index: number }>;
     };
 
+    if (!Array.isArray(data.data) || data.data.length !== texts.length) {
+      throw new Error('OpenAI returned a malformed embedding batch');
+    }
+
     // Sort by index to maintain order
-    return data.data.sort((a, b) => a.index - b.index).map((d) => d.embedding);
+    return [...data.data]
+      .sort((a, b) => a.index - b.index)
+      .map((d) => assertEmbeddingVector(d.embedding, 'OpenAI'));
   }
 }
 
@@ -469,6 +503,8 @@ export interface OllamaEmbedderOptions {
   baseUrl?: string;
   /** Model name (default: embeddinggemma) */
   model?: string;
+  /** Per-request deadline in ms (default: 60_000) */
+  timeoutMs?: number;
 }
 
 export class OllamaEmbedder implements EmbeddingProvider {
@@ -477,10 +513,12 @@ export class OllamaEmbedder implements EmbeddingProvider {
 
   private baseUrl: string;
   private model: string;
+  private timeoutMs: number;
 
   constructor(options: OllamaEmbedderOptions = {}) {
     this.baseUrl = options.baseUrl || 'http://localhost:11434';
     this.model = options.model || 'embeddinggemma';
+    this.timeoutMs = options.timeoutMs ?? EMBEDDING_TIMEOUT_MS;
 
     // Adjust dimension based on model
     if (this.model.includes('nomic')) {
@@ -507,6 +545,7 @@ export class OllamaEmbedder implements EmbeddingProvider {
         model: this.model,
         prompt: text,
       }),
+      signal: AbortSignal.timeout(this.timeoutMs),
     });
 
     if (!response.ok) {
@@ -514,10 +553,10 @@ export class OllamaEmbedder implements EmbeddingProvider {
     }
 
     const data = (await response.json()) as {
-      embedding: number[];
+      embedding?: unknown;
     };
 
-    return data.embedding;
+    return assertEmbeddingVector(data.embedding, 'Ollama');
   }
 
   async embedBatch(texts: string[]): Promise<number[][]> {
