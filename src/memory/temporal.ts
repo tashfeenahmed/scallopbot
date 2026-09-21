@@ -51,6 +51,27 @@ export interface TemporalExtractorOptions {
 }
 
 /**
+ * Build a calendar date and reject components that JS would otherwise roll
+ * over silently: `new Date(2026, 1, 30)` is Mar 2, not an error, so a memory
+ * like "the conference is on 2026-02-30" (a typo) was stored as a confident
+ * March date. Returns null when the components do not form a real date.
+ */
+function safeBuildDate(year: number, monthIndex: number, day: number): Date | null {
+  if (
+    !Number.isInteger(year) || !Number.isInteger(monthIndex) || !Number.isInteger(day)
+    || monthIndex < 0 || monthIndex > 11 || day < 1 || day > 31
+  ) {
+    return null;
+  }
+  const date = new Date(year, monthIndex, day);
+  // Rollover check: e.g. Feb 30 becomes Mar 2, month 13 becomes Jan next year.
+  if (date.getFullYear() !== year || date.getMonth() !== monthIndex || date.getDate() !== day) {
+    return null;
+  }
+  return date;
+}
+
+/**
  * Temporal Extractor
  */
 export class TemporalExtractor {
@@ -298,17 +319,21 @@ export class TemporalExtractor {
     // ISO format: 2026-02-15
     const isoMatch = content.match(/(\d{4})-(\d{2})-(\d{2})/);
     if (isoMatch) {
-      const date = new Date(
+      const date = safeBuildDate(
         parseInt(isoMatch[1], 10),
         parseInt(isoMatch[2], 10) - 1,
         parseInt(isoMatch[3], 10)
       );
-      return {
-        date,
-        confidence: 0.95,
-        isRelative: false,
-        rawText: isoMatch[0],
-      };
+      if (date) {
+        return {
+          date,
+          confidence: 0.95,
+          isRelative: false,
+          rawText: isoMatch[0],
+        };
+      }
+      // Invalid calendar date (e.g. 2026-02-30): fall through rather than
+      // silently store the rolled-over day as a 0.95-confidence event date.
     }
 
     // Month day, year: February 15, 2026
@@ -331,13 +356,16 @@ export class TemporalExtractor {
       if (fullMatch) {
         const day = parseInt(fullMatch[2], 10);
         const year = fullMatch[3] ? parseInt(fullMatch[3], 10) : refDate.getFullYear();
-        const date = new Date(year, i, day);
-        return {
-          date,
-          confidence: fullMatch[3] ? 0.95 : 0.8,
-          isRelative: false,
-          rawText: fullMatch[0],
-        };
+        const date = safeBuildDate(year, i, day);
+        if (date) {
+          return {
+            date,
+            confidence: fullMatch[3] ? 0.95 : 0.8,
+            isRelative: false,
+            rawText: fullMatch[0],
+          };
+        }
+        // "February 30" is not a date; fall through instead of storing Mar 2.
       }
     }
 
@@ -361,13 +389,16 @@ export class TemporalExtractor {
         day = second;
       }
 
-      const date = new Date(year, month, day);
-      return {
-        date,
-        confidence: 0.75, // Lower confidence for ambiguous format
-        isRelative: false,
-        rawText: slashMatch[0],
-      };
+      const date = safeBuildDate(year, month, day);
+      if (date) {
+        return {
+          date,
+          confidence: 0.75, // Lower confidence for ambiguous format
+          isRelative: false,
+          rawText: slashMatch[0],
+        };
+      }
+      // Components like 13/45/2026 are not a date; do not roll them over.
     }
 
     return null;
