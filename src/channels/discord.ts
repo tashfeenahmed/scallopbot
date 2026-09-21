@@ -260,25 +260,27 @@ export class DiscordChannel {
       'Received message'
     );
 
-    try {
-      // Show typing indicator (only for channels that support it)
-      const channel = message.channel;
+    // Show typing indicator (only for channels that support it)
+    const channel = message.channel;
+    if ('sendTyping' in channel && typeof channel.sendTyping === 'function') {
+      await channel.sendTyping().catch(() => {});
+    }
+    // Declared outside the try so the finally below can always clear it. If it
+    // lived inside the try, any throw from session/agent processing below would
+    // leave this interval running forever, pinging sendTyping() every 5s per
+    // failed message.
+    const typingInterval = setInterval(() => {
       if ('sendTyping' in channel && typeof channel.sendTyping === 'function') {
-        await channel.sendTyping();
+        channel.sendTyping().catch(() => {});
       }
-      const typingInterval = setInterval(() => {
-        if ('sendTyping' in channel && typeof channel.sendTyping === 'function') {
-          channel.sendTyping().catch(() => {});
-        }
-      }, 5000);
+    }, 5000);
 
+    try {
       // Get or create session
       const sessionId = await this.getOrCreateSession(userId);
 
       // Process through agent
       const result = await this.agent.processMessage(sessionId, content);
-
-      clearInterval(typingInterval);
 
       // Format and send response
       const formatted = formatMarkdownForDiscord(result.response);
@@ -296,6 +298,8 @@ export class DiscordChannel {
       const err = error as Error;
       this.logger.error({ userId, error: err.message }, 'Failed to process message');
       await message.reply('Sorry, I encountered an error. Please try again.');
+    } finally {
+      clearInterval(typingInterval);
     }
   }
 
