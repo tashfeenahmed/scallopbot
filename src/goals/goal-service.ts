@@ -69,7 +69,7 @@ function calculateNextCheckin(frequency: CheckinFrequency): number {
 const DEFAULT_GOAL_BUDGET: GoalBudget = { maxTurns: 10 };
 const MAX_PERSISTED_OUTPUT_CHARS = 4_000;
 
-const UNBOUNDED_QUANTIFIER_AFTER = /^[+*]|\{\d+,(?:\d+)?\}/;
+const UNBOUNDED_QUANTIFIER_AFTER = /^(?:[+*]|\{\d+,(?:\d+)?\})/;
 
 /**
  * Structural ReDoS detector: does the pattern contain a group that is itself

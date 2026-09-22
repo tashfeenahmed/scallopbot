@@ -238,6 +238,8 @@ describe('hasNestedQuantifier', () => {
       'foo{2,5}bar',
       '\\(a+\\)+',
       '(a{2})+',
+      '(a+)x{2,}',        // brace quantifier later in the pattern is not on the group
+      '(\\w+)\\s{1,}done',
     ]) {
       expect(hasNestedQuantifier(pattern), pattern).toBe(false);
     }
