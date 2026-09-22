@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import pino from 'pino';
 import { ScallopDatabase } from '../memory/db.js';
-import { GoalService } from './goal-service.js';
+import { GoalService, hasNestedQuantifier } from './goal-service.js';
 
 const logger = pino({ level: 'silent' });
 
@@ -197,5 +197,51 @@ describe('verified persistent goal execution', () => {
         ],
       },
     })).rejects.toThrow(/potentially unsafe regular expression/);
+  });
+
+  it('rejects a nested-quantifier criterion even though it is a valid regex', async () => {
+    // '((a|b)*)+c' compiles fine — the old flat guard let it through and the
+    // verification call would have hung the process on non-matching output.
+    expect(() => new RegExp('((a|b)*)+c', 'i')).not.toThrow();
+    await expect(service.createGoal('default', {
+      title: 'Nested quantifier regex',
+      contract: {
+        acceptanceCriteria: [
+          { id: 'nested', description: 'Nested quantifier', kind: 'regex', expected: '((a|b)*)+c' },
+        ],
+      },
+    })).rejects.toThrow(/potentially unsafe regular expression/);
+  });
+});
+
+describe('hasNestedQuantifier', () => {
+  it('flags every catastrophic-backtracking shape, including nested groups the old flat check missed', () => {
+    for (const pattern of [
+      '(a+)+',            // classic: quantified group over quantified body
+      '((a|b)*)+',        // nested: inner star, outer plus — hung verification
+      '(x?(a+))+',        // quantifier on an inner group, quantifier outside
+      '(a+){2,}',         // unbounded brace instead of +/*
+      '(([a-z]+)*)*',     // star over star through two levels
+    ]) {
+      expect(hasNestedQuantifier(pattern), pattern).toBe(true);
+    }
+  });
+
+  it('accepts ordinary patterns', () => {
+    for (const pattern of [
+      'abc',
+      '(a|b|c)+',
+      '(a+)',
+      '(a+)?b',
+      '\\w+@\\w+\\.\\w+',
+      '(20\\d{2})-(\\d{2})-(\\d{2})',
+      'foo{2,5}bar',
+      '\\(a+\\)+',
+      '(a{2})+',
+      '(a+)x{2,}',        // brace quantifier later in the pattern is not on the group
+      '(\\w+)\\s{1,}done',
+    ]) {
+      expect(hasNestedQuantifier(pattern), pattern).toBe(false);
+    }
   });
 });
