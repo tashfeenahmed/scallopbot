@@ -52,6 +52,8 @@ export default function Sidebar({
         <span
           className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2 border-gray-50 dark:border-black ${STATUS_DOT[status]}`}
           title={status}
+          role="status"
+          aria-label={`Connection: ${status}`}
         />
       </div>
 
@@ -113,6 +115,8 @@ export default function Sidebar({
             ? 'bg-gray-200 dark:bg-neutral-700 text-gray-900 dark:text-gray-100'
             : 'text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-neutral-800'
         }`}
+        aria-label={debugMode ? 'Debug on' : 'Debug off'}
+        aria-pressed={debugMode}
         title={debugMode ? 'Debug on' : 'Debug off'}
       >
         <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
@@ -125,6 +129,7 @@ export default function Sidebar({
         <button
           onClick={onLogout}
           className="w-10 h-10 flex items-center justify-center rounded-xl text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-neutral-800 transition-colors"
+          aria-label="Sign out"
           title="Sign out"
         >
           <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
@@ -139,6 +144,7 @@ export default function Sidebar({
       <button
         onClick={onDarkModeToggle}
         className="w-10 h-10 flex items-center justify-center rounded-xl text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-neutral-800 transition-colors"
+        aria-label={darkMode ? 'Light mode' : 'Dark mode'}
         title={darkMode ? 'Light mode' : 'Dark mode'}
       >
         {darkMode ? (
@@ -172,6 +178,8 @@ function NavButton({
   return (
     <button
       onClick={onClick}
+      aria-label={title}
+      aria-current={active ? 'page' : undefined}
       className={`relative w-10 h-10 flex flex-col items-center justify-center rounded-xl transition-colors ${
         active
           ? 'bg-gray-200 dark:bg-neutral-700 text-gray-900 dark:text-gray-100'
@@ -180,7 +188,7 @@ function NavButton({
       title={title}
     >
       {children}
-      <span className="text-[9px] font-medium mt-0.5 leading-none">{title}</span>
+      <span aria-hidden="true" className="text-[9px] font-medium mt-0.5 leading-none">{title}</span>
       {badge && (
         <span className="absolute top-1 right-1 w-2 h-2 bg-blue-500 rounded-full" />
       )}
