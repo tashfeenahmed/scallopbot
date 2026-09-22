@@ -108,7 +108,7 @@ export default function SetupScreen({ onSetup, error, darkMode }: SetupScreenPro
             </div>
 
             {displayError && (
-              <p className="text-sm text-red-600 dark:text-red-400">{displayError}</p>
+              <p role="alert" className="text-sm text-red-600 dark:text-red-400">{displayError}</p>
             )}
 
             <button
