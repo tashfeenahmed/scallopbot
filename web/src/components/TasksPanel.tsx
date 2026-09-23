@@ -92,7 +92,7 @@ export default function TasksPanel() {
           </div>
           <button onClick={() => void refresh()} className="px-3 py-1.5 rounded-lg border border-gray-300 dark:border-neutral-700 text-sm">Refresh</button>
         </div>
-        {error && <div className="mb-3 text-sm text-red-600">{error}</div>}
+        {error && <div role="alert" className="mb-3 text-sm text-red-600">{error}</div>}
         <div className="space-y-2">
           {tasks.map(task => {
             const isExpanded = expanded === task.id;
