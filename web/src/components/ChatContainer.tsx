@@ -19,6 +19,9 @@ interface ChatContainerProps {
 
 const ChatContainer = forwardRef<HTMLDivElement, ChatContainerProps>(
   function ChatContainer({ messages, debugMode, isWaiting, onLoadMore, isLoadingMore, hasMore, historyLoaded, historyError, onRetryHistory }, ref) {
+    // The socket always adds a "Connected" system pill, so count only real
+    // conversation turns when deciding whether to show the empty state.
+    const hasConversation = messages.some(m => m.type === 'user' || m.type === 'assistant' || m.type === 'file');
     const internalRef = useRef<HTMLDivElement>(null);
     const containerRef = (ref as React.RefObject<HTMLDivElement>) || internalRef;
     const isNearBottomRef = useRef(true);
@@ -75,7 +78,7 @@ const ChatContainer = forwardRef<HTMLDivElement, ChatContainerProps>(
               )}
             </div>
           )}
-          {!historyError && historyLoaded && messages.length === 0 && !isWaiting && (
+          {!historyError && historyLoaded && !hasConversation && !isWaiting && (
             <div className="mx-auto my-16 max-w-md text-center" data-testid="chat-empty-state">
               <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full border border-gray-200 dark:border-neutral-700 text-gray-500 dark:text-gray-400">
                 <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
