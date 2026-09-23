@@ -11,7 +11,7 @@ export default defineConfig({
     // one-off failures on high-core hosts. Four workers retains parallelism
     // while keeping the public suite deterministic under load.
     maxWorkers: 4,
-    include: ['src/**/*.test.ts'],
+    include: ['src/**/*.test.ts', 'web/src/**/*.test.ts'],
     exclude: ['src/eval/**'],
     coverage: {
       provider: 'v8',
