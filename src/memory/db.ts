@@ -14,6 +14,7 @@ import * as fs from 'fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { nanoid } from 'nanoid';
 import { redactSensitiveText } from '../security/redaction.js';
+import { isInternalSessionMetadata, parseSessionContentBlocks } from './session-message-kinds.js';
 import type {
   MessageFrequencySignal,
   SessionEngagementSignal,
@@ -5129,6 +5130,65 @@ export class ScallopDatabase {
     const stmt = this.db.prepare(query);
     const rows = stmt.all(...params) as Record<string, unknown>[];
     return rows.map(row => this.rowToSession(row));
+  }
+
+  /**
+   * List user-facing sessions with per-session message counts and a short
+   * preview of the first human message, for the REST sessions API. Internal
+   * background/sub-agent/scheduler sessions are excluded so the list shows
+   * conversations, not protocol transcripts.
+   */
+  listSessionsWithStats(
+    limit = 50,
+    offset = 0,
+  ): Array<SessionRow & { messageCount: number; preview: string | null; userId: string | null }> {
+    const cappedLimit = Math.max(1, Math.min(Math.floor(limit) || 50, 200));
+    const cappedOffset = Math.max(0, Math.floor(offset) || 0);
+    // Internal sessions (scheduler/sub-agent/...) are identified from their
+    // metadata JSON, so they must be filtered BEFORE paginating: on a live bot
+    // they are interleaved with real conversations, and a SQL LIMIT/OFFSET
+    // followed by a JS filter returned short or empty pages.
+    const visible = (this.db.prepare(`
+      SELECT * FROM sessions
+      WHERE archived_at IS NULL AND transcript_deleted_at IS NULL
+      ORDER BY updated_at DESC
+    `).all() as Record<string, unknown>[])
+      .map(row => this.rowToSession(row))
+      .filter(session => !isInternalSessionMetadata(session.metadata))
+      .slice(cappedOffset, cappedOffset + cappedLimit);
+
+    const countStmt = this.db.prepare('SELECT COUNT(*) AS n FROM session_messages WHERE session_id = ?');
+    const firstUserStmt = this.db.prepare(`
+      SELECT content FROM session_messages
+      WHERE session_id = ? AND role = 'user'
+      ORDER BY id ASC LIMIT 1
+    `);
+
+    const sessions: Array<SessionRow & { messageCount: number; preview: string | null; userId: string | null }> = [];
+    for (const session of visible) {
+      const messageCount = (countStmt.get(session.id) as { n: number } | undefined)?.n ?? 0;
+      const firstUserMessage = (firstUserStmt.get(session.id) as { content: unknown } | undefined)?.content;
+      const rawPreview = typeof firstUserMessage === 'string' ? firstUserMessage : null;
+      const parsedBlocks = parseSessionContentBlocks(rawPreview);
+      let preview = rawPreview;
+      if (parsedBlocks) {
+        preview = parsedBlocks
+          .filter(block => block.type === 'text' && typeof block.text === 'string')
+          .map(block => block.text as string)
+          .join(' ') || null;
+      }
+      if (preview) {
+        preview = preview.replace(/\s+/g, ' ').trim();
+        if (preview.length > 120) preview = `${preview.slice(0, 117).trimEnd()}...`;
+      }
+      sessions.push({
+        ...session,
+        messageCount: Number(messageCount),
+        preview: preview || null,
+        userId: typeof session.metadata?.userId === 'string' ? session.metadata.userId : null,
+      });
+    }
+    return sessions;
   }
 
   updateSessionMetadata(id: string, metadata: Record<string, unknown>): void {
