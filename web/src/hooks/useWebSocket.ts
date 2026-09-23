@@ -1,6 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  connectionBanner,
+  reconnectDelay,
+  shouldGiveUp,
+  type ConnectionStatus,
+} from './connection';
 
-export type ConnectionStatus = 'connected' | 'connecting' | 'disconnected';
+export type { ConnectionStatus };
+export { connectionBanner };
 
 export interface WsMessage {
   type: string;
@@ -39,8 +46,6 @@ export function useWebSocket({ onMessage, enabled = true }: UseWebSocketOptions)
   const onMessageRef = useRef(onMessage);
   onMessageRef.current = onMessage;
 
-  const MAX_RECONNECT = 10;
-  const BASE_DELAY = 1000;
   const HEARTBEAT_INTERVAL = 30000;
 
   const getWebSocketUrl = useCallback(() => {
@@ -89,22 +94,22 @@ export function useWebSocket({ onMessage, enabled = true }: UseWebSocketOptions)
         wsRef.current = null;
         setStatus('disconnected');
 
-        if (reconnectAttemptsRef.current < MAX_RECONNECT) {
-          const delay = Math.min(
-            BASE_DELAY * Math.pow(2, reconnectAttemptsRef.current),
-            30000
-          );
+        if (shouldGiveUp(reconnectAttemptsRef.current)) {
+          // Backoff budget spent. Keep status 'disconnected' so the banner's
+          // "Try now" button stays available — previously the only escape was
+          // a full page refresh.
+          onMessageRef.current({
+            type: 'error',
+            error: 'Connection lost. Hit "Try now" above the message box to reconnect.',
+          });
+        } else {
+          const delay = reconnectDelay(reconnectAttemptsRef.current);
           reconnectAttemptsRef.current++;
           onMessageRef.current({
             type: 'system',
             content: `Reconnecting in ${Math.round(delay / 1000)}s...`,
           });
           reconnectTimerRef.current = setTimeout(connect, delay);
-        } else {
-          onMessageRef.current({
-            type: 'error',
-            error: 'Connection lost. Please refresh the page.',
-          });
         }
       };
 
@@ -123,6 +128,25 @@ export function useWebSocket({ onMessage, enabled = true }: UseWebSocketOptions)
     }
     return false;
   }, []);
+
+  /** Manual retry from the offline banner: resets the backoff budget and
+   *  reconnects immediately (also works after the auto-retries gave up). */
+  const retry = useCallback(() => {
+    clearTimeout(reconnectTimerRef.current);
+    reconnectAttemptsRef.current = 0;
+    // A socket still CONNECTING would otherwise be orphaned: its later onclose
+    // nulls wsRef, flips status and schedules another reconnect on top of the
+    // fresh socket. Detach it before starting over.
+    const stale = wsRef.current;
+    if (stale && stale.readyState !== WebSocket.OPEN) {
+      stale.onclose = null;
+      stale.onopen = null;
+      stale.onmessage = null;
+      stale.close();
+      wsRef.current = null;
+    }
+    connect();
+  }, [connect]);
 
   const sendStop = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -154,5 +178,5 @@ export function useWebSocket({ onMessage, enabled = true }: UseWebSocketOptions)
     };
   }, [connect, enabled]);
 
-  return { status, sendMessage, sendStop, sessionId };
+  return { status, sendMessage, sendStop, retry, sessionId };
 }

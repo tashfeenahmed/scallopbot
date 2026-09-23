@@ -1,11 +1,13 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { useWebSocket, type WsMessage } from './hooks/useWebSocket';
+import { composerPlaceholder } from './hooks/connection';
 import { useCosts } from './hooks/useCosts';
 import { useAuth } from './hooks/useAuth';
 import Sidebar from './components/Sidebar';
 import CreditsPanel from './components/CreditsPanel';
 import ChatContainer from './components/ChatContainer';
 import ChatInput from './components/ChatInput';
+import ConnectionBanner from './components/ConnectionBanner';
 import SetupScreen from './components/SetupScreen';
 import LoginScreen from './components/LoginScreen';
 import TasksPanel from './components/TasksPanel';
@@ -310,7 +312,7 @@ export default function App() {
     [addMessage, refetchCosts]
   );
 
-  const { status, sendMessage, sendStop, sessionId } = useWebSocket({
+  const { status, sendMessage, sendStop, retry, sessionId } = useWebSocket({
     onMessage: handleWsMessage,
     enabled: authState === 'authenticated',
   });
@@ -479,11 +481,13 @@ export default function App() {
                 isLoadingMore={isLoadingMore}
                 hasMore={hasMore}
               />
+              <ConnectionBanner status={status} onRetry={retry} />
               <ChatInput
                 onSend={handleSend}
                 onStop={handleStop}
                 isWaiting={isWaiting}
                 disabled={status !== 'connected'}
+                placeholder={composerPlaceholder(status)}
                 inputRef={inputRef}
               />
             </>

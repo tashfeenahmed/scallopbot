@@ -7,10 +7,11 @@ interface ChatInputProps {
   onStop: () => void;
   isWaiting: boolean;
   disabled: boolean;
+  placeholder?: string;
   inputRef: RefObject<HTMLInputElement | null>;
 }
 
-export default function ChatInput({ onSend, onStop, isWaiting, disabled, inputRef }: ChatInputProps) {
+export default function ChatInput({ onSend, onStop, isWaiting, disabled, placeholder = 'Message...', inputRef }: ChatInputProps) {
   const [text, setText] = useState('');
   const [menuOpen, setMenuOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
@@ -144,9 +145,10 @@ export default function ChatInput({ onSend, onStop, isWaiting, disabled, inputRe
           value={text}
           onChange={(e) => handleChange(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder="Message..."
+          placeholder={placeholder}
           disabled={disabled}
           autoComplete="off"
+          aria-label="Message"
           className="flex-1 px-4 py-3 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-full text-gray-900 dark:text-gray-100 outline-none focus:border-blue-300 dark:focus:border-blue-500 focus:bg-white dark:focus:bg-gray-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed placeholder:text-gray-400 dark:placeholder:text-gray-500"
         />
         <button
