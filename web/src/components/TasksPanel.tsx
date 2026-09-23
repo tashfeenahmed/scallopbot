@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import { taskElapsedLabel } from '../hooks/taskDisplay';
 
 interface TaskResult {
   summary?: string;
@@ -31,9 +32,17 @@ const ACTIVE = new Set(['pending', 'running']);
 export default function TasksPanel() {
   const [tasks, setTasks] = useState<DelegatedTask[]>([]);
   const [error, setError] = useState('');
+  const [actionError, setActionError] = useState('');
+  const [busyId, setBusyId] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [instruction, setInstruction] = useState('');
   const [logs, setLogs] = useState<Record<string, string>>({});
+  // Re-render once a second so "running 3m 12s" ticks without a refetch.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(t);
+  }, []);
 
   const refresh = useCallback(async () => {
     try {
@@ -53,33 +62,55 @@ export default function TasksPanel() {
     return () => window.clearInterval(timer);
   }, [refresh]);
 
-  const cancel = async (id: string) => {
-    await fetch(`/api/subagents/${encodeURIComponent(id)}/control`, {
-      method: 'POST',
-      credentials: 'include',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'cancel' }),
-    });
-    await refresh();
+  // All three control actions share error handling: previously a failed
+  // fetch was swallowed, so "Cancel" looked successful while the worker
+  // kept running.
+  const runControl = async (id: string, body: Record<string, unknown>) => {
+    setBusyId(id);
+    setActionError('');
+    try {
+      const response = await fetch(`/api/subagents/${encodeURIComponent(id)}/control`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!response.ok) {
+        let detail = '';
+        try { detail = ((await response.json()) as { error?: string }).error || ''; } catch { /* non-JSON */ }
+        throw new Error(detail || `HTTP ${response.status}`);
+      }
+      await refresh();
+    } catch (err) {
+      setActionError(`Action failed: ${(err as Error).message}`);
+    } finally {
+      setBusyId(null);
+    }
   };
 
-  const control = async (id: string, action: 'steer' | 'followup') => {
+  const cancel = (id: string) => runControl(id, { action: 'cancel' });
+
+  const control = (id: string, action: 'steer' | 'followup') => {
     if (!instruction.trim()) return;
-    await fetch(`/api/subagents/${encodeURIComponent(id)}/control`, {
-      method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action, message: instruction.trim() }),
-    });
     setInstruction('');
-    await refresh();
+    void runControl(id, { action, message: instruction.trim() });
   };
 
   const loadLog = async (id: string) => {
-    const response = await fetch(`/api/subagents/${encodeURIComponent(id)}/log`, { credentials: 'include' });
-    const data = await response.json() as { messages?: Array<{ role: string; content: string }>; error?: string };
-    setLogs(previous => ({
-      ...previous,
-      [id]: data.messages?.map(message => `${message.role}: ${message.content}`).join('\n\n') || data.error || 'No retained log.',
-    }));
+    try {
+      const response = await fetch(`/api/subagents/${encodeURIComponent(id)}/log`, { credentials: 'include' });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const data = await response.json() as { messages?: Array<{ role: string; content: string }>; error?: string };
+      setLogs(previous => ({
+        ...previous,
+        [id]: data.messages?.map(message => `${message.role}: ${message.content}`).join('\n\n') || data.error || 'No retained log.',
+      }));
+    } catch (err) {
+      setLogs(previous => ({
+        ...previous,
+        [id]: `Could not load log: ${(err as Error).message}`,
+      }));
+    }
   };
 
   return (
@@ -93,10 +124,12 @@ export default function TasksPanel() {
           <button onClick={() => void refresh()} className="px-3 py-1.5 rounded-lg border border-gray-300 dark:border-neutral-700 text-sm">Refresh</button>
         </div>
         {error && <div role="alert" className="mb-3 text-sm text-red-600">{error}</div>}
+        {actionError && <div role="alert" className="mb-3 text-sm text-red-600">{actionError}</div>}
         <div className="space-y-2">
           {tasks.map(task => {
             const isExpanded = expanded === task.id;
             const active = ACTIVE.has(task.status);
+            const elapsed = taskElapsedLabel(task, now);
             return (
               <section key={task.id} style={{ marginLeft: `${Math.min(task.spawnDepth || 0, 4) * 20}px` }} className="rounded-xl border border-gray-200 dark:border-neutral-800 bg-white dark:bg-neutral-900">
                 <button onClick={() => setExpanded(isExpanded ? null : task.id)} className="w-full text-left p-4 flex gap-3 items-start">
@@ -109,7 +142,10 @@ export default function TasksPanel() {
                     </span>
                     <span className="block text-sm text-gray-600 dark:text-gray-300 truncate mt-1">{task.result?.summary || task.task}</span>
                   </span>
-                  <span className="text-xs text-gray-400 shrink-0">{new Date(task.createdAt).toLocaleString()}</span>
+                  <span className="flex flex-col items-end gap-1 shrink-0">
+                    <span className="text-xs text-gray-400">{new Date(task.createdAt).toLocaleString()}</span>
+                    {elapsed && <span className="text-[11px] text-gray-500 tabular-nums">{elapsed}</span>}
+                  </span>
                 </button>
                 {isExpanded && (
                   <div className="px-4 pb-4 ml-5 text-sm space-y-3">
@@ -118,11 +154,11 @@ export default function TasksPanel() {
                     {!!task.result?.tests?.length && <div><strong>Tests</strong><ul className="list-disc ml-5 mt-1">{task.result.tests.map(item => <li key={item}>{item}</li>)}</ul></div>}
                     {!!task.result?.changedFiles?.length && <div><strong>Changed files</strong><div className="font-mono text-xs mt-1">{task.result.changedFiles.join(', ')}</div></div>}
                     <div className="flex gap-2">
-                      <input value={instruction} onChange={event => setInstruction(event.target.value)} placeholder={active ? 'Steer this worker…' : 'Start a follow-up…'} className="flex-1 rounded-lg border border-gray-300 dark:border-neutral-700 bg-transparent px-3 py-1.5" />
-                      <button onClick={() => void control(task.id, active ? 'steer' : 'followup')} className="px-3 py-1.5 rounded-lg border border-gray-300 dark:border-neutral-700">{active ? 'Steer' : 'Follow up'}</button>
+                      <input value={instruction} onChange={event => setInstruction(event.target.value)} placeholder={active ? 'Steer this worker…' : 'Start a follow-up…'} aria-label={active ? 'Steering instruction for this worker' : 'Follow-up instruction'} className="flex-1 rounded-lg border border-gray-300 dark:border-neutral-700 bg-transparent px-3 py-1.5" />
+                      <button onClick={() => void control(task.id, active ? 'steer' : 'followup')} disabled={busyId === task.id || !instruction.trim()} className="px-3 py-1.5 rounded-lg border border-gray-300 dark:border-neutral-700 disabled:opacity-50 disabled:cursor-not-allowed">{active ? 'Steer' : 'Follow up'}</button>
                     </div>
                     <div className="flex gap-2">
-                      {active && <button onClick={() => void cancel(task.id)} className="px-3 py-1.5 rounded-lg bg-red-600 text-white">Cancel</button>}
+                      {active && <button onClick={() => void cancel(task.id)} disabled={busyId === task.id} className="px-3 py-1.5 rounded-lg bg-red-600 text-white disabled:opacity-50 disabled:cursor-not-allowed">{busyId === task.id ? 'Cancelling…' : 'Cancel'}</button>}
                       <button onClick={() => void loadLog(task.id)} className="px-3 py-1.5 rounded-lg border border-gray-300 dark:border-neutral-700">Load log</button>
                       <span className="font-mono text-xs text-gray-400 self-center">{task.id}</span>
                     </div>
