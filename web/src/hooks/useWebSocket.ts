@@ -134,6 +134,17 @@ export function useWebSocket({ onMessage, enabled = true }: UseWebSocketOptions)
   const retry = useCallback(() => {
     clearTimeout(reconnectTimerRef.current);
     reconnectAttemptsRef.current = 0;
+    // A socket still CONNECTING would otherwise be orphaned: its later onclose
+    // nulls wsRef, flips status and schedules another reconnect on top of the
+    // fresh socket. Detach it before starting over.
+    const stale = wsRef.current;
+    if (stale && stale.readyState !== WebSocket.OPEN) {
+      stale.onclose = null;
+      stale.onopen = null;
+      stale.onmessage = null;
+      stale.close();
+      wsRef.current = null;
+    }
     connect();
   }, [connect]);
 
