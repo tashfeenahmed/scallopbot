@@ -502,6 +502,30 @@ describe('ApiChannel', () => {
         }
       });
 
+      it('should paginate over user-facing sessions, not internal ones', async () => {
+        const db = new ScallopDatabase(':memory:');
+        // Newest first: an internal scheduler session sits on top of the only
+        // real conversation, so a SQL LIMIT 1 before filtering returned [].
+        db.createSession('chat-session', { userId: 'api:default', channelId: 'api' });
+        db.addSessionMessage('chat-session', 'user', 'hello');
+        db.createSession('scheduler-session', { source: 'scheduler', userId: 'default' });
+        db.addSessionMessage('scheduler-session', 'user', 'tick');
+        const raw = (db as unknown as { db: { prepare(sql: string): { run(...args: unknown[]): unknown } } }).db;
+        raw.prepare('UPDATE sessions SET updated_at = ? WHERE id = ?').run(1000, 'chat-session');
+        raw.prepare('UPDATE sessions SET updated_at = ? WHERE id = ?').run(2000, 'scheduler-session');
+        (channel as unknown as { db: ScallopDatabase | null }).db = db;
+
+        try {
+          const first = await makeRequest('/api/sessions?limit=1');
+          expect((first.body as { sessions: Record<string, unknown>[] }).sessions.map(s => s.id)).toEqual(['chat-session']);
+          const second = await makeRequest('/api/sessions?limit=1&offset=1');
+          expect((second.body as { sessions: Record<string, unknown>[] }).sessions).toEqual([]);
+        } finally {
+          (channel as unknown as { db: ScallopDatabase | null }).db = null;
+          db.close();
+        }
+      });
+
       it('should truncate long previews and flatten content blocks', async () => {
         const db = new ScallopDatabase(':memory:');
         db.createSession('long-session', { userId: 'api:default', channelId: 'api' });

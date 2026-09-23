@@ -5144,25 +5144,31 @@ export class ScallopDatabase {
   ): Array<SessionRow & { messageCount: number; preview: string | null; userId: string | null }> {
     const cappedLimit = Math.max(1, Math.min(Math.floor(limit) || 50, 200));
     const cappedOffset = Math.max(0, Math.floor(offset) || 0);
-    const rows = this.db.prepare(`
-      SELECT s.*,
-        (SELECT COUNT(*) FROM session_messages sm WHERE sm.session_id = s.id) AS message_count,
-        (
-          SELECT sm.content FROM session_messages sm
-          WHERE sm.session_id = s.id AND sm.role = 'user'
-          ORDER BY sm.id ASC LIMIT 1
-        ) AS first_user_message
-      FROM sessions s
-      WHERE s.archived_at IS NULL AND s.transcript_deleted_at IS NULL
-      ORDER BY s.updated_at DESC
-      LIMIT ? OFFSET ?
-    `).all(cappedLimit, cappedOffset) as Record<string, unknown>[];
+    // Internal sessions (scheduler/sub-agent/...) are identified from their
+    // metadata JSON, so they must be filtered BEFORE paginating: on a live bot
+    // they are interleaved with real conversations, and a SQL LIMIT/OFFSET
+    // followed by a JS filter returned short or empty pages.
+    const visible = (this.db.prepare(`
+      SELECT * FROM sessions
+      WHERE archived_at IS NULL AND transcript_deleted_at IS NULL
+      ORDER BY updated_at DESC
+    `).all() as Record<string, unknown>[])
+      .map(row => this.rowToSession(row))
+      .filter(session => !isInternalSessionMetadata(session.metadata))
+      .slice(cappedOffset, cappedOffset + cappedLimit);
+
+    const countStmt = this.db.prepare('SELECT COUNT(*) AS n FROM session_messages WHERE session_id = ?');
+    const firstUserStmt = this.db.prepare(`
+      SELECT content FROM session_messages
+      WHERE session_id = ? AND role = 'user'
+      ORDER BY id ASC LIMIT 1
+    `);
 
     const sessions: Array<SessionRow & { messageCount: number; preview: string | null; userId: string | null }> = [];
-    for (const row of rows) {
-      const session = this.rowToSession(row);
-      if (isInternalSessionMetadata(session.metadata)) continue;
-      const rawPreview = typeof row.first_user_message === 'string' ? row.first_user_message : null;
+    for (const session of visible) {
+      const messageCount = (countStmt.get(session.id) as { n: number } | undefined)?.n ?? 0;
+      const firstUserMessage = (firstUserStmt.get(session.id) as { content: unknown } | undefined)?.content;
+      const rawPreview = typeof firstUserMessage === 'string' ? firstUserMessage : null;
       const parsedBlocks = parseSessionContentBlocks(rawPreview);
       let preview = rawPreview;
       if (parsedBlocks) {
@@ -5177,7 +5183,7 @@ export class ScallopDatabase {
       }
       sessions.push({
         ...session,
-        messageCount: Number(row.message_count ?? 0),
+        messageCount: Number(messageCount),
         preview: preview || null,
         userId: typeof session.metadata?.userId === 'string' ? session.metadata.userId : null,
       });
