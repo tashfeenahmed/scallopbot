@@ -14,6 +14,7 @@ import * as fs from 'fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { nanoid } from 'nanoid';
 import { redactSensitiveText } from '../security/redaction.js';
+import { isInternalSessionMetadata, parseSessionContentBlocks } from './session-message-kinds.js';
 import type {
   MessageFrequencySignal,
   SessionEngagementSignal,
@@ -5129,6 +5130,59 @@ export class ScallopDatabase {
     const stmt = this.db.prepare(query);
     const rows = stmt.all(...params) as Record<string, unknown>[];
     return rows.map(row => this.rowToSession(row));
+  }
+
+  /**
+   * List user-facing sessions with per-session message counts and a short
+   * preview of the first human message, for the REST sessions API. Internal
+   * background/sub-agent/scheduler sessions are excluded so the list shows
+   * conversations, not protocol transcripts.
+   */
+  listSessionsWithStats(
+    limit = 50,
+    offset = 0,
+  ): Array<SessionRow & { messageCount: number; preview: string | null; userId: string | null }> {
+    const cappedLimit = Math.max(1, Math.min(Math.floor(limit) || 50, 200));
+    const cappedOffset = Math.max(0, Math.floor(offset) || 0);
+    const rows = this.db.prepare(`
+      SELECT s.*,
+        (SELECT COUNT(*) FROM session_messages sm WHERE sm.session_id = s.id) AS message_count,
+        (
+          SELECT sm.content FROM session_messages sm
+          WHERE sm.session_id = s.id AND sm.role = 'user'
+          ORDER BY sm.id ASC LIMIT 1
+        ) AS first_user_message
+      FROM sessions s
+      WHERE s.archived_at IS NULL AND s.transcript_deleted_at IS NULL
+      ORDER BY s.updated_at DESC
+      LIMIT ? OFFSET ?
+    `).all(cappedLimit, cappedOffset) as Record<string, unknown>[];
+
+    const sessions: Array<SessionRow & { messageCount: number; preview: string | null; userId: string | null }> = [];
+    for (const row of rows) {
+      const session = this.rowToSession(row);
+      if (isInternalSessionMetadata(session.metadata)) continue;
+      const rawPreview = typeof row.first_user_message === 'string' ? row.first_user_message : null;
+      const parsedBlocks = parseSessionContentBlocks(rawPreview);
+      let preview = rawPreview;
+      if (parsedBlocks) {
+        preview = parsedBlocks
+          .filter(block => block.type === 'text' && typeof block.text === 'string')
+          .map(block => block.text as string)
+          .join(' ') || null;
+      }
+      if (preview) {
+        preview = preview.replace(/\s+/g, ' ').trim();
+        if (preview.length > 120) preview = `${preview.slice(0, 117).trimEnd()}...`;
+      }
+      sessions.push({
+        ...session,
+        messageCount: Number(row.message_count ?? 0),
+        preview: preview || null,
+        userId: typeof session.metadata?.userId === 'string' ? session.metadata.userId : null,
+      });
+    }
+    return sessions;
   }
 
   updateSessionMetadata(id: string, metadata: Record<string, unknown>): void {

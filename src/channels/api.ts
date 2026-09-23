@@ -543,7 +543,7 @@ export class ApiChannel implements Channel, TriggerSource {
       } else if (urlPath === '/api/chat/stream' && method === 'POST') {
         await this.handleChatStream(req, res);
       } else if (urlPath === '/api/sessions' && method === 'GET') {
-        await this.handleListSessions(res);
+        await this.handleListSessions(res, url);
       } else if (urlPath === '/api/sessions/current' && method === 'GET') {
         this.handleGetCurrentSession(res);
       } else if (urlPath === '/api/messages' && method === 'GET') {
@@ -879,10 +879,38 @@ export class ApiChannel implements Channel, TriggerSource {
   /**
    * Handle GET /api/sessions
    */
-  private async handleListSessions(res: ServerResponse): Promise<void> {
-    // SessionManager doesn't have a list method, so we return an empty array for now
-    // This could be enhanced to scan the sessions directory
-    this.sendJson(res, 200, { sessions: [] });
+  private async handleListSessions(res: ServerResponse, url: URL): Promise<void> {
+    const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '50', 10) || 50, 1), 200);
+    const offset = Math.max(parseInt(url.searchParams.get('offset') || '0', 10) || 0, 0);
+    if (this.db) {
+      const sessions = this.db.listSessionsWithStats(limit, offset);
+      this.sendJson(res, 200, {
+        sessions: sessions.map(session => ({
+          id: session.id,
+          createdAt: session.createdAt,
+          updatedAt: session.updatedAt,
+          messageCount: session.messageCount,
+          preview: session.preview,
+          userId: session.userId,
+        })),
+      });
+      return;
+    }
+    // No durable DB: fall back to the in-memory session manager, which only
+    // exposes id/createdAt.
+    const managerList = typeof this.config.sessionManager.listSessions === 'function'
+      ? await this.config.sessionManager.listSessions()
+      : [];
+    this.sendJson(res, 200, {
+      sessions: managerList.map(session => ({
+        id: session.id,
+        createdAt: session.createdAt instanceof Date ? session.createdAt.getTime() : session.createdAt,
+        updatedAt: session.createdAt instanceof Date ? session.createdAt.getTime() : session.createdAt,
+        messageCount: 0,
+        preview: null,
+        userId: null,
+      })),
+    });
   }
 
   /**

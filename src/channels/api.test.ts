@@ -471,6 +471,63 @@ describe('ApiChannel', () => {
         expect(res.status).toBe(200);
         expect((res.body as Record<string, unknown>).sessions).toEqual([]);
       });
+
+      it('should list durable sessions with counts, preview and internal sessions hidden', async () => {
+        const db = new ScallopDatabase(':memory:');
+        db.createSession('chat-session', { userId: 'api:default', channelId: 'api' });
+        db.addSessionMessage('chat-session', 'user', 'Where did I put the passport?');
+        db.addSessionMessage('chat-session', 'assistant', 'In the blue drawer.');
+        db.addSessionMessage('chat-session', 'user', 'Thanks');
+        db.createSession('internal-session', { userId: 'subagent:worker', channelId: 'subagent' });
+        db.addSessionMessage('internal-session', 'user', 'protocol chatter');
+        db.createSession('archived-session', { userId: 'api:default', channelId: 'api' });
+        db.addSessionMessage('archived-session', 'user', 'old');
+        db.archiveSession('archived-session', 'new_conversation', 'user_command');
+        (channel as unknown as { db: ScallopDatabase | null }).db = db;
+
+        try {
+          const res = await makeRequest('/api/sessions');
+
+          expect(res.status).toBe(200);
+          const sessions = (res.body as { sessions: Record<string, unknown>[] }).sessions;
+          expect(sessions.map(s => s.id)).toEqual(['chat-session']);
+          expect(sessions[0]).toMatchObject({
+            messageCount: 3,
+            preview: 'Where did I put the passport?',
+            userId: 'api:default',
+          });
+        } finally {
+          (channel as unknown as { db: ScallopDatabase | null }).db = null;
+          db.close();
+        }
+      });
+
+      it('should truncate long previews and flatten content blocks', async () => {
+        const db = new ScallopDatabase(':memory:');
+        db.createSession('long-session', { userId: 'api:default', channelId: 'api' });
+        db.addSessionMessage(
+          'long-session',
+          'user',
+          JSON.stringify([
+            { type: 'text', text: `${'a'.repeat(200)}   with  whitespace` },
+            { type: 'tool_result', text: 'ignored' },
+          ]),
+        );
+        (channel as unknown as { db: ScallopDatabase | null }).db = db;
+
+        try {
+          const res = await makeRequest('/api/sessions');
+          const sessions = (res.body as { sessions: Record<string, unknown>[] }).sessions;
+          expect(sessions).toHaveLength(1);
+          const preview = sessions[0].preview as string;
+          expect(preview.length).toBeLessThanOrEqual(120);
+          expect(preview.endsWith('...')).toBe(true);
+          expect(preview).not.toContain('ignored');
+        } finally {
+          (channel as unknown as { db: ScallopDatabase | null }).db = null;
+          db.close();
+        }
+      });
     });
 
     describe('DELETE /api/sessions/:id', () => {
