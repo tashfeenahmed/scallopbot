@@ -145,6 +145,7 @@ export default function App() {
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [hasMore, setHasMore] = useState(false);
   const [historyLoaded, setHistoryLoaded] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
   const { costs, refetch: refetchCosts } = useCosts();
   const { authState, error: authError, setup, login, logout } = useAuth();
   const inputRef = useRef<HTMLInputElement>(null);
@@ -322,9 +323,11 @@ export default function App() {
     if (status !== 'connected' || historyLoaded) return;
 
     const loadHistory = async () => {
+      setHistoryError(null);
       try {
         const res = await fetch('/api/messages?limit=50');
         if (!res.ok) {
+          setHistoryError('Chat history could not be loaded. Your messages are safe — try again.');
           setHistoryLoaded(true);
           return;
         }
@@ -350,12 +353,18 @@ export default function App() {
         }
       } catch (err) {
         console.error('Failed to load chat history:', err);
+        setHistoryError('Chat history could not be loaded. Your messages are safe — try again.');
       }
       setHistoryLoaded(true);
     };
 
     loadHistory();
   }, [status, historyLoaded]);
+
+  const retryLoadHistory = useCallback(() => {
+    setHistoryLoaded(false);
+    setHistoryError(null);
+  }, []);
 
   const handleLoadMore = useCallback(async () => {
     if (isLoadingMore || !hasMore) return;
@@ -480,6 +489,9 @@ export default function App() {
                 onLoadMore={handleLoadMore}
                 isLoadingMore={isLoadingMore}
                 hasMore={hasMore}
+                historyLoaded={historyLoaded}
+                historyError={historyError}
+                onRetryHistory={retryLoadHistory}
               />
               <ConnectionBanner status={status} onRetry={retry} />
               <ChatInput
