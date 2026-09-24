@@ -148,7 +148,7 @@ export default function App() {
   const [historyError, setHistoryError] = useState<string | null>(null);
   const { costs, refetch: refetchCosts, setBudgets } = useCosts();
   const { authState, error: authError, setup, login, logout } = useAuth();
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
   // Sync view changes to browser URL
