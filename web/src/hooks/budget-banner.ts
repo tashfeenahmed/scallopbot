@@ -24,7 +24,7 @@ export function budgetBanner(costs: CostData | null): BudgetBanner | null {
   if (costs.monthly.exceeded && costs.monthly.budget != null) {
     return {
       tone: 'exceeded',
-      text: `Monthly spend limit reached ($${costs.monthly.spent.toFixed(2)} of $${costs.monthly.budget.toFixed(2)}). The bot will not answer until you raise the limit in Costs.`,
+      text: `Monthly spend limit reached ($${costs.monthly.spent.toFixed(2)} of $${costs.monthly.budget.toFixed(2)}). The bot will not answer until it resets at the start of next month (UTC), or until you raise the limit in Costs.`,
     };
   }
   if (costs.daily.warning && costs.daily.budget != null) {

@@ -49,6 +49,9 @@ describe('budgetBanner', () => {
     }));
     expect(b?.tone).toBe('exceeded');
     expect(b?.text).toContain('Monthly');
+    // The monthly cap resets on its own at the next UTC month, too.
+    expect(b?.text).toContain('start of next month (UTC)');
+    expect(b?.text).toContain('raise the limit in Costs');
   });
 
   it('ignores exceeded flags that have no budget set (defensive)', () => {
