@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { ScallopDatabase } from '../memory/db.js';
 import {
   CostTracker,
   CostTrackerOptions,
@@ -657,6 +658,100 @@ describe('CostTracker', () => {
 
       const history = tracker.getUsageHistory();
       expect(history[0].sessionId).toBe('unknown');
+    });
+  });
+
+  describe('runtime budget updates (dashboard-set)', () => {
+    it('only persists the caps the caller changed', () => {
+      const db = new ScallopDatabase(':memory:');
+      try {
+        const t = new CostTracker({ dailyBudget: 2, monthlyBudget: 40, db });
+        t.setBudgets({ dailyBudget: 3 });
+        expect(db.getAppSetting('cost.dailyBudget')).toBe('3');
+        expect(db.getAppSetting('cost.monthlyBudget')).toBeNull();
+        // Monthly still follows env config after a restart.
+        expect(new CostTracker({ monthlyBudget: 60, db }).getMonthlyBudget()).toBe(60);
+      } finally {
+        db.close();
+      }
+    });
+
+    it('ignores corrupt stored values and falls back to config', () => {
+      const db = new ScallopDatabase(':memory:');
+      try {
+        db.setAppSetting('cost.dailyBudget', 'garbage');
+        expect(new CostTracker({ dailyBudget: 4, db }).getDailyBudget()).toBe(4);
+      } finally {
+        db.close();
+      }
+    });
+
+    it('should apply valid budgets and enforce them', () => {
+      tracker = new CostTracker({});
+      expect(tracker.getDailyBudget()).toBeUndefined();
+
+      expect(tracker.setBudgets({ dailyBudget: 5, monthlyBudget: 50 })).toBe(true);
+      expect(tracker.getDailyBudget()).toBe(5);
+      expect(tracker.getMonthlyBudget()).toBe(50);
+      expect(tracker.canMakeRequest().allowed).toBe(true);
+    });
+
+    it('should reject invalid budgets without applying anything', () => {
+      tracker = new CostTracker({ dailyBudget: 10 });
+      expect(tracker.setBudgets({ dailyBudget: -1 })).toBe(false);
+      expect(tracker.setBudgets({ monthlyBudget: 0 })).toBe(false);
+      expect(tracker.setBudgets({ dailyBudget: NaN })).toBe(false);
+      expect(tracker.setBudgets({ dailyBudget: Infinity })).toBe(false);
+      // original untouched
+      expect(tracker.getDailyBudget()).toBe(10);
+    });
+
+    it('should clear a budget with null', () => {
+      tracker = new CostTracker({ dailyBudget: 10 });
+      expect(tracker.setBudgets({ dailyBudget: null })).toBe(true);
+      expect(tracker.getDailyBudget()).toBeUndefined();
+      expect(tracker.isDailyBudgetExceeded()).toBe(false);
+    });
+
+    it('should block requests once a runtime budget is exceeded', () => {
+      tracker = new CostTracker({});
+      tracker.setBudgets({ dailyBudget: 0.000001 });
+      tracker.recordUsage({
+        model: 'gpt-4o',
+        provider: 'openai',
+        sessionId: 's1',
+        inputTokens: 1000000,
+        outputTokens: 1000000,
+      });
+      const check = tracker.canMakeRequest();
+      expect(check.allowed).toBe(false);
+      expect(check.reason).toContain('Daily budget exceeded');
+    });
+
+    it('should persist budgets to app_settings and reload them on restart', () => {
+      const db = new ScallopDatabase(':memory:');
+      try {
+        const first = new CostTracker({ dailyBudget: 1, db });
+        first.setBudgets({ dailyBudget: 7.5, monthlyBudget: 100 });
+        expect(db.getAppSetting('cost.dailyBudget')).toBe('7.5');
+        expect(db.getAppSetting('cost.monthlyBudget')).toBe('100');
+
+        // Simulated restart: env default is 1, stored value wins.
+        const restarted = new CostTracker({ dailyBudget: 1, db });
+        expect(restarted.getDailyBudget()).toBe(7.5);
+        expect(restarted.getMonthlyBudget()).toBe(100);
+
+        // Clearing persists an explicit "no limit" (dashboard always wins),
+        // so a restart does NOT fall back to the env/config budget.
+        restarted.setBudgets({ dailyBudget: null });
+        expect(db.getAppSetting('cost.dailyBudget')).toBe(CostTracker.NO_LIMIT);
+        const restarted2 = new CostTracker({ dailyBudget: 1, monthlyBudget: 500, db });
+        expect(restarted2.getDailyBudget()).toBeUndefined();
+        // Monthly was not touched by the clear and keeps its dashboard value.
+        expect(restarted2.getMonthlyBudget()).toBe(100);
+      } finally {
+        db.close();
+      }
     });
   });
 });

@@ -1396,6 +1396,15 @@ export class ScallopDatabase {
         updated_at INTEGER NOT NULL
       );
 
+      -- Non-secret application settings that must survive restarts and must
+      -- NOT be loaded into process.env (unlike runtime_keys). Example: cost
+      -- budgets set from the web dashboard.
+      CREATE TABLE IF NOT EXISTS app_settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+
       -- Transcript chunks for cross-session recall (#9)
       CREATE TABLE IF NOT EXISTS transcript_chunks (
         id TEXT PRIMARY KEY,
@@ -9029,6 +9038,29 @@ export class ScallopDatabase {
     const rows = this.db.prepare('SELECT key, value FROM runtime_keys ORDER BY key').all() as
       Array<{ key: string; value: string }>;
     return rows;
+  }
+
+  // ============ App Settings (non-secret, not loaded into env) ============
+
+  getAppSetting(key: string): string | null {
+    const row = this.db.prepare('SELECT value FROM app_settings WHERE key = ?').get(key) as
+      | { value: string }
+      | undefined;
+    return row?.value ?? null;
+  }
+
+  setAppSetting(key: string, value: string): void {
+    const now = Date.now();
+    this.db.prepare(`
+      INSERT INTO app_settings (key, value, updated_at)
+      VALUES (?, ?, ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+    `).run(key, value, now);
+  }
+
+  deleteAppSetting(key: string): boolean {
+    const result = this.db.prepare('DELETE FROM app_settings WHERE key = ?').run(key);
+    return result.changes > 0;
   }
 
 }

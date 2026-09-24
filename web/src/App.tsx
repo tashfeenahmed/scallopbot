@@ -146,7 +146,7 @@ export default function App() {
   const [hasMore, setHasMore] = useState(false);
   const [historyLoaded, setHistoryLoaded] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
-  const { costs, refetch: refetchCosts } = useCosts();
+  const { costs, refetch: refetchCosts, setBudgets } = useCosts();
   const { authState, error: authError, setup, login, logout } = useAuth();
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -471,7 +471,7 @@ export default function App() {
         <div className="flex flex-col flex-1 min-w-0">
           {currentView === 'costs' ? (
             costs ? (
-              <CreditsPanel costs={costs} />
+              <CreditsPanel costs={costs} onSetBudgets={setBudgets} />
             ) : (
               <div className="flex-1 flex items-center justify-center text-gray-500 dark:text-gray-400">
                 <p>No cost data available</p>
