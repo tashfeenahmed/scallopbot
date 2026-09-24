@@ -662,6 +662,30 @@ describe('CostTracker', () => {
   });
 
   describe('runtime budget updates (dashboard-set)', () => {
+    it('only persists the caps the caller changed', () => {
+      const db = new ScallopDatabase(':memory:');
+      try {
+        const t = new CostTracker({ dailyBudget: 2, monthlyBudget: 40, db });
+        t.setBudgets({ dailyBudget: 3 });
+        expect(db.getAppSetting('cost.dailyBudget')).toBe('3');
+        expect(db.getAppSetting('cost.monthlyBudget')).toBeNull();
+        // Monthly still follows env config after a restart.
+        expect(new CostTracker({ monthlyBudget: 60, db }).getMonthlyBudget()).toBe(60);
+      } finally {
+        db.close();
+      }
+    });
+
+    it('ignores corrupt stored values and falls back to config', () => {
+      const db = new ScallopDatabase(':memory:');
+      try {
+        db.setAppSetting('cost.dailyBudget', 'garbage');
+        expect(new CostTracker({ dailyBudget: 4, db }).getDailyBudget()).toBe(4);
+      } finally {
+        db.close();
+      }
+    });
+
     it('should apply valid budgets and enforce them', () => {
       tracker = new CostTracker({});
       expect(tracker.getDailyBudget()).toBeUndefined();
@@ -717,11 +741,14 @@ describe('CostTracker', () => {
         expect(restarted.getDailyBudget()).toBe(7.5);
         expect(restarted.getMonthlyBudget()).toBe(100);
 
-        // Clearing persists as removal, so a restart falls back to env.
+        // Clearing persists an explicit "no limit" (dashboard always wins),
+        // so a restart does NOT fall back to the env/config budget.
         restarted.setBudgets({ dailyBudget: null });
-        expect(db.getAppSetting('cost.dailyBudget')).toBeNull();
-        const restarted2 = new CostTracker({ dailyBudget: 1, db });
-        expect(restarted2.getDailyBudget()).toBe(1);
+        expect(db.getAppSetting('cost.dailyBudget')).toBe(CostTracker.NO_LIMIT);
+        const restarted2 = new CostTracker({ dailyBudget: 1, monthlyBudget: 500, db });
+        expect(restarted2.getDailyBudget()).toBeUndefined();
+        // Monthly was not touched by the clear and keeps its dashboard value.
+        expect(restarted2.getMonthlyBudget()).toBe(100);
       } finally {
         db.close();
       }

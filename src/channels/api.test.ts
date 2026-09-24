@@ -364,6 +364,32 @@ describe('ApiChannel', () => {
         expect((await budgetRequest({ dailyBudget: 'ten' })).status).toBe(400);
         expect((await budgetRequest({})).status).toBe(400);
       });
+
+      it('rejects a null or malformed JSON body with 400, not 500', async () => {
+        await withTracker();
+        const raw = (payload: string): Promise<number> =>
+          new Promise((resolve, reject) => {
+            const req = http.request(
+              {
+                hostname: '127.0.0.1',
+                port,
+                path: '/api/costs/budget',
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+              },
+              (res) => {
+                res.resume();
+                res.on('end', () => resolve(res.statusCode || 0));
+              },
+            );
+            req.on('error', reject);
+            req.end(payload);
+          });
+        expect(await raw('null')).toBe(400);
+        expect(await raw('[1,2]')).toBe(400);
+        expect(await raw('7')).toBe(400);
+        expect(await raw('{not json')).toBe(400);
+      });
     });
 
     describe('GET /api/health', () => {

@@ -1302,7 +1302,19 @@ export class ApiChannel implements Channel, TriggerSource {
       return;
     }
 
-    const body = await this.parseBody<{ dailyBudget?: number | null; monthlyBudget?: number | null }>(req);
+    let body: { dailyBudget?: number | null; monthlyBudget?: number | null };
+    try {
+      body = await this.parseBody<typeof body>(req);
+    } catch (err) {
+      this.sendJson(res, 400, { error: (err as Error).message || 'Invalid JSON' });
+      return;
+    }
+    // JSON.parse accepts `null`, arrays and primitives; only an object is a
+    // valid budget update.
+    if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+      this.sendJson(res, 400, { error: 'Body must be a JSON object' });
+      return;
+    }
 
     const acceptsNumberOrNull = (v: unknown): boolean =>
       v === undefined || v === null || (typeof v === 'number' && Number.isFinite(v) && v > 0);

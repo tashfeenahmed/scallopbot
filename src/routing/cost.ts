@@ -196,6 +196,17 @@ export class CostTracker {
   /** app_settings keys for budgets set at runtime (dashboard), not env. */
   static readonly SETTING_DAILY_BUDGET = 'cost.dailyBudget';
   static readonly SETTING_MONTHLY_BUDGET = 'cost.monthlyBudget';
+  /** Stored value meaning "the dashboard explicitly removed this cap". */
+  static readonly NO_LIMIT = 'none';
+
+  /** Interpret an app_settings budget value. Missing or unparseable → not
+   *  set (env config applies); NO_LIMIT → explicitly no cap. */
+  private static readStoredBudget(stored: string | null): { set: boolean; value: number | undefined } {
+    if (stored === null) return { set: false, value: undefined };
+    if (stored === CostTracker.NO_LIMIT) return { set: true, value: undefined };
+    const n = parseFloat(stored);
+    return Number.isFinite(n) && n > 0 ? { set: true, value: n } : { set: false, value: undefined };
+  }
 
   constructor(options: CostTrackerOptions) {
     this.dailyBudget = options.dailyBudget;
@@ -203,17 +214,15 @@ export class CostTracker {
     this.warningThreshold = options.warningThreshold ?? 0.75;
     this.db = options.db;
 
-    // Budgets set at runtime from the dashboard win over env config: they are
-    // the most recent explicit user decision and survive restarts.
+    // Budgets set at runtime from the dashboard win over env config (owner
+    // decision: "dashboard always wins"). That includes an explicit "no
+    // limit", stored as NO_LIMIT, so clearing a cap in the dashboard is not
+    // undone by DAILY_BUDGET/MONTHLY_BUDGET on the next restart.
     if (this.db) {
-      const stored = this.db.getAppSetting(CostTracker.SETTING_DAILY_BUDGET);
-      if (stored !== null && Number.isFinite(parseFloat(stored)) && parseFloat(stored) > 0) {
-        this.dailyBudget = parseFloat(stored);
-      }
-      const storedMonthly = this.db.getAppSetting(CostTracker.SETTING_MONTHLY_BUDGET);
-      if (storedMonthly !== null && Number.isFinite(parseFloat(storedMonthly)) && parseFloat(storedMonthly) > 0) {
-        this.monthlyBudget = parseFloat(storedMonthly);
-      }
+      const daily = CostTracker.readStoredBudget(this.db.getAppSetting(CostTracker.SETTING_DAILY_BUDGET));
+      if (daily.set) this.dailyBudget = daily.value;
+      const monthly = CostTracker.readStoredBudget(this.db.getAppSetting(CostTracker.SETTING_MONTHLY_BUDGET));
+      if (monthly.set) this.monthlyBudget = monthly.value;
     }
 
     for (const [key, pricing] of Object.entries(options.customPricing ?? {})) {
@@ -263,17 +272,22 @@ export class CostTracker {
     if (options.monthlyBudget !== undefined) {
       this.monthlyBudget = options.monthlyBudget ?? undefined;
     }
-    if (this.db) {
+    // Persist only what the caller changed; untouched caps keep following
+    // their current source (env or an earlier dashboard value).
+    if (options.dailyBudget !== undefined) {
       this.persistBudgetSetting(CostTracker.SETTING_DAILY_BUDGET, this.dailyBudget);
+    }
+    if (options.monthlyBudget !== undefined) {
       this.persistBudgetSetting(CostTracker.SETTING_MONTHLY_BUDGET, this.monthlyBudget);
     }
     return true;
   }
 
+  /** A cleared cap is stored as an explicit NO_LIMIT, not deleted: deleting
+   *  would let the env/config budget silently return after a restart. */
   private persistBudgetSetting(key: string, value: number | undefined): void {
     if (!this.db) return;
-    if (value === undefined) this.db.deleteAppSetting(key);
-    else this.db.setAppSetting(key, String(value));
+    this.db.setAppSetting(key, value === undefined ? CostTracker.NO_LIMIT : String(value));
   }
 
   getModelPricing(model: string, provider?: string): ModelPricing {

@@ -50,22 +50,31 @@ function BudgetEditor({ costs, onSetBudgets }: CreditsPanelProps) {
     }
   };
 
-  if (!editing && !saved) {
+  // After a successful save the form collapses straight back to the
+  // "Edit spend limits" link, with a brief confirmation beside it (previously
+  // the inputs stayed on screen for 2.5s with no Save/Cancel buttons).
+  if (!editing) {
     return (
+      <div className="mt-3 flex items-center gap-3">
       <button
         type="button"
         onClick={() => {
           setDaily(costs.daily.budget?.toString() ?? '');
           setMonthly(costs.monthly.budget?.toString() ?? '');
           setError(null);
+          setSaved(false);
           setEditing(true);
         }}
-        className="mt-3 text-xs text-blue-600 dark:text-blue-400 hover:underline font-medium"
+        className="text-xs text-blue-600 dark:text-blue-400 hover:underline font-medium"
       >
         {costs.daily.budget == null && costs.monthly.budget == null
           ? 'Set spend limits'
           : 'Edit spend limits'}
       </button>
+      {saved && (
+        <span role="status" className="text-xs text-green-600 dark:text-green-400">Spend limits saved.</span>
+      )}
+      </div>
     );
   }
 
@@ -109,12 +118,10 @@ function BudgetEditor({ costs, onSetBudgets }: CreditsPanelProps) {
         </label>
       </div>
       <p className="text-[11px] text-gray-500 dark:text-gray-400 mt-2">
-        The bot stops answering once a limit is hit. Leave a field blank for no limit. Limits persist across restarts.
+        The bot stops answering once a limit is hit. Leave a field blank for no limit. Limits set here override the config file and persist across restarts.
       </p>
       {error && <p role="alert" className="text-xs text-red-600 dark:text-red-400 mt-2">{error}</p>}
-      {saved && !editing && <p className="text-xs text-green-600 dark:text-green-400 mt-2">Spend limits saved.</p>}
-      {editing && (
-        <div className="flex gap-2 mt-3">
+      <div className="flex gap-2 mt-3">
           <button
             type="submit"
             disabled={saving}
@@ -129,8 +136,7 @@ function BudgetEditor({ costs, onSetBudgets }: CreditsPanelProps) {
           >
             Cancel
           </button>
-        </div>
-      )}
+      </div>
     </form>
   );
 }
