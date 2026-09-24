@@ -307,7 +307,7 @@ node dist/cli.js skill install elicitation
 | **Signal** | End-to-end encrypted messaging |
 | **Matrix** | Federated chat |
 | **CLI** | Interactive terminal session with session resume (`-s <id>`) |
-| **REST API** | `POST /api/chat`, SSE streaming, session management, file download |
+| **REST API** | `POST /api/chat`, SSE streaming, session management, file download, budget management (`POST /api/costs/budget`) |
 | **WebSocket** | Real-time bidirectional communication with the web dashboard |
 
 ## Web Dashboard

@@ -11,6 +11,7 @@ import http from 'http';
 import WebSocket from 'ws';
 import { ScallopDatabase } from '../memory/db.js';
 import { SubAgentRegistry } from '../subagent/registry.js';
+import { CostTracker } from '../routing/cost.js';
 
 // Create mock logger
 const createMockLogger = (): Logger =>
@@ -306,6 +307,89 @@ describe('ApiChannel', () => {
       });
       await channel.stop();
       db.close();
+    });
+
+    describe('POST /api/costs/budget', () => {
+      const budgetRequest = (
+        body: unknown,
+      ): Promise<{ status: number; body: Record<string, unknown> }> =>
+        makeRequest('/api/costs/budget', 'POST', body) as Promise<{ status: number; body: Record<string, unknown> }>;
+
+      const withTracker = async (): Promise<CostTracker> => {
+        await channel.stop();
+        const tracker = new CostTracker({});
+        channel = new ApiChannel({
+          port,
+          host: '127.0.0.1',
+          agent: mockAgent,
+          sessionManager: mockSessionManager,
+          logger: mockLogger,
+          costTracker: tracker,
+        });
+        await channel.start();
+        return tracker;
+      };
+
+      it('sets daily and monthly budgets and reports them back', async () => {
+        const tracker = await withTracker();
+        const res = await budgetRequest({ dailyBudget: 5, monthlyBudget: 100 });
+        expect(res.status).toBe(200);
+        expect(res.body.dailyBudget).toBe(5);
+        expect(res.body.monthlyBudget).toBe(100);
+        expect(tracker.getDailyBudget()).toBe(5);
+      });
+
+      it('clears a budget with null', async () => {
+        await channel.stop();
+        const tracker = new CostTracker({ dailyBudget: 10 });
+        channel = new ApiChannel({
+          port,
+          host: '127.0.0.1',
+          agent: mockAgent,
+          sessionManager: mockSessionManager,
+          logger: mockLogger,
+          costTracker: tracker,
+        });
+        await channel.start();
+        const res = await budgetRequest({ dailyBudget: null });
+        expect(res.status).toBe(200);
+        expect(res.body.dailyBudget).toBeNull();
+        expect(tracker.getDailyBudget()).toBeUndefined();
+      });
+
+      it('rejects non-positive, non-numeric and empty bodies', async () => {
+        await withTracker();
+        expect((await budgetRequest({ dailyBudget: 0 })).status).toBe(400);
+        expect((await budgetRequest({ dailyBudget: -3 })).status).toBe(400);
+        expect((await budgetRequest({ dailyBudget: 'ten' })).status).toBe(400);
+        expect((await budgetRequest({})).status).toBe(400);
+      });
+
+      it('rejects a null or malformed JSON body with 400, not 500', async () => {
+        await withTracker();
+        const raw = (payload: string): Promise<number> =>
+          new Promise((resolve, reject) => {
+            const req = http.request(
+              {
+                hostname: '127.0.0.1',
+                port,
+                path: '/api/costs/budget',
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+              },
+              (res) => {
+                res.resume();
+                res.on('end', () => resolve(res.statusCode || 0));
+              },
+            );
+            req.on('error', reject);
+            req.end(payload);
+          });
+        expect(await raw('null')).toBe(400);
+        expect(await raw('[1,2]')).toBe(400);
+        expect(await raw('7')).toBe(400);
+        expect(await raw('{not json')).toBe(400);
+      });
     });
 
     describe('GET /api/health', () => {

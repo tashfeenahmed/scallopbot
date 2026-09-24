@@ -40,11 +40,26 @@ export function useCosts() {
     }
   }, []);
 
+  const setBudgets = useCallback(async (budgets: { dailyBudget?: number | null; monthlyBudget?: number | null }): Promise<boolean> => {
+    try {
+      const res = await fetch('/api/costs/budget', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(budgets),
+      });
+      if (!res.ok) return false;
+      await fetchCosts();
+      return true;
+    } catch {
+      return false;
+    }
+  }, [fetchCosts]);
+
   useEffect(() => {
     fetchCosts();
     const interval = setInterval(fetchCosts, POLL_INTERVAL);
     return () => clearInterval(interval);
   }, [fetchCosts]);
 
-  return { costs, refetch: fetchCosts };
+  return { costs, refetch: fetchCosts, setBudgets };
 }

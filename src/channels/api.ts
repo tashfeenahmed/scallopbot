@@ -530,6 +530,8 @@ export class ApiChannel implements Channel, TriggerSource {
       // Route requests
       if (urlPath === '/api/costs' && method === 'GET') {
         this.handleCosts(res);
+      } else if (urlPath === '/api/costs/budget' && method === 'POST') {
+        await this.handleSetBudget(req, res);
       } else if (urlPath === '/api/subagents' && method === 'GET') {
         this.handleSubAgents(res, url);
       } else if (urlPath.match(/^\/api\/subagents\/[^/]+\/log$/) && method === 'GET') {
@@ -1284,6 +1286,61 @@ export class ApiChannel implements Channel, TriggerSource {
       topModels,
       totalRequests: history.length,
       dailyHistory,
+    });
+  }
+
+  /**
+   * Handle POST /api/costs/budget
+   * Body: { dailyBudget?: number | null, monthlyBudget?: number | null }
+   * null clears a cap; omitted fields stay unchanged. Persisted via the cost
+   * tracker so it survives restarts.
+   */
+  private async handleSetBudget(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const tracker = this.config.costTracker;
+    if (!tracker) {
+      this.sendJson(res, 200, { enabled: false });
+      return;
+    }
+
+    let body: { dailyBudget?: number | null; monthlyBudget?: number | null };
+    try {
+      body = await this.parseBody<typeof body>(req);
+    } catch (err) {
+      this.sendJson(res, 400, { error: (err as Error).message || 'Invalid JSON' });
+      return;
+    }
+    // JSON.parse accepts `null`, arrays and primitives; only an object is a
+    // valid budget update.
+    if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+      this.sendJson(res, 400, { error: 'Body must be a JSON object' });
+      return;
+    }
+
+    const acceptsNumberOrNull = (v: unknown): boolean =>
+      v === undefined || v === null || (typeof v === 'number' && Number.isFinite(v) && v > 0);
+    if (!acceptsNumberOrNull(body.dailyBudget) || !acceptsNumberOrNull(body.monthlyBudget)) {
+      this.sendJson(res, 400, { error: 'Budgets must be positive numbers or null to clear' });
+      return;
+    }
+    if (body.dailyBudget === undefined && body.monthlyBudget === undefined) {
+      this.sendJson(res, 400, { error: 'Provide dailyBudget and/or monthlyBudget' });
+      return;
+    }
+
+    const applied = tracker.setBudgets({
+      ...(body.dailyBudget !== undefined ? { dailyBudget: body.dailyBudget } : {}),
+      ...(body.monthlyBudget !== undefined ? { monthlyBudget: body.monthlyBudget } : {}),
+    });
+    if (!applied) {
+      this.sendJson(res, 400, { error: 'Invalid budget' });
+      return;
+    }
+
+    const status = tracker.getBudgetStatus();
+    this.sendJson(res, 200, {
+      enabled: true,
+      dailyBudget: status.dailyBudget ?? null,
+      monthlyBudget: status.monthlyBudget ?? null,
     });
   }
 
