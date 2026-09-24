@@ -8,6 +8,7 @@ import CreditsPanel from './components/CreditsPanel';
 import ChatContainer from './components/ChatContainer';
 import ChatInput from './components/ChatInput';
 import ConnectionBanner from './components/ConnectionBanner';
+import { budgetBanner } from './hooks/budget-banner';
 import SetupScreen from './components/SetupScreen';
 import LoginScreen from './components/LoginScreen';
 import TasksPanel from './components/TasksPanel';
@@ -494,6 +495,23 @@ export default function App() {
                 onRetryHistory={retryLoadHistory}
               />
               <ConnectionBanner status={status} onRetry={retry} />
+              {(() => {
+                const banner = budgetBanner(costs);
+                if (!banner) return null;
+                return (
+                  <div
+                    role="status"
+                    aria-live="polite"
+                    className={`px-4 py-2 text-xs font-medium border-t ${
+                      banner.tone === 'exceeded'
+                        ? 'bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 border-red-200 dark:border-red-900'
+                        : 'bg-yellow-50 dark:bg-yellow-950/40 text-yellow-800 dark:text-yellow-300 border-yellow-200 dark:border-yellow-900'
+                    }`}
+                  >
+                    {banner.text}
+                  </div>
+                );
+              })()}
               <ChatInput
                 onSend={handleSend}
                 onStop={handleStop}
