@@ -29,13 +29,15 @@ describe('taskElapsedLabel', () => {
     }), 9_999_999)).toBe('done in 2m 30s');
   });
 
-  it('shows live time for running tasks, measured from last progress when newer', () => {
+  it('shows live time for running tasks, always measured from startedAt', () => {
     const now = 10_000;
     expect(taskElapsedLabel(task({ startedAt: now - 3 * MIN, lastProgressAt: now - 3 * MIN }), now))
       .toBe('running 3m 0s');
-    // Resumed worker: claiming since startedAt would overstate the run.
+    // Recent progress must not reset the clock: this task has run for 40m.
     expect(taskElapsedLabel(task({ startedAt: now - 40 * MIN, lastProgressAt: now - 30_000 }), now))
-      .toBe('running 30s');
+      .toBe('running 40m 0s');
+    // Progress without a start time is not a run duration.
+    expect(taskElapsedLabel(task({ startedAt: null, lastProgressAt: now - 30_000 }), now)).toBe('');
   });
 
   it('shows queue wait for pending tasks', () => {

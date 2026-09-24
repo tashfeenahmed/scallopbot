@@ -23,8 +23,8 @@ export function formatDuration(ms: number): string {
 
 /** Human label for how long a task has been (or was) running.
  *  - completed: wall time from start to completion.
- *  - running:   since it started, or since last progress if that is later
- *               (a task that just resumed shouldn't claim 40 minutes).
+ *  - running:   since it started (startedAt). Progress updates don't reset
+ *               the clock: "running Xm" is total run time, not idle time.
  *  - pending:   how long it has been queued.
  *  - failed/blocked/cancelled with no timestamps: ''. */
 export function taskElapsedLabel(task: TaskTimes, now: number): string {
@@ -33,7 +33,7 @@ export function taskElapsedLabel(task: TaskTimes, now: number): string {
     return d ? `done in ${d}` : '';
   }
   if (task.status === 'running') {
-    const since = Math.max(task.startedAt ?? 0, task.lastProgressAt ?? 0);
+    const since = task.startedAt;
     if (!since) return '';
     const d = formatDuration(now - since);
     return d ? `running ${d}` : '';

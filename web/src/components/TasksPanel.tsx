@@ -65,7 +65,7 @@ export default function TasksPanel() {
   // All three control actions share error handling: previously a failed
   // fetch was swallowed, so "Cancel" looked successful while the worker
   // kept running.
-  const runControl = async (id: string, body: Record<string, unknown>) => {
+  const runControl = async (id: string, body: Record<string, unknown>): Promise<boolean> => {
     setBusyId(id);
     setActionError('');
     try {
@@ -81,8 +81,10 @@ export default function TasksPanel() {
         throw new Error(detail || `HTTP ${response.status}`);
       }
       await refresh();
+      return true;
     } catch (err) {
       setActionError(`Action failed: ${(err as Error).message}`);
+      return false;
     } finally {
       setBusyId(null);
     }
@@ -90,10 +92,13 @@ export default function TasksPanel() {
 
   const cancel = (id: string) => runControl(id, { action: 'cancel' });
 
-  const control = (id: string, action: 'steer' | 'followup') => {
-    if (!instruction.trim()) return;
-    setInstruction('');
-    void runControl(id, { action, message: instruction.trim() });
+  const control = async (id: string, action: 'steer' | 'followup') => {
+    const message = instruction.trim();
+    if (!message) return;
+    // Keep the typed text until the server accepts it, so a failed
+    // steer/follow-up can be retried without retyping.
+    const ok = await runControl(id, { action, message });
+    if (ok) setInstruction(current => (current.trim() === message ? '' : current));
   };
 
   const loadLog = async (id: string) => {
