@@ -193,11 +193,29 @@ export class CostTracker {
    */
   private static readonly RETENTION_MS = 31 * 24 * 60 * 60 * 1000;
 
+  /** app_settings keys for budgets set at runtime (dashboard), not env. */
+  static readonly SETTING_DAILY_BUDGET = 'cost.dailyBudget';
+  static readonly SETTING_MONTHLY_BUDGET = 'cost.monthlyBudget';
+
   constructor(options: CostTrackerOptions) {
     this.dailyBudget = options.dailyBudget;
     this.monthlyBudget = options.monthlyBudget;
     this.warningThreshold = options.warningThreshold ?? 0.75;
     this.db = options.db;
+
+    // Budgets set at runtime from the dashboard win over env config: they are
+    // the most recent explicit user decision and survive restarts.
+    if (this.db) {
+      const stored = this.db.getAppSetting(CostTracker.SETTING_DAILY_BUDGET);
+      if (stored !== null && Number.isFinite(parseFloat(stored)) && parseFloat(stored) > 0) {
+        this.dailyBudget = parseFloat(stored);
+      }
+      const storedMonthly = this.db.getAppSetting(CostTracker.SETTING_MONTHLY_BUDGET);
+      if (storedMonthly !== null && Number.isFinite(parseFloat(storedMonthly)) && parseFloat(storedMonthly) > 0) {
+        this.monthlyBudget = parseFloat(storedMonthly);
+      }
+    }
+
     for (const [key, pricing] of Object.entries(options.customPricing ?? {})) {
       this.customPricing.set(normalizePricingKey(key), pricing);
     }
@@ -226,6 +244,36 @@ export class CostTracker {
 
   getMonthlyBudget(): number | undefined {
     return this.monthlyBudget;
+  }
+
+  /**
+   * Update budget caps at runtime (e.g. from the web dashboard). Values are
+   * validated here so a bad request can never disable enforcement: a cap must
+   * be a finite positive number or explicitly cleared with undefined.
+   * Returns false when any provided value is invalid (nothing is applied).
+   */
+  setBudgets(options: { dailyBudget?: number | null; monthlyBudget?: number | null }): boolean {
+    const valid = (v: number | null | undefined): boolean =>
+      v === undefined || v === null || (Number.isFinite(v) && v > 0);
+    if (!valid(options.dailyBudget) || !valid(options.monthlyBudget)) return false;
+
+    if (options.dailyBudget !== undefined) {
+      this.dailyBudget = options.dailyBudget ?? undefined;
+    }
+    if (options.monthlyBudget !== undefined) {
+      this.monthlyBudget = options.monthlyBudget ?? undefined;
+    }
+    if (this.db) {
+      this.persistBudgetSetting(CostTracker.SETTING_DAILY_BUDGET, this.dailyBudget);
+      this.persistBudgetSetting(CostTracker.SETTING_MONTHLY_BUDGET, this.monthlyBudget);
+    }
+    return true;
+  }
+
+  private persistBudgetSetting(key: string, value: number | undefined): void {
+    if (!this.db) return;
+    if (value === undefined) this.db.deleteAppSetting(key);
+    else this.db.setAppSetting(key, String(value));
   }
 
   getModelPricing(model: string, provider?: string): ModelPricing {
