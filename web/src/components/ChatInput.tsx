@@ -1,7 +1,7 @@
-import { type FormEvent, type KeyboardEvent, type RefObject, useEffect, useMemo, useState } from 'react';
+import { type FormEvent, type KeyboardEvent, type RefObject, useEffect, useLayoutEffect, useMemo, useState } from 'react';
 import { COMMANDS, type CommandDefinition } from '../commands';
 import CommandMenu from './CommandMenu';
-import { composerKeyAction, loadDraft, saveDraft, textareaRows } from '../hooks/composer';
+import { composerKeyAction, loadDraft, saveDraft, textareaHeight } from '../hooks/composer';
 
 interface ChatInputProps {
   onSend: (text: string) => void;
@@ -30,11 +30,26 @@ export default function ChatInput({ onSend, onStop, isWaiting, disabled, placeho
     saveDraft(draftStorage(), text);
   }, [text]);
 
-  // Keep the caret in view as the field grows.
-  useEffect(() => {
+  // Auto-grow from the rendered content height (so soft-wrapped lines count,
+  // not just hard newlines), capped at a max row count; past the cap the
+  // field scrolls. Layout effect so the resize lands before paint.
+  useLayoutEffect(() => {
     const el = inputRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [text]);
+    if (!el) return;
+    const cs = window.getComputedStyle(el);
+    const px = (v: string) => parseFloat(v) || 0;
+    el.style.height = 'auto';
+    const { height, overflow } = textareaHeight({
+      scrollHeight: el.scrollHeight,
+      lineHeight: px(cs.lineHeight),
+      paddingY: px(cs.paddingTop) + px(cs.paddingBottom),
+      borderY: px(cs.borderTopWidth) + px(cs.borderBottomWidth),
+    });
+    el.style.height = `${height}px`;
+    el.style.overflowY = overflow ? 'auto' : 'hidden';
+    // Keep the caret in view once the field is scrolling.
+    if (overflow) el.scrollTop = el.scrollHeight;
+  }, [text, inputRef]);
 
   // Filter commands based on current input after "/"
   const filtered = useMemo(() => {
@@ -181,9 +196,9 @@ export default function ChatInput({ onSend, onStop, isWaiting, disabled, placeho
           disabled={disabled}
           autoComplete="off"
           spellCheck={true}
-          rows={textareaRows(text)}
+          rows={1}
           aria-label="Message. Shift+Enter adds a new line."
-          className="flex-1 px-4 py-3 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-2xl text-gray-900 dark:text-gray-100 outline-none focus:border-blue-300 dark:focus:border-blue-500 focus:bg-white dark:focus:bg-gray-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed placeholder:text-gray-400 dark:placeholder:text-gray-500 leading-relaxed resize-none overflow-y-auto max-h-60"
+          className="flex-1 px-4 py-3 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-2xl text-gray-900 dark:text-gray-100 outline-none focus:border-blue-300 dark:focus:border-blue-500 focus:bg-white dark:focus:bg-gray-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed placeholder:text-gray-400 dark:placeholder:text-gray-500 leading-relaxed resize-none box-border"
         />
         <button
           type="submit"

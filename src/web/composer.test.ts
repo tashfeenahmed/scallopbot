@@ -3,7 +3,7 @@ import {
   composerKeyAction,
   loadDraft,
   saveDraft,
-  textareaRows,
+  textareaHeight,
   DRAFT_KEY,
   type ComposerKeyContext,
 } from '../../web/src/hooks/composer';
@@ -100,19 +100,31 @@ describe('draft persistence', () => {
   });
 });
 
-describe('textareaRows', () => {
-  it('shows one row for empty text', () => {
-    expect(textareaRows('')).toBe(1);
+describe('DRAFT_KEY', () => {
+  it('is a clean, namespaced ASCII key', () => {
+    expect(DRAFT_KEY).toBe('smartbot:composer-draft');
+  });
+});
+
+describe('textareaHeight', () => {
+  // line-height 20, padding 12+12, border 1+1
+  const m = (scrollHeight: number) => ({ scrollHeight, lineHeight: 20, paddingY: 24, borderY: 2 });
+
+  it('shows one row for empty / single-line content', () => {
+    expect(textareaHeight(m(44))).toEqual({ height: 46, overflow: false });
   });
 
-  it('grows one row per hard newline', () => {
-    expect(textareaRows('one\ntwo')).toBe(2);
-    expect(textareaRows('a\nb\nc\nd')).toBe(4);
+  it('grows with rendered content height, so soft-wrapped lines count too', () => {
+    // 3 visual lines (e.g. one long line wrapped) with no hard newline
+    expect(textareaHeight(m(84))).toEqual({ height: 86, overflow: false });
   });
 
-  it('clamps at the max so pasted walls scroll instead of pushing the footer away', () => {
-    const wall = Array(50).fill('line').join('\n');
-    expect(textareaRows(wall)).toBe(10);
-    expect(textareaRows(wall, 4)).toBe(4);
+  it('clamps at maxRows and reports overflow so pasted walls scroll', () => {
+    expect(textareaHeight(m(50 * 20 + 24))).toEqual({ height: 226, overflow: true });
+    expect(textareaHeight(m(50 * 20 + 24), 4)).toEqual({ height: 106, overflow: true });
+  });
+
+  it('never goes below one row and tolerates a missing line-height', () => {
+    expect(textareaHeight({ scrollHeight: 0, lineHeight: 0, paddingY: 0, borderY: 0 }).height).toBe(20);
   });
 });

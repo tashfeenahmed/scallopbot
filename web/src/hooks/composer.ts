@@ -42,7 +42,7 @@ export function composerKeyAction(ctx: ComposerKeyContext): ComposerAction {
   return 'default';
 }
 
-export const DRAFT_KEY = 'smartbo…raft';
+export const DRAFT_KEY = 'smartbot:composer-draft';
 
 /** Draft persistence with a storage that may throw (Safari private mode) or
  *  be missing (SSR/tests). All operations are best-effort. */
@@ -65,10 +65,29 @@ export function loadDraft(storage: Storage | null | undefined): string {
   }
 }
 
-/** Lines the auto-growing textarea should show: one per hard newline,
- *  clamped so a pasted wall of text turns into a scrollbar instead of
- *  pushing the send button off screen. */
-export function textareaRows(text: string, maxRows = 10): number {
-  const lines = text === '' ? 1 : text.split('\n').length;
-  return Math.max(1, Math.min(lines, maxRows));
+export interface TextareaMetrics {
+  /** el.scrollHeight measured with height reset to 'auto' (content + padding). */
+  scrollHeight: number;
+  /** Computed line-height in px. */
+  lineHeight: number;
+  /** padding-top + padding-bottom in px. */
+  paddingY: number;
+  /** border-top + border-bottom in px (scrollHeight excludes borders). */
+  borderY: number;
+}
+
+/** Height (border-box px) for the auto-growing textarea, derived from the
+ *  rendered content height so soft-wrapped long lines grow the field too,
+ *  not just hard newlines. Clamped to maxRows so a pasted wall of text turns
+ *  into a scrollbar instead of pushing the send button off screen.
+ *  `overflow` says whether the content exceeds the cap (show the scrollbar). */
+export function textareaHeight(m: TextareaMetrics, maxRows = 10): { height: number; overflow: boolean } {
+  const lineHeight = m.lineHeight > 0 ? m.lineHeight : 20;
+  const min = lineHeight + m.paddingY + m.borderY;
+  const max = lineHeight * maxRows + m.paddingY + m.borderY;
+  const content = m.scrollHeight + m.borderY;
+  return {
+    height: Math.max(min, Math.min(content, max)),
+    overflow: content > max + 1,
+  };
 }
