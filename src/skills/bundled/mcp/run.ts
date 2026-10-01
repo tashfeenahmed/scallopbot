@@ -1,5 +1,7 @@
 /**
- * Bounded MCP stdio client used by the executable `mcp` skill.
+ * Bounded MCP client used by the executable `mcp` skill: local stdio servers
+ * (`command`) plus remote Streamable HTTP / legacy SSE servers (`url`, see
+ * ./http-client.ts).
  *
  * MCP servers are owner-configured but still treated as untrusted subprocesses:
  * every wire direction, process lifetime, tool authorization decision, schema,
@@ -8,7 +10,13 @@
 
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
 import { isDeepStrictEqual } from 'util';
-import { loadMCPConfig, type MCPServerConfig } from '../../../config/mcp-config.js';
+import { loadMCPConfig, resolveMcpHeaders, type MCPServerConfig } from '../../../config/mcp-config.js';
+import {
+  McpLegacySseClient,
+  McpStreamableHttpClient,
+  type McpClient,
+  type RpcResult,
+} from './http-client.js';
 import { redactSensitiveText } from '../../../security/redaction.js';
 
 export interface MCPSkillInput {
@@ -37,11 +45,6 @@ interface McpTool {
   inputSchema?: unknown;
 }
 
-interface RpcResult {
-  value: unknown;
-  wireBytes: number;
-}
-
 interface PendingRequest {
   resolve: (value: RpcResult) => void;
   reject: (error: Error) => void;
@@ -63,7 +66,7 @@ const PROTOCOL_VERSION = '2024-11-05';
 const MAX_TOOLS = 100;
 const MAX_TOOL_NAME_CHARS = 256;
 const MAX_SCHEMA_DEPTH = 12;
-const activeClients = new Set<McpStdioClient>();
+const activeClients = new Set<McpClient>();
 
 function safeMcpEnvironment(server: MCPServerConfig): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
@@ -79,7 +82,23 @@ function safeMcpEnvironment(server: MCPServerConfig): NodeJS.ProcessEnv {
 }
 
 function scopedEnvironmentValues(server?: MCPServerConfig): string[] {
-  return Object.values(server?.env ?? {})
+  const values = [...Object.values(server?.env ?? {})];
+  if (server?.url) {
+    // Remote auth: redact both the configured literals and the resolved
+    // header values (including each `${VAR}` expansion and the bare token).
+    values.push(...Object.values(server.headers ?? {}));
+    if (server.bearerToken) values.push(server.bearerToken);
+    try {
+      for (const value of Object.values(resolveMcpHeaders(server))) {
+        values.push(value);
+        const bearer = value.match(/^Bearer\s+(.+)$/i);
+        if (bearer) values.push(bearer[1]);
+      }
+    } catch {
+      // Unresolvable references fail the request itself; nothing to redact.
+    }
+  }
+  return [...new Set(values)]
     .filter(value => value.length > 0)
     .sort((a, b) => b.length - a.length);
 }
@@ -336,7 +355,7 @@ function validateValue(value: unknown, schema: Record<string, unknown>, path = '
   }
 }
 
-class McpStdioClient {
+class McpStdioClient implements McpClient {
   private child: ChildProcessWithoutNullStreams;
   private buffer = '';
   private bufferBytes = 0;
@@ -352,7 +371,7 @@ class McpStdioClient {
 
   constructor(private readonly server: MCPServerConfig, cwd: string) {
     this.timeoutMs = server.timeoutMs ?? 30_000;
-    this.child = spawn(server.command, server.args ?? [], {
+    this.child = spawn(server.command ?? '', server.args ?? [], {
       cwd,
       env: safeMcpEnvironment(server),
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -645,12 +664,29 @@ function configuredServers(configPath?: string): MCPSkillResult {
   };
 }
 
+const REMOTE_LIMITS = Object.freeze({
+  maxOutboundRequestBytes: MCP_LIMITS.maxOutboundRequestBytes,
+  maxInboundLineBytes: MCP_LIMITS.maxInboundLineBytes,
+  maxInboundStdoutBytes: MCP_LIMITS.maxInboundStdoutBytes,
+});
+
+function createClient(server: MCPServerConfig, workspace: string): McpClient {
+  if (!server.url) return new McpStdioClient(server, workspace);
+  const client = server.transport === 'sse'
+    ? new McpLegacySseClient(server, REMOTE_LIMITS)
+    : new McpStreamableHttpClient(server, REMOTE_LIMITS);
+  activeClients.add(client);
+  const close = client.close.bind(client);
+  client.close = () => close().finally(() => activeClients.delete(client));
+  return client;
+}
+
 async function withClient<T>(
   server: MCPServerConfig,
   workspace: string,
-  operation: (client: McpStdioClient) => Promise<T>,
+  operation: (client: McpClient) => Promise<T>,
 ): Promise<T> {
-  const client = new McpStdioClient(server, workspace);
+  const client = createClient(server, workspace);
   try {
     await client.initialize();
     return await operation(client);
@@ -659,7 +695,7 @@ async function withClient<T>(
   }
 }
 
-async function advertisedTools(client: McpStdioClient): Promise<{ tools: McpTool[]; wireBytes: number }> {
+async function advertisedTools(client: McpClient): Promise<{ tools: McpTool[]; wireBytes: number }> {
   const response = await client.request('tools/list', {});
   if (response.wireBytes > MCP_LIMITS.maxInboundLineBytes) throw new Error('MCP tools response exceeds limit');
   const tools = (response.value as { tools?: unknown } | undefined)?.tools;

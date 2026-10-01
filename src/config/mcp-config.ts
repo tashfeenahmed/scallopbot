@@ -1,16 +1,31 @@
 /**
  * MCP Server Configuration
  *
- * Loads MCP server definitions from ~/.smartbot/mcp.json.
+ * Loads MCP server definitions from ~/.smartbot/mcp.json. A server is either
+ * local stdio (`command`) or remote (`url` + `transport` "http" | "sse").
  */
 
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 
+export type MCPRemoteTransport = 'http' | 'sse';
+
 export interface MCPServerConfig {
   name: string;
-  command: string;      // e.g., "npx"
+  /** Local stdio server executable. Exactly one of `command` or `url` is required. */
+  command?: string;     // e.g., "/opt/mcp/bin/server"
+  /** Remote server endpoint (Streamable HTTP endpoint, or legacy SSE stream URL). */
+  url?: string;
+  /** Remote transport: "http" (Streamable HTTP, default) or legacy "sse". */
+  transport?: MCPRemoteTransport;
+  /**
+   * Extra HTTP headers for remote servers. Values may reference environment
+   * variables as `${MCP_NAME}`; resolved values are redacted from all output.
+   */
+  headers?: Record<string, string>;
+  /** Shorthand for `Authorization: Bearer <token>`; may also use `${MCP_NAME}`. */
+  bearerToken?: string;
   args?: string[];      // e.g., ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
   env?: Record<string, string>;
   description?: string;
@@ -34,6 +49,46 @@ const MAX_ENV_VARS = 64;
 const MAX_ENV_VALUE_CHARS = 16_384;
 const MAX_DESCRIPTION_CHARS = 1_000;
 const MAX_ALLOWED_TOOLS = 256;
+const MAX_URL_CHARS = 2_048;
+const MAX_HEADERS = 32;
+const MAX_HEADER_VALUE_CHARS = 8_192;
+const HEADER_NAME_RE = /^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,128}$/;
+// Hop-by-hop / framing headers the client controls itself.
+const RESERVED_HEADERS = new Set([
+  'host', 'content-length', 'content-type', 'accept', 'connection', 'transfer-encoding',
+  'mcp-session-id', 'mcp-protocol-version', 'last-event-id',
+]);
+
+function isLoopbackOrPrivateHost(hostname: string): boolean {
+  const host = hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  if (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local')) return true;
+  if (host === '::1') return true;
+  const v4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (!v4) return false;
+  const [a, b] = [Number(v4[1]), Number(v4[2])];
+  return a === 127 || a === 10 || (a === 192 && b === 168) || (a === 172 && b >= 16 && b <= 31);
+}
+
+/**
+ * Remote MCP endpoints must be https, except loopback/private-network hosts
+ * where plain http is common (a server on the same Pi or LAN).
+ */
+export function isAllowedMcpUrl(value: unknown): value is string {
+  if (typeof value !== 'string' || value.length > MAX_URL_CHARS || /[\0\s]/.test(value)) return false;
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return false;
+  }
+  if (parsed.username || parsed.password) return false;
+  if (parsed.protocol === 'https:') return true;
+  return parsed.protocol === 'http:' && isLoopbackOrPrivateHost(parsed.hostname);
+}
+
+function isHeaderValue(value: unknown): value is string {
+  return typeof value === 'string' && value.length <= MAX_HEADER_VALUE_CHARS && !/[\0\r\n]/.test(value);
+}
 const MAX_TOOL_NAME_CHARS = 256;
 const MIN_TIMEOUT_MS = 1_000;
 // Keep the inner MCP timeout below the outer skill-executor default so the
@@ -52,11 +107,31 @@ function isValidServer(value: unknown, names: Set<string>): value is MCPServerCo
   const server = value as Record<string, unknown>;
   if (typeof server.name !== 'string' || !/^[A-Za-z0-9._-]{1,64}$/.test(server.name)) return false;
   if (names.has(server.name)) return false;
-  if (
+  const hasCommand = server.command !== undefined;
+  const hasUrl = server.url !== undefined;
+  if (hasCommand === hasUrl) return false; // exactly one transport family
+  if (hasCommand && (
     typeof server.command !== 'string' ||
     !server.command.trim() ||
     server.command.length > MAX_COMMAND_CHARS ||
     server.command.includes('\0')
+  )) return false;
+  if (hasUrl && !isAllowedMcpUrl(server.url)) return false;
+  if (!hasUrl && (
+    server.transport !== undefined || server.headers !== undefined || server.bearerToken !== undefined
+  )) return false;
+  if (hasUrl && (server.args !== undefined || server.env !== undefined)) return false;
+  if (server.transport !== undefined && server.transport !== 'http' && server.transport !== 'sse') return false;
+  if (server.headers !== undefined && (
+    !server.headers || typeof server.headers !== 'object' || Array.isArray(server.headers) ||
+    Object.keys(server.headers).length > MAX_HEADERS ||
+    !Object.entries(server.headers).every(([key, headerValue]) =>
+      HEADER_NAME_RE.test(key) && !RESERVED_HEADERS.has(key.toLowerCase()) && isHeaderValue(headerValue))
+  )) return false;
+  if (server.bearerToken !== undefined && (!isHeaderValue(server.bearerToken) || !server.bearerToken)) return false;
+  if (
+    server.bearerToken !== undefined && server.headers &&
+    Object.keys(server.headers).some(key => key.toLowerCase() === 'authorization')
   ) return false;
   if (server.args !== undefined && (
     !Array.isArray(server.args) ||
@@ -167,4 +242,37 @@ export function saveMCPConfig(servers: MCPServerConfig[], configPath?: string): 
  */
 export function hasMCPConfig(configPath?: string): boolean {
   return loadMCPConfig(configPath).length > 0;
+}
+
+const ENV_REFERENCE_RE = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g;
+
+/**
+ * Resolve the outbound HTTP headers for a remote MCP server. `${NAME}` inside
+ * a header value (or `bearerToken`) is replaced with that environment
+ * variable; an unset/empty reference fails closed. Error messages name the
+ * variable, never a value.
+ */
+export function resolveMcpHeaders(
+  server: MCPServerConfig,
+  env: NodeJS.ProcessEnv = process.env,
+): Record<string, string> {
+  const resolve = (raw: string, label: string): string =>
+    raw.replace(ENV_REFERENCE_RE, (_match, name: string) => {
+      const value = env[name];
+      if (typeof value !== 'string' || value.length === 0) {
+        throw new Error(`MCP server "${server.name}" ${label} references unset environment variable ${name}`);
+      }
+      if (/[\0\r\n]/.test(value)) {
+        throw new Error(`MCP server "${server.name}" ${label} environment variable ${name} contains invalid characters`);
+      }
+      return value;
+    });
+  const headers: Record<string, string> = {};
+  for (const [key, value] of Object.entries(server.headers ?? {})) {
+    headers[key] = resolve(value, `header ${key}`);
+  }
+  if (server.bearerToken !== undefined) {
+    headers.Authorization = `Bearer ${resolve(server.bearerToken, 'bearerToken')}`;
+  }
+  return headers;
 }

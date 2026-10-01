@@ -13,6 +13,11 @@ import {
 } from '../../../../memory/db.js';
 import { calculateBM25Score, buildDocFreqMap, SEARCH_WEIGHTS, type BM25Options } from '../../../../memory/bm25.js';
 import { TFIDFEmbedder, OllamaEmbedder, cosineSimilarity } from '../../../../memory/embeddings.js';
+import {
+  DEFAULT_OLLAMA_EMBEDDING_MODEL,
+  embeddingModelKey,
+  resolveEmbeddingSettings,
+} from '../../../../memory/embedding-config.js';
 import { rerankResults, type RerankCandidate } from '../../../../memory/reranker.js';
 import {
   isRecallRelevant,
@@ -118,13 +123,24 @@ function parseArgs(): MemorySearchArgs {
  * Try to get query embedding via Ollama. Returns undefined if unavailable.
  */
 async function getOllamaQueryEmbedding(query: string): Promise<number[] | undefined> {
+  const settings = resolveEmbeddingSettings();
+  // Only Ollama vectors can be matched from this subprocess (provider API keys
+  // are not passed to skills); other providers use the in-run TF-IDF path.
+  if (settings.provider !== 'ollama' && settings.provider !== 'auto') return undefined;
   const baseUrl = process.env.OLLAMA_BASE_URL || 'http://localhost:11434';
   try {
-    const embedder = new OllamaEmbedder({ baseUrl, model: 'nomic-embed-text' });
+    const embedder = new OllamaEmbedder({ baseUrl, model: settings.model || DEFAULT_OLLAMA_EMBEDDING_MODEL });
     return await embedder.embed(query);
   } catch {
     return undefined;
   }
+}
+
+/** Embedding space the gateway writes in, so mismatched vectors stay hidden. */
+function activeEmbeddingKey(): string {
+  const settings = resolveEmbeddingSettings();
+  const provider = settings.provider === 'auto' ? 'ollama' : settings.provider;
+  return embeddingModelKey(provider, settings.model);
 }
 
 /**
@@ -336,6 +352,7 @@ async function executeSearch(args: MemorySearchArgs): Promise<void> {
   let db: ScallopDatabase | null = null;
   try {
     db = new ScallopDatabase(dbPath);
+    db.setEmbeddingModel(activeEmbeddingKey());
 
     // Normal recall uses latest projections. A directly relevant historical
     // event may also contribute its dated superseded record: consolidation can

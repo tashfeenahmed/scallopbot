@@ -9,6 +9,11 @@
  * Skill metadata for gating and configuration
  */
 export interface SkillMetadata {
+  /**
+   * Free-form agentskills.io metadata (string key/values such as author or
+   * version). Preserved for display; never used for gating.
+   */
+  [key: string]: unknown;
   openclaw?: {
     /** Always include skill regardless of gates */
     always?: boolean;
@@ -103,6 +108,15 @@ export interface SkillFrontmatter {
   description: string;
   /** Optional homepage URL */
   homepage?: string;
+  /** agentskills.io: license name or bundled license file */
+  license?: string;
+  /** agentskills.io: environment requirements (free text) */
+  compatibility?: string;
+  /**
+   * agentskills.io (experimental): tools the skill expects to use. Surfaced to
+   * the model when the skill is loaded; not enforced as a permission grant.
+   */
+  'allowed-tools'?: string[];
   /** Whether exposed as slash command (default: true) */
   'user-invocable'?: boolean;
   /** Exclude from model prompt (default: false) */

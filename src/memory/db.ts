@@ -40,6 +40,7 @@ import {
   verifyResponseEvidenceClaims,
 } from '../security/evidence-grounding.js';
 import { sourceMemoryFingerprint } from './source-fingerprint.js';
+import { LEGACY_EMBEDDING_DIMENSION, LEGACY_EMBEDDING_KEY } from './embedding-config.js';
 
 const PERSISTED_MESSAGE_KIND_SQL = PERSISTED_SESSION_MESSAGE_KINDS
   .map(kind => `'${kind}'`)
@@ -894,6 +895,13 @@ interface SqliteTableColumn {
 export class ScallopDatabase {
   private db: Database.Database;
   private dbPath: string;
+  /**
+   * Active embedding-space key (e.g. `ollama:nomic-embed-text`). When set,
+   * stored vectors tagged with any other key are read back as `null` so they
+   * are never compared against vectors from the active provider, and new
+   * vectors are tagged with it. `null` (tests, tools) keeps legacy behaviour.
+   */
+  private embeddingModel: string | null = null;
   private lastRetentionMaintenanceAt = 0;
 
   constructor(
@@ -1733,6 +1741,138 @@ export class ScallopDatabase {
     // Migration: Index embeddings written before the bounded semantic index
     // existed. This is a one-time startup cost; normal writes stay indexed.
     this.migrateBackfillEmbeddingLsh();
+
+    // Migration: tag each stored vector with the embedding space it came from.
+    this.migrateAddEmbeddingModelColumns();
+  }
+
+  /**
+   * Add `embedding_model` to memories and session_summaries. Untagged legacy
+   * 768-dim vectors were written by the gateway's hard-wired Ollama
+   * nomic-embed-text embedder, so they are tagged as such once, when the column
+   * is first added. Anything else stays untagged and is treated as stale.
+   */
+  private migrateAddEmbeddingModelColumns(): void {
+    const migrate = this.db.transaction(() => {
+      for (const table of ['memories', 'session_summaries'] as const) {
+        const columns = new Set(
+          (this.db.prepare(`PRAGMA table_info(${table})`).all() as SqliteTableColumn[])
+            .map(column => column.name),
+        );
+        if (columns.has('embedding_model')) continue;
+        this.db.exec(`ALTER TABLE ${table} ADD COLUMN embedding_model TEXT`);
+        this.db.prepare(`
+          UPDATE ${table} SET embedding_model = ?
+          WHERE embedding IS NOT NULL AND json_valid(embedding)
+            AND json_array_length(embedding) = ?
+        `).run(LEGACY_EMBEDDING_KEY, LEGACY_EMBEDDING_DIMENSION);
+      }
+      this.db.exec(
+        'CREATE INDEX IF NOT EXISTS idx_memories_embedding_model ON memories(embedding_model)',
+      );
+    });
+    migrate();
+  }
+
+  /** Set the active embedding space; see the `embeddingModel` field. */
+  setEmbeddingModel(key: string | null): void {
+    this.embeddingModel = key;
+  }
+
+  getEmbeddingModel(): string | null {
+    return this.embeddingModel;
+  }
+
+  /** Whether a stored vector with this tag may be compared in the active space. */
+  private isEmbeddingVisible(tag: unknown): boolean {
+    return this.embeddingModel === null || tag === this.embeddingModel;
+  }
+
+  private parseVisibleEmbedding(row: Record<string, unknown>): number[] | null {
+    if (!row.embedding || !this.isEmbeddingVisible(row.embedding_model)) return null;
+    return JSON.parse(row.embedding as string) as number[];
+  }
+
+  /**
+   * Count vectors that do not belong to `key` (missing, untagged, or from
+   * another provider/model). Only current memories without any vector count
+   * as missing; superseded rows are re-embedded only if they had one.
+   */
+  countStaleEmbeddings(key: string): { memories: number; summaries: number } {
+    const memories = this.db.prepare(`
+      SELECT COUNT(*) AS c FROM memories
+      WHERE source != '_cleaned_sentinel'
+        AND ((embedding IS NOT NULL AND (embedding_model IS NULL OR embedding_model != ?))
+          OR (embedding IS NULL AND is_latest = 1))
+    `).get(key) as { c: number };
+    const summaries = this.db.prepare(`
+      SELECT COUNT(*) AS c FROM session_summaries
+      WHERE embedding IS NULL OR embedding_model IS NULL OR embedding_model != ?
+    `).get(key) as { c: number };
+    return { memories: memories.c, summaries: summaries.c };
+  }
+
+  /** Keyset page of memories whose vector is not in `key`'s space. */
+  getStaleEmbeddingMemories(
+    key: string,
+    afterId: string,
+    limit: number,
+    options: { includeMissing?: boolean; includeStale?: boolean } = {},
+  ): Array<{ id: string; userId: string; content: string }> {
+    const clauses: string[] = [];
+    if (options.includeStale !== false) {
+      clauses.push('(embedding IS NOT NULL AND (embedding_model IS NULL OR embedding_model != ?))');
+    }
+    if (options.includeMissing !== false) clauses.push('(embedding IS NULL AND is_latest = 1)');
+    if (clauses.length === 0) return [];
+    const params: unknown[] = [afterId];
+    if (options.includeStale !== false) params.push(key);
+    params.push(limit);
+    return (this.db.prepare(`
+      SELECT id, user_id, content FROM memories
+      WHERE id > ? AND source != '_cleaned_sentinel' AND (${clauses.join(' OR ')})
+      ORDER BY id LIMIT ?
+    `).all(...params) as Array<{ id: string; user_id: string; content: string }>)
+      .map(row => ({ id: row.id, userId: row.user_id, content: row.content }));
+  }
+
+  /** Keyset page of session summaries whose vector is not in `key`'s space. */
+  getStaleEmbeddingSummaries(
+    key: string,
+    afterId: string,
+    limit: number,
+  ): Array<{ id: string; summary: string }> {
+    return this.db.prepare(`
+      SELECT id, summary FROM session_summaries
+      WHERE id > ? AND (embedding IS NULL OR embedding_model IS NULL OR embedding_model != ?)
+      ORDER BY id LIMIT ?
+    `).all(afterId, key, limit) as Array<{ id: string; summary: string }>;
+  }
+
+  /** Replace a memory's vector and tag without touching updated_at. */
+  setMemoryEmbedding(id: string, userId: string, embedding: number[], key: string): void {
+    const write = this.db.transaction(() => {
+      this.db.prepare('UPDATE memories SET embedding = ?, embedding_model = ? WHERE id = ?')
+        .run(JSON.stringify(embedding), key, id);
+      this.replaceEmbeddingLsh(id, userId, embedding);
+    });
+    write();
+  }
+
+  setSessionSummaryEmbedding(id: string, embedding: number[], key: string): void {
+    this.db.prepare('UPDATE session_summaries SET embedding = ?, embedding_model = ? WHERE id = ?')
+      .run(JSON.stringify(embedding), key, id);
+  }
+
+  /**
+   * Mark every stored vector stale (keeps the vectors; they are hidden until
+   * re-embedded). Used by `reembed --all` so a forced run is resumable.
+   */
+  markAllEmbeddingsStale(): void {
+    this.db.exec(`
+      UPDATE memories SET embedding_model = NULL WHERE embedding IS NOT NULL;
+      UPDATE session_summaries SET embedding_model = NULL WHERE embedding IS NOT NULL;
+    `);
   }
 
   /**
@@ -2184,6 +2324,11 @@ export class ScallopDatabase {
         console.warn(`[migration] migrateBackfillEmbeddingLsh: ${error.message}`);
       }
     }
+  }
+
+  private tagMemoryEmbedding(memoryId: string): void {
+    this.db.prepare('UPDATE memories SET embedding_model = ? WHERE id = ?')
+      .run(this.embeddingModel, memoryId);
   }
 
   private replaceEmbeddingLsh(memoryId: string, userId: string, embedding: number[]): void {
@@ -3743,6 +3888,7 @@ export class ScallopDatabase {
     );
 
     if (memory.embedding) {
+      this.tagMemoryEmbedding(id);
       this.replaceEmbeddingLsh(id, memory.userId, memory.embedding);
     }
 
@@ -4075,6 +4221,7 @@ export class ScallopDatabase {
     );
 
     if (updates.embedding) {
+      this.tagMemoryEmbedding(id);
       this.replaceEmbeddingLsh(id, memory.userId, updates.embedding);
     }
 
@@ -4369,12 +4516,16 @@ export class ScallopDatabase {
       const batch = ids.slice(offset, offset + SQLITE_ID_BATCH_SIZE);
       const placeholders = batch.map(() => '?').join(',');
       const stmt = this.db.prepare(
-        `SELECT id, embedding FROM memories WHERE id IN (${placeholders})`
+        `SELECT id, embedding, embedding_model FROM memories WHERE id IN (${placeholders})`
       );
-      const rows = stmt.all(...batch) as Array<{ id: string; embedding: string | null }>;
+      const rows = stmt.all(...batch) as Array<{
+        id: string;
+        embedding: string | null;
+        embedding_model: string | null;
+      }>;
 
       for (const row of rows) {
-        if (row.embedding) {
+        if (row.embedding && this.isEmbeddingVisible(row.embedding_model)) {
           try {
             const parsed = JSON.parse(row.embedding) as unknown;
             if (Array.isArray(parsed) && parsed.every(value => typeof value === 'number' && Number.isFinite(value))) {
@@ -5515,8 +5666,8 @@ export class ScallopDatabase {
       this.db.prepare(`
         INSERT INTO session_summaries (
           id, session_id, user_id, summary, topics, message_count, duration_ms,
-          embedding, created_at, verified_at, verifier, verification_version, schema_valid
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          embedding, embedding_model, created_at, verified_at, verifier, verification_version, schema_valid
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         id,
         summary.sessionId,
@@ -5526,6 +5677,7 @@ export class ScallopDatabase {
         summary.messageCount,
         summary.durationMs,
         summary.embedding ? JSON.stringify(summary.embedding) : null,
+        summary.embedding ? this.embeddingModel : null,
         now,
         verifiedAt,
         verifier,
@@ -5619,7 +5771,7 @@ export class ScallopDatabase {
       this.db.prepare(`
         UPDATE session_summaries
         SET user_id = ?, summary = ?, topics = ?, message_count = ?,
-            duration_ms = ?, embedding = ?, created_at = ?, verified_at = ?,
+            duration_ms = ?, embedding = ?, embedding_model = ?, created_at = ?, verified_at = ?,
             verifier = ?, verification_version = ?, schema_valid = 1
         WHERE id = ?
       `).run(
@@ -5629,6 +5781,7 @@ export class ScallopDatabase {
         summary.messageCount,
         summary.durationMs,
         summary.embedding ? JSON.stringify(summary.embedding) : null,
+        summary.embedding ? this.embeddingModel : null,
         now,
         verifiedAt,
         verification.verifier.trim(),
@@ -6030,7 +6183,7 @@ export class ScallopDatabase {
       topics: this.parseSummaryTopics(row.topics) ?? [],
       messageCount: row.message_count as number,
       durationMs: row.duration_ms as number,
-      embedding: row.embedding ? JSON.parse(row.embedding as string) : null,
+      embedding: this.parseVisibleEmbedding(row),
       createdAt: row.created_at as number,
       verifiedAt: row.verified_at == null ? null : Number(row.verified_at),
       verifier: row.verifier == null ? null : String(row.verifier),
@@ -8659,7 +8812,7 @@ export class ScallopDatabase {
       lastAccessed: row.last_accessed as number | null,
       accessCount: row.access_count as number,
       sourceChunk: row.source_chunk as string | null,
-      embedding: row.embedding ? JSON.parse(row.embedding as string) : null,
+      embedding: this.parseVisibleEmbedding(row),
       metadata: row.metadata ? JSON.parse(row.metadata as string) : null,
       learnedFrom: (row.learned_from as string) || 'conversation',
       timesConfirmed: (row.times_confirmed as number) || 1,

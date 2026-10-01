@@ -17,6 +17,11 @@
  * # Instructions for the agent
  * ...markdown content...
  * ```
+ *
+ * Plain Anthropic / agentskills.io skills are accepted as-is: only `name` and
+ * `description` are required; `license`, `compatibility`, `allowed-tools` and
+ * free-form `metadata` are optional. Such skills are instruction-only unless
+ * they also opt into ScallopBot's executable-script conventions.
  */
 
 import yaml from 'js-yaml';
@@ -114,6 +119,18 @@ export function parseFrontmatter(content: string, path?: string): ParsedSkill {
       frontmatter['command-arg-mode'] = 'raw';
     }
 
+    // agentskills.io optional fields
+    if (typeof parsed.license === 'string' && parsed.license.trim()) {
+      frontmatter.license = parsed.license.trim();
+    }
+    if (typeof parsed.compatibility === 'string' && parsed.compatibility.trim()) {
+      frontmatter.compatibility = parsed.compatibility.trim();
+    }
+    const allowedTools = parseAllowedTools(parsed['allowed-tools']);
+    if (allowedTools) {
+      frontmatter['allowed-tools'] = allowedTools;
+    }
+
     // Parse metadata
     if (parsed.metadata && typeof parsed.metadata === 'object') {
       frontmatter.metadata = parseMetadata(parsed.metadata as Record<string, unknown>);
@@ -164,11 +181,26 @@ export function parseFrontmatter(content: string, path?: string): ParsedSkill {
   }
 }
 
+/** `allowed-tools` is a space-delimited string in the spec; also accept a YAML list. */
+function parseAllowedTools(value: unknown): string[] | undefined {
+  const items = typeof value === 'string'
+    ? value.split(/\s+/)
+    : Array.isArray(value) ? value.filter((x): x is string => typeof x === 'string') : [];
+  const tools = items.map(item => item.trim()).filter(Boolean).slice(0, 64);
+  return tools.length > 0 ? tools : undefined;
+}
+
 /**
  * Parse metadata object
  */
 function parseMetadata(raw: Record<string, unknown>): SkillMetadata {
   const metadata: SkillMetadata = {};
+
+  // agentskills.io metadata is a flat string map; keep scalar entries.
+  for (const [key, value] of Object.entries(raw)) {
+    if (key === 'openclaw') continue;
+    if (['string', 'number', 'boolean'].includes(typeof value)) metadata[key] = value;
+  }
 
   if (raw.openclaw && typeof raw.openclaw === 'object') {
     const oc = raw.openclaw as Record<string, unknown>;

@@ -29,6 +29,7 @@ import type { LLMProvider } from '../providers/types.js';
 import { projectTo3D } from '../utils/pca.js';
 import { applyMMR, type MMRItem } from './mmr.js';
 import { SEMANTIC_CANDIDATE_LIMIT } from './semantic-index.js';
+import { reembedStale } from './reembed.js';
 
 /**
  * Options for ScallopMemoryStore
@@ -40,6 +41,12 @@ export interface ScallopMemoryStoreOptions {
   logger: Logger;
   /** Embedding provider for semantic search */
   embedder?: EmbeddingProvider;
+  /**
+   * Embedding-space key of `embedder` (see embedding-config.ts). When set,
+   * vectors stored by other providers/models are ignored and new vectors are
+   * tagged with it.
+   */
+  embeddingModel?: string;
   /** Decay configuration */
   decayConfig?: DecayConfig;
   /** Relation detection options */
@@ -133,6 +140,7 @@ export class ScallopMemoryStore {
 
   constructor(options: ScallopMemoryStoreOptions) {
     this.db = new ScallopDatabase(options.dbPath);
+    if (options.embeddingModel) this.db.setEmbeddingModel(options.embeddingModel);
     this.logger = options.logger.child({ component: 'scallop-memory' });
     // Wrap embedder with cache to avoid recomputing embeddings for seen texts
     this.embedder = options.embedder ? new CachedEmbedder(options.embedder) : undefined;
@@ -953,7 +961,12 @@ export class ScallopMemoryStore {
    * Processes in batches to avoid overloading the embedding provider.
    * Returns the number of memories updated.
    */
-  async backfillEmbeddings(options?: { batchSize?: number; limit?: number }): Promise<number> {
+  async backfillEmbeddings(options?: {
+    batchSize?: number;
+    limit?: number;
+    /** Also re-embed vectors from another embedding model (default true when a model key is set). */
+    includeStale?: boolean;
+  }): Promise<number> {
     if (!this.embedder) {
       this.logger.warn('No embedding provider available, cannot backfill');
       return 0;
@@ -961,6 +974,21 @@ export class ScallopMemoryStore {
 
     const batchSize = options?.batchSize ?? 20;
     const limit = options?.limit ?? 500;
+
+    const key = this.db.getEmbeddingModel();
+    if (key) {
+      const stale = this.db.countStaleEmbeddings(key);
+      if (stale.memories + stale.summaries === 0) return 0;
+      this.logger.info({ ...stale, model: key, limit }, 'Starting embedding backfill');
+      const result = await reembedStale(this.db, this.embedder, key, {
+        batchSize,
+        limit,
+        includeStale: options?.includeStale ?? true,
+      });
+      const updated = result.memories.embedded + result.summaries.embedded;
+      this.logger.info({ ...result, model: key }, 'Embedding backfill complete');
+      return updated;
+    }
 
     // Find memories without embeddings
     const rows = this.db.raw<{ id: string; content: string }>(

@@ -71,7 +71,7 @@ const SAFE_BASE_ENV_KEYS = [
 /** Non-secret Smartbot runtime paths/config used by bundled skills. */
 const SAFE_SMARTBOT_ENV_KEYS = [
   'AGENT_WORKSPACE', 'MEMORY_DB_PATH', 'SCALLOPBOT_DATA_DIR',
-  'OLLAMA_BASE_URL', 'LOCAL_BASE_URL',
+  'OLLAMA_BASE_URL', 'LOCAL_BASE_URL', 'EMBEDDING_PROVIDER', 'EMBEDDING_MODEL',
 ] as const;
 
 function copyDefinedEnv(target: Record<string, string>, keys: readonly string[]): void {
@@ -105,6 +105,11 @@ export function buildSkillSubprocessEnv(
   for (const key of openclaw?.requires?.anyEnv ?? []) explicitlyAllowed.add(key);
   for (const key of openclaw?.optionalEnv ?? []) explicitlyAllowed.add(key);
   copyDefinedEnv(env, [...explicitlyAllowed]);
+  if (skill.source === 'bundled' && skill.name === 'mcp') {
+    // Remote MCP auth headers in ~/.smartbot/mcp.json may reference `${MCP_*}`
+    // variables. Only the bundled MCP client receives that namespace.
+    copyDefinedEnv(env, Object.keys(process.env).filter(key => /^MCP_[A-Z0-9_]+$/.test(key)));
+  }
 
   env.SKILL_NAME = skill.name;
   env.SKILL_DIR = skill.scriptsDir ? join(skill.scriptsDir, '..') : '';

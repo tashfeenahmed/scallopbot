@@ -10,7 +10,7 @@ import { homedir } from 'os';
 import { createHash } from 'crypto';
 import type { Logger } from 'pino';
 import { parseFrontmatter } from './parser.js';
-import { checkGates } from './loader.js';
+import { checkGates, hasExecutableEntrypoint } from './loader.js';
 import type { Skill, SkillFrontmatter } from './types.js';
 import { unzipSync } from 'fflate';
 
@@ -1088,7 +1088,7 @@ export class SkillPackageManager {
       let hasScripts = false;
       try {
         const stat = await fs.stat(scriptsDir);
-        hasScripts = stat.isDirectory();
+        hasScripts = stat.isDirectory() && await hasExecutableEntrypoint(skillDir, parsed.frontmatter);
       } catch {
         // No scripts directory
       }

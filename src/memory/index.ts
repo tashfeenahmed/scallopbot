@@ -36,6 +36,13 @@ export {
   type OpenAIEmbedderOptions,
   type OllamaEmbedderOptions,
 } from './embeddings.js';
+export {
+  createConfiguredEmbedder,
+  embeddingModelKey,
+  resolveEmbeddingSettings,
+  type ConfiguredEmbedder,
+} from './embedding-config.js';
+export { reembedStale, type ReembedOptions, type ReembedResult } from './reembed.js';
 
 // LLM-based fact extraction
 export {
