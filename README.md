@@ -24,7 +24,7 @@
 
 ---
 
-Open-source personal AI agents like [OpenClaw](https://github.com/openclaw/openclaw) excel at tool orchestration but lack genuine cognitive depth: no memory lifecycle, no self-reflection, no autonomous reasoning. ScallopBot addresses this cognition gap with a bio-inspired cognitive architecture that maintains full compatibility with the OpenClaw skill ecosystem. Runs at an estimated $0.06--0.10/day in model spend -- see the [cost comparison](https://scallopbot.com/cost).
+Open-source personal AI agents like [OpenClaw](https://github.com/openclaw/openclaw) excel at tool orchestration, but their memory mostly stores and promotes notes rather than reshaping them, and they have no self-reflection or autonomous reasoning loop. ScallopBot addresses this cognition gap with a bio-inspired cognitive architecture that maintains full compatibility with the OpenClaw skill ecosystem. Runs at an estimated $0.06--0.10/day in model spend -- see the [cost comparison](https://scallopbot.com/cost).
 
 ScallopBot runs on your own server, routes each request to the cheapest model that can handle it, tracks every cent in real time, and fails over across 7 LLM providers automatically. It connects to Telegram, Discord, WhatsApp, Slack, Signal, Matrix, a CLI, and a REST/WebSocket API -- all from a single Node.js process.
 
@@ -405,23 +405,25 @@ Actionable reminders automatically execute when they contain action words (check
 
 | Capability | OpenClaw | ScallopBot |
 |------------|----------|------------|
-| **Memory retrieval** | Vector + FTS5 hybrid | BM25 + semantic + LLM re-ranking |
-| **Memory decay** | -- | Natural activation + category half-lives + user-confirmation reinforcement |
-| **Memory consolidation** | -- | BFS-clustered fusion + NREM cross-category |
-| **Memory forgetting** | -- | Utility-based with soft-archive / hard-prune |
+| **Memory retrieval** | Vector + keyword hybrid, deterministic weighted ranking | BM25 + semantic + LLM re-ranking |
+| **Memory decay** | Recency decay on search ranking (30-day half-life) | Natural activation + category half-lives + user-confirmation reinforcement |
+| **Memory consolidation** | "Dreaming" promotes frequently-recalled notes into MEMORY.md; entries kept as written | BFS-clustered fusion + NREM cross-category |
+| **Memory forgetting** | -- (notes are never archived or pruned) | Utility-based with soft-archive / hard-prune |
 | **Associative retrieval** | -- | Spreading activation with typed edges |
-| **Dream cycle** | -- | NREM consolidation + REM exploration |
+| **Dream cycle** | Light / REM / deep sweep (on by default), promotion only | NREM consolidation + REM exploration |
 | **Affect detection** | -- | AFINN-165 + VADER + dual-EMA + affect guard |
 | **Self-reflection** | -- | Private composite reflection feeding benchmarked, rollback-capable evolution |
 | **Proactive intelligence** | Basic Heartbeat | Gap scanner + inner thoughts + trust feedback loop |
 | **Background processing** | Heartbeat wake-up | 3-tier daemon (Pulse / Breath / Sleep) |
-| **Cost tracking & budgets** | -- | Built-in per-token tracking with daily/monthly limits |
-| **Multi-provider routing** | 2 providers | 7 providers with health-aware failover |
+| **Cost tracking & budgets** | Token + estimated-cost reporting (`/usage`, `/status`), no spend limits | Built-in per-token tracking with daily/monthly limits |
+| **Multi-provider routing** | Swappable model plugins | 7 providers with health-aware failover |
 | **Smart model selection** | Manual | Auto-routes by complexity |
 | **Local voice (zero cost)** | -- | Kokoro TTS + faster-whisper STT |
 | **Skill ecosystem** | 100+ bundled, 3000+ ClawHub | Full OpenClaw SKILL.md compatibility |
-| **Channel support** | 15+ platforms | 9 channels |
-| **Native apps** | macOS/iOS/Android | -- |
+| **Channel support** | 25+ platforms | 9 channels |
+| **Native apps** | macOS/iOS/Android/Windows/Linux | -- |
+
+OpenClaw column reflects its public README and docs as of October 2026; it ships fast, so corrections are welcome. A fuller write-up is at [scallopbot.com/vs/openclaw](https://scallopbot.com/vs/openclaw/).
 
 ## Deployment
 
