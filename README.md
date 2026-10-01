@@ -1,5 +1,8 @@
 <p align="center">
-  <img src="assets/scallop.png" alt="ScallopBot" width="120" height="120">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.svg">
+    <img src="assets/logo-light.svg" alt="ScallopBot" width="120" height="120">
+  </picture>
 </p>
 
 <h1 align="center">ScallopBot</h1>
@@ -24,11 +27,11 @@
 
 ---
 
-Open-source personal AI agents like [OpenClaw](https://github.com/openclaw/openclaw) excel at tool orchestration, but their memory mostly stores and promotes notes rather than reshaping them, and they have no self-reflection or autonomous reasoning loop. ScallopBot addresses this cognition gap with a bio-inspired cognitive architecture that maintains full compatibility with the OpenClaw skill ecosystem. Runs at an estimated $0.06--0.10/day in model spend -- see the [cost comparison](https://scallopbot.com/cost).
+Open-source personal AI agents like [OpenClaw](https://github.com/openclaw/openclaw) excel at tool orchestration, but their memory mostly stores and promotes notes rather than reshaping them, and they have no self-reflection or autonomous reasoning loop. ScallopBot addresses this cognition gap with a bio-inspired cognitive architecture that maintains full compatibility with the OpenClaw skill ecosystem. Runs at an estimated $0.05--0.10/day in model spend -- see the [cost comparison](https://scallopbot.com/cost). Comparing it with a gateway like LiteLLM? See [ScallopBot as a LiteLLM alternative](https://scallopbot.com/litellm-alternative/).
 
-ScallopBot runs on your own server, routes each request to the cheapest model that can handle it, tracks every cent in real time, and fails over across 7 LLM providers automatically. It connects to Telegram, Discord, WhatsApp, Slack, Signal, Matrix, a CLI, and a REST/WebSocket API -- all from a single Node.js process.
+ScallopBot runs on your own server, routes each request to the cheapest model that can handle it, tracks every cent in real time, and fails over between the LLM providers you have keys for (7 supported). You talk to it over Telegram, the web dashboard (REST + WebSocket API), or a CLI -- all from a single Node.js process. Adapters for Discord, WhatsApp, Slack, Signal and Matrix exist in `src/channels/` but are not yet started by the gateway.
 
-The architecture is validated against 30 research works from 2023--2026 across six domains (memory retrieval, lifecycle management, associative reasoning, sleep-inspired consolidation, affect modelling, and proactive intelligence). The full cognitive pipeline operates at an estimated **$0.06--0.10 per day**.
+The architecture is validated against 30 research works from 2023--2026 across six domains (memory retrieval, lifecycle management, associative reasoning, sleep-inspired consolidation, affect modelling, and proactive intelligence). The full cognitive pipeline operates at an estimated **$0.05--0.10 per day** in model spend.
 
 ## Benchmark Results
 
@@ -37,7 +40,7 @@ Evaluated on the [LoCoMo](https://github.com/snap-research/locomo) long-conversa
 | Metric | OpenClaw | ScallopBot | Improvement |
 |--------|:--------:|:----------:|:-----------:|
 | **F1** | 0.38 | **0.48** | +26% |
-| **Exact Match** | 0.24 | **0.30** | +22% |
+| **Exact Match** | 0.25 | **0.30** | +22% |
 
 **F1 by question category:**
 
@@ -53,10 +56,11 @@ Evaluated on the [LoCoMo](https://github.com/snap-research/locomo) long-conversa
 | Multi-hop | 0.32 | **0.42** | +0.10 |
 | Adversarial | 0.77 | **0.97** | +0.20 |
 
-Adversarial questions show the largest gain (+0.20) driven by cognitive pipeline features and strict answering constraints. Multi-hop benefits from memory fusion and NREM dream consolidation.
+Adversarial questions show the largest gain (+0.20) driven by cognitive pipeline features and strict answering constraints. Multi-hop benefits from NREM dream consolidation (cluster fusion).
 
-Figures are the QA-item-weighted average over all 1,049 items (ScallopBot F1 0.4784 / EM
-0.3003, OpenClaw F1 0.3801 / EM 0.2469). Both arms use the same strict QA-answerer prompt.
+Overall F1/EM are the QA-item-weighted average over all 1,049 items (ScallopBot F1 0.4784 / EM
+0.3003, OpenClaw F1 0.3801 / EM 0.2469). Per-category figures are the mean of the five
+per-conversation scores. Both arms use the same strict QA-answerer prompt.
 The harness lives in [`src/eval/`](src/eval/); full methodology is in the
 [paper](Paper2026.pdf).
 
@@ -129,13 +133,17 @@ silently degrading.
 
 ## Cognitive Architecture
 
-ScallopBot's cognitive layer is organised into six subsystems, orchestrated by a three-tier heartbeat daemon:
+ScallopBot's cognitive layer is organised into six subsystems, orchestrated by a three-tier gardener daemon:
 
 | Tier | Interval | Operations |
 |------|----------|------------|
-| **Pulse** | 5 min | Health monitoring, retrieval auditing, affect EMA update |
-| **Breath** | 6 h | Decay engine, memory fusion, forgetting |
-| **Sleep** | Nightly | Dream cycle (NREM+REM), private self-reflection, guarded skill/prompt evolution, gap scanning |
+| **Light** | 1 min | Incremental decay, expiring scheduled items, health ping |
+| **Deep** | ~72 min | Full decay, session summaries, forgetting, retrieval audit, behavioural inference, proactive evaluation |
+| **Sleep** | ≥20 h apart, only in 2--5 AM local quiet hours | Dream cycle (NREM+REM), private self-reflection, gap scanning, board review, guarded skill/prompt evolution |
+
+Affect is updated per message, not on a tick. Intervals and quiet hours are configurable with
+`GARDENER_LIGHT_INTERVAL_MS`, `GARDENER_DEEP_INTERVAL_MS`, `GARDENER_SLEEP_INTERVAL_MS`,
+`GARDENER_QUIET_HOURS_START` and `GARDENER_QUIET_HOURS_END`.
 
 ### Bio-Inspired Dream Cycle
 
@@ -171,7 +179,7 @@ SQLite-backed memory with ACID guarantees. Combines BM25 keyword scoring with se
 
 ### Cost-Aware Model Routing
 
-Every API call is priced at the token level using a built-in pricing database covering 50+ models. A complexity analyzer scores each request and routes it to the cheapest capable tier: fast (Groq, Moonshot), standard (OpenAI, xAI), or capable (Anthropic). Daily and monthly budgets gate requests before they're sent. Provider health is tracked per-call -- consecutive failures trigger automatic failover with exponential backoff and jitter.
+Every API call is priced at the token level using a built-in pricing database covering 50+ models. A complexity analyzer scores each request and routes it to a tier -- fast (prefers Groq, then Moonshot), standard (prefers Moonshot, then OpenAI), or capable (prefers Anthropic) -- falling through to the next healthy provider you have keys for. OpenRouter joins the failover chain when listed in `PROVIDER_ORDER`. Daily and monthly budgets gate requests before they're sent. Provider health is tracked per-call -- consecutive failures trigger automatic failover with exponential backoff and jitter.
 
 ### Local-First Voice Pipeline
 
@@ -199,20 +207,20 @@ At 100 messages/day with Groq for fast-tier operations:
 | Memory re-ranking | 100 | $0.003 |
 | Relation classification | 50 | $0.0015 |
 | Affect classification | 100 | $0 (lexicon) |
-| Decay/fusion (Breath ticks) | 48 | $0.005 |
+| Session summaries (deep tick, ~72 min) | ≤20 | ~$0.005 |
 | Dream cycle (nightly) | 15--20 | $0.005 |
 | Self-reflection (nightly) | 1 | $0.001 |
 | Gap scanner (nightly) | 3--5 | $0.001 |
-| **Total** | | **$0.047--0.10** |
+| **Total** | | **~$0.05** (up to ~$0.10 with a heavier primary model) |
 
-The entire cognitive pipeline -- dreams, reflection, affect, gap scanning -- adds approximately $0.02/day to the base conversation cost.
+The entire cognitive pipeline -- dreams, reflection, affect, gap scanning -- adds approximately $0.02/day to the base conversation cost. Add a $5--8/month VPS (or a Raspberry Pi you already own) for hosting; see the [cost page](https://scallopbot.com/cost/).
 
 ## Providers
 
 | Provider | Default Model | Best For |
 |----------|--------------|----------|
 | **Anthropic** | Claude Sonnet 4 | Complex reasoning, coding |
-| **Moonshot** | Kimi K2.5 (extended thinking) | Cost-effective daily driver |
+| **Moonshot** | Kimi K2.5 (thinking on request) | Cost-effective daily driver |
 | **OpenAI** | GPT-4o | General tasks |
 | **xAI** | Grok 4 | Real-time information |
 | **Groq** | Llama 3.3 70B | Ultra-fast inference |
@@ -220,6 +228,16 @@ The entire cognitive pipeline -- dreams, reflection, affect, gap scanning -- add
 | **OpenRouter** | 100+ models | Maximum flexibility |
 
 Configure one or more in `.env`. The router handles selection and failover automatically.
+
+### Fine-tuned local models (optional)
+
+Two small models fine-tuned for ScallopBot's own jobs are published on Hugging Face:
+[scalloptools-1](https://huggingface.co/tashfene/scalloptools-1) (tool selection) and
+[scallopmemory-1](https://huggingface.co/tashfene/scallopmemory-1) (memory extraction). Both ship
+as q5 GGUF files (~2.9 GB) that run under Ollama. Plug them in with Multi-Model Mode below
+(register each as a `CUSTOM_PROVIDER_*`; point `MODEL_FACT_EXTRACTION` at scallopmemory-1, and put
+scalloptools-1 first in `PROVIDER_ORDER` to make it the chat/tool model). Their
+benchmark numbers are on [scallopbot.com](https://scallopbot.com/#models).
 
 ### Multi-Model Mode (optional)
 
@@ -269,7 +287,7 @@ sent as a bearer token.
 
 ## Bundled Skills
 
-16 skills ship out of the box:
+29 skills ship out of the box:
 
 | Skill | Description |
 |-------|-------------|
@@ -277,18 +295,31 @@ sent as a bearer token.
 | `read_file` | Read file contents |
 | `write_file` | Create/overwrite files |
 | `edit_file` | Make targeted edits |
-| `browser` | Web automation ([agent-browser](https://github.com/ArcadeAI/agent-browser) from Vercel Labs) |
+| `multi_edit` | Apply several replacements to one file atomically |
+| `apply_patch` | Apply a unified diff patch |
+| `ls` | List files and directories |
+| `glob` | Find files by glob pattern |
+| `grep` | Search file contents with regex |
+| `codesearch` | Find code definitions (functions, classes, imports) |
+| `run_code` | Run a throwaway Python, Node or bash program |
+| `browser` | Web automation ([agent-browser](https://github.com/vercel-labs/agent-browser) from Vercel Labs) |
 | `web_search` | Search via Brave API |
+| `webfetch` | Fetch and extract text from a URL |
 | `memory_search` | Query the hybrid memory engine |
-| `reminder` | One-time, interval, and recurring cron reminders |
+| `board` | Task board: create, move, prioritise and track work items |
+| `goals` | Track goals, milestones and tasks |
+| `triggers` | View and cancel automatic follow-up schedules |
+| `question` | Ask the user a clarifying question |
+| `batch` | Run several tool calls in parallel |
 | `pdf` | Create PDFs with [Typst](https://typst.app), read with poppler, edit with qpdf |
+| `notion` | Typed Notion API access |
+| `mcp` | Call tools on configured MCP servers |
 | `git` | Version control operations |
 | `npm` | Package management |
 | `docker` | Container management |
 | `telegram_send` | Send messages programmatically |
-| `goals` | Track and manage goals |
-| `triggers` | Define event-based triggers |
-| `progress` | Report progress to the user |
+| `reminder` | Reminders (deprecated; use `board`) |
+| `progress` | Goal progress (deprecated; use `board`) |
 
 Install community skills from ClawHub:
 
@@ -298,17 +329,13 @@ node dist/cli.js skill install elicitation
 
 ## Channels
 
-| Channel | Features |
-|---------|----------|
-| **Telegram** | Voice transcription, voice reply, file upload/download, photo analysis, per-user onboarding |
-| **Discord** | Slash commands, mention-based chat, DM support |
-| **WhatsApp** | Regular account (no Business API needed), QR auth, media support |
-| **Slack** | App-based integration |
-| **Signal** | End-to-end encrypted messaging |
-| **Matrix** | Federated chat |
-| **CLI** | Interactive terminal session with session resume (`-s <id>`) |
-| **REST API** | `POST /api/chat`, SSE streaming, session management, file download, budget management (`POST /api/costs/budget`) |
-| **WebSocket** | Real-time bidirectional communication with the web dashboard |
+| Channel | Status | Features |
+|---------|--------|----------|
+| **Telegram** | Live (`start`) | Voice transcription, voice reply, file upload/download, photo analysis, per-user onboarding |
+| **Web dashboard / REST API** | Live (`start`, needs `WEB_UI_ENABLED=true`) | `POST /api/chat`, SSE streaming, session management, file download, budget management (`POST /api/costs/budget`) |
+| **WebSocket** | Live (served by the API channel) | Real-time bidirectional communication with the web dashboard |
+| **CLI** | Live (`chat`) | Interactive terminal session with session resume (`-s <id>`) |
+| Discord, WhatsApp, Slack, Signal, Matrix | Adapter code only | Classes exist in `src/channels/` but the gateway does not start them yet |
 
 ## Web Dashboard
 
@@ -327,6 +354,7 @@ Minimal `.env`:
 
 ```bash
 ANTHROPIC_API_KEY=sk-...           # At least one provider required
+WEB_UI_ENABLED=true                # Optional: web dashboard + REST/WebSocket API
 TELEGRAM_BOT_TOKEN=...             # Optional: enable Telegram
 TELEGRAM_ALLOWED_USERS=123456789   # Optional: restrict access
 BRAVE_SEARCH_API_KEY=...           # Optional: enable web search
@@ -335,12 +363,12 @@ BRAVE_SEARCH_API_KEY=...           # Optional: enable web search
 Budget controls:
 
 ```bash
-COST_DAILY_BUDGET=5.00
-COST_MONTHLY_BUDGET=100.00
-COST_WARNING_THRESHOLD=0.8
+DAILY_BUDGET=5.00
+MONTHLY_BUDGET=100.00
+BUDGET_WARNING_THRESHOLD=0.75      # default; dashboard bars turn amber past this
 ```
 
-Full reference: [.env.example](.env.example)
+Common options: [.env.example](.env.example); every variable is read in [`src/config/config.ts`](src/config/config.ts).
 
 ## Reminders
 
@@ -354,7 +382,7 @@ Natural language scheduling with timezone awareness:
 "remind me weekdays at 8am to exercise"          -> Weekday recurring
 ```
 
-Actionable reminders automatically execute when they contain action words (check, search, get, find).
+Reminders can be plain nudges or tasks; a task runs a sub-agent at the scheduled time and sends you the result.
 
 ## Error Recovery
 
@@ -375,20 +403,18 @@ Actionable reminders automatically execute when they contain action words (check
 +-----------------------------------------------------------------+
 |                                                                  |
 |  Telegram ---+                                                   |
-|  Discord ----+                                                   |
-|  WhatsApp ---+                                                   |
-|  Slack ------+-->  GATEWAY --> AGENT --> ROUTER --> PROVIDERS     |
-|  Signal -----+       |          |                    |           |
-|  Matrix -----+  +---------+    |         +-----------+           |
-|  CLI --------+  | Session |    |         | Anthropic |           |
-|  API/WS -----+  | Manager |    |         | Moonshot  |           |
-|                  +---------+    |         | OpenAI    |           |
+|  CLI --------+-->  GATEWAY --> AGENT --> ROUTER --> PROVIDERS     |
+|  API/WS -----+       |          |                    |           |
+|                 +---------+    |         +-----------+           |
+|                 | Session |    |         | Anthropic |           |
+|                 | Manager |    |         | Moonshot  |           |
+|                 +---------+    |         | OpenAI    |           |
 |                       |         |         |           |           |
 |                       +--> OUTCOME BRAIN --> delivery/actions     |
 |                                 |         | xAI       |           |
 |                 +---------------+-+       | Groq      |           |
 |                 |  COGNITIVE LAYER |       | Ollama    |           |
-|                 |  Pulse | Breath  |       | OpenRouter|           |
+|                 |  Light |  Deep   |       | OpenRouter|           |
 |                 |  Sleep | Dreams  |       +-----------+           |
 |                 +---------+-------+                               |
 |                           |                                       |
@@ -414,13 +440,13 @@ Actionable reminders automatically execute when they contain action words (check
 | **Affect detection** | -- | AFINN-165 + VADER + dual-EMA + affect guard |
 | **Self-reflection** | -- | Private composite reflection feeding benchmarked, rollback-capable evolution |
 | **Proactive intelligence** | Basic Heartbeat | Gap scanner + inner thoughts + trust feedback loop |
-| **Background processing** | Heartbeat wake-up | 3-tier daemon (Pulse / Breath / Sleep) |
+| **Background processing** | Heartbeat wake-up | 3-tier gardener (Light / Deep / Sleep) |
 | **Cost tracking & budgets** | Token + estimated-cost reporting (`/usage`, `/status`), no spend limits | Built-in per-token tracking with daily/monthly limits |
-| **Multi-provider routing** | Swappable model plugins | 7 providers with health-aware failover |
+| **Multi-provider routing** | Swappable model plugins | 7 supported providers with health-aware failover |
 | **Smart model selection** | Manual | Auto-routes by complexity |
 | **Local voice (zero cost)** | -- | Kokoro TTS + faster-whisper STT |
 | **Skill ecosystem** | 100+ bundled, 3000+ ClawHub | Full OpenClaw SKILL.md compatibility |
-| **Channel support** | 25+ platforms | 9 channels |
+| **Channel support** | 25+ platforms | Telegram, web dashboard/API, CLI (5 more adapters not yet wired) |
 | **Native apps** | macOS/iOS/Android/Windows/Linux | -- |
 
 OpenClaw column reflects its public README and docs as of October 2026; it ships fast, so corrections are welcome. A fuller write-up is at [scallopbot.com/vs/openclaw](https://scallopbot.com/vs/openclaw/).
@@ -500,7 +526,7 @@ sudo systemctl enable --now scallopbot
 ```
 src/
 ├── agent/          # Agent loop, session management, crash recovery
-├── channels/       # Telegram, Discord, WhatsApp, Slack, Signal, Matrix, CLI, API
+├── channels/       # Telegram, CLI, API live; Discord/WhatsApp/Slack/Signal/Matrix adapters unwired
 ├── config/         # Zod-validated configuration schemas
 ├── dashboard/      # Systemd config generator, crash recovery
 ├── gateway/        # Server orchestration and channel initialization
@@ -511,7 +537,7 @@ src/
 ├── providers/      # LLM provider implementations (7 providers)
 ├── reliability/    # Circuit breaker, graceful degradation
 ├── routing/        # Cost tracking, complexity analysis, model selection
-├── skills/         # Loader, registry, executor, ClawHub client (16 bundled)
+├── skills/         # Loader, registry, executor, ClawHub client (29 bundled)
 ├── evolution/      # Evidence-gated procedural skill learning and curation
 ├── goals/          # Persistent, budgeted, verified autonomous goals
 ├── workflow/       # Context-efficient validated tool DAG execution
