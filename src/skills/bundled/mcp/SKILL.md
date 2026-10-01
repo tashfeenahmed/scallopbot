@@ -64,6 +64,36 @@ other install-on-execution commands:
 
 After editing, re-assert the mode with `chmod 600 ~/.smartbot/mcp.json`.
 
+### Remote servers (Streamable HTTP or legacy SSE)
+
+Use `url` instead of `command`. `transport` is `"http"` (Streamable HTTP, the
+default) or `"sse"` (the older HTTP+SSE transport, `url` is the SSE stream).
+URLs must be `https://`, except loopback/LAN hosts (`localhost`, `127.x`,
+`10.x`, `192.168.x`, `172.16-31.x`, `*.local`).
+
+```json
+{
+  "servers": [
+    {
+      "name": "docs",
+      "url": "https://mcp.example.com/mcp",
+      "transport": "http",
+      "bearerToken": "${MCP_DOCS_TOKEN}",
+      "headers": { "X-Workspace": "home" },
+      "timeoutMs": 20000,
+      "allowedTools": ["search_docs"]
+    }
+  ]
+}
+```
+
+Header values and `bearerToken` may be literals or `${VAR}` references. Skills
+run with a stripped environment, so only variables named `MCP_*` (set in the
+bot's `.env`) reach the MCP client. An unset reference fails the call and names
+only the variable. Resolved values are redacted from every result and error.
+Redirects are refused, so credentials are never forwarded to another host, and
+`Mcp-Session-Id` sessions are released with a DELETE when each call finishes.
+
 ## Security boundary
 
 MCP servers are native programs, not sandboxes. By default they run with the bot

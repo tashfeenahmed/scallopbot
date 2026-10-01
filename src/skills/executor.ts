@@ -87,6 +87,11 @@ export function buildSkillSubprocessEnv(
   const explicitlyAllowed = new Set(openclaw?.requires?.env ?? []);
   if (openclaw?.primaryEnv) explicitlyAllowed.add(openclaw.primaryEnv);
   copyDefinedEnv(env, [...explicitlyAllowed]);
+  if (skill.source === 'bundled' && skill.name === 'mcp') {
+    // Remote MCP auth headers in ~/.smartbot/mcp.json may reference `${MCP_*}`
+    // variables. Only the bundled MCP client receives that namespace.
+    copyDefinedEnv(env, Object.keys(process.env).filter(key => /^MCP_[A-Z0-9_]+$/.test(key)));
+  }
 
   env.SKILL_NAME = skill.name;
   env.SKILL_DIR = skill.scriptsDir ? join(skill.scriptsDir, '..') : '';

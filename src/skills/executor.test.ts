@@ -907,4 +907,22 @@ describe('SkillExecutor', () => {
       expect(env.SKILL_DEADLINE_AT).toBe('123456');
     });
   });
+
+  describe('MCP auth env namespace', () => {
+    it('forwards MCP_* variables only to the bundled mcp skill', () => {
+      const previous = process.env.MCP_REMOTE_TOKEN;
+      process.env.MCP_REMOTE_TOKEN = 'remote-secret';
+      try {
+        const bundledMcp = createMockSkill({ name: 'mcp', source: 'bundled' });
+        const workspaceMcp = createMockSkill({ name: 'mcp', source: 'workspace' });
+        const other = createMockSkill({ name: 'weather', source: 'bundled' });
+        expect(buildSkillSubprocessEnv(bundledMcp, { skillName: 'mcp' }).MCP_REMOTE_TOKEN).toBe('remote-secret');
+        expect(buildSkillSubprocessEnv(workspaceMcp, { skillName: 'mcp' }).MCP_REMOTE_TOKEN).toBeUndefined();
+        expect(buildSkillSubprocessEnv(other, { skillName: 'weather' }).MCP_REMOTE_TOKEN).toBeUndefined();
+      } finally {
+        if (previous === undefined) delete process.env.MCP_REMOTE_TOKEN;
+        else process.env.MCP_REMOTE_TOKEN = previous;
+      }
+    });
+  });
 });
