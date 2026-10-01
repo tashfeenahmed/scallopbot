@@ -174,7 +174,7 @@ onboard() {
   fi
   set_env "$envfile" AGENT_WORKSPACE "$workspace"
   set_env "$envfile" WEB_UI_ENABLED true
-  note "Wrote $envfile (mode 600). Edit it any time; see .env.example for every option."
+  [ "$DRY_RUN" = 1 ] || note "Wrote $envfile (mode 600). Edit it any time; see .env.example for every option."
 }
 
 # ── Docker mode: compose file + .env only ────────────────────────────────────
@@ -206,6 +206,10 @@ if [ "$MODE" = docker ]; then
     fi
   else
     warn "Docker with the compose plugin was not found. Install Docker, then run: cd $DIR && docker compose up -d --build"
+  fi
+  if [ -n "$WEB_EMAIL" ]; then
+    note "Dashboard login: if it was not created above, run once the container is up:"
+    note "  cd $DIR && docker compose exec scallopbot node dist/cli.js web-login --email $WEB_EMAIL"
   fi
   say "Done. Dashboard: http://localhost:3000  (logs: cd $DIR && docker compose logs -f)"
   exit 0
