@@ -61,6 +61,7 @@ import { matchesPolicy } from '../skills/tool-policy.js';
 import { resolveStateUserId, resolveStateUserTimezone } from '../utils/state-user-id.js';
 import { inspectArtifact, validateArtifactForDelivery } from '../artifacts/delivery.js';
 import { OutcomeBrain } from '../brain/index.js';
+import { registerMediaSkills, type MediaSkills } from '../skills/media-skills.js';
 
 export interface GatewayOptions {
   config: Config;
@@ -98,6 +99,7 @@ export class Gateway {
   private interruptQueue: InterruptQueue | null = null;
   private outboundQueue: OutboundQueue | null = null;
   private outcomeBrain: OutcomeBrain | null = null;
+  private mediaSkills: MediaSkills | null = null;
   private subAgentDeliveryTimer: NodeJS.Timeout | null = null;
   /** Explicit aliases for this deployment's single canonical state owner. */
   private canonicalSingleUserIds: string[] = [];
@@ -441,6 +443,18 @@ export class Gateway {
 
     // Register native skills (comms + memory_get) that need runtime access
     this.registerNativeSkills(voiceStatus.tts);
+    // image_gen / phone_call / sms: bundled SKILL.md, in-process handlers
+    const mediaVoice = voiceStatus.tts ? this.voiceManager : null;
+    this.mediaSkills = registerMediaSkills({
+      registry: this.skillRegistry,
+      logger: this.logger,
+      costTracker: this.costTracker ?? undefined,
+      deliverFile: (userId, filePath, caption, ctx) =>
+        this.handleFileSend(userId, filePath, caption, ctx.sessionId, ctx.userMessage),
+      getApprovals: () => this.agent?.getApprovalStore(),
+      notify: (userId, text) => this.handleProactiveMessage(userId, text),
+      synthesize: mediaVoice ? (text) => mediaVoice.synthesize(text, { format: 'mp3' }) : undefined,
+    });
     this.logger.debug(
       { nativeSkills: ['send_message', 'send_file', 'inspect_artifact', 'voice_reply', 'memory_get', 'load_procedure'].filter(n => this.skillRegistry!.hasSkill(n)) },
       'Native skills registered'
@@ -673,7 +687,9 @@ export class Gateway {
         subAgentExecutor: this.subAgentExecutor || undefined,
         router: this.router || undefined,
         interval: 30 * 1000, // Check every 30 seconds
-        onSendMessage: this.outboundQueue.createHandler(),
+        onSendMessage: this.mediaSkills
+          ? this.mediaSkills.withReminderCalls(this.outboundQueue.createHandler())
+          : this.outboundQueue.createHandler(),
         getTimezone: (userId: string) => this.getUserTimezone(userId),
         canonicalSingleUserIds: this.canonicalSingleUserIds,
       });
@@ -889,6 +905,8 @@ export class Gateway {
         providerRegistry: this.providerRegistry || undefined,
         subAgentRegistry: this.subAgentRegistry || undefined,
         subAgentExecutor: this.subAgentExecutor || undefined,
+        twilioWebhook: this.mediaSkills?.twilioWebhook,
+        voiceManager: this.voiceManager || undefined,
       });
       await this.apiChannel.start();
 

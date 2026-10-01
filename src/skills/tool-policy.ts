@@ -24,7 +24,7 @@ export const TOOL_GROUPS: Record<string, string[]> = {
   'group:exec':     ['bash'],
   'group:web':      ['web_search', 'webfetch'],
   'group:memory':   ['memory_search'],
-  'group:comms':    ['send_message', 'send_file', 'question'],
+  'group:comms':    ['send_message', 'send_file', 'question', 'phone_call', 'sms'],
   'group:agent':    ['spawn_agent'],
 };
 

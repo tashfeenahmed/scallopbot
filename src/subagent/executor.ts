@@ -47,6 +47,9 @@ const NEVER_ALLOWED_SKILLS = new Set([
   'send_message',     // No direct user communication
   'send_file',        // No direct user communication
   'voice_reply',      // No direct user communication
+  'image_gen',        // Delivers to the user and spends budget
+  'phone_call',       // No calls on the user's behalf from background work
+  'sms',              // No texts on the user's behalf from background work
   'manage_skills',    // No installing/uninstalling skills
 ]);
 
