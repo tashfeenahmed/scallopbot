@@ -29,7 +29,7 @@
 
 Open-source personal AI agents like [OpenClaw](https://github.com/openclaw/openclaw) excel at tool orchestration, but their memory mostly stores and promotes notes rather than reshaping them, and they have no self-reflection or autonomous reasoning loop. ScallopBot addresses this cognition gap with a bio-inspired cognitive architecture that maintains full compatibility with the OpenClaw skill ecosystem. Runs at an estimated $0.05--0.10/day in model spend -- see the [cost comparison](https://scallopbot.com/cost). Comparing it with a gateway like LiteLLM? See [ScallopBot as a LiteLLM alternative](https://scallopbot.com/litellm-alternative/).
 
-ScallopBot runs on your own server, routes each request to the cheapest model that can handle it, tracks every cent in real time, and fails over between the LLM providers you have keys for (7 supported). You talk to it over Telegram, the web dashboard (REST + WebSocket API), or a CLI -- all from a single Node.js process. Adapters for Discord, WhatsApp, Slack, Signal and Matrix exist in `src/channels/` but are not yet started by the gateway.
+ScallopBot runs on your own server, routes each request to the cheapest model that can handle it, tracks every cent in real time, and fails over between the LLM providers you have keys for (7 supported). You talk to it over Telegram, the web dashboard (REST + WebSocket API), or a CLI, and optionally Discord, Slack, WhatsApp, Signal or Matrix -- all from a single Node.js process. Each extra chat channel starts only when its credentials are set.
 
 The architecture is validated against 30 research works from 2023--2026 across six domains (memory retrieval, lifecycle management, associative reasoning, sleep-inspired consolidation, affect modelling, and proactive intelligence). The full cognitive pipeline operates at an estimated **$0.05--0.10 per day** in model spend.
 
@@ -335,7 +335,25 @@ node dist/cli.js skill install elicitation
 | **Web dashboard / REST API** | Live (`start`, needs `WEB_UI_ENABLED=true`) | `POST /api/chat`, SSE streaming, session management, file download, budget management (`POST /api/costs/budget`) |
 | **WebSocket** | Live (served by the API channel) | Real-time bidirectional communication with the web dashboard |
 | **CLI** | Live (`chat`) | Interactive terminal session with session resume (`-s <id>`) |
-| Discord, WhatsApp, Slack, Signal, Matrix | Adapter code only | Classes exist in `src/channels/` but the gateway does not start them yet |
+| **Discord** | Starts when `DISCORD_BOT_TOKEN` is set | DMs and @mentions, `/ask` `/reset` `/help` `/status` slash commands, proactive DMs, file sending |
+| **Slack** | Starts when `SLACK_BOT_TOKEN` + `SLACK_APP_TOKEN` are set (Socket Mode) | DMs and @mentions, optional `/scallopbot` command, proactive DMs, file sending |
+| **WhatsApp** | Starts when `WHATSAPP_ENABLED=true` and `WHATSAPP_ALLOWED_NUMBERS` is set | 1:1 chats via a linked device (Baileys), voice-note transcription, proactive messages, file sending |
+| **Signal** | Starts when `SIGNAL_PHONE_NUMBER` is set and `signal-cli` is installed | 1:1 chats via `signal-cli` JSON-RPC, voice-note transcription, proactive messages, file sending |
+| **Matrix** | Starts when `MATRIX_HOMESERVER_URL` + `MATRIX_ACCESS_TOKEN` are set | DMs and mentions in unencrypted rooms, `!help` `!reset` `!status`, proactive room messages, file sending |
+
+Discord, Slack, WhatsApp, Signal and Matrix are covered by tests against mocked SDK clients (start, inbound message to agent and back, allowlist, proactive delivery); they have not been exercised against the live services in CI. Telegram-only features (approval buttons, `/model`, `/setup`, photo analysis, voice replies) are not available on them; a blocked write is answered by replying "yes" or "no". A channel that fails to start (bad token, missing optional package) is logged and skipped, and the rest of the gateway keeps running.
+
+**What each channel needs** (all variables are in `.env.example`):
+
+| Channel | Credentials | Allowlist | Notes |
+|---------|-------------|-----------|-------|
+| Discord | `DISCORD_BOT_TOKEN` (`DISCORD_APPLICATION_ID` optional) | `DISCORD_ALLOWED_USERS` (user IDs) | Enable the privileged **Message Content** intent for the bot; `discord.js` is a regular dependency |
+| Slack | `SLACK_BOT_TOKEN` (xoxb-), `SLACK_APP_TOKEN` (xapp-, `connections:write`) | `SLACK_ALLOWED_USERS` (member IDs) | Socket Mode on; scopes `chat:write`, `app_mentions:read`, `im:history`, `im:read`, `im:write`, `files:write`; events `app_mention`, `message.im`; optional package `@slack/bolt` |
+| WhatsApp | `WHATSAPP_ENABLED=true`; link once via pairing code (`WHATSAPP_PHONE_NUMBER`) or QR | `WHATSAPP_ALLOWED_NUMBERS` (**required**) | Rides a real WhatsApp account, so it refuses to start without an allowlist; session stored in `WHATSAPP_AUTH_DIR`; optional packages `@whiskeysockets/baileys`, `@hapi/boom` (`qrcode-terminal` to render the QR) |
+| Signal | `SIGNAL_PHONE_NUMBER` (registered with `signal-cli`) | `SIGNAL_ALLOWED_NUMBERS` | Needs the `signal-cli` binary (`SIGNAL_CLI_PATH`, `SIGNAL_CONFIG_PATH`); group messages are ignored |
+| Matrix | `MATRIX_HOMESERVER_URL`, `MATRIX_ACCESS_TOKEN` (`MATRIX_USER_ID` optional) | `MATRIX_ALLOWED_USERS`, `MATRIX_ALLOWED_ROOMS` | No end-to-end encryption: use unencrypted rooms; auto-joins invites from allowed users; optional package `matrix-js-sdk` |
+
+An empty allowlist means anyone who can reach the bot can use it (a warning is logged). Every channel's proactive delivery is held to the same allowlist. Set `<CHANNEL>_ENABLED=false` to keep a channel off without removing its credentials.
 
 ## Web Dashboard
 
@@ -446,7 +464,7 @@ Reminders can be plain nudges or tasks; a task runs a sub-agent at the scheduled
 | **Smart model selection** | Manual | Auto-routes by complexity |
 | **Local voice (zero cost)** | -- | Kokoro TTS + faster-whisper STT |
 | **Skill ecosystem** | 100+ bundled, 3000+ ClawHub | Full OpenClaw SKILL.md compatibility |
-| **Channel support** | 25+ platforms | Telegram, web dashboard/API, CLI (5 more adapters not yet wired) |
+| **Channel support** | 25+ platforms | Telegram, web dashboard/API, CLI, Discord, Slack, WhatsApp, Signal, Matrix |
 | **Native apps** | macOS/iOS/Android/Windows/Linux | -- |
 
 OpenClaw column reflects its public README and docs as of October 2026; it ships fast, so corrections are welcome. A fuller write-up is at [scallopbot.com/vs/openclaw](https://scallopbot.com/vs/openclaw/).
@@ -526,7 +544,7 @@ sudo systemctl enable --now scallopbot
 ```
 src/
 ├── agent/          # Agent loop, session management, crash recovery
-├── channels/       # Telegram, CLI, API live; Discord/WhatsApp/Slack/Signal/Matrix adapters unwired
+├── channels/       # Telegram, CLI, API, Discord, Slack, WhatsApp, Signal, Matrix adapters
 ├── config/         # Zod-validated configuration schemas
 ├── dashboard/      # Systemd config generator, crash recovery
 ├── gateway/        # Server orchestration and channel initialization
