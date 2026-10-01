@@ -1,0 +1,54 @@
+# ScallopBot with Docker Compose.
+#
+#   cp .env.example .env    # add at least one provider API key
+#   docker compose up -d --build
+#   open http://localhost:3000   # first visit creates the dashboard login
+#
+# All state (SQLite memory, sessions, workspace, installed skills) lives in the
+# `scallopbot-data` volume mounted at /data; `docker compose down` keeps it,
+# `docker compose down -v` deletes it.
+
+services:
+  scallopbot:
+    build: .
+    image: scallopbot:latest
+    container_name: scallopbot
+    restart: unless-stopped
+    init: true
+    env_file: .env
+    environment:
+      # These win over .env so a copied .env.example cannot point the bot
+      # outside the persistent volume or bind the UI to the container's loopback.
+      AGENT_WORKSPACE: /data/workspace
+      WEB_UI_HOST: 0.0.0.0
+      WEB_UI_PORT: "3000"
+      # Uncomment with the ollama service below for local embeddings/models.
+      # OLLAMA_BASE_URL: http://ollama:11434
+    ports:
+      # Loopback only: the first browser visit claims the dashboard account.
+      # Put a reverse proxy / Tailscale in front before exposing it wider.
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - scallopbot-data:/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 40s
+      retries: 3
+    # depends_on:
+    #   - ollama
+
+  # Optional: local Ollama for embeddings (nomic-embed-text) and local models.
+  # After `docker compose up -d`, pull the embedding model once:
+  #   docker compose exec ollama ollama pull nomic-embed-text
+  # ollama:
+  #   image: ollama/ollama:latest
+  #   container_name: scallopbot-ollama
+  #   restart: unless-stopped
+  #   volumes:
+  #     - ollama-data:/root/.ollama
+
+volumes:
+  scallopbot-data:
+  # ollama-data:

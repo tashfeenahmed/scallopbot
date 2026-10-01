@@ -1,4 +1,5 @@
 import * as path from 'path';
+import { fileURLToPath } from 'url';
 import type { Logger } from 'pino';
 import type { Config } from '../config/config.js';
 import { PurposeRouter, DEFAULT_MODELS, type ModelPurpose } from '../config/model-routing.js';
@@ -874,7 +875,10 @@ export class Gateway {
         port: this.config.channels.api.port,
         host: this.config.channels.api.host,
         apiKey: this.config.channels.api.apiKey,
-        staticDir: path.join(process.cwd(), 'public'),
+        // Resolve the built dashboard relative to the package (src/ or dist/ →
+        // ../../public) so it is found under `npm install -g` and in Docker,
+        // not only when started from the repo root.
+        staticDir: fileURLToPath(new URL('../../public', import.meta.url)),
         agent: this.agent!,
         sessionManager: this.sessionManager!,
         logger: this.logger,

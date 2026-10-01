@@ -1,0 +1,46 @@
+# Dependencies and build output are produced inside the image
+node_modules
+web/node_modules
+dist
+coverage
+*.tsbuildinfo
+
+# Secrets and local data never go into the build context
+.env
+.env.*
+!.env.example
+*.token
+*.refresh-token
+credentials.json
+tokens.json
+*.db
+*.db-shm
+*.db-wal
+memories.jsonl
+bot-config.json
+data
+sessions
+pi-data
+.scallopbot
+.private
+
+# Repo and editor noise
+.git
+.github
+.claude
+.vscode
+.idea
+.DS_Store
+logs
+*.log
+results
+evals
+website
+specs
+.planning
+*.pdf
+benchmarks
+docs
+Dockerfile
+docker-compose.yml
+.dockerignore
