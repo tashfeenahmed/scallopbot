@@ -56,7 +56,7 @@ const SAFE_BASE_ENV_KEYS = [
 /** Non-secret Smartbot runtime paths/config used by bundled skills. */
 const SAFE_SMARTBOT_ENV_KEYS = [
   'AGENT_WORKSPACE', 'MEMORY_DB_PATH', 'SCALLOPBOT_DATA_DIR',
-  'OLLAMA_BASE_URL', 'LOCAL_BASE_URL',
+  'OLLAMA_BASE_URL', 'LOCAL_BASE_URL', 'EMBEDDING_PROVIDER', 'EMBEDDING_MODEL',
 ] as const;
 
 function copyDefinedEnv(target: Record<string, string>, keys: readonly string[]): void {

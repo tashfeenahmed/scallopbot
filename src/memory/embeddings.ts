@@ -2,8 +2,11 @@
  * Vector Embeddings for Semantic Search
  *
  * Provides multiple embedding backends:
- * - TF-IDF: Local, no external dependencies (default)
+ * - TF-IDF: Local, no external dependencies
+ * - Ollama: Local neural embeddings (nomic-embed-text, mxbai-embed-large, ...)
  * - OpenAI: High quality embeddings via API
+ *
+ * The gateway picks one via EMBEDDING_PROVIDER (see embedding-config.ts).
  *
  * Embeddings are used for semantic similarity search in the memory system.
  */
@@ -514,13 +517,16 @@ export class OllamaEmbedder implements EmbeddingProvider {
   private baseUrl: string;
   private model: string;
   private timeoutMs: number;
+  /** Set once the server answers /api/embed with a non-model 404 (Ollama < 0.3). */
+  private legacyEndpoint = false;
+  private static readonly MAX_BATCH = 32;
 
   constructor(options: OllamaEmbedderOptions = {}) {
-    this.baseUrl = options.baseUrl || 'http://localhost:11434';
+    this.baseUrl = (options.baseUrl || 'http://localhost:11434').replace(/\/+$/, '');
     this.model = options.model || 'embeddinggemma';
     this.timeoutMs = options.timeoutMs ?? EMBEDDING_TIMEOUT_MS;
 
-    // Adjust dimension based on model
+    // Initial guess; corrected from the first real response.
     if (this.model.includes('nomic')) {
       this.dimension = 768;
     } else if (this.model.includes('mxbai')) {
@@ -530,42 +536,85 @@ export class OllamaEmbedder implements EmbeddingProvider {
     }
   }
 
+  getModel(): string {
+    return this.model;
+  }
+
   isAvailable(): boolean {
-    // TODO: Could ping Ollama to check availability
     return true;
   }
 
   async embed(text: string): Promise<number[]> {
-    const response = await fetch(`${this.baseUrl}/api/embeddings`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: this.model,
-        prompt: text,
-      }),
-      signal: AbortSignal.timeout(this.timeoutMs),
-    });
-
-    if (!response.ok) {
-      throw new Error(`Ollama embedding failed: ${response.statusText}`);
-    }
-
-    const data = (await response.json()) as {
-      embedding?: unknown;
-    };
-
-    return assertEmbeddingVector(data.embedding, 'Ollama');
+    const [vector] = await this.embedChunk([text]);
+    return vector;
   }
 
   async embedBatch(texts: string[]): Promise<number[][]> {
-    // Ollama doesn't have batch endpoint, so we do them sequentially
-    const embeddings: number[][] = [];
-    for (const text of texts) {
-      embeddings.push(await this.embed(text));
+    const results: number[][] = [];
+    for (let i = 0; i < texts.length; i += OllamaEmbedder.MAX_BATCH) {
+      results.push(...await this.embedChunk(texts.slice(i, i + OllamaEmbedder.MAX_BATCH)));
     }
-    return embeddings;
+    return results;
+  }
+
+  private async embedChunk(texts: string[]): Promise<number[][]> {
+    if (texts.length === 0) return [];
+    if (this.legacyEndpoint) return this.embedLegacy(texts);
+
+    // /api/embed (Ollama >= 0.3) embeds a whole batch in one request.
+    const response = await fetch(`${this.baseUrl}/api/embed`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: this.model, input: texts }),
+      signal: AbortSignal.timeout(this.timeoutMs),
+    });
+
+    if (response.status === 404) {
+      const detail = await response.text().catch(() => '');
+      if (/model/i.test(detail)) {
+        throw new Error(`Ollama embedding model "${this.model}" not found (run: ollama pull ${this.model})`);
+      }
+      this.legacyEndpoint = true;
+      return this.embedLegacy(texts);
+    }
+    if (!response.ok) {
+      throw new Error(`Ollama embedding failed: ${response.status} ${response.statusText}`);
+    }
+
+    const data = (await response.json()) as { embeddings?: unknown; embedding?: unknown };
+    let vectors: number[][];
+    if (Array.isArray(data.embeddings)) {
+      vectors = data.embeddings.map(vector => assertEmbeddingVector(vector, 'Ollama'));
+    } else if (texts.length === 1 && data.embedding !== undefined) {
+      vectors = [assertEmbeddingVector(data.embedding, 'Ollama')];
+    } else {
+      throw new Error('Ollama returned a malformed embedding payload');
+    }
+    if (vectors.length !== texts.length) {
+      throw new Error(`Ollama returned ${vectors.length} embeddings for ${texts.length} inputs`);
+    }
+    this.dimension = vectors[0].length;
+    return vectors;
+  }
+
+  /** Pre-0.3 Ollama: one /api/embeddings request per text. */
+  private async embedLegacy(texts: string[]): Promise<number[][]> {
+    const vectors: number[][] = [];
+    for (const text of texts) {
+      const response = await fetch(`${this.baseUrl}/api/embeddings`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: this.model, prompt: text }),
+        signal: AbortSignal.timeout(this.timeoutMs),
+      });
+      if (!response.ok) {
+        throw new Error(`Ollama embedding failed: ${response.status} ${response.statusText}`);
+      }
+      const data = (await response.json()) as { embedding?: unknown };
+      vectors.push(assertEmbeddingVector(data.embedding, 'Ollama'));
+    }
+    if (vectors.length > 0) this.dimension = vectors[0].length;
+    return vectors;
   }
 }
 

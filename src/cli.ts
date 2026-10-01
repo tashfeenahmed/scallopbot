@@ -727,6 +727,84 @@ program
     }
   });
 
+// reembed - move stored memory vectors into the configured embedding model
+program
+  .command('reembed')
+  .description('Re-embed memories into EMBEDDING_PROVIDER/EMBEDDING_MODEL (batched, resumable)')
+  .option('-b, --batch-size <n>', 'Texts per embedding request', '16')
+  .option('-n, --limit <n>', 'Stop after this many rows (run again to continue)')
+  .option('--all', 'Re-embed every stored vector, even ones already in the active model')
+  .option('--dry-run', 'Only report how many rows need embedding')
+  .action(async (options: { batchSize: string; limit?: string; all?: boolean; dryRun?: boolean }) => {
+    const { createConfiguredEmbedder, resolveEmbeddingSettings } = await import('./memory/embedding-config.js');
+    const { reembedStale } = await import('./memory/reembed.js');
+    const { TFIDFEmbedder } = await import('./memory/embeddings.js');
+    let db: ScallopDatabase | undefined;
+    try {
+      const config = loadConfig();
+      const configured = config.memory.dbPath;
+      const dbPath = nodePath.isAbsolute(configured)
+        ? configured
+        : nodePath.join(config.agent.workspace, configured);
+
+      const setup = await createConfiguredEmbedder({
+        ollamaBaseUrl: config.providers.ollama.baseUrl,
+        openaiApiKey: config.providers.openai.apiKey || undefined,
+        logger: {
+          info: (_obj, msg) => console.log(msg),
+          warn: (_obj, msg) => console.warn(msg),
+        },
+      });
+      if (setup.fellBack && resolveEmbeddingSettings().provider !== 'auto') {
+        // Never silently rewrite neural vectors as TF-IDF.
+        throw new Error(`${setup.reason ?? 'embedding provider unavailable'}; nothing re-embedded`);
+      }
+      console.log(`Embedding model: ${setup.key}`);
+
+      db = new ScallopDatabase(dbPath);
+      db.setEmbeddingModel(setup.key);
+      if (setup.embedder instanceof TFIDFEmbedder) {
+        setup.embedder.addDocuments(db.getAllMemories({ minProminence: 0.1, limit: 500 }).map(m => m.content));
+      }
+      if (options.all && !options.dryRun) db.markAllEmbeddingsStale();
+
+      const stale = db.countStaleEmbeddings(setup.key);
+      console.log(`Need embedding: ${stale.memories} memories, ${stale.summaries} session summaries`);
+      if (options.dryRun || stale.memories + stale.summaries === 0) return;
+
+      const abort = new AbortController();
+      process.once('SIGINT', () => {
+        console.log('\nStopping after the current batch; run again to resume.');
+        abort.abort();
+      });
+      const limit = options.limit ? Math.max(1, parseInt(options.limit, 10) || 1) : undefined;
+      const result = await reembedStale(db, setup.embedder, setup.key, {
+        batchSize: Math.max(1, parseInt(options.batchSize, 10) || 16),
+        limit,
+        signal: abort.signal,
+        onProgress: (p) => {
+          process.stdout.write(`\r  ${p.phase}: ${p.embedded + p.failed}/${p.total} (${p.failed} failed)   `);
+        },
+      });
+      process.stdout.write('\n');
+      console.log(
+        `Re-embedded ${result.memories.embedded} memories and ${result.summaries.embedded} summaries` +
+        (result.memories.failed + result.summaries.failed > 0
+          ? `; ${result.memories.failed + result.summaries.failed} failed (left for the next run)`
+          : ''),
+      );
+      if (result.incomplete) {
+        console.log(`Stopped early${result.error ? ` (${result.error})` : ''}; run again to resume.`);
+        if (result.error && result.error !== 'aborted') process.exitCode = 1;
+      }
+    } catch (error) {
+      console.error('Re-embed failed:', (error as Error).message);
+      process.exitCode = 1;
+    } finally {
+      db?.close();
+    }
+  });
+
 // why-evolution - diagnose what the self-evolution engine has captured / learned
 program
   .command('why-evolution')

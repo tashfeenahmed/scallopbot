@@ -29,12 +29,12 @@ import { Router, buildTierMapping } from '../routing/router.js';
 import { CostTracker } from '../routing/cost.js';
 import {
   BackgroundGardener,
-  OllamaEmbedder,
   LLMFactExtractor,
   SessionSummarizer,
   ScallopMemoryStore,
   type EmbeddingProvider,
 } from '../memory/index.js';
+import { createConfiguredEmbedder } from '../memory/embedding-config.js';
 import { ContextManager } from '../routing/context.js';
 import { MediaProcessor } from '../media/index.js';
 import { VoiceManager } from '../voice/index.js';
@@ -188,16 +188,14 @@ export class Gateway {
       this.logger,
     );
 
-    // Use OllamaEmbedder for semantic search if Ollama is configured
-    let embedder: EmbeddingProvider | undefined;
-    const ollamaConfig = this.config.providers.ollama;
-    if (ollamaConfig.baseUrl) {
-      embedder = new OllamaEmbedder({
-        baseUrl: ollamaConfig.baseUrl,
-        model: 'nomic-embed-text',  // Use nomic-embed-text for embeddings
-      });
-      this.logger.debug({ model: 'nomic-embed-text', baseUrl: ollamaConfig.baseUrl }, 'Using Ollama for semantic embeddings');
-    }
+    // Memory embeddings: EMBEDDING_PROVIDER=tfidf|openai|ollama (unset = try
+    // Ollama, else TF-IDF). Fixed for this process; vectors are tagged per model.
+    const embeddingSetup = await createConfiguredEmbedder({
+      ollamaBaseUrl: this.config.providers.ollama.baseUrl,
+      openaiApiKey: this.config.providers.openai.apiKey || undefined,
+      logger: this.logger,
+    });
+    const embedder: EmbeddingProvider | undefined = embeddingSetup.embedder;
 
     // Initialize memory system — ScallopMemory (SQLite) is always the primary backend.
     // If MEMORY_DB_PATH is absolute, use it as-is (lets workspace and DB be decoupled
@@ -219,6 +217,7 @@ export class Gateway {
       dbPath,
       logger: this.logger,
       embedder,
+      embeddingModel: embeddingSetup.key,
       rerankProvider,
       relationsProvider: rerankProvider,
       mmrEnabled: this.config.memory.mmrEnabled,
@@ -273,7 +272,13 @@ export class Gateway {
     }
 
     // Backfill embeddings for old memories (runs in background, non-blocking)
-    this.scallopMemoryStore.backfillEmbeddings({ batchSize: 20, limit: 500 }).then(count => {
+    // Vectors from another embedding model are re-embedded too, unless this run
+    // is on the TF-IDF fallback (they will be picked up once Ollama is back).
+    this.scallopMemoryStore.backfillEmbeddings({
+      batchSize: 20,
+      limit: 500,
+      includeStale: !embeddingSetup.fellBack,
+    }).then(count => {
       if (count > 0) {
         this.logger.info({ embeddingsBackfilled: count }, 'Embedding backfill completed');
       }
