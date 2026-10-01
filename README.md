@@ -379,6 +379,8 @@ sent as a bearer token.
 | `batch` | Run several tool calls in parallel |
 | `pdf` | Create PDFs with [Typst](https://typst.app), read with poppler, edit with qpdf |
 | `notion` | Typed Notion API access |
+| `email` | Read, search and send email over IMAP/SMTP (sends need your yes) |
+| `calendar` | Google Calendar read/write (writes need your yes) or a read-only ICS feed |
 | `mcp` | Call tools on configured MCP servers |
 | `git` | Version control operations |
 | `npm` | Package management |
@@ -429,6 +431,16 @@ Discord, Slack, WhatsApp, Signal and Matrix are covered by tests against mocked 
 | Matrix | `MATRIX_HOMESERVER_URL`, `MATRIX_ACCESS_TOKEN` (`MATRIX_USER_ID` optional) | `MATRIX_ALLOWED_USERS`, `MATRIX_ALLOWED_ROOMS` | No end-to-end encryption: use unencrypted rooms; auto-joins invites from allowed users; optional package `matrix-js-sdk` |
 
 An empty allowlist means anyone who can reach the bot can use it (a warning is logged). Every channel's proactive delivery is held to the same allowlist. Set `<CHANNEL>_ENABLED=false` to keep a channel off without removing its credentials.
+
+## Email and Calendar
+
+Both are optional and configured in `.env` (see `.env.example`).
+
+- **Email** (`email` skill): list, search and read over IMAP; send and reply over SMTP. Works with Gmail app passwords and any IMAP/SMTP provider. Every send or reply is blocked until you approve that exact email (recipients, subject, body) with the yes/no prompt; `EMAIL_SEND_WITHOUT_APPROVAL=true` relaxes this to "you asked for it in your message".
+- **Email in** (`EMAIL_INBOUND_ENABLED=true`): the bot polls your inbox. Mail from `EMAIL_ALLOWED_SENDERS` that passes DMARC/DKIM becomes a message to the bot (one session per sender) and the answer is emailed back in-thread. Email turns can't approve sends or calendar writes. `EMAIL_NOTIFY=important|all` posts a one-line "new email" note to your main channel instead. Polling only, no IMAP IDLE.
+- **Calendar** (`calendar` skill): Google Calendar via an OAuth refresh token (`node dist/cli.js google-auth` prints one), with upcoming/search/create/update/delete; each write needs your yes. Without Google, `CALENDAR_ICS_URL` gives read-only access to any ICS feed (recurring, all-day and timezone-aware). `CALENDAR_REMINDER_MINUTES=15` sends a heads-up before timed events.
+
+Google refresh tokens for OAuth apps left in "Testing" expire after 7 days; publish the consent screen (unverified is fine for your own account) to keep the token.
 
 ## Web Dashboard
 
@@ -638,6 +650,7 @@ sudo systemctl enable --now scallopbot
 | `secrets set <name> [value]` | Store a secret in the encrypted vault (omit the value to type it hidden) |
 | `secrets get <name>` / `list` / `rm <name>` | Read, list names, or delete vault secrets |
 | `secrets import-env [file]` | Move credential-looking variables from `.env` into the vault (`--strip` removes them from the file) |
+| `google-auth` | Authorize Google Calendar and print `GOOGLE_REFRESH_TOKEN` |
 
 ## Project Structure
 

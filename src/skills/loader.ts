@@ -118,6 +118,13 @@ export function checkGates(metadata?: SkillMetadata): GateResult {
     }
   }
 
+  if (oc.requires?.anyEnv?.length && !oc.requires.anyEnv.some((envVar) => process.env[envVar])) {
+    return {
+      available: false,
+      reason: `Missing one of required environment variables: ${oc.requires.anyEnv.join(', ')}`,
+    };
+  }
+
   // Note: Config file checking requires async access, so we skip it in sync version
   // The async method on SkillLoader still handles config checking
 
@@ -424,6 +431,13 @@ export class SkillLoader extends EventEmitter {
           };
         }
       }
+    }
+
+    if (oc.requires?.anyEnv?.length && !oc.requires.anyEnv.some((envVar) => process.env[envVar])) {
+      return {
+        passed: false,
+        reason: `Missing one of required environment variables: ${oc.requires.anyEnv.join(', ')}`,
+      };
     }
 
     // Check required config files

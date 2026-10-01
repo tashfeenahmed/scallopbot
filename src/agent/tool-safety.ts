@@ -714,6 +714,27 @@ export function describeToolCallPlainly(toolUse: ToolUseContent): string {
   return `${verb} ${title ? `"${title}"` : 'this'}${detail} ${where}`;
 }
 
+/**
+ * True when the skill lists this call's action under `safety.confirmActions`
+ * and the bypass env var (if any) is not exactly "true".
+ */
+export function requiresOwnerConfirmation(toolUse: ToolUseContent, skill?: Skill | null): boolean {
+  const safety = skill?.frontmatter.metadata?.openclaw?.safety;
+  const actions = safety?.confirmActions;
+  if (!actions || actions.length === 0) return false;
+  if (safety.confirmBypassEnv && process.env[safety.confirmBypassEnv]?.trim().toLowerCase() === 'true') return false;
+  const action = actionFromInput(toolUse.input ?? {});
+  return action !== null && actions.includes(action.toLowerCase());
+}
+
+function confirmationBlockReason(toolUse: ToolUseContent): string {
+  const summary = describeToolCallForUser(toolUse);
+  return `BLOCKED: ${toolUse.name} ${actionFromInput(toolUse.input ?? {}) ?? 'write'} always needs the owner's explicit approval (${summary}). `
+    + 'Do not retry it with another tool and do not claim it was done. '
+    + 'Show the user exactly what you would send or change (recipients, subject and full text, or event details) and ask ONE yes/no question. '
+    + 'After they approve, re-issue the identical call.';
+}
+
 function externalBlockReason(toolUse: ToolUseContent): string {
   const summary = describeToolCallForUser(toolUse);
   const plain = describeToolCallPlainly(toolUse);
@@ -752,6 +773,18 @@ export function assessToolCallForTurn(
   if (grantPattern && context.grants?.(grantPattern)) {
     return relativeDateMismatch(toolUse, message, context, { isMutation, isExternalMutation, signature })
       ?? { allowed: true, isMutation, isExternalMutation, signature };
+  }
+  // Some actions (sending email, calendar writes) always need the owner's
+  // explicit yes, even when the current message asked for them: the model
+  // writes the content, so the owner must see it before it leaves.
+  if (requiresOwnerConfirmation(toolUse, skill)) {
+    return {
+      allowed: false,
+      reason: confirmationBlockReason(toolUse),
+      isMutation,
+      isExternalMutation: true,
+      signature,
+    };
   }
   if (!isExternalMutation) {
     // A bare "yes" after "Should I add these tasks to your board?" authorizes

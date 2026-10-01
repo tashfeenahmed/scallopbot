@@ -878,4 +878,35 @@ async function readStdin(): Promise<string> {
   return Buffer.concat(chunks).toString('utf8');
 }
 
+// Google OAuth helper for the calendar skill
+program
+  .command('google-auth')
+  .description('Authorize Google Calendar and print GOOGLE_REFRESH_TOKEN (uses GOOGLE_CLIENT_ID/SECRET)')
+  .option('--client-id <id>', 'OAuth client ID (default: GOOGLE_CLIENT_ID)')
+  .option('--client-secret <secret>', 'OAuth client secret (default: GOOGLE_CLIENT_SECRET)')
+  .option('--port <port>', 'Loopback port (default: random)')
+  .option('--scope <scope>', 'OAuth scope (default: calendar.events)')
+  .action(async (options: { clientId?: string; clientSecret?: string; port?: string; scope?: string }) => {
+    try {
+      const clientId = options.clientId || process.env.GOOGLE_CLIENT_ID;
+      const clientSecret = options.clientSecret || process.env.GOOGLE_CLIENT_SECRET;
+      if (!clientId || !clientSecret) {
+        throw new Error('Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET (a "Desktop app" OAuth client) or pass --client-id/--client-secret');
+      }
+      const { runGoogleAuth } = await import('./integrations/calendar/google-auth.js');
+      const refreshToken = await runGoogleAuth({
+        clientId,
+        clientSecret,
+        scope: options.scope,
+        port: options.port ? Number.parseInt(options.port, 10) : undefined,
+      });
+      console.log('\nAdd this to your .env:\n');
+      console.log(`GOOGLE_REFRESH_TOKEN=${refreshToken}`);
+      process.exit(0);
+    } catch (error) {
+      console.error('google-auth failed:', (error as Error).message);
+      process.exit(1);
+    }
+  });
+
 program.parse();

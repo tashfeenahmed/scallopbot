@@ -194,6 +194,10 @@ function parseMetadata(raw: Record<string, unknown>): SkillMetadata {
       metadata.openclaw.primaryEnv = oc.primaryEnv;
     }
 
+    if (Array.isArray(oc.optionalEnv)) {
+      metadata.openclaw.optionalEnv = oc.optionalEnv.filter((x): x is string => typeof x === 'string');
+    }
+
     // Parse requires
     if (oc.requires && typeof oc.requires === 'object') {
       const req = oc.requires as Record<string, unknown>;
@@ -213,6 +217,10 @@ function parseMetadata(raw: Record<string, unknown>): SkillMetadata {
         metadata.openclaw.requires.env = req.env.filter((x) => typeof x === 'string');
       }
 
+      if (Array.isArray(req.anyEnv)) {
+        metadata.openclaw.requires.anyEnv = req.anyEnv.filter((x): x is string => typeof x === 'string');
+      }
+
       if (Array.isArray(req.config)) {
         metadata.openclaw.requires.config = req.config.filter(
           (x) => typeof x === 'string'
@@ -226,8 +234,16 @@ function parseMetadata(raw: Record<string, unknown>): SkillMetadata {
     if (oc.safety && typeof oc.safety === 'object') {
       const rawSafety = oc.safety as Record<string, unknown>;
       const safety: NonNullable<NonNullable<SkillMetadata['openclaw']>['safety']> = {};
-      for (const key of ['readOnly', 'externalWrite', 'localWrite', 'sensitive', 'requiresConfirmation'] as const) {
+      for (const key of ['readOnly', 'externalWrite', 'localWrite', 'sensitive', 'requiresConfirmation', 'publicCommunication'] as const) {
         if (typeof rawSafety[key] === 'boolean') safety[key] = rawSafety[key];
+      }
+      if (Array.isArray(rawSafety.confirmActions)) {
+        safety.confirmActions = rawSafety.confirmActions
+          .filter((x): x is string => typeof x === 'string' && x.trim() !== '')
+          .map((x) => x.trim().toLowerCase());
+      }
+      if (typeof rawSafety.confirmBypassEnv === 'string' && rawSafety.confirmBypassEnv.trim()) {
+        safety.confirmBypassEnv = rawSafety.confirmBypassEnv.trim();
       }
       metadata.openclaw.safety = safety;
     }

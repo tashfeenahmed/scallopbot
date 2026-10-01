@@ -24,11 +24,18 @@ export interface SkillMetadata {
       anyBins?: string[];
       /** Required environment variables */
       env?: string[];
+      /** At least one of these environment variables must be set */
+      anyEnv?: string[];
       /** Required config paths */
       config?: string[];
     };
     /** Primary environment variable for API key */
     primaryEnv?: string;
+    /**
+     * Extra environment variables passed to the skill process when set, without
+     * gating availability (optional ports, defaults, feature switches).
+     */
+    optionalEnv?: string[];
     /** Installation instructions */
     install?: SkillInstaller[];
     /**
@@ -49,6 +56,13 @@ export interface SkillMetadata {
       requiresConfirmation?: boolean;
       /** String arguments may be shown to a person and must cross the final public-output boundary. */
       publicCommunication?: boolean;
+      /**
+       * Actions that always need an explicit owner approval (button or typed
+       * "yes"), even when the current message asked for them, e.g. [send, reply].
+       */
+      confirmActions?: string[];
+      /** Env var that, when exactly "true", lifts `confirmActions` back to the normal intent gate. */
+      confirmBypassEnv?: string;
     };
     /**
      * Explicit trust declaration for unattended factual reports. Merely being

@@ -102,6 +102,8 @@ export function buildSkillSubprocessEnv(
   const openclaw = skill.frontmatter.metadata?.openclaw;
   const explicitlyAllowed = new Set(openclaw?.requires?.env ?? []);
   if (openclaw?.primaryEnv) explicitlyAllowed.add(openclaw.primaryEnv);
+  for (const key of openclaw?.requires?.anyEnv ?? []) explicitlyAllowed.add(key);
+  for (const key of openclaw?.optionalEnv ?? []) explicitlyAllowed.add(key);
   copyDefinedEnv(env, [...explicitlyAllowed]);
 
   env.SKILL_NAME = skill.name;
