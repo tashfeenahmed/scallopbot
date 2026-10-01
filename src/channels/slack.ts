@@ -356,7 +356,17 @@ export class SlackChannel implements ProactiveChatChannel {
         socketMode: this.socketMode,
         port: this.port,
         logLevel: LogLevel.INFO,
+        // Without this, Bolt runs auth.test inside the constructor and a bad
+        // bot token becomes an unhandled rejection that kills the process.
+        deferInitialization: true,
       });
+      await this.app.init();
+
+      // Socket Mode retries a rejected app token forever and eventually throws
+      // outside any caller; check it once here so a bad token fails start().
+      if (this.socketMode && this.appToken) {
+        await this.app.client.apps.connections.open({ token: this.appToken });
+      }
 
       this.setupEventHandlers();
 

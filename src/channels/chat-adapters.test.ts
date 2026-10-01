@@ -244,7 +244,10 @@ function installFakeBolt() {
     events = new Map<string, any>();
     start = vi.fn(async () => undefined);
     stop = vi.fn(async () => undefined);
+    init = vi.fn(async () => { if (FakeApp.authError) throw FakeApp.authError; });
+    static authError: Error | null = null;
     client = {
+      apps: { connections: { open: vi.fn(async () => ({ ok: true, url: 'wss://x' })) } },
       chat: { postMessage: vi.fn(async () => ({ ok: true, ts: '1700000000.0001' })) },
       conversations: { open: vi.fn(async () => ({ channel: { id: 'D1' } })) },
       files: { uploadV2: vi.fn(async () => ({ ok: true })) },
@@ -258,10 +261,26 @@ function installFakeBolt() {
     command() {}
   }
   h.modules['@slack/bolt'] = { App: FakeApp, LogLevel: { INFO: 'info' } };
+  (apps as any).FakeApp = FakeApp;
   return apps;
 }
 
 describe('SlackChannel (mocked @slack/bolt)', () => {
+  it('defers Bolt auth so a bad token rejects start() instead of crashing the process', async () => {
+    const apps = installFakeBolt();
+    (apps as any).FakeApp.authError = new Error('An API error occurred: invalid_auth');
+    try {
+      const { SlackChannel } = await import('./slack.js');
+      const channel = new SlackChannel({ ...makeDeps(), botToken: 'xoxb-bad', appToken: 'xapp-1' } as any);
+      await expect(channel.start()).rejects.toThrow('invalid_auth');
+      expect(apps[0].options.deferInitialization).toBe(true);
+      expect(apps[0].start).not.toHaveBeenCalled();
+      expect(channel.isRunning()).toBe(false);
+    } finally {
+      (apps as any).FakeApp.authError = null;
+    }
+  });
+
   async function startSlack(allowedUsers?: string[]) {
     const apps = installFakeBolt();
     const deps = makeDeps();

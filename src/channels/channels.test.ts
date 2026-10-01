@@ -25,6 +25,8 @@ vi.mock('@slack/bolt', () => ({
     message: vi.fn(),
     event: vi.fn(),
     command: vi.fn(),
+    init: vi.fn().mockResolvedValue(undefined),
+    client: { apps: { connections: { open: vi.fn().mockResolvedValue({ ok: true }) } } },
     start: vi.fn().mockResolvedValue(undefined),
     stop: vi.fn().mockResolvedValue(undefined),
   })),
