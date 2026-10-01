@@ -92,6 +92,12 @@ describe('command construction', () => {
     expect(wrapCommand(spec, 'docker', { ...baseConfig, network: true }).args.join(' ')).toContain('--network bridge');
   });
 
+  it('docker omits --memory when the host cannot enforce it', () => {
+    const a = wrapCommand(spec, 'docker', { ...baseConfig, memory: '' }).args.join(' ');
+    expect(a).not.toContain('--memory');
+    expect(a).toContain('--cpus 1');
+  });
+
   it('docker mounts read-only extra files', () => {
     const w = wrapCommand({ ...spec, readOnlyFiles: ['/tmp/x.py'] }, 'docker', baseConfig);
     expect(w.args.join(' ')).toContain('-v /tmp/x.py:/tmp/x.py:ro');

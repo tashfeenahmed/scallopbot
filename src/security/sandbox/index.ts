@@ -325,7 +325,7 @@ export function wrapCommand(
         'run', '--rm', '-i', '--init',
         '--network', network ? 'bridge' : 'none',
         '--cpus', config.cpus,
-        '--memory', config.memory,
+        ...(config.memory ? ['--memory', config.memory] : []),
         '--pids-limit', '256',
         '--cap-drop', 'ALL',
         '--security-opt', 'no-new-privileges',
@@ -378,7 +378,31 @@ export function prepareSandboxedCommand(
 ): { ok: true; wrapped: WrappedCommand } | { ok: false; error: string } {
   const { config, resolution } = sandboxForSubprocess(env);
   if (resolution.error) return { ok: false, error: `Sandbox unavailable: ${resolution.error}` };
-  return { ok: true, wrapped: wrapCommand(spec, resolution.backend, config) };
+  const effective = resolution.backend === 'docker' && config.memory && !dockerEnforcesMemoryLimit()
+    ? { ...config, memory: '' }
+    : config;
+  return { ok: true, wrapped: wrapCommand(spec, resolution.backend, effective) };
+}
+
+let dockerMemoryLimit: boolean | undefined;
+
+/**
+ * Some hosts (Raspberry Pi OS ships with the memory cgroup off) cannot enforce
+ * `--memory`; docker then prints a kernel warning on every run, which reaches
+ * the model as tool stderr and reads like a failure. Skip the flag there.
+ */
+export function dockerEnforcesMemoryLimit(): boolean {
+  if (dockerMemoryLimit === undefined) {
+    try {
+      const out = execFileSync('docker', ['info', '--format', '{{.MemoryLimit}}'], {
+        encoding: 'utf8', timeout: 10_000, stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      dockerMemoryLimit = out.trim() !== 'false';
+    } catch {
+      dockerMemoryLimit = true;
+    }
+  }
+  return dockerMemoryLimit;
 }
 
 /** Human-readable one-liner for startup logs. */
