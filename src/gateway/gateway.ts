@@ -23,6 +23,8 @@ import { SkillStore } from '../evolution/skill-store.js';
 import { TelegramChannel } from '../channels/telegram.js';
 import { TelegramGateway } from '../channels/telegram-gateway.js';
 import { ApiChannel } from '../channels/api.js';
+import type { ProactiveChatChannel } from '../channels/chat-support.js';
+import { configuredChatChannels, startChatChannels } from './chat-channels.js';
 import { createSkillRegistry, type SkillRegistry } from '../skills/registry.js';
 import { createSkillExecutor, type SkillExecutor } from '../skills/executor.js';
 import { Router, buildTierMapping } from '../routing/router.js';
@@ -91,6 +93,8 @@ export class Gateway {
   private agent: Agent | null = null;
   private telegramChannel: TelegramChannel | null = null;
   private apiChannel: ApiChannel | null = null;
+  /** Discord, Slack, WhatsApp, Signal, Matrix: whichever are configured and started */
+  private chatChannels: ProactiveChatChannel[] = [];
   private unifiedScheduler: UnifiedScheduler | null = null;
   private subAgentRegistry: SubAgentRegistry | null = null;
   private subAgentExecutor: SubAgentExecutor | null = null;
@@ -868,6 +872,24 @@ export class Gateway {
       this.registerTelegramTriggerSource(this.telegramChannel);
     }
 
+    // Start the other chat channels that have credentials. Each failure is
+    // logged inside startChatChannels and never aborts gateway startup.
+    this.chatChannels = await startChatChannels(
+      configuredChatChannels(this.config.channels, {
+        agent: this.agent!,
+        sessionManager: this.sessionManager!,
+        logger: this.logger,
+        db: this.scallopMemoryStore?.getDatabase(),
+        voiceManager: this.voiceManager || undefined,
+        onUserMessage: (prefixedUserId: string, userMessage?: string) =>
+          this.unifiedScheduler?.checkEngagement(prefixedUserId, userMessage),
+      }),
+      this.logger,
+    );
+    for (const channel of this.chatChannels) {
+      this.registerChatTriggerSource(channel);
+    }
+
     // Start API channel if enabled (web UI)
     if (this.config.channels.api.enabled) {
       this.apiChannel = new ApiChannel({
@@ -961,6 +983,16 @@ export class Gateway {
     this.logger.debug('Registered telegram trigger source');
   }
 
+  /** Register a started chat channel for reminders and proactive delivery. */
+  private registerChatTriggerSource(channel: ProactiveChatChannel): void {
+    this.triggerSources.set(channel.name, {
+      sendMessage: (userId: string, message: string) => channel.sendMessage(userId, message),
+      sendFile: (userId: string, filePath: string, caption?: string) => channel.sendFile(userId, filePath, caption),
+      getName: () => channel.name,
+    });
+    this.logger.debug({ channel: channel.name }, 'Registered chat trigger source');
+  }
+
   async stop(): Promise<void> {
     if (!this.isRunning) {
       return;
@@ -997,6 +1029,16 @@ export class Gateway {
       await this.apiChannel.stop();
       this.apiChannel = null;
     }
+
+    // Stop the other chat channels
+    for (const channel of this.chatChannels) {
+      try {
+        await channel.stop();
+      } catch (error) {
+        this.logger.warn({ channel: channel.name, error: (error as Error).message }, 'Chat channel failed to stop cleanly');
+      }
+    }
+    this.chatChannels = [];
 
     // Stop Telegram channel
     if (this.telegramChannel) {
@@ -1700,6 +1742,22 @@ export class Gateway {
         }
       }
 
+      const chat = this.chatChannels.find(c => c.name === channel);
+      if (chat) {
+        if (rawUserId === 'default') {
+          const sole = chat.soleRecipient();
+          if (!sole) {
+            this.logger.warn({ channel }, 'Cannot resolve default recipient unambiguously');
+            return { source: null, rawUserId };
+          }
+          return { source, rawUserId: sole };
+        }
+        if (!chat.isAllowedRecipient(rawUserId)) {
+          this.logger.warn({ channel, userId: rawUserId }, 'Refusing delivery outside the channel allowlist');
+          return { source: null, rawUserId };
+        }
+      }
+
       this.logger.debug({ channel, userId: rawUserId }, 'Using prefixed trigger source');
       return { source, rawUserId };
     }
@@ -1710,6 +1768,13 @@ export class Gateway {
       const telegram = this.triggerSources.get('telegram');
       if (telegram && allowedTelegramUsers.length === 1) {
         return { source: telegram, rawUserId: allowedTelegramUsers[0] };
+      }
+      // Without Telegram, a single chat channel with exactly one allowlisted
+      // recipient is just as unambiguous.
+      const soleChats = telegram ? [] : this.chatChannels.filter(c => c.soleRecipient() !== null);
+      if (soleChats.length === 1) {
+        const source = this.triggerSources.get(soleChats[0].name);
+        if (source) return { source, rawUserId: soleChats[0].soleRecipient()! };
       }
       const api = this.triggerSources.get('api');
       if (api && !telegram) return { source: api, rawUserId };

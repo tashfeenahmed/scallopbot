@@ -5,6 +5,7 @@
 
 import {
   Client,
+  Events,
   GatewayIntentBits,
   Partials,
   REST,
@@ -13,9 +14,22 @@ import {
   type ChatInputCommandInteraction,
   type RESTPostAPIChatInputApplicationCommandsJSONBody,
 } from 'discord.js';
+import { basename } from 'path';
 import type { Logger } from 'pino';
 import type { Agent } from '../agent/agent.js';
 import type { SessionManager } from '../agent/session.js';
+import type { ScallopDatabase } from '../memory/db.js';
+import type { MessageDeliveryResult } from '../triggers/types.js';
+import type { ChannelStatus } from './types.js';
+import {
+  ChannelSessions,
+  KeyedSerialQueue,
+  notifyUserMessage,
+  renderAgentReply,
+  soleEntry,
+  type ChatUserMessageHook,
+  type ProactiveChatChannel,
+} from './chat-support.js';
 
 const MAX_MESSAGE_LENGTH = 2000;
 
@@ -25,6 +39,11 @@ export interface DiscordChannelOptions {
   agent: Agent;
   sessionManager: SessionManager;
   logger: Logger;
+  /** Discord user IDs allowed to use the bot. Empty/undefined = allow all */
+  allowedUsers?: string[];
+  /** Rehydrates sessions after a restart */
+  db?: Pick<ScallopDatabase, 'findSessionByUserId'>;
+  onUserMessage?: ChatUserMessageHook;
 }
 
 export interface ParsedSlashCommand {
@@ -164,16 +183,21 @@ Send me a DM to chat privately.
 `;
 }
 
-export class DiscordChannel {
+export class DiscordChannel implements ProactiveChatChannel {
+  public readonly name = 'discord';
+
   private client: Client;
   private botToken: string;
   private applicationId?: string;
   private agent: Agent;
   private sessionManager: SessionManager;
   private logger: Logger;
-  public userSessions: Map<string, string> = new Map();
-  private isRunning = false;
-  private botUserId?: string;
+  private sessions: ChannelSessions;
+  private turns = new KeyedSerialQueue();
+  private allowedUsers: Set<string> | null;
+  private onUserMessage?: ChatUserMessageHook;
+  private running = false;
+  private status: ChannelStatus = { connected: false, authenticated: false };
 
   constructor(options: DiscordChannelOptions) {
     this.botToken = options.botToken;
@@ -181,8 +205,12 @@ export class DiscordChannel {
     this.agent = options.agent;
     this.sessionManager = options.sessionManager;
     this.logger = options.logger.child({ channel: 'discord' });
+    this.sessions = new ChannelSessions('discord', options.sessionManager, options.db);
+    this.allowedUsers = options.allowedUsers?.length ? new Set(options.allowedUsers) : null;
+    this.onUserMessage = options.onUserMessage;
 
-    // Create Discord client
+    // MessageContent is a privileged intent: enable it for the bot in the
+    // Discord developer portal or guild mentions arrive with empty content.
     this.client = new Client({
       intents: [
         GatewayIntentBits.Guilds,
@@ -197,57 +225,66 @@ export class DiscordChannel {
   }
 
   private setupHandlers(): void {
-    // Ready event
-    this.client.once('ready', () => {
-      this.botUserId = this.client.user?.id;
+    this.client.once(Events.ClientReady, () => {
+      this.status = { connected: true, authenticated: true };
       this.logger.info(
-        { username: this.client.user?.tag },
+        { username: this.client.user?.tag, allowedUsers: this.allowedUsers?.size ?? 'all' },
         'Discord bot connected'
       );
+      // Application commands need the application ID, known once ready.
+      void this.registerCommands();
     });
 
-    // Message event (for mentions and DMs)
-    this.client.on('messageCreate', async (message: Message) => {
+    this.client.on(Events.MessageCreate, async (message: Message) => {
       await this.handleMessage(message);
     });
 
-    // Slash command event
-    this.client.on('interactionCreate', async (interaction) => {
+    this.client.on(Events.InteractionCreate, async (interaction) => {
       if (interaction.isChatInputCommand()) {
         await this.handleSlashCommand(interaction);
       }
     });
 
-    // Error handler
-    this.client.on('error', (error) => {
+    this.client.on(Events.Error, (error) => {
+      this.status.error = error.message;
       this.logger.error({ error: error.message }, 'Discord client error');
     });
+  }
+
+  isAllowedRecipient(userId: string): boolean {
+    return !this.allowedUsers || this.allowedUsers.has(userId);
+  }
+
+  soleRecipient(): string | null {
+    return soleEntry(this.allowedUsers);
   }
 
   /**
    * Handle a message (mention or DM)
    */
   async handleMessage(message: Message): Promise<void> {
-    // Ignore bots
     if (message.author.bot) {
       return;
     }
 
-    // Check if this is a DM or a mention
     const isDM = !message.guild;
-    const isMention =
-      this.botUserId && message.mentions.has(this.botUserId);
+    const botUserId = this.client.user?.id;
+    const isMention = !!botUserId
+      && message.mentions.has(botUserId, { ignoreEveryone: true, ignoreRoles: true });
 
     if (!isDM && !isMention) {
       return;
     }
 
     const userId = message.author.id;
-    let content = message.content;
+    if (!this.isAllowedRecipient(userId)) {
+      this.logger.debug({ userId }, 'Ignoring message from user outside the Discord allowlist');
+      return;
+    }
 
-    // Remove mention from content
-    if (isMention && this.botUserId) {
-      content = content.replace(new RegExp(`<@!?${this.botUserId}>`, 'g'), '').trim();
+    let content = message.content;
+    if (isMention && botUserId) {
+      content = content.replace(new RegExp(`<@!?${botUserId}>`, 'g'), '').trim();
     }
 
     if (!content) {
@@ -260,47 +297,42 @@ export class DiscordChannel {
       'Received message'
     );
 
-    // Show typing indicator (only for channels that support it)
-    const channel = message.channel;
-    if ('sendTyping' in channel && typeof channel.sendTyping === 'function') {
-      await channel.sendTyping().catch(() => {});
-    }
-    // Declared outside the try so the finally below can always clear it. If it
-    // lived inside the try, any throw from session/agent processing below would
-    // leave this interval running forever, pinging sendTyping() every 5s per
-    // failed message.
-    const typingInterval = setInterval(() => {
+    await this.turns.run(userId, async () => {
+      // Show typing indicator (only for channels that support it)
+      const channel = message.channel;
       if ('sendTyping' in channel && typeof channel.sendTyping === 'function') {
-        channel.sendTyping().catch(() => {});
+        await channel.sendTyping().catch(() => {});
       }
-    }, 5000);
+      // Declared outside the try so the finally below can always clear it;
+      // a throw from session/agent processing must not leave it running.
+      const typingInterval = setInterval(() => {
+        if ('sendTyping' in channel && typeof channel.sendTyping === 'function') {
+          channel.sendTyping().catch(() => {});
+        }
+      }, 5000);
 
-    try {
-      // Get or create session
-      const sessionId = await this.getOrCreateSession(userId);
+      try {
+        await notifyUserMessage(this.onUserMessage, this.sessions.prefixed(userId), content, this.logger);
+        const sessionId = await this.getOrCreateSession(userId);
+        const result = await this.agent.processMessage(sessionId, content);
 
-      // Process through agent
-      const result = await this.agent.processMessage(sessionId, content);
+        const chunks = splitMessage(formatMarkdownForDiscord(renderAgentReply(result))).filter(Boolean);
+        for (const chunk of chunks) {
+          await message.reply(chunk);
+        }
 
-      // Format and send response
-      const formatted = formatMarkdownForDiscord(result.response);
-      const chunks = splitMessage(formatted);
-
-      for (const chunk of chunks) {
-        await message.reply(chunk);
+        this.logger.info(
+          { userId, responseLength: result.response.length },
+          'Sent response'
+        );
+      } catch (error) {
+        const err = error as Error;
+        this.logger.error({ userId, error: err.message }, 'Failed to process message');
+        await message.reply('Sorry, I encountered an error. Please try again.').catch(() => {});
+      } finally {
+        clearInterval(typingInterval);
       }
-
-      this.logger.info(
-        { userId, responseLength: result.response.length },
-        'Sent response'
-      );
-    } catch (error) {
-      const err = error as Error;
-      this.logger.error({ userId, error: err.message }, 'Failed to process message');
-      await message.reply('Sorry, I encountered an error. Please try again.');
-    } finally {
-      clearInterval(typingInterval);
-    }
+    });
   }
 
   /**
@@ -315,28 +347,33 @@ export class DiscordChannel {
       'Received slash command'
     );
 
+    if (!this.isAllowedRecipient(userId)) {
+      await interaction.reply({ content: 'You are not allowed to use this bot.', ephemeral: true });
+      return;
+    }
+
     try {
       switch (parsed.command) {
         case 'ask': {
-          if (!parsed.message) {
+          const text = parsed.message;
+          if (!text) {
             await interaction.reply('Please provide a message.');
             return;
           }
 
           await interaction.deferReply();
 
-          const sessionId = await this.getOrCreateSession(userId);
-          const result = await this.agent.processMessage(sessionId, parsed.message);
+          await this.turns.run(userId, async () => {
+            await notifyUserMessage(this.onUserMessage, this.sessions.prefixed(userId), text, this.logger);
+            const sessionId = await this.getOrCreateSession(userId);
+            const result = await this.agent.processMessage(sessionId, text);
 
-          const formatted = formatMarkdownForDiscord(result.response);
-          const chunks = splitMessage(formatted);
-
-          await interaction.editReply(chunks[0]);
-
-          // Send additional chunks as follow-ups
-          for (let i = 1; i < chunks.length; i++) {
-            await interaction.followUp(chunks[i]);
-          }
+            const chunks = splitMessage(formatMarkdownForDiscord(renderAgentReply(result))).filter(Boolean);
+            await interaction.editReply(chunks[0] ?? '(no response)');
+            for (let i = 1; i < chunks.length; i++) {
+              await interaction.followUp(chunks[i]);
+            }
+          });
           break;
         }
 
@@ -350,7 +387,7 @@ export class DiscordChannel {
           break;
 
         case 'status': {
-          const sessionId = this.userSessions.get(userId);
+          const sessionId = this.sessions.peek(userId);
           if (sessionId) {
             const session = await this.sessionManager.getSession(sessionId);
             await interaction.reply(
@@ -374,44 +411,25 @@ export class DiscordChannel {
 
       const errorMessage = 'Sorry, I encountered an error. Please try again.';
       if (interaction.deferred) {
-        await interaction.editReply(errorMessage);
+        await interaction.editReply(errorMessage).catch(() => {});
       } else {
-        await interaction.reply(errorMessage);
+        await interaction.reply(errorMessage).catch(() => {});
       }
     }
   }
 
   /**
-   * Get or create session for user
+   * Get or create the session for a user (stored as `discord:<userId>`)
    */
   async getOrCreateSession(userId: string): Promise<string> {
-    const cached = this.userSessions.get(userId);
-    if (cached) {
-      const session = await this.sessionManager.getSession(cached);
-      if (session) {
-        return cached;
-      }
-    }
-
-    const session = await this.sessionManager.createSession({
-      userId,
-      channelId: 'discord',
-    });
-
-    this.userSessions.set(userId, session.id);
-    return session.id;
+    return this.sessions.get(userId);
   }
 
   /**
-   * Reset session for user
+   * Preserve the current session and start a fresh one
    */
   async handleReset(userId: string): Promise<void> {
-    const sessionId = this.userSessions.get(userId);
-    const session = await this.sessionManager.startNewSession({
-      userId,
-      channelId: 'discord',
-    }, sessionId);
-    this.userSessions.set(userId, session.id);
+    await this.sessions.reset(userId);
   }
 
   /**
@@ -445,33 +463,85 @@ export class DiscordChannel {
   }
 
   /**
-   * Start the Discord bot
+   * Proactive message to a user's DMs (reminders, scheduled items).
+   */
+  async sendMessage(userId: string, message: string): Promise<MessageDeliveryResult> {
+    if (!this.running) {
+      this.logger.warn({ userId }, 'Cannot send message - Discord not running');
+      return false;
+    }
+    if (userId === 'default') {
+      const sole = this.soleRecipient();
+      if (!sole) return false;
+      userId = sole;
+    }
+    if (!this.isAllowedRecipient(userId)) {
+      this.logger.warn({ userId }, 'Refusing proactive delivery outside the Discord allowlist');
+      return false;
+    }
+
+    try {
+      const user = await this.client.users.fetch(userId);
+      const messageIds: string[] = [];
+      for (const chunk of splitMessage(formatMarkdownForDiscord(message)).filter(Boolean)) {
+        const sent = await user.send(chunk);
+        messageIds.push(String(sent.id));
+      }
+      return { sent: true, channel: 'discord', messageIds };
+    } catch (error) {
+      this.logger.error({ userId, error: (error as Error).message }, 'Failed to send proactive message');
+      return false;
+    }
+  }
+
+  async sendFile(userId: string, filePath: string, caption?: string): Promise<boolean> {
+    if (!this.running || !this.isAllowedRecipient(userId)) return false;
+    try {
+      const user = await this.client.users.fetch(userId);
+      await user.send({
+        content: caption ? caption.slice(0, MAX_MESSAGE_LENGTH) : undefined,
+        files: [{ attachment: filePath, name: basename(filePath) }],
+      });
+      return true;
+    } catch (error) {
+      this.logger.error({ userId, filePath, error: (error as Error).message }, 'Failed to send file');
+      return false;
+    }
+  }
+
+  /**
+   * Start the Discord bot. Slash commands register once the client is ready.
    */
   async start(): Promise<void> {
-    if (this.isRunning) {
+    if (this.running) {
       return;
     }
 
     this.logger.info('Starting Discord bot...');
-
     await this.client.login(this.botToken);
-    this.isRunning = true;
-
-    // Register slash commands after login
-    await this.registerCommands();
+    this.running = true;
   }
 
   /**
    * Stop the Discord bot
    */
   async stop(): Promise<void> {
-    if (!this.isRunning) {
+    if (!this.running) {
       return;
     }
 
     this.logger.info('Stopping Discord bot...');
     await this.client.destroy();
-    this.isRunning = false;
+    this.running = false;
+    this.status.connected = false;
     this.logger.info('Discord bot stopped');
+  }
+
+  isRunning(): boolean {
+    return this.running;
+  }
+
+  getStatus(): ChannelStatus {
+    return { ...this.status };
   }
 }

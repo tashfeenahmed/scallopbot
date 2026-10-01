@@ -14,6 +14,7 @@ const ALLOWED_MODULES = new Set([
   'matrix-js-sdk',
   '@whiskeysockets/baileys',
   '@slack/bolt',
+  'qrcode-terminal',
   'playwright',
   'pdf-parse',
 ]);

@@ -620,3 +620,76 @@ describe('Config Schema', () => {
     });
   });
 });
+
+describe('loadConfig chat channels', () => {
+  const originalEnv = process.env;
+  const channelEnv = [
+    'DISCORD_BOT_TOKEN', 'DISCORD_ALLOWED_USERS', 'DISCORD_ENABLED',
+    'SLACK_BOT_TOKEN', 'SLACK_APP_TOKEN', 'SLACK_ALLOWED_USERS', 'SLACK_ENABLED',
+    'WHATSAPP_ENABLED', 'WHATSAPP_AUTH_DIR', 'WHATSAPP_PHONE_NUMBER', 'WHATSAPP_ALLOWED_NUMBERS',
+    'SIGNAL_PHONE_NUMBER', 'SIGNAL_CLI_PATH', 'SIGNAL_CONFIG_PATH', 'SIGNAL_ALLOWED_NUMBERS', 'SIGNAL_ENABLED',
+    'MATRIX_HOMESERVER_URL', 'MATRIX_ACCESS_TOKEN', 'MATRIX_USER_ID', 'MATRIX_ALLOWED_USERS',
+    'MATRIX_ALLOWED_ROOMS', 'MATRIX_ENABLED',
+  ];
+
+  beforeEach(() => {
+    vi.resetModules();
+    process.env = { ...originalEnv, ANTHROPIC_API_KEY: 'sk-ant-test' };
+    for (const key of channelEnv) delete process.env[key];
+  });
+
+  afterEach(() => {
+    process.env = originalEnv;
+  });
+
+  it('leaves every chat channel disabled without credentials', async () => {
+    const { loadConfig } = await import('./config.js');
+    const { channels } = loadConfig();
+    expect(channels.discord.enabled).toBe(false);
+    expect(channels.slack.enabled).toBe(false);
+    expect(channels.whatsapp.enabled).toBe(false);
+    expect(channels.signal.enabled).toBe(false);
+    expect(channels.matrix.enabled).toBe(false);
+  });
+
+  it('enables channels from their credentials and parses allowlists', async () => {
+    Object.assign(process.env, {
+      DISCORD_BOT_TOKEN: 'discord-token',
+      DISCORD_ALLOWED_USERS: '111, 222',
+      SLACK_BOT_TOKEN: 'xoxb-1',
+      SLACK_APP_TOKEN: 'xapp-1',
+      SLACK_ALLOWED_USERS: 'U1',
+      WHATSAPP_ENABLED: 'true',
+      WHATSAPP_ALLOWED_NUMBERS: '+44 7700 900000',
+      SIGNAL_PHONE_NUMBER: '+15550001111',
+      SIGNAL_ALLOWED_NUMBERS: '+15552223333',
+      MATRIX_HOMESERVER_URL: 'https://matrix.example',
+      MATRIX_ACCESS_TOKEN: 'syt_x',
+      MATRIX_ALLOWED_USERS: '@me:matrix.example',
+    });
+    const { loadConfig } = await import('./config.js');
+    const { channels } = loadConfig();
+
+    expect(channels.discord).toMatchObject({ enabled: true, botToken: 'discord-token', allowedUsers: ['111', '222'] });
+    expect(channels.slack).toMatchObject({ enabled: true, botToken: 'xoxb-1', appToken: 'xapp-1', allowedUsers: ['U1'] });
+    expect(channels.whatsapp).toMatchObject({ enabled: true, allowedNumbers: ['+44 7700 900000'] });
+    expect(channels.signal).toMatchObject({ enabled: true, phoneNumber: '+15550001111', cliPath: 'signal-cli' });
+    expect(channels.matrix).toMatchObject({
+      enabled: true, homeserverUrl: 'https://matrix.example', allowedUsers: ['@me:matrix.example'],
+    });
+  });
+
+  it('needs both Slack tokens and both Matrix credentials, and honours *_ENABLED=false', async () => {
+    Object.assign(process.env, {
+      SLACK_BOT_TOKEN: 'xoxb-1',
+      MATRIX_ACCESS_TOKEN: 'syt_x',
+      DISCORD_BOT_TOKEN: 'discord-token',
+      DISCORD_ENABLED: 'false',
+    });
+    const { loadConfig } = await import('./config.js');
+    const { channels } = loadConfig();
+    expect(channels.slack.enabled).toBe(false);
+    expect(channels.matrix.enabled).toBe(false);
+    expect(channels.discord.enabled).toBe(false);
+  });
+});

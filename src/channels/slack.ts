@@ -1,24 +1,41 @@
 /**
  * Slack Channel using Bolt framework
  *
- * Uses @slack/bolt for Slack's Events API and Web API.
- * Supports both socket mode (no public URL needed) and HTTP mode.
+ * Uses @slack/bolt in Socket Mode (no public URL needed): a bot token
+ * (xoxb-...) plus an app-level token (xapp-..., scope connections:write).
  *
- * Required Slack App permissions:
- * - chat:write
- * - app_mentions:read
- * - im:history
- * - im:read
- * - im:write
+ * Required Slack App setup:
+ * - Socket Mode enabled
+ * - Bot scopes: chat:write, app_mentions:read, im:history, im:read, im:write,
+ *   files:write (for sending files)
+ * - Event subscriptions: app_mention, message.im
+ * - App Home: "Allow users to send Slash commands and messages from the messages tab"
+ * - Optional slash command: /scallopbot
  *
  * Note: Requires optional dependency @slack/bolt
  */
 
+import { basename } from 'path';
 import type { Logger } from 'pino';
 import type { Agent } from '../agent/agent.js';
 import type { SessionManager } from '../agent/session.js';
-import type { Channel, ChannelStatus } from './types.js';
+import type { ScallopDatabase } from '../memory/db.js';
+import type { MessageDeliveryResult } from '../triggers/types.js';
+import type { ChannelStatus } from './types.js';
 import { safeImport } from '../utils/dynamic-import.js';
+import {
+  ChannelSessions,
+  KeyedSerialQueue,
+  notifyUserMessage,
+  renderAgentReply,
+  soleEntry,
+  splitText,
+  type ChatUserMessageHook,
+  type ProactiveChatChannel,
+} from './chat-support.js';
+
+// Slack rejects text over 40k chars; stay well under for readability.
+const MAX_MESSAGE_LENGTH = 3900;
 
 // Dynamic import for optional dependency
 let App: any;
@@ -46,13 +63,19 @@ export interface SlackChannelOptions {
   signingSecret?: string; // For HTTP mode
   socketMode?: boolean;
   port?: number; // For HTTP mode
+  /** Slack member IDs (U...) allowed to use the bot. Empty/undefined = allow all */
+  allowedUsers?: string[];
+  /** Rehydrates sessions after a restart */
+  db?: Pick<ScallopDatabase, 'findSessionByUserId'>;
+  onUserMessage?: ChatUserMessageHook;
 }
 
-export class SlackChannel implements Channel {
+type Say = (msg: string | Record<string, unknown>) => Promise<unknown>;
+
+export class SlackChannel implements ProactiveChatChannel {
   public readonly name = 'slack';
 
   private agent: Agent;
-  private sessionManager: SessionManager;
   private logger: Logger;
   private app: any = null;
   private socketMode: boolean;
@@ -60,8 +83,11 @@ export class SlackChannel implements Channel {
   private botToken: string;
   private appToken?: string;
   private signingSecret?: string;
+  private allowedUsers: Set<string> | null;
+  private onUserMessage?: ChatUserMessageHook;
 
-  private userSessions: Map<string, string> = new Map();
+  private sessions: ChannelSessions;
+  private turns = new KeyedSerialQueue();
   private running = false;
   private status: ChannelStatus = {
     connected: false,
@@ -70,59 +96,34 @@ export class SlackChannel implements Channel {
 
   constructor(options: SlackChannelOptions) {
     this.agent = options.agent;
-    this.sessionManager = options.sessionManager;
     this.logger = options.logger.child({ channel: 'slack' });
     this.socketMode = options.socketMode ?? true;
     this.port = options.port ?? 3000;
     this.botToken = options.botToken;
     this.appToken = options.appToken;
     this.signingSecret = options.signingSecret;
+    this.allowedUsers = options.allowedUsers?.length ? new Set(options.allowedUsers) : null;
+    this.onUserMessage = options.onUserMessage;
+    this.sessions = new ChannelSessions('slack', options.sessionManager, options.db);
+  }
+
+  isAllowedRecipient(userId: string): boolean {
+    return !this.allowedUsers || this.allowedUsers.has(userId);
+  }
+
+  soleRecipient(): string | null {
+    return soleEntry(this.allowedUsers);
   }
 
   private setupEventHandlers(): void {
-    // Handle direct messages
-    this.app.message(async ({ message, say }: { message: any; say: any }) => {
-      // Skip bot messages and message changes
-      if (message.subtype) return;
-      if (!('text' in message) || !message.text) return;
-      if (!('user' in message) || !message.user) return;
-
-      const userId = message.user;
-      const text = message.text;
-      const channelId = message.channel;
-
-      this.logger.info(
-        { userId, message: text.substring(0, 100), channelId },
-        'Received message'
-      );
-
-      // Handle commands
-      if (text.startsWith('/')) {
-        await this.handleCommand(text, say);
-        return;
-      }
-
-      // Process through agent
-      await this.processMessage(text, userId, say);
+    // Direct messages only. Channel messages reach us as app_mention below;
+    // handling them here too would answer every mention twice.
+    this.app.message(async ({ message, say }: { message: any; say: Say }) => {
+      await this.handleDirectMessage(message, say);
     });
 
-    // Handle app mentions in channels
-    this.app.event('app_mention', async ({ event, say }: { event: any; say: any }) => {
-      const userId = event.user;
-      // Remove the bot mention from the text
-      const text = event.text.replace(/<@[A-Z0-9]+>/g, '').trim();
-
-      if (!text) {
-        await say("Hi! How can I help you? Just mention me with your question.");
-        return;
-      }
-
-      this.logger.info(
-        { userId, message: text.substring(0, 100), channelId: event.channel },
-        'Received mention'
-      );
-
-      await this.processMessage(text, userId, say);
+    this.app.event('app_mention', async ({ event, say }: { event: any; say: Say }) => {
+      await this.handleMention(event, say);
     });
 
     // Handle app home opened
@@ -140,21 +141,12 @@ export class SlackChannel implements Channel {
                   text: '*Welcome to ScallopBot!* :robot_face:\n\nI\'m your AI assistant. You can chat with me directly or mention me in any channel.',
                 },
               },
-              {
-                type: 'divider',
-              },
+              { type: 'divider' },
               {
                 type: 'section',
                 text: {
                   type: 'mrkdwn',
-                  text: '*Commands:*\n• `/reset` - Preserve this conversation and start a new one\n• `/help` - Show this help message\n• `/status` - Check bot status',
-                },
-              },
-              {
-                type: 'section',
-                text: {
-                  type: 'mrkdwn',
-                  text: '*How to use:*\n1. Send me a direct message\n2. Or mention me in any channel: `@ScallopBot your question`',
+                  text: '*Commands (in a DM):*\n• `reset` - Preserve this conversation and start a new one\n• `help` - Show this help message\n• `status` - Check bot status',
                 },
               },
             ],
@@ -165,13 +157,16 @@ export class SlackChannel implements Channel {
       }
     });
 
-    // Handle slash commands
+    // Optional slash command (must also be created in the Slack app config)
     this.app.command('/scallopbot', async ({ command, ack, respond }: { command: any; ack: any; respond: any }) => {
       await ack();
 
-      const args = command.text.trim().split(' ');
-      const subcommand = args[0]?.toLowerCase();
+      if (!this.isAllowedRecipient(command.user_id)) {
+        await respond('You are not allowed to use this bot.');
+        return;
+      }
 
+      const subcommand = command.text.trim().split(' ')[0]?.toLowerCase();
       switch (subcommand) {
         case 'reset':
           await this.handleReset(command.user_id);
@@ -179,94 +174,158 @@ export class SlackChannel implements Channel {
           break;
 
         case 'status':
-          await respond(
-            `Connected: ${this.status.connected}\nAuthenticated: ${this.status.authenticated}`
-          );
+          await respond(`Connected: ${this.status.connected}\nAuthenticated: ${this.status.authenticated}`);
           break;
 
-        case 'help':
         default:
-          await respond({
-            blocks: [
-              {
-                type: 'section',
-                text: {
-                  type: 'mrkdwn',
-                  text: '*ScallopBot Help*\n\n`/scallopbot help` - Show this message\n`/scallopbot reset` - Preserve this conversation and start a new one\n`/scallopbot status` - Check bot status\n\nOr just send me a message!',
-                },
-              },
-            ],
-          });
+          await respond(this.helpText());
       }
     });
   }
 
-  private async handleCommand(
-    text: string,
-    say: (msg: string) => Promise<void>
-  ): Promise<void> {
-    const [command] = text.slice(1).split(' ');
+  /** Exposed for tests: a Slack `message` event payload. */
+  async handleDirectMessage(message: any, say: Say): Promise<void> {
+    // Skip edits, joins, and anything posted by a bot (including ourselves).
+    if (message.subtype || message.bot_id) return;
+    if (message.channel_type !== 'im') return;
+    if (!message.text || !message.user) return;
 
-    switch (command.toLowerCase()) {
-      case 'help':
-        await say(
-          '*ScallopBot Help*\n\n• `/help` - Show this message\n• `/reset` - Preserve this conversation and start a new one\n• `/status` - Check bot status\n\nOr just send me a message!'
-        );
+    const userId: string = message.user;
+    if (!this.isAllowedRecipient(userId)) {
+      this.logger.debug({ userId }, 'Ignoring message from user outside the Slack allowlist');
+      return;
+    }
+
+    const text: string = message.text.trim();
+    this.logger.info({ userId, message: text.substring(0, 100) }, 'Received message');
+
+    // Slack swallows "/..." as slash commands, so DM commands are bare words.
+    const command = text.replace(/^[/!]/, '').toLowerCase();
+    if (command === 'help' || command === 'reset' || command === 'new' || command === 'status') {
+      await this.handleCommand(command, userId, say);
+      return;
+    }
+
+    await this.processMessage(text, userId, say);
+  }
+
+  /** Exposed for tests: a Slack `app_mention` event payload. */
+  async handleMention(event: any, say: Say): Promise<void> {
+    if (event.bot_id || !event.user) return;
+    const userId: string = event.user;
+    if (!this.isAllowedRecipient(userId)) {
+      this.logger.debug({ userId }, 'Ignoring mention from user outside the Slack allowlist');
+      return;
+    }
+
+    const text = String(event.text ?? '').replace(/<@[A-Z0-9]+>/g, '').trim();
+    if (!text) {
+      await say('Hi! How can I help you? Just mention me with your question.');
+      return;
+    }
+
+    this.logger.info({ userId, message: text.substring(0, 100), channelId: event.channel }, 'Received mention');
+    await this.processMessage(text, userId, say);
+  }
+
+  private helpText(): string {
+    return '*ScallopBot Help*\n\nIn a DM:\n• `help` - Show this message\n• `reset` - Preserve this conversation and start a new one\n• `status` - Check bot status\n\nOr just send me a message, or mention me in a channel.';
+  }
+
+  private async handleCommand(command: string, userId: string, say: Say): Promise<void> {
+    switch (command) {
+      case 'reset':
+      case 'new':
+        await this.handleReset(userId);
+        await say('Started a new conversation. Your previous conversation is preserved.');
         break;
-
       case 'status':
-        await say(
-          `Connected: ${this.status.connected}\nAuthenticated: ${this.status.authenticated}`
-        );
+        await say(`Connected: ${this.status.connected}\nAuthenticated: ${this.status.authenticated}`);
         break;
-
       default:
-        await say(
-          `Unknown command: \`/${command}\`\nType \`/help\` for available commands.`
-        );
+        await say(this.helpText());
     }
   }
 
-  private async processMessage(
-    text: string,
-    userId: string,
-    say: (msg: string | object) => Promise<void>
-  ): Promise<void> {
-    try {
-      // Get or create session
-      const sessionId = await this.getOrCreateSession(userId);
+  private async processMessage(text: string, userId: string, say: Say): Promise<void> {
+    await this.turns.run(userId, async () => {
+      try {
+        await notifyUserMessage(this.onUserMessage, this.sessions.prefixed(userId), text, this.logger);
+        const sessionId = await this.getOrCreateSession(userId);
+        const result = await this.agent.processMessage(sessionId, text);
 
-      // Process through agent
-      const result = await this.agent.processMessage(sessionId, text);
+        for (const chunk of splitText(this.formatForSlack(renderAgentReply(result)), MAX_MESSAGE_LENGTH)) {
+          await say(chunk);
+        }
 
-      // Format response for Slack (convert markdown if needed)
-      const response = this.formatForSlack(result.response);
-
-      // Send response
-      await say(response);
-
-      this.logger.info(
-        { userId, responseLength: result.response.length, tokens: result.tokenUsage },
-        'Sent response'
-      );
-    } catch (error) {
-      const err = error as Error;
-      this.logger.error({ userId, error: err.message }, 'Failed to process message');
-      await say('Sorry, I encountered an error. Please try again.');
-    }
+        this.logger.info(
+          { userId, responseLength: result.response.length, tokens: result.tokenUsage },
+          'Sent response'
+        );
+      } catch (error) {
+        const err = error as Error;
+        this.logger.error({ userId, error: err.message }, 'Failed to process message');
+        await say('Sorry, I encountered an error. Please try again.').catch(() => {});
+      }
+    });
   }
 
   private formatForSlack(text: string): string {
     // Slack uses its own markdown variant (mrkdwn)
-    // Convert common markdown to Slack format
     return text
       // Bold: **text** -> *text*
       .replace(/\*\*([^*]+)\*\*/g, '*$1*')
-      // Italic: _text_ stays the same
-      // Code blocks stay the same (```)
-      // Inline code stays the same (`)
       // Links: [text](url) -> <url|text>
       .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<$2|$1>');
+  }
+
+  /**
+   * Proactive message to a user. Posting with a user ID as the channel lands
+   * in the bot's DM with that user.
+   */
+  async sendMessage(userId: string, message: string): Promise<MessageDeliveryResult> {
+    if (!this.running || !this.app) {
+      this.logger.warn({ userId }, 'Cannot send message - Slack not running');
+      return false;
+    }
+    if (userId === 'default') {
+      const sole = this.soleRecipient();
+      if (!sole) return false;
+      userId = sole;
+    }
+    if (!this.isAllowedRecipient(userId)) {
+      this.logger.warn({ userId }, 'Refusing proactive delivery outside the Slack allowlist');
+      return false;
+    }
+
+    try {
+      const messageIds: string[] = [];
+      for (const chunk of splitText(this.formatForSlack(message), MAX_MESSAGE_LENGTH)) {
+        const res = await this.app.client.chat.postMessage({ channel: userId, text: chunk });
+        if (res?.ts) messageIds.push(String(res.ts));
+      }
+      return { sent: true, channel: 'slack', messageIds };
+    } catch (error) {
+      this.logger.error({ userId, error: (error as Error).message }, 'Failed to send proactive message');
+      return false;
+    }
+  }
+
+  async sendFile(userId: string, filePath: string, caption?: string): Promise<boolean> {
+    if (!this.running || !this.app || !this.isAllowedRecipient(userId)) return false;
+    try {
+      const dm = await this.app.client.conversations.open({ users: userId });
+      await this.app.client.files.uploadV2({
+        channel_id: dm.channel.id,
+        file: filePath,
+        filename: basename(filePath),
+        initial_comment: caption,
+      });
+      return true;
+    } catch (error) {
+      this.logger.error({ userId, filePath, error: (error as Error).message }, 'Failed to send file');
+      return false;
+    }
   }
 
   async start(): Promise<void> {
@@ -305,7 +364,7 @@ export class SlackChannel implements Channel {
       this.status.connected = true;
       this.status.authenticated = true;
       this.status.error = undefined;
-      this.logger.info('Slack channel started');
+      this.logger.info({ allowedUsers: this.allowedUsers?.size ?? 'all' }, 'Slack channel started');
     } catch (error) {
       const err = error as Error;
       this.status.error = err.message;
@@ -322,7 +381,7 @@ export class SlackChannel implements Channel {
     this.logger.info('Stopping Slack channel...');
     this.running = false;
 
-    await this.app.stop();
+    await this.app?.stop();
 
     this.status.connected = false;
     this.logger.info('Slack channel stopped');
@@ -337,29 +396,10 @@ export class SlackChannel implements Channel {
   }
 
   async getOrCreateSession(userId: string): Promise<string> {
-    const cached = this.userSessions.get(userId);
-    if (cached) {
-      const session = await this.sessionManager.getSession(cached);
-      if (session) {
-        return cached;
-      }
-    }
-
-    const session = await this.sessionManager.createSession({
-      userId,
-      channelId: 'slack',
-    });
-
-    this.userSessions.set(userId, session.id);
-    return session.id;
+    return this.sessions.get(userId);
   }
 
   async handleReset(userId: string): Promise<void> {
-    const sessionId = this.userSessions.get(userId);
-    const session = await this.sessionManager.startNewSession({
-      userId,
-      channelId: 'slack',
-    }, sessionId);
-    this.userSessions.set(userId, session.id);
+    await this.sessions.reset(userId);
   }
 }
