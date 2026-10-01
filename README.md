@@ -678,7 +678,7 @@ src/
 ├── providers/      # LLM provider implementations (7 providers)
 ├── reliability/    # Circuit breaker, graceful degradation
 ├── routing/        # Cost tracking, complexity analysis, model selection
-├── skills/         # Loader, registry, executor, ClawHub client (29 bundled)
+├── skills/         # Loader, registry, executor, ClawHub client (34 bundled)
 ├── evolution/      # Evidence-gated procedural skill learning and curation
 ├── goals/          # Persistent, budgeted, verified autonomous goals
 ├── workflow/       # Context-efficient validated tool DAG execution
