@@ -11,6 +11,7 @@ import * as os from 'os';
 import * as path from 'path';
 import * as fs from 'fs';
 import { randomBytes } from 'crypto';
+import { prepareSandboxedCommand } from '../../../../security/sandbox/index.js';
 
 const DEFAULT_TIMEOUT = 60_000;
 const MAX_TIMEOUT = 120_000;
@@ -95,6 +96,20 @@ async function main(): Promise<void> {
   const cwd = process.env.SKILL_WORKSPACE || process.env.AGENT_WORKSPACE || process.cwd();
   const cleanup = () => { try { fs.unlinkSync(tmpFile); } catch { /* ignore */ } };
 
+  const prepared = prepareSandboxedCommand({
+    argv: [runner.cmd, ...runner.args(tmpFile)],
+    cwd,
+    workspace: cwd,
+    env: { ...process.env },
+    readOnlyFiles: [tmpFile],
+  });
+  if (!prepared.ok) {
+    cleanup();
+    fail(language, prepared.error, 126);
+    return;
+  }
+  const { wrapped } = prepared;
+
   await new Promise<void>((resolve) => {
     const stdout: string[] = [];
     const stderr: string[] = [];
@@ -102,9 +117,9 @@ async function main(): Promise<void> {
     let truncated = false;
     let settled = false;
 
-    const child = spawn(runner.cmd, runner.args(tmpFile), {
+    const child = spawn(wrapped.command, wrapped.args, {
       cwd,
-      env: process.env,
+      env: wrapped.env,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 
@@ -145,7 +160,9 @@ async function main(): Promise<void> {
     });
 
     child.on('error', (err: NodeJS.ErrnoException) => {
-      const msg = err.code === 'ENOENT' ? runner.missingHint : `Failed to execute: ${err.message}`;
+      const msg = wrapped.backend !== 'off'
+        ? `Failed to start ${wrapped.backend} sandbox: ${err.message}`
+        : err.code === 'ENOENT' ? runner.missingHint : `Failed to execute: ${err.message}`;
       finish({ success: false, output: stdout.join(''), error: msg, exitCode: 127, language });
     });
 

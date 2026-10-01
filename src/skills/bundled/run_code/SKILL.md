@@ -87,4 +87,4 @@ For a single shell command (`ls`, `git status`, `npm install`), use `bash`.
 - `python` requires `python3` on PATH; if it's missing, the result explains how
   to install it. `javascript` runs under `node`. `bash` runs under `bash`.
 - Output is captured up to 1 MB; long-running programs are killed at the timeout.
-- This is not a security sandbox — the same trust model as the `bash` skill.
+- Same trust model as the `bash` skill: it runs on the host unless the operator enabled `SANDBOX_MODE`, in which case writes outside the workspace (and, if configured, network access) are denied.

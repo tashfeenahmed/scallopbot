@@ -16,6 +16,8 @@ import {
 import { defineSkill } from '../skills/sdk.js';
 import { SessionManager } from '../agent/session.js';
 import { Agent } from '../agent/agent.js';
+import { initSecurityLayers } from '../security/startup.js';
+import { vaultLoadResult } from '../config/config.js';
 import { EvolutionRecorder } from '../evolution/signals.js';
 import { EvolutionEngine } from '../evolution/engine.js';
 import { createLoadProcedureSkill } from '../evolution/procedure-skill.js';
@@ -150,6 +152,7 @@ export class Gateway {
     }
 
     this.logger.info('Initializing gateway...');
+    initSecurityLayers(this.logger, vaultLoadResult);
     this.configureLifecycleEventRelay();
 
     // A single configured Telegram owner may safely share the canonical
