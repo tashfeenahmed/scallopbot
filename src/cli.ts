@@ -839,5 +839,43 @@ program
 
 // secrets - encrypted vault for API keys
 registerSecretsCommand(program);
+// web-login - create the web dashboard account ahead of the first browser visit
+program
+  .command('web-login')
+  .description('Create the web dashboard login (password read from SCALLOPBOT_WEB_PASSWORD or stdin)')
+  .requiredOption('-e, --email <email>', 'Login email for the dashboard')
+  .action(async (options: { email: string }) => {
+    try {
+      const password = process.env.SCALLOPBOT_WEB_PASSWORD
+        ?? (process.stdin.isTTY ? '' : (await readStdin()).split(/\r?\n/)[0] ?? '');
+      if (password.length < 8) throw new Error('Password must be at least 8 characters (set SCALLOPBOT_WEB_PASSWORD or pipe it on stdin)');
+      const config = loadConfig();
+      const configured = config.memory.dbPath;
+      const dbPath = nodePath.isAbsolute(configured)
+        ? configured
+        : nodePath.join(config.agent.workspace, configured);
+      const db = new ScallopDatabase(dbPath);
+      try {
+        if (db.hasAuthUser()) {
+          console.log('A dashboard login already exists; leaving it unchanged.');
+          return;
+        }
+        const bcrypt = await import('bcrypt');
+        db.createAuthUser(options.email, await bcrypt.hash(password, 12));
+        console.log(`Dashboard login created for ${options.email}`);
+      } finally {
+        db.close();
+      }
+    } catch (error) {
+      console.error('web-login failed:', (error as Error).message);
+      process.exitCode = 1;
+    }
+  });
+
+async function readStdin(): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) chunks.push(chunk as Buffer);
+  return Buffer.concat(chunks).toString('utf8');
+}
 
 program.parse();

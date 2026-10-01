@@ -64,7 +64,65 @@ per-conversation scores. Both arms use the same strict QA-answerer prompt.
 The harness lives in [`src/eval/`](src/eval/); full methodology is in the
 [paper](Paper2026.pdf).
 
-## Quick Start
+## Install
+
+Every route ends with the bot running and the web dashboard on
+`http://localhost:3000`. The first browser visit creates the dashboard login,
+unless the installer (or `scallopbot web-login`) already set one. When you copy
+`.env.example` by hand, set one provider key and comment out the placeholder
+`TELEGRAM_BOT_TOKEN` line if you are not using Telegram.
+
+### One-liner (Linux, macOS, Raspberry Pi OS 64-bit)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/tashfeenahmed/scallopbot/main/scripts/install.sh | bash
+```
+
+[`scripts/install.sh`](scripts/install.sh) installs Node 24 through nvm if you
+don't have it (no sudo), clones or updates `~/scallopbot`, runs `npm ci` and the
+build, asks for a provider key, an optional Telegram token and an optional
+dashboard login, writes `.env`, and can install a pm2 or systemd user service.
+Re-running it updates the checkout and keeps your `.env`. Flags go after
+`bash -s --`, for example `| bash -s -- --dir /opt/scallopbot --service pm2`;
+`--non-interactive` reads the answers from `ANTHROPIC_API_KEY` (or another
+provider key), `TELEGRAM_BOT_TOKEN`, `SCALLOPBOT_WEB_EMAIL` and
+`SCALLOPBOT_WEB_PASSWORD`; `--dry-run` shows what it would do.
+
+### Docker
+
+```bash
+git clone https://github.com/tashfeenahmed/scallopbot.git && cd scallopbot
+cp .env.example .env          # set a provider key
+docker compose up -d --build
+```
+
+The image (`node:24-slim`, amd64 and arm64) runs as a non-root user and keeps
+everything it writes, including the SQLite memory, sessions, workspace and
+installed skills, in the `scallopbot-data` volume at `/data`. The port is
+published on `127.0.0.1` only; put a reverse proxy or Tailscale in front before
+exposing it. An Ollama service is ready to uncomment in
+[`docker-compose.yml`](docker-compose.yml). Local voice (Python, ffmpeg) and the
+browser skill's Chrome are not in the image. `install.sh --docker` fetches just
+the compose file and a filled-in `.env` and builds straight from GitHub.
+
+### npm (global CLI)
+
+ScallopBot is not on the npm registry yet, so build and pack it from a clone:
+
+```bash
+git clone https://github.com/tashfeenahmed/scallopbot.git && cd scallopbot
+npm ci && npm run build && npm pack
+npm install -g ./scallopbot-0.1.0.tgz
+
+mkdir -p ~/scallopbot-data && cd ~/scallopbot-data
+cp "$(npm root -g)/scallopbot/.env.example" .env   # set a provider key
+scallopbot start
+```
+
+`scallopbot` reads `.env` from, and keeps its data in, the directory you start
+it from (or `AGENT_WORKSPACE`).
+
+### From source
 
 ```bash
 git clone https://github.com/tashfeenahmed/scallopbot.git
@@ -79,6 +137,14 @@ node dist/cli.js start
 ```
 
 Requires Node.js 24+.
+
+### Install the dashboard as an app
+
+The web dashboard is a Progressive Web App. In Chrome or Edge use **Install
+app** in the address bar; on iPhone or iPad use **Share → Add to Home Screen**.
+Browsers only offer this over HTTPS or on `localhost`. The service worker
+caches the app shell so it opens offline; chat, memory and API data always come
+live from your server.
 
 ## MCP
 
@@ -548,6 +614,7 @@ sudo systemctl enable --now scallopbot
 | `chat` | Interactive CLI session (`-s <id>` to resume) |
 | `config` | Show current configuration (`--json` for machine output) |
 | `version` | Show version |
+| `web-login -e <email>` | Create the dashboard login (password from `SCALLOPBOT_WEB_PASSWORD` or stdin) |
 | `skill search <query>` | Search ClawHub |
 | `skill install <slug>` | Install from ClawHub |
 | `skill uninstall <name>` | Remove a skill |
