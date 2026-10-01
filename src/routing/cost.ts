@@ -374,6 +374,65 @@ export class CostTracker {
   }
 
   /**
+   * Record spend that is priced per call rather than per token (image
+   * generation, phone calls, SMS). It lands in the same history and SQLite
+   * table as LLM usage, so it counts toward the daily and monthly budgets.
+   */
+  recordFlatCost(params: {
+    model: string;
+    provider: string;
+    sessionId: string;
+    cost: number;
+  }): void {
+    const cost = Number.isFinite(params.cost) && params.cost > 0 ? params.cost : 0;
+    const record: UsageRecord = {
+      model: params.model,
+      provider: params.provider,
+      sessionId: params.sessionId,
+      inputTokens: 0,
+      outputTokens: 0,
+      cost,
+      timestamp: new Date(),
+    };
+    this.usageHistory.push(record);
+    this.evictExpiredRecords();
+    if (this.db) {
+      this.db.recordCostUsage({
+        model: record.model,
+        provider: record.provider,
+        sessionId: record.sessionId,
+        inputTokens: 0,
+        outputTokens: 0,
+        cost,
+        timestamp: record.timestamp.getTime(),
+      });
+    }
+  }
+
+  /**
+   * Budget check for a call with a known (estimated) price: refuses when a
+   * budget is already exhausted or when this call would push spend past it.
+   */
+  canAfford(estimatedCost: number): RequestCheck {
+    const base = this.canMakeRequest();
+    if (!base.allowed) return base;
+    const estimate = Number.isFinite(estimatedCost) && estimatedCost > 0 ? estimatedCost : 0;
+    if (this.dailyBudget !== undefined && this.getDailySpend() + estimate > this.dailyBudget) {
+      return {
+        allowed: false,
+        reason: `Daily budget would be exceeded: $${this.getDailySpend().toFixed(4)} spent + ~$${estimate.toFixed(4)} > $${this.dailyBudget}`,
+      };
+    }
+    if (this.monthlyBudget !== undefined && this.getMonthlySpend() + estimate > this.monthlyBudget) {
+      return {
+        allowed: false,
+        reason: `Monthly budget would be exceeded: $${this.getMonthlySpend().toFixed(4)} spent + ~$${estimate.toFixed(4)} > $${this.monthlyBudget}`,
+      };
+    }
+    return { allowed: true };
+  }
+
+  /**
    * Record a concrete completion using the provider that actually served it.
    * Keeping this operation here prevents fallback call sites from accidentally
    * attributing usage to the initially selected (failed) provider.

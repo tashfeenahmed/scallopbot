@@ -2,6 +2,7 @@ import { type FormEvent, type KeyboardEvent, type RefObject, useEffect, useLayou
 import { COMMANDS, type CommandDefinition } from '../commands';
 import CommandMenu from './CommandMenu';
 import { composerKeyAction, loadDraft, saveDraft, textareaHeight } from '../hooks/composer';
+import type { useVoice } from '../hooks/useVoice';
 
 interface ChatInputProps {
   onSend: (text: string) => void;
@@ -10,6 +11,9 @@ interface ChatInputProps {
   disabled: boolean;
   placeholder?: string;
   inputRef: RefObject<HTMLTextAreaElement | null>;
+  /** Push-to-talk; the mic button shows only when the server has STT. */
+  voice?: ReturnType<typeof useVoice>;
+  onVoiceText?: (text: string) => void;
 }
 
 function draftStorage(): Storage | null {
@@ -20,7 +24,7 @@ function draftStorage(): Storage | null {
   }
 }
 
-export default function ChatInput({ onSend, onStop, isWaiting, disabled, placeholder = 'Message...', inputRef }: ChatInputProps) {
+export default function ChatInput({ onSend, onStop, isWaiting, disabled, placeholder = 'Message...', inputRef, voice, onVoiceText }: ChatInputProps) {
   // A half-typed message survives a refresh or a disconnect-reload.
   const [text, setText] = useState(() => loadDraft(draftStorage()));
   const [menuOpen, setMenuOpen] = useState(false);
@@ -155,6 +159,20 @@ export default function ChatInput({ onSend, onStop, isWaiting, disabled, placeho
     }
   };
 
+  const showMic = !!voice && voice.supported && voice.status.stt;
+  const finishTalking = async () => {
+    if (!voice) return;
+    const spoken = await voice.stop();
+    if (spoken.trim()) onVoiceText?.(spoken.trim());
+  };
+  const voiceHint = voice?.state === 'recording'
+    ? 'Listening… release to send'
+    : voice?.state === 'transcribing'
+      ? 'Transcribing…'
+      : voice?.state === 'speaking'
+        ? 'Speaking the reply…'
+        : voice?.error ?? null;
+
   const toggleMenu = () => {
     if (menuOpen) {
       setMenuOpen(false);
@@ -200,6 +218,44 @@ export default function ChatInput({ onSend, onStop, isWaiting, disabled, placeho
           aria-label="Message. Shift+Enter adds a new line."
           className="flex-1 px-4 py-3 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-2xl text-gray-900 dark:text-gray-100 outline-none focus:border-blue-300 dark:focus:border-blue-500 focus:bg-white dark:focus:bg-gray-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed placeholder:text-gray-400 dark:placeholder:text-gray-500 leading-relaxed resize-none box-border"
         />
+        {showMic && (
+          <button
+            type="button"
+            aria-label="Hold to talk"
+            title="Hold to talk (space or Enter also works). The reply is read aloud."
+            disabled={disabled || isWaiting || voice!.state === 'transcribing'}
+            onPointerDown={(e) => {
+              e.preventDefault();
+              e.currentTarget.setPointerCapture?.(e.pointerId);
+              void voice!.start();
+            }}
+            onPointerUp={() => { void finishTalking(); }}
+            onPointerCancel={() => { void finishTalking(); }}
+            onKeyDown={(e) => {
+              if ((e.key === ' ' || e.key === 'Enter') && !e.repeat) {
+                e.preventDefault();
+                void voice!.start();
+              }
+            }}
+            onKeyUp={(e) => {
+              if (e.key === ' ' || e.key === 'Enter') {
+                e.preventDefault();
+                void finishTalking();
+              }
+            }}
+            className={`w-11 h-11 flex items-center justify-center rounded-full shrink-0 transition-colors touch-none select-none disabled:opacity-50 disabled:cursor-not-allowed ${
+              voice!.state === 'recording'
+                ? 'bg-red-500 text-white animate-pulse'
+                : 'bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-500 dark:text-gray-400'
+            }`}
+          >
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="9" y="3" width="6" height="11" rx="3" />
+              <path d="M5 11a7 7 0 0 0 14 0" />
+              <line x1="12" y1="18" x2="12" y2="21" />
+            </svg>
+          </button>
+        )}
         <button
           type="submit"
           disabled={disabled}
@@ -223,6 +279,11 @@ export default function ChatInput({ onSend, onStop, isWaiting, disabled, placeho
           )}
         </button>
       </form>
+      {showMic && voiceHint && (
+        <div role="status" className="max-w-3xl mx-auto mt-1 text-xs text-gray-500 dark:text-gray-400 text-center">
+          {voiceHint}
+        </div>
+      )}
     </footer>
   );
 }

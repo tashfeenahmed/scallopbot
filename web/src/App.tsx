@@ -7,6 +7,7 @@ import Sidebar from './components/Sidebar';
 import CreditsPanel from './components/CreditsPanel';
 import ChatContainer from './components/ChatContainer';
 import ChatInput from './components/ChatInput';
+import { useVoice } from './hooks/useVoice';
 import ConnectionBanner from './components/ConnectionBanner';
 import { budgetBanner } from './hooks/budget-banner';
 import SetupScreen from './components/SetupScreen';
@@ -151,6 +152,11 @@ export default function App() {
   const { authState, error: authError, setup, login, logout } = useAuth();
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  // Push-to-talk: a spoken message gets its reply read aloud.
+  const voice = useVoice(authState === 'authenticated');
+  const voiceRef = useRef(voice);
+  voiceRef.current = voice;
+  const speakNextReplyRef = useRef(false);
 
   // Sync view changes to browser URL
   const handleViewChange = useCallback((view: ViewMode) => {
@@ -191,7 +197,11 @@ export default function App() {
           }
           if (data.content) {
             addMessage({ type: 'assistant', content: data.content, isMarkdown: true });
+            if (speakNextReplyRef.current && voiceRef.current.status.tts) {
+              void voiceRef.current.speak(data.content);
+            }
           }
+          speakNextReplyRef.current = false;
           refetchCosts();
           inputRef.current?.focus();
           break;
@@ -302,6 +312,7 @@ export default function App() {
           break;
 
         case 'error':
+          speakNextReplyRef.current = false;
           setIsWaiting(false);
           addMessage({ type: 'error', content: data.error || 'An error occurred' });
           inputRef.current?.focus();
@@ -519,6 +530,11 @@ export default function App() {
                 disabled={status !== 'connected'}
                 placeholder={composerPlaceholder(status)}
                 inputRef={inputRef}
+                voice={voice}
+                onVoiceText={(text) => {
+                  speakNextReplyRef.current = true;
+                  handleSend(text);
+                }}
               />
             </>
           ) : (

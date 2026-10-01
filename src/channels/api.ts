@@ -11,6 +11,9 @@
  * - DELETE /api/sessions/:id - Delete a session
  * - GET /api/files?path= - Download a workspace file
  * - GET /api/health - Health check
+ * - POST /api/voice/transcribe - Speech-to-text for the dashboard's push-to-talk
+ * - POST /api/voice/speak - Text-to-speech for the dashboard's voice mode
+ * - /api/twilio/* - Twilio webhooks (signature-checked, no session auth)
  *
  * WebSocket:
  * - ws://host:port/ws - Real-time bidirectional communication
@@ -38,6 +41,8 @@ import type { ProviderRegistry } from '../providers/registry.js';
 import type { SubAgentRegistry, SubAgentExecutor } from '../subagent/index.js';
 import { stripThinkTags } from '../utils/output-safety.js';
 import { redactSensitiveText } from '../security/redaction.js';
+import type { TwilioWebhookHandler } from '../skills/bundled/phone_call/scripts/twilio.js';
+import type { VoiceManager } from '../voice/index.js';
 import {
   classifySessionMessage,
   isInternalSessionMetadata,
@@ -45,6 +50,8 @@ import {
 
 /** Maximum request body size (1MB) */
 const MAX_BODY_SIZE = 1024 * 1024;
+/** Push-to-talk clips are short; 10MB is several minutes of opus. */
+const MAX_AUDIO_BODY_SIZE = 10 * 1024 * 1024;
 /** Keep opt-in debug payloads useful without turning them into an unbounded data channel. */
 const MAX_DEBUG_TEXT_LENGTH = 2_000;
 
@@ -164,6 +171,10 @@ export interface ApiChannelConfig {
   providerRegistry?: ProviderRegistry;
   subAgentRegistry?: SubAgentRegistry;
   subAgentExecutor?: SubAgentExecutor;
+  /** Twilio webhook handler (phone_call skill), mounted at /api/twilio/ */
+  twilioWebhook?: TwilioWebhookHandler;
+  /** Voice manager for the dashboard's push-to-talk STT/TTS endpoints */
+  voiceManager?: VoiceManager;
 }
 
 /** Content-Type mapping for static files */
@@ -192,6 +203,7 @@ const CONTENT_TYPES: Record<string, string> = {
   '.yml': 'text/yaml',
   '.mp3': 'audio/mpeg',
   '.mp4': 'video/mp4',
+  '.webp': 'image/webp',
 };
 
 /**
@@ -267,7 +279,7 @@ interface WsResponse {
 export class ApiChannel implements Channel, TriggerSource {
   name = 'api';
 
-  private config: Required<Omit<ApiChannelConfig, 'apiKey' | 'allowedOrigins' | 'staticDir' | 'costTracker' | 'memoryStore' | 'db' | 'interruptQueue' | 'onUserMessage' | 'configManager' | 'providerRegistry' | 'subAgentRegistry' | 'subAgentExecutor'>> & {
+  private config: Required<Omit<ApiChannelConfig, 'apiKey' | 'allowedOrigins' | 'staticDir' | 'costTracker' | 'memoryStore' | 'db' | 'interruptQueue' | 'onUserMessage' | 'configManager' | 'providerRegistry' | 'subAgentRegistry' | 'subAgentExecutor' | 'twilioWebhook' | 'voiceManager'>> & {
     apiKey?: string;
     allowedOrigins: string[];
     staticDir?: string;
@@ -293,6 +305,8 @@ export class ApiChannel implements Channel, TriggerSource {
   private db: ScallopDatabase | null = null;
   private subAgentRegistry: SubAgentRegistry | null = null;
   private subAgentExecutor: SubAgentExecutor | null = null;
+  private twilioWebhook: TwilioWebhookHandler | null = null;
+  private voiceManager: VoiceManager | null = null;
   /** Per-client verbose mode toggle */
   private verboseClients: Set<string> = new Set();
 
@@ -321,6 +335,8 @@ export class ApiChannel implements Channel, TriggerSource {
     this.db = config.db || null;
     this.subAgentRegistry = config.subAgentRegistry || null;
     this.subAgentExecutor = config.subAgentExecutor || null;
+    this.twilioWebhook = config.twilioWebhook || null;
+    this.voiceManager = config.voiceManager || null;
   }
 
   async start(): Promise<void> {
@@ -509,6 +525,13 @@ export class ApiChannel implements Channel, TriggerSource {
       return;
     }
 
+    // Twilio webhooks carry no session cookie; the handler checks the
+    // X-Twilio-Signature instead (or serves unguessable one-off audio).
+    if (urlPath.startsWith('/api/twilio/') && this.twilioWebhook) {
+      await this.handleTwilioWebhook(req, res, method ?? 'GET');
+      return;
+    }
+
     // Auth gate
     const authenticated = this.checkAuthentication(req);
 
@@ -561,6 +584,12 @@ export class ApiChannel implements Channel, TriggerSource {
         await this.handleDeleteSession(res, sessionId, url);
       } else if (urlPath === '/api/files' && method === 'GET') {
         await this.handleFileDownload(res, url);
+      } else if (urlPath === '/api/voice/status' && method === 'GET') {
+        await this.handleVoiceStatus(res);
+      } else if (urlPath === '/api/voice/transcribe' && method === 'POST') {
+        await this.handleVoiceTranscribe(req, res);
+      } else if (urlPath === '/api/voice/speak' && method === 'POST') {
+        await this.handleVoiceSpeak(req, res);
       } else if (urlPath === '/api/memories/graph' && method === 'GET') {
         this.handleMemoryGraph(res);
       } else {
@@ -1875,6 +1904,110 @@ export class ApiChannel implements Channel, TriggerSource {
       });
       req.on('error', reject);
     });
+  }
+
+  /** Read a raw request body up to `maxSize` bytes. */
+  private readRawBody(req: IncomingMessage, maxSize: number): Promise<Buffer> {
+    return new Promise((resolve, reject) => {
+      const chunks: Buffer[] = [];
+      let size = 0;
+      req.on('data', (chunk: Buffer | string) => {
+        const buf = typeof chunk === 'string' ? Buffer.from(chunk) : chunk;
+        size += buf.length;
+        if (size > maxSize) {
+          req.destroy();
+          reject(new Error(`Request body too large (max ${maxSize} bytes)`));
+          return;
+        }
+        chunks.push(buf);
+      });
+      req.on('end', () => resolve(Buffer.concat(chunks)));
+      req.on('error', reject);
+    });
+  }
+
+  /** Twilio webhooks: form-encoded POST (gather replies) or GET (TTS audio). */
+  private async handleTwilioWebhook(req: IncomingMessage, res: ServerResponse, method: string): Promise<void> {
+    try {
+      const raw = method === 'POST' ? await this.readRawBody(req, MAX_BODY_SIZE) : Buffer.alloc(0);
+      const params: Record<string, string> = {};
+      for (const [key, value] of new URLSearchParams(raw.toString('utf-8'))) params[key] = value;
+      const signature = req.headers['x-twilio-signature'];
+      const result = await this.twilioWebhook!({
+        method,
+        pathAndQuery: req.url || '/',
+        params,
+        signature: Array.isArray(signature) ? signature[0] : signature,
+      });
+      res.writeHead(result.status, { 'Content-Type': result.contentType });
+      res.end(method === 'HEAD' ? undefined : result.body);
+    } catch (error) {
+      this.logger.warn({ error: (error as Error).message }, 'Twilio webhook failed');
+      this.sendJson(res, 400, { error: 'Bad request' });
+    }
+  }
+
+  private async handleVoiceStatus(res: ServerResponse): Promise<void> {
+    const status = this.voiceManager ? await this.voiceManager.isAvailable() : { stt: false, tts: false };
+    this.sendJson(res, 200, { stt: status.stt, tts: status.tts });
+  }
+
+  /** Body is the raw recorded audio (webm/ogg/mp4/wav); returns { text }. */
+  private async handleVoiceTranscribe(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (!this.voiceManager) {
+      this.sendJson(res, 503, { error: 'Speech-to-text is not configured' });
+      return;
+    }
+    let audio: Buffer;
+    try {
+      audio = await this.readRawBody(req, MAX_AUDIO_BODY_SIZE);
+    } catch (error) {
+      this.sendJson(res, 413, { error: (error as Error).message });
+      return;
+    }
+    if (audio.length === 0) {
+      this.sendJson(res, 400, { error: 'Empty audio' });
+      return;
+    }
+    try {
+      const result = await this.voiceManager.transcribe(audio);
+      this.sendJson(res, 200, { text: result.text.trim() });
+    } catch (error) {
+      this.logger.warn({ error: (error as Error).message }, 'Dashboard transcription failed');
+      this.sendJson(res, 502, { error: 'Transcription failed' });
+    }
+  }
+
+  /** Body { text }; returns the synthesized audio bytes. */
+  private async handleVoiceSpeak(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (!this.voiceManager) {
+      this.sendJson(res, 503, { error: 'Text-to-speech is not configured' });
+      return;
+    }
+    let body: { text?: unknown };
+    try {
+      body = await this.parseBody<{ text?: unknown }>(req);
+    } catch (error) {
+      this.sendJson(res, 400, { error: (error as Error).message });
+      return;
+    }
+    const text = typeof body.text === 'string' ? stripThinkTags(body.text).trim().slice(0, 2000) : '';
+    if (!text) {
+      this.sendJson(res, 400, { error: 'Missing text' });
+      return;
+    }
+    try {
+      const result = await this.voiceManager.synthesize(text, { format: 'mp3' });
+      const types: Record<string, string> = { mp3: 'audio/mpeg', wav: 'audio/wav', opus: 'audio/ogg', ogg: 'audio/ogg', aac: 'audio/aac' };
+      res.writeHead(200, {
+        'Content-Type': types[result.format.toLowerCase()] ?? 'application/octet-stream',
+        'Content-Length': result.audio.length,
+      });
+      res.end(result.audio);
+    } catch (error) {
+      this.logger.warn({ error: (error as Error).message }, 'Dashboard speech synthesis failed');
+      this.sendJson(res, 502, { error: 'Speech synthesis failed' });
+    }
   }
 
   /**

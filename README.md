@@ -353,7 +353,7 @@ sent as a bearer token.
 
 ## Bundled Skills
 
-29 skills ship out of the box:
+32 skills ship out of the box:
 
 | Skill | Description |
 |-------|-------------|
@@ -384,8 +384,17 @@ sent as a bearer token.
 | `npm` | Package management |
 | `docker` | Container management |
 | `telegram_send` | Send messages programmatically |
+| `image_gen` | Generate or edit an image (OpenAI, FAL or OpenRouter) and send it to the chat |
+| `phone_call` | Twilio call that speaks a message, optionally collecting a spoken/keypad reply |
+| `sms` | Send a text message via Twilio |
 | `reminder` | Reminders (deprecated; use `board`) |
 | `progress` | Goal progress (deprecated; use `board`) |
+
+### Images, calls and SMS
+
+- **`image_gen`** needs `OPENAI_API_KEY`, `FAL_KEY` or `OPENROUTER_API_KEY` (or pick one with `IMAGE_GEN_PROVIDER`). Images are saved under `output/` and sent straight to the chat (Telegram photo, inline preview in the web dashboard). Each image's cost is recorded in the cost tracker, so it counts toward `DAILY_BUDGET`/`MONTHLY_BUDGET`, and generation is refused once a budget is used up. Prices are the API's reported usage where it gives one (OpenAI token usage, OpenRouter `usage.cost`), otherwise a per-image estimate.
+- **`phone_call` / `sms`** need `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN` and `TWILIO_FROM_NUMBER`. Numbers in `PHONE_ALLOWED_NUMBERS` go straight through; any other number gets a one-tap approval prompt per recipient. Calls use Twilio's voice by default. With `PUBLIC_BASE_URL` set, they use ScallopBot's own TTS and can collect the callee's reply (`wait_for_reply`), which is posted back to you in chat. Twilio's webhook at `/api/twilio/gather` is checked against `X-Twilio-Signature`. Calls and SMS record an estimated price (US list rates) against the budget. `PHONE_REMINDER_CALLS=tagged|all` with `PHONE_OWNER_NUMBER` also phones you when a reminder fires.
+- These variables are read at call time from the environment (or the runtime key vault), not in `config.ts`. See [.env.example](.env.example).
 
 Install community skills from ClawHub:
 
@@ -398,7 +407,7 @@ node dist/cli.js skill install elicitation
 | Channel | Status | Features |
 |---------|--------|----------|
 | **Telegram** | Live (`start`) | Voice transcription, voice reply, file upload/download, photo analysis, per-user onboarding |
-| **Web dashboard / REST API** | Live (`start`, needs `WEB_UI_ENABLED=true`) | `POST /api/chat`, SSE streaming, session management, file download, budget management (`POST /api/costs/budget`) |
+| **Web dashboard / REST API** | Live (`start`, needs `WEB_UI_ENABLED=true`) | `POST /api/chat`, SSE streaming, session management, file download, budget management (`POST /api/costs/budget`), push-to-talk STT/TTS (`/api/voice/*`) |
 | **WebSocket** | Live (served by the API channel) | Real-time bidirectional communication with the web dashboard |
 | **CLI** | Live (`chat`) | Interactive terminal session with session resume (`-s <id>`) |
 | **Discord** | Starts when `DISCORD_BOT_TOKEN` is set | DMs and @mentions, `/ask` `/reset` `/help` `/status` slash commands, proactive DMs, file sending |
@@ -429,7 +438,8 @@ A React + Tailwind + Vite single-page app served from the API channel. Features:
 - Debug mode showing tool execution (start/complete/error), thinking steps, and memory operations
 - Cost panel with daily/monthly budget bars, per-model breakdown, and a 14-day spending chart
 - Delegated Tasks rail with live status, parent/child hierarchy, acceptance evidence, blockers, logs, cancellation, steering, and follow-ups
-- File send/receive with download links
+- File send/receive with download links; images show inline
+- Push-to-talk voice mode: hold the mic button (or Space/Enter on it) to talk. The clip goes through the same STT as Telegram voice notes, and the reply is read aloud when TTS is configured
 - Proactive message delivery (reminders, triggers)
 
 ## Configuration

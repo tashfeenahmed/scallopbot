@@ -209,7 +209,13 @@ export class SkillRegistry {
    */
   registerSkill(skill: Skill): void {
     this.state.skills.set(skill.name, skill);
-    if (skill.available && !this.state.availableSkills.find(s => s.name === skill.name)) {
+    // Replace (or drop) any same-named entry so a native override of a
+    // disk-loaded skill is what gets listed and dispatched.
+    const index = this.state.availableSkills.findIndex(s => s.name === skill.name);
+    if (index >= 0) {
+      if (skill.available) this.state.availableSkills[index] = skill;
+      else this.state.availableSkills.splice(index, 1);
+    } else if (skill.available) {
       this.state.availableSkills.push(skill);
     }
     this.logger?.debug({ skill: skill.name, source: skill.source }, 'Skill registered programmatically');

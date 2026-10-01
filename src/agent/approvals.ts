@@ -178,6 +178,12 @@ export function grantPatternFor(toolUse: ToolUseContent): string | null {
     }
     return `${name}:${head}`;
   }
+  // Calls and texts are granted per recipient, never for "any number".
+  if ((name === 'phone_call' || name === 'sms') && typeof input.to === 'string') {
+    let to = input.to.replace(/[^\d+]/g, '');
+    if (to.startsWith('00')) to = `+${to.slice(2)}`;
+    return `${name}:${to || 'unknown'}`;
+  }
   const action = actionFromInput(input);
   return action ? `${name}:${action}` : name;
 }
