@@ -7,7 +7,7 @@
  * Hard floors (rm -rf, force push, mkfs, HTTP DELETE, ...) can never be
  * granted; `grantPatternFor` returns null for them so no prompt is offered.
  */
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, chmodSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -179,7 +179,34 @@ export function grantPatternFor(toolUse: ToolUseContent): string | null {
     return `${name}:${head}`;
   }
   const action = actionFromInput(input);
+  // An approved email or calendar write covers exactly that call (recipients,
+  // subject, body / event fields), never "any email for the next 24h".
+  if (action && CONTENT_SCOPED_GRANTS[name]?.includes(action)) {
+    return `${name}:${action}#${contentDigest(input)}`;
+  }
   return action ? `${name}:${action}` : name;
+}
+
+const CONTENT_SCOPED_GRANTS: Record<string, readonly string[]> = {
+  email: ['send', 'reply'],
+  calendar: ['create', 'update', 'delete'],
+};
+
+function contentDigest(input: Record<string, unknown>): string {
+  const canonical = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(canonical);
+    if (typeof value === 'string') return value.trim();
+    if (value && typeof value === 'object') {
+      return Object.keys(value as Record<string, unknown>).sort()
+        .map(key => [key, canonical((value as Record<string, unknown>)[key])]);
+    }
+    return value ?? null;
+  };
+  const fields = Object.keys(input)
+    .filter(key => input[key] !== undefined && input[key] !== null && input[key] !== '')
+    .sort()
+    .map(key => [key, canonical(input[key])]);
+  return createHash('sha256').update(JSON.stringify(fields)).digest('hex').slice(0, 12);
 }
 
 function defaultDataDir(): string {

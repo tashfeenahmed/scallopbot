@@ -287,7 +287,7 @@ sent as a bearer token.
 
 ## Bundled Skills
 
-29 skills ship out of the box:
+31 skills ship out of the box:
 
 | Skill | Description |
 |-------|-------------|
@@ -313,6 +313,8 @@ sent as a bearer token.
 | `batch` | Run several tool calls in parallel |
 | `pdf` | Create PDFs with [Typst](https://typst.app), read with poppler, edit with qpdf |
 | `notion` | Typed Notion API access |
+| `email` | Read, search and send email over IMAP/SMTP (sends need your yes) |
+| `calendar` | Google Calendar read/write (writes need your yes) or a read-only ICS feed |
 | `mcp` | Call tools on configured MCP servers |
 | `git` | Version control operations |
 | `npm` | Package management |
@@ -336,6 +338,16 @@ node dist/cli.js skill install elicitation
 | **WebSocket** | Live (served by the API channel) | Real-time bidirectional communication with the web dashboard |
 | **CLI** | Live (`chat`) | Interactive terminal session with session resume (`-s <id>`) |
 | Discord, WhatsApp, Slack, Signal, Matrix | Adapter code only | Classes exist in `src/channels/` but the gateway does not start them yet |
+
+## Email and Calendar
+
+Both are optional and configured in `.env` (see `.env.example`).
+
+- **Email** (`email` skill): list, search and read over IMAP; send and reply over SMTP. Works with Gmail app passwords and any IMAP/SMTP provider. Every send or reply is blocked until you approve that exact email (recipients, subject, body) with the yes/no prompt; `EMAIL_SEND_WITHOUT_APPROVAL=true` relaxes this to "you asked for it in your message".
+- **Email in** (`EMAIL_INBOUND_ENABLED=true`): the bot polls your inbox. Mail from `EMAIL_ALLOWED_SENDERS` that passes DMARC/DKIM becomes a message to the bot (one session per sender) and the answer is emailed back in-thread. Email turns can't approve sends or calendar writes. `EMAIL_NOTIFY=important|all` posts a one-line "new email" note to your main channel instead. Polling only, no IMAP IDLE.
+- **Calendar** (`calendar` skill): Google Calendar via an OAuth refresh token (`node dist/cli.js google-auth` prints one), with upcoming/search/create/update/delete; each write needs your yes. Without Google, `CALENDAR_ICS_URL` gives read-only access to any ICS feed (recurring, all-day and timezone-aware). `CALENDAR_REMINDER_MINUTES=15` sends a heads-up before timed events.
+
+Google refresh tokens for OAuth apps left in "Testing" expire after 7 days; publish the consent screen (unverified is fine for your own account) to keep the token.
 
 ## Web Dashboard
 
@@ -520,6 +532,7 @@ sudo systemctl enable --now scallopbot
 | `skill-curator pin <name>` | Keep an agent-created skill active |
 | `skill-curator restore <name>` | Restore a recoverably archived skill |
 | `migrate run` | Migrate legacy JSONL memories to SQLite |
+| `google-auth` | Authorize Google Calendar and print `GOOGLE_REFRESH_TOKEN` |
 
 ## Project Structure
 

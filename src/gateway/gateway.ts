@@ -99,6 +99,8 @@ export class Gateway {
   private outboundQueue: OutboundQueue | null = null;
   private outcomeBrain: OutcomeBrain | null = null;
   private subAgentDeliveryTimer: NodeJS.Timeout | null = null;
+  /** Opt-in email inbox trigger + calendar heads-up (src/triggers/mail-calendar.ts). */
+  private mailCalendarTriggers: { stop(): void } | null = null;
   /** Explicit aliases for this deployment's single canonical state owner. */
   private canonicalSingleUserIds: string[] = [];
 
@@ -926,6 +928,16 @@ export class Gateway {
       void this.drainSubAgentDeliveriesSafely();
     }, 1_000);
 
+    // Email inbox trigger and calendar heads-up; both off unless configured.
+    const { startMailAndCalendarTriggers } = await import('../triggers/mail-calendar.js');
+    this.mailCalendarTriggers = startMailAndCalendarTriggers({
+      agent: this.agent!,
+      sessionManager: this.sessionManager!,
+      logger: this.logger,
+      notifyOwner: (text) => this.handleProactiveMessage('default', text),
+      ownerTimeZone: () => this.getUserTimezone('default'),
+    });
+
     this.isRunning = true;
     this.logger.info('Gateway started');
   }
@@ -988,6 +1000,9 @@ export class Gateway {
       clearInterval(this.subAgentDeliveryTimer);
       this.subAgentDeliveryTimer = null;
     }
+
+    this.mailCalendarTriggers?.stop();
+    this.mailCalendarTriggers = null;
 
     // Clear trigger sources before stopping channels
     this.triggerSources.clear();
