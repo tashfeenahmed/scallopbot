@@ -186,6 +186,71 @@ describe('gardener-sleep-steps', () => {
       const ctx = buildCtx(store, db, { fusionProvider: failingProvider });
       await expect(runDreamCycle(ctx)).resolves.not.toThrow();
     });
+    it('does not pay for the same rejected NREM cluster on the next nightly cycle', async () => {
+      const m1 = seedMemory(db, {
+        userId: 'default',
+        content: 'Uses Notion to log daily activities and workouts',
+        category: 'fact',
+        prominence: 0.5
+      });
+      const m2 = seedMemory(db, {
+        userId: 'default',
+        content: 'Logs workouts in Notion',
+        category: 'preference',
+        prominence: 0.45
+      });
+      const m3 = seedMemory(db, {
+        userId: 'default',
+        content: 'Tracks past workout weights in Notion',
+        category: 'fact',
+        prominence: 0.4
+      });
+      db.addRelation(m1.id, m2.id, 'EXTENDS', 0.9);
+      db.addRelation(m2.id, m3.id, 'EXTENDS', 0.9);
+
+      let nremCalls = 0;
+      const provider: LLMProvider = {
+        name: 'overlong-nrem',
+        isAvailable: () => true,
+        complete: vi.fn().mockImplementation(async request => {
+          if (request.structuredOutput?.name === 'memory_fusion') {
+            nremCalls++;
+            const schema = request.structuredOutput.schema as {
+              properties: { summary: { maxLength: number } };
+            };
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    summary: 'X'.repeat(schema.properties.summary.maxLength + 1),
+                    importance: 5,
+                    category: 'fact'
+                  })
+                }
+              ],
+              stopReason: 'end_turn',
+              usage: { inputTokens: 100, outputTokens: 50 },
+              model: 'mock-model'
+            } satisfies CompletionResponse;
+          }
+          return {
+            content: [{ type: 'text', text: JSON.stringify({ evaluations: [] }) }],
+            stopReason: 'end_turn',
+            usage: { inputTokens: 100, outputTokens: 10 },
+            model: 'mock-model'
+          } satisfies CompletionResponse;
+        })
+      };
+      const ctx = buildCtx(store, db, { fusionProvider: provider });
+
+      await runDreamCycle(ctx);
+      expect(nremCalls).toBe(2);
+      expect(db.getNremClusterFailureStates('default')).toHaveLength(1);
+
+      await runDreamCycle(ctx);
+      expect(nremCalls).toBe(2);
+    });
   });
 
   describe('runSelfReflection', () => {

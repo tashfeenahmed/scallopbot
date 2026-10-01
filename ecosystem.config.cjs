@@ -37,6 +37,9 @@ module.exports = {
       },
       env_production: {
         NODE_ENV: 'production',
+        // Production defaults to actionable lifecycle events. Operators can
+        // still opt into debug temporarily with an explicit PM2 env override.
+        LOG_LEVEL: 'info',
       },
 
       // Graceful shutdown

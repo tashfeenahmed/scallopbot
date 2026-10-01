@@ -39,6 +39,8 @@ export interface NremConfig {
   maxRelationsPerMemory: number;
   /** Source sets already consolidated by an earlier cycle. */
   sourceFingerprintsToSkip?: ReadonlySet<string>;
+  /** Maximum focused attempts for one cluster (default: 2). */
+  maxFusionAttempts: number;
 }
 
 /** Default NREM configuration */
@@ -48,6 +50,7 @@ export const DEFAULT_NREM_CONFIG: NremConfig = {
   maxClusters: 10,
   minClusterSize: 3,
   maxRelationsPerMemory: 3,
+  maxFusionAttempts: 2
 };
 
 /** Result of a single NREM fusion */
@@ -79,7 +82,13 @@ export interface NremResult {
     sourceMemoryIds: string[];
     reason: 'invalid_json' | 'summary_not_shorter' | 'provider_error';
     errorCode?: string;
+    attempts?: number;
   }>;
+}
+
+/** A derived memory must be strictly smaller than the source wording. */
+export function nremSummaryBudget(cluster: readonly ScallopMemoryEntry[]): number {
+  return Math.max(1, cluster.reduce((sum, memory) => sum + memory.content.length, 0) - 1);
 }
 
 // ============ Relation Context ============
@@ -101,7 +110,7 @@ export interface NremResult {
 export function buildRelationContext(
   cluster: ScallopMemoryEntry[],
   getRelations: (memoryId: string) => MemoryRelation[],
-  maxPerMemory: number,
+  maxPerMemory: number
 ): RelationContextEntry[] {
   const idToIndex = new Map(cluster.map((m, i) => [m.id, i]));
   const entries: RelationContextEntry[] = [];
@@ -123,7 +132,7 @@ export function buildRelationContext(
           relationType: rel.relationType,
           targetIndex: neighborIndex + 1,
           targetContent: cluster[neighborIndex].content.slice(0, 80),
-          confidence: rel.confidence,
+          confidence: rel.confidence
         });
         count++;
       }
@@ -164,12 +173,17 @@ export async function nremConsolidate(
   memories: ScallopMemoryEntry[],
   getRelations: (memoryId: string) => MemoryRelation[],
   provider: LLMProvider,
-  options?: Partial<NremConfig>,
+  options?: Partial<NremConfig>
 ): Promise<NremResult> {
   const config = { ...DEFAULT_NREM_CONFIG, ...options };
 
   if (memories.length === 0) {
-    return { clustersProcessed: 0, fusionResults: [], failures: 0, failureDetails: [] };
+    return {
+      clustersProcessed: 0,
+      fusionResults: [],
+      failures: 0,
+      failureDetails: []
+    };
   }
 
   // Step 1: Find cross-category clusters using NREM config
@@ -178,15 +192,20 @@ export async function nremConsolidate(
     maxProminence: config.maxProminence,
     maxClusters: config.maxClusters,
     minClusterSize: config.minClusterSize,
-    crossCategory: true,
+    crossCategory: true
   });
 
-  const pendingClusters = clusters.filter(cluster => !config.sourceFingerprintsToSkip?.has(
-    sourceMemoryFingerprint(cluster.map(memory => memory.id)),
-  ));
+  const pendingClusters = clusters.filter(
+    cluster => !config.sourceFingerprintsToSkip?.has(sourceMemoryFingerprint(cluster.map(memory => memory.id)))
+  );
 
   if (pendingClusters.length === 0) {
-    return { clustersProcessed: 0, fusionResults: [], failures: 0, failureDetails: [] };
+    return {
+      clustersProcessed: 0,
+      fusionResults: [],
+      failures: 0,
+      failureDetails: []
+    };
   }
 
   // Step 2: Fuse each cluster with relation context (per-cluster error isolation)
@@ -195,33 +214,39 @@ export async function nremConsolidate(
   const failureDetails: NonNullable<NremResult['failureDetails']> = [];
 
   for (const cluster of pendingClusters) {
+    let attempts = 0;
     try {
       const relationContext = buildRelationContext(cluster, getRelations, config.maxRelationsPerMemory);
-      const request = buildFusionPrompt(cluster, relationContext);
-      const response = await provider.complete(request);
+      const summaryBudget = nremSummaryBudget(cluster);
+      const maxAttempts = Math.max(1, Math.floor(config.maxFusionAttempts));
+      let parsed: ReturnType<typeof parseFusionResponse> = null;
+      let rejectedSummary: string | undefined;
 
-      // Extract text from ContentBlock[] response
-      const responseText = Array.isArray(response.content)
-        ? response.content.map(block => 'text' in block ? block.text : '').join('')
-        : String(response.content);
+      for (; attempts < maxAttempts; attempts++) {
+        const response = await provider.complete(
+          buildFusionPrompt(cluster, relationContext, {
+            maxSummaryChars: summaryBudget,
+            rejectedSummary
+          })
+        );
+        const responseText = Array.isArray(response.content)
+          ? response.content.map(block => ('text' in block ? block.text : '')).join('')
+          : String(response.content);
+        const candidate = parseFusionResponse(responseText);
+        if (candidate && candidate.summary.length <= summaryBudget) {
+          parsed = candidate;
+          attempts++;
+          break;
+        }
+        rejectedSummary = candidate?.summary;
+      }
 
-      const parsed = parseFusionResponse(responseText);
       if (!parsed) {
         failures++;
         failureDetails.push({
           sourceMemoryIds: cluster.map(memory => memory.id),
-          reason: 'invalid_json',
-        });
-        continue;
-      }
-
-      // Validate: summary must be shorter than combined source content
-      const combinedLength = cluster.reduce((sum, m) => sum + m.content.length, 0);
-      if (parsed.summary.length >= combinedLength) {
-        failures++;
-        failureDetails.push({
-          sourceMemoryIds: cluster.map(memory => memory.id),
-          reason: 'summary_not_shorter',
+          reason: rejectedSummary ? 'summary_not_shorter' : 'invalid_json',
+          attempts
         });
         continue;
       }
@@ -231,9 +256,7 @@ export async function nremConsolidate(
       const confidence = Math.min(...cluster.map(m => m.confidence));
 
       // For cross-category clusters, override category to 'insight'
-      const category: MemoryCategory = isCrossCategory(cluster)
-        ? 'insight'
-        : cluster[0].category; // same-category cluster: use cluster's category
+      const category: MemoryCategory = isCrossCategory(cluster) ? 'insight' : cluster[0].category; // same-category cluster: use cluster's category
 
       fusionResults.push({
         summary: parsed.summary,
@@ -241,7 +264,7 @@ export async function nremConsolidate(
         category,
         confidence,
         learnedFrom: 'nrem_consolidation',
-        sourceMemoryIds: cluster.map(m => m.id),
+        sourceMemoryIds: cluster.map(m => m.id)
       });
     } catch (error) {
       failures++;
@@ -249,6 +272,7 @@ export async function nremConsolidate(
         sourceMemoryIds: cluster.map(memory => memory.id),
         reason: 'provider_error',
         errorCode: error instanceof Error ? error.name : 'unknown_error',
+        attempts: attempts + 1
       });
     }
   }
@@ -257,6 +281,6 @@ export async function nremConsolidate(
     clustersProcessed: pendingClusters.length,
     fusionResults,
     failures,
-    failureDetails,
+    failureDetails
   };
 }

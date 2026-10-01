@@ -56,9 +56,9 @@ export const MEMORY_FUSION_SCHEMA: Record<string, unknown> = {
     importance: { type: 'number', minimum: 1, maximum: 10 },
     category: {
       type: 'string',
-      enum: ['preference', 'fact', 'event', 'relationship', 'insight'],
-    },
-  },
+      enum: ['preference', 'fact', 'event', 'relationship', 'insight']
+    }
+  }
 };
 
 /** A relation context entry for enriched fusion prompts (used by NREM consolidation) */
@@ -75,14 +75,21 @@ export interface RelationContextEntry {
   confidence: number;
 }
 
+export interface FusionPromptOptions {
+  /** Exact output budget used by sleep consolidation for compact memories. */
+  maxSummaryChars?: number;
+  /** An overlong/invalid first draft that the provider should repair. */
+  rejectedSummary?: string;
+}
+
 /** Default fusion configuration */
 export const DEFAULT_FUSION_CONFIG: FusionConfig = {
   minClusterSize: 2,
   maxClusters: 5,
   minProminence: PROMINENCE_THRESHOLDS.DORMANT, // 0.1
-  maxProminence: PROMINENCE_THRESHOLDS.ACTIVE,  // 0.5
+  maxProminence: PROMINENCE_THRESHOLDS.ACTIVE, // 0.5
   crossCategory: false,
-  embeddingSimilarityThreshold: 0.6,
+  embeddingSimilarityThreshold: 0.6
 };
 
 // ============ Cluster Detection ============
@@ -107,17 +114,18 @@ export const DEFAULT_FUSION_CONFIG: FusionConfig = {
 export function findFusionClusters(
   memories: ScallopMemoryEntry[],
   getRelations: (memoryId: string) => MemoryRelation[],
-  options?: Partial<FusionConfig>,
+  options?: Partial<FusionConfig>
 ): ScallopMemoryEntry[][] {
   const config: FusionConfig = { ...DEFAULT_FUSION_CONFIG, ...options };
 
   // Step 1: Filter to eligible memories
-  const eligible = memories.filter(m =>
-    m.isLatest &&
-    m.prominence >= config.minProminence &&
-    m.prominence < config.maxProminence &&
-    m.memoryType !== 'static_profile' &&
-    m.memoryType !== 'derived'
+  const eligible = memories.filter(
+    m =>
+      m.isLatest &&
+      m.prominence >= config.minProminence &&
+      m.prominence < config.maxProminence &&
+      m.memoryType !== 'static_profile' &&
+      m.memoryType !== 'derived'
   );
 
   if (eligible.length === 0) {
@@ -223,7 +231,7 @@ export function findFusionClusters(
 function clusterByEmbeddingSimilarity(
   memories: ScallopMemoryEntry[],
   threshold: number,
-  minClusterSize: number,
+  minClusterSize: number
 ): ScallopMemoryEntry[][] {
   // Filter to memories that have embeddings
   const withEmbeddings = memories.filter(m => m.embedding && m.embedding.length > 0);
@@ -280,7 +288,7 @@ function clusterByEmbeddingSimilarity(
  */
 export async function fuseMemoryCluster(
   cluster: ScallopMemoryEntry[],
-  provider: LLMProvider,
+  provider: LLMProvider
 ): Promise<FusionResult | null> {
   if (cluster.length === 0) {
     return null;
@@ -292,7 +300,7 @@ export async function fuseMemoryCluster(
 
     // Extract text from ContentBlock[] response (same pattern as reranker.ts)
     const responseText = Array.isArray(response.content)
-      ? response.content.map(block => 'text' in block ? block.text : '').join('')
+      ? response.content.map(block => ('text' in block ? block.text : '')).join('')
       : String(response.content);
 
     // Parse LLM response
@@ -316,7 +324,7 @@ export async function fuseMemoryCluster(
       summary: parsed.summary,
       importance,
       category,
-      confidence,
+      confidence
     };
   } catch {
     // LLM call failed — return null (caller decides fallback)
@@ -339,22 +347,31 @@ export async function fuseMemoryCluster(
 export function buildFusionPrompt(
   cluster: ScallopMemoryEntry[],
   relationContext?: RelationContextEntry[],
+  options: FusionPromptOptions = {}
 ): CompletionRequest {
-  const hasRelationContext = relationContext && relationContext.length > 0;
+  const isDeepSleep = relationContext !== undefined;
+  const hasRelationContext = isDeepSleep && relationContext.length > 0;
+  const maxSummaryChars =
+    options.maxSummaryChars != null ? Math.max(1, Math.floor(options.maxSummaryChars)) : undefined;
+  const exactBudgetRule =
+    maxSummaryChars != null
+      ? `\n8. The summary must contain at most ${maxSummaryChars} characters. This is a hard limit.`
+      : '';
 
-  const system = hasRelationContext
-    ? `You are a memory consolidation engine performing deep sleep consolidation. Merge these related memories into a SINGLE coherent summary that captures the conceptual thread connecting them.
+  const system = isDeepSleep
+    ? `You are a memory consolidation engine performing deep sleep consolidation. Create ONE compact, natural memory that captures the useful conceptual thread connecting the sources.
 
 Rules:
-1. The summary MUST be shorter than all memories combined
-2. Preserve ALL distinct facts — do not drop any unique information
-3. Synthesize cross-category connections into coherent insights
+1. The source memories remain stored, so do not copy every sentence or make a list
+2. Preserve only the facts and dates needed for the conceptual thread; omit redundant wording
+3. Synthesize cross-category connections when they are genuinely supported
 4. Use the CONNECTIONS section to understand WHY these memories are related
-5. The summary should capture the deeper pattern, not just list facts
+5. Prefer one plain, human-readable sentence; never add advice or speculation
 6. Every memory includes its authored date and, when known, its event date.
-   Preserve those dates. Never rewrite an old relative word such as "today",
-   "tomorrow", or "yesterday" relative to the current consolidation run.
+   Preserve a date when it changes the meaning. Never rewrite an old relative
+   word such as "today", "tomorrow", or "yesterday" relative to this run.
 7. Use absolute YYYY-MM-DD dates in the summary. Do not output relative dates.
+${exactBudgetRule}
 
 Respond with JSON only:
 {"summary": "...", "importance": 1-10, "category": "preference|fact|event|relationship|insight"}`
@@ -379,9 +396,10 @@ Respond with JSON only:
       const documentDate = Number.isFinite(m.documentDate)
         ? new Date(m.documentDate).toISOString().slice(0, 10)
         : 'unknown';
-      const eventDate = m.eventDate != null && Number.isFinite(m.eventDate)
-        ? new Date(m.eventDate).toISOString().slice(0, 10)
-        : 'unknown';
+      const eventDate =
+        m.eventDate != null && Number.isFinite(m.eventDate)
+          ? new Date(m.eventDate).toISOString().slice(0, 10)
+          : 'unknown';
       return `${i + 1}. [${m.category}] [authored: ${documentDate}] [event: ${eventDate}] "${m.content}" (importance: ${m.importance})`;
     })
     .join('\n');
@@ -401,6 +419,28 @@ Respond with JSON only:
     userMessage += `\n\nMerge into a single concise summary (JSON only):`;
   }
 
+  if (maxSummaryChars != null) {
+    userMessage += `\n\nHARD OUTPUT LIMIT: summary must be ${maxSummaryChars} characters or fewer.`;
+  }
+  if (options.rejectedSummary) {
+    userMessage += `\n\nA previous draft was rejected as too long:\n${JSON.stringify(options.rejectedSummary)}\nRewrite it more compactly without inventing facts.`;
+  }
+
+  const schema =
+    maxSummaryChars == null
+      ? MEMORY_FUSION_SCHEMA
+      : {
+          ...MEMORY_FUSION_SCHEMA,
+          properties: {
+            ...(MEMORY_FUSION_SCHEMA.properties as Record<string, unknown>),
+            summary: {
+              type: 'string',
+              minLength: 1,
+              maxLength: maxSummaryChars
+            }
+          }
+        };
+
   return {
     messages: [{ role: 'user', content: userMessage }],
     system,
@@ -409,10 +449,10 @@ Respond with JSON only:
     enableThinking: false,
     structuredOutput: {
       name: 'memory_fusion',
-      schema: MEMORY_FUSION_SCHEMA,
-      strict: true,
+      schema,
+      strict: true
     },
-    purpose: 'memory_fusion',
+    purpose: 'memory_fusion'
   };
 }
 
@@ -424,7 +464,9 @@ Respond with JSON only:
  * Expects JSON with { summary, importance, category }.
  * Returns null if parsing fails or required fields are missing.
  */
-export function parseFusionResponse(responseText: string): { summary: string; importance: number; category: string } | null {
+export function parseFusionResponse(
+  responseText: string
+): { summary: string; importance: number; category: string } | null {
   if (!responseText || responseText.trim().length === 0) {
     return null;
   }
@@ -438,17 +480,14 @@ export function parseFusionResponse(responseText: string): { summary: string; im
   try {
     const parsed = JSON.parse(jsonMatch[0]) as Record<string, unknown>;
 
-    if (
-      typeof parsed.summary !== 'string' ||
-      parsed.summary.trim().length === 0
-    ) {
+    if (typeof parsed.summary !== 'string' || parsed.summary.trim().length === 0) {
       return null;
     }
 
     return {
       summary: parsed.summary,
       importance: typeof parsed.importance === 'number' ? parsed.importance : 5,
-      category: typeof parsed.category === 'string' ? parsed.category : 'fact',
+      category: typeof parsed.category === 'string' ? parsed.category : 'fact'
     };
   } catch {
     return null;

@@ -64,7 +64,6 @@ export function runFullDecay(ctx: GardenerContext): { updated: number; archived:
     return { updated: 0, archived: 0 };
   }
 }
-
 /**
  * B1.5: Memory fusion (merge dormant related memory clusters)
  */
@@ -687,11 +686,11 @@ export function runSubAgentCleanup(ctx: GardenerContext, cleanupAfterSeconds?: n
     const runsDeleted = ctx.db.deleteOldSubAgentRuns(ledgerMaxAgeMs);
 
     // Delete their sessions and messages
-    let sessionsDeleted = 0;
+    let sessionTranscriptsPurged = 0;
     for (const sessionId of childSessionIds) {
       try {
         if (ctx.db.deleteSession(sessionId, 'subagent_cleanup', 'gardener')) {
-          sessionsDeleted++;
+          sessionTranscriptsPurged++;
         }
       } catch {
         // Session may already be deleted
@@ -711,9 +710,9 @@ export function runSubAgentCleanup(ctx: GardenerContext, cleanupAfterSeconds?: n
     // Archive rather than delete so lifecycle metadata and audit remain intact.
     const staleEmptySessionsArchived = ctx.db.archiveStaleEmptySessions(24 * 60 * 60 * 1000);
 
-    if (runsCompacted > 0 || runsDeleted > 0 || sessionsDeleted > 0 || staleSessionsCleaned > 0 || staleEmptySessionsArchived > 0) {
+    if (runsCompacted > 0 || runsDeleted > 0 || sessionTranscriptsPurged > 0 || staleSessionsCleaned > 0 || staleEmptySessionsArchived > 0) {
       ctx.logger.info(
-        { runsCompacted, runsDeleted, sessionsDeleted, staleSessionsCleaned, staleEmptySessionsArchived },
+        { runsCompacted, runsDeleted, sessionTranscriptsPurged, staleSessionsCleaned, staleEmptySessionsArchived },
         'Sub-agent cleanup complete'
       );
     }

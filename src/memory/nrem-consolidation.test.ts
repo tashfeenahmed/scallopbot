@@ -13,6 +13,7 @@ import type { LLMProvider, CompletionResponse } from '../providers/types.js';
 import {
   buildRelationContext,
   nremConsolidate,
+  nremSummaryBudget,
   DEFAULT_NREM_CONFIG,
   type NremConfig,
   type NremResult,
@@ -320,6 +321,30 @@ describe('buildFusionPrompt', () => {
     expect(prompt.system).toMatch(/Use absolute YYYY-MM-DD\s+dates/);
   });
 
+  it('puts the exact compact memory budget in both the prompt and JSON schema', () => {
+    const cluster = [
+      makeMemory({
+        id: 'm1',
+        content: 'Uses Notion to log daily activities and workouts'
+      }),
+      makeMemory({ id: 'm2', content: 'Logs workouts in Notion' }),
+      makeMemory({
+        id: 'm3',
+        content: 'Tracks past workout weights in Notion'
+      })
+    ];
+    const budget = nremSummaryBudget(cluster);
+    const prompt = buildFusionPrompt(cluster, [], { maxSummaryChars: budget });
+    const schema = prompt.structuredOutput?.schema as {
+      properties: { summary: { maxLength: number } };
+    };
+
+    expect(schema.properties.summary.maxLength).toBe(budget);
+    expect(prompt.system).toContain(`at most ${budget} characters`);
+    expect(String(prompt.messages[0].content)).toContain(`${budget} characters or fewer`);
+    expect(prompt.system).toContain('source memories remain stored');
+  });
+
   it('requests JSON response format in system prompt', () => {
     const cluster = [
       makeMemory({ id: 'm1', content: 'Memory A', category: 'fact', importance: 5 }),
@@ -373,6 +398,104 @@ describe('nremConsolidate', () => {
     expect(result.clustersProcessed).toBeGreaterThanOrEqual(1);
     expect(result.fusionResults.length).toBeGreaterThanOrEqual(1);
     expect(result.fusionResults[0].learnedFrom).toBe('nrem_consolidation');
+  });
+
+  it('repairs one overlong draft in the same cycle instead of failing the cluster', async () => {
+    const memories = [
+      makeMemory({
+        id: 'm1',
+        content: 'Uses Notion to log daily activities and workouts',
+        category: 'fact'
+      }),
+      makeMemory({
+        id: 'm2',
+        content: 'Logs workouts in Notion',
+        category: 'preference'
+      }),
+      makeMemory({
+        id: 'm3',
+        content: 'Tracks past workout weights in Notion',
+        category: 'fact'
+      })
+    ];
+    const relations = [makeRelation('m1', 'm2'), makeRelation('m2', 'm3')];
+    const budget = nremSummaryBudget(memories);
+    const provider: LLMProvider = {
+      name: 'mock-repair',
+      isAvailable: () => true,
+      complete: vi
+        .fn()
+        .mockResolvedValueOnce({
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                summary: 'X'.repeat(budget + 20),
+                importance: 6,
+                category: 'fact'
+              })
+            }
+          ],
+          stopReason: 'end_turn',
+          usage: { inputTokens: 100, outputTokens: 50 },
+          model: 'mock'
+        } satisfies CompletionResponse)
+        .mockResolvedValueOnce({
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                summary: 'Uses Notion for activity and workout logs, including past weights.',
+                importance: 6,
+                category: 'insight'
+              })
+            }
+          ],
+          stopReason: 'end_turn',
+          usage: { inputTokens: 100, outputTokens: 30 },
+          model: 'mock'
+        } satisfies CompletionResponse)
+    };
+
+    const result = await nremConsolidate(memories, buildGetRelations(relations), provider);
+
+    expect(provider.complete).toHaveBeenCalledTimes(2);
+    expect(result.failures).toBe(0);
+    expect(result.fusionResults).toHaveLength(1);
+    const repairRequest = vi.mocked(provider.complete).mock.calls[1][0];
+    expect(String(repairRequest.messages[0].content)).toContain('previous draft was rejected');
+  });
+
+  it('bounds a persistently overlong cluster to two attempts', async () => {
+    const memories = [
+      makeMemory({
+        id: 'm1',
+        content: 'First concise source memory about a project'
+      }),
+      makeMemory({
+        id: 'm2',
+        content: 'Second concise source memory about a project'
+      }),
+      makeMemory({
+        id: 'm3',
+        content: 'Third concise source memory about a project'
+      })
+    ];
+    const relations = [makeRelation('m1', 'm2'), makeRelation('m2', 'm3')];
+    const budget = nremSummaryBudget(memories);
+    const provider = createMockProvider(
+      JSON.stringify({
+        summary: 'X'.repeat(budget + 1),
+        importance: 5,
+        category: 'fact'
+      })
+    );
+
+    const result = await nremConsolidate(memories, buildGetRelations(relations), provider);
+
+    expect(provider.complete).toHaveBeenCalledTimes(2);
+    expect(result.fusionResults).toHaveLength(0);
+    expect(result.failureDetails).toEqual([expect.objectContaining({ reason: 'summary_not_shorter', attempts: 2 })]);
   });
 
   it('does not call the provider again for an already-consolidated source set', async () => {
@@ -594,5 +717,6 @@ describe('DEFAULT_NREM_CONFIG', () => {
     expect(DEFAULT_NREM_CONFIG.maxClusters).toBe(10);
     expect(DEFAULT_NREM_CONFIG.minClusterSize).toBe(3);
     expect(DEFAULT_NREM_CONFIG.maxRelationsPerMemory).toBe(3);
+    expect(DEFAULT_NREM_CONFIG.maxFusionAttempts).toBe(2);
   });
 });

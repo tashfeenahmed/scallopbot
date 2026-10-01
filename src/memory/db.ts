@@ -61,6 +61,35 @@ function summaryFailureBackoffMs(failureCount: number): number {
   return Math.min(7 * 24 * 60 * 60 * 1000, 24 * 60 * 60 * 1000 * (2 ** (failureCount - 3)));
 }
 
+/** Sleep failures retry slowly enough to avoid paying for the same bad cluster nightly. */
+export function nremClusterFailureBackoffMs(failureCount: number): number {
+  const count = Math.max(1, Math.floor(failureCount));
+  return Math.min(30 * 24 * 60 * 60 * 1000, 3 * 24 * 60 * 60 * 1000 * 2 ** (count - 1));
+}
+
+function explicitCadenceFromTitle(title: string): RecurringType | null {
+  const match = title.match(/^[^a-z0-9]*(daily|weekly|monthly)\b/i);
+  return (match?.[1]?.toLowerCase() as RecurringType | undefined) ?? null;
+}
+
+function correctedRecurringSchedule(
+  cadence: RecurringType,
+  existing: RecurringSchedule,
+  triggerAt: number
+): RecurringSchedule {
+  const corrected = {
+    type: cadence,
+    hour: existing.hour,
+    minute: existing.minute
+  } as RecurringSchedule;
+  if (cadence === 'weekly') {
+    corrected.dayOfWeek = existing.dayOfWeek ?? new Date(triggerAt).getUTCDay();
+  } else if (cadence === 'monthly') {
+    corrected.dayOfMonth = existing.dayOfMonth ?? new Date(triggerAt).getUTCDate();
+  }
+  return corrected;
+}
+
 /**
  * Strong signals that a legacy task claimed fresh, externally verifiable
  * facts. Deliberately avoid generic words such as "report" and "current":
@@ -711,6 +740,21 @@ export interface ScheduledItem {
 
   createdAt: number;
   updatedAt: number;
+}
+
+export interface NremClusterFailureState {
+  fingerprint: string;
+  failureCount: number;
+  lastFailureAt: number;
+  nextRetryAt: number;
+  lastErrorCode: string;
+}
+
+export interface NaturalLifecycleReconciliationResult {
+  cadenceCorrected: number;
+  farFutureTasksUnscheduled: number;
+  staleBlockedExpired: number;
+  overdueGoalsMovedToBacklog: number;
 }
 
 // ============ Sub-Agent Runs ============
@@ -1403,6 +1447,40 @@ export class ScallopDatabase {
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL,
         updated_at INTEGER NOT NULL
+      );
+
+      -- Compact, content-free sleep retry ledger. Source IDs are retained so
+      -- failed clusters can cool down without losing or rewriting memories.
+      CREATE TABLE IF NOT EXISTS nrem_cluster_failures (
+        user_id TEXT NOT NULL,
+        fingerprint TEXT NOT NULL,
+        source_memory_ids TEXT NOT NULL,
+        failure_count INTEGER NOT NULL,
+        last_failure_at INTEGER NOT NULL,
+        next_retry_at INTEGER NOT NULL,
+        last_error_code TEXT NOT NULL,
+        PRIMARY KEY (user_id, fingerprint)
+      );
+      CREATE INDEX IF NOT EXISTS idx_nrem_cluster_failures_retry
+        ON nrem_cluster_failures(user_id, next_retry_at);
+
+      -- Lossless receipts for natural board/goal dormancy. Every automatic
+      -- transition keeps a pre-change snapshot and no source row is deleted.
+      CREATE TABLE IF NOT EXISTS scheduled_lifecycle_reconciliation_audit (
+        item_id TEXT NOT NULL,
+        action TEXT NOT NULL,
+        item_snapshot TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        reconciled_at INTEGER NOT NULL,
+        PRIMARY KEY (item_id, action)
+      );
+      CREATE TABLE IF NOT EXISTS goal_lifecycle_reconciliation_audit (
+        goal_id TEXT NOT NULL,
+        action TEXT NOT NULL,
+        goal_snapshot TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        reconciled_at INTEGER NOT NULL,
+        PRIMARY KEY (goal_id, action)
       );
 
       -- Transcript chunks for cross-session recall (#9)
@@ -8901,8 +8979,16 @@ export class ScallopDatabase {
 
   getSubAgentChildSessionIds(maxAgeMs?: number): string[] {
     const sql = maxAgeMs
-      ? "SELECT child_session_id FROM subagent_runs WHERE status NOT IN ('pending', 'running') AND COALESCE(completed_at, created_at) < ?"
-      : 'SELECT child_session_id FROM subagent_runs';
+      ? `SELECT run.child_session_id
+         FROM subagent_runs run
+         JOIN sessions session ON session.id = run.child_session_id
+         WHERE run.status NOT IN ('pending', 'running')
+           AND COALESCE(run.completed_at, run.created_at) < ?
+           AND session.transcript_deleted_at IS NULL`
+      : `SELECT run.child_session_id
+         FROM subagent_runs run
+         JOIN sessions session ON session.id = run.child_session_id
+         WHERE session.transcript_deleted_at IS NULL`;
     const params = maxAgeMs ? [Date.now() - maxAgeMs] : [];
     const rows = this.db.prepare(sql).all(...params) as Array<Record<string, unknown>>;
     return rows.map(r => r.child_session_id as string);
@@ -9009,6 +9095,255 @@ export class ScallopDatabase {
   purgeExpiredSessions(): number {
     const result = this.db.prepare('DELETE FROM auth_sessions WHERE expires_at <= ?').run(Date.now());
     return result.changes;
+  }
+
+  /**
+   * Let old work become dormant without deleting it. This corrects explicit
+   * legacy cadence, removes accidental far-future alarms from inbox tasks,
+   * expires stale blocked occurrences, and moves abandoned overdue goals back
+   * to the durable backlog. Every transition is snapshotted first.
+   */
+  reconcileNaturalLifecycle(
+    userId: string,
+    now: number = Date.now(),
+    options: {
+      blockedGraceMs?: number;
+      farFutureThresholdMs?: number;
+      overdueGoalGraceMs?: number;
+    } = {}
+  ): NaturalLifecycleReconciliationResult {
+    const blockedGraceMs = options.blockedGraceMs ?? 48 * 60 * 60 * 1000;
+    const farFutureThresholdMs = options.farFutureThresholdMs ?? 180 * 24 * 60 * 60 * 1000;
+    const overdueGoalGraceMs = options.overdueGoalGraceMs ?? 30 * 24 * 60 * 60 * 1000;
+    const result: NaturalLifecycleReconciliationResult = {
+      cadenceCorrected: 0,
+      farFutureTasksUnscheduled: 0,
+      staleBlockedExpired: 0,
+      overdueGoalsMovedToBacklog: 0
+    };
+
+    const reconcile = this.db.transaction(() => {
+      const auditScheduled = this.db.prepare(`
+        INSERT OR IGNORE INTO scheduled_lifecycle_reconciliation_audit
+          (item_id, action, item_snapshot, reason, reconciled_at)
+        VALUES (?, ?, ?, ?, ?)
+      `);
+
+      const recurringRows = this.db
+        .prepare(
+          `
+        SELECT * FROM scheduled_items
+        WHERE user_id = ? AND recurring IS NOT NULL AND json_valid(recurring)
+          AND status NOT IN ('fired', 'acted', 'dismissed', 'expired', 'failed')
+      `
+        )
+        .all(userId) as Array<Record<string, unknown>>;
+      for (const row of recurringRows) {
+        const cadence = explicitCadenceFromTitle(String(row.message ?? ''));
+        if (!cadence) continue;
+        const existing = JSON.parse(String(row.recurring)) as RecurringSchedule;
+        if (existing.type === cadence) continue;
+        const reason = `Title says ${cadence}; repaired legacy ${existing.type} recurrence`;
+        auditScheduled.run(row.id, 'corrected_explicit_cadence', JSON.stringify(row), reason, now);
+        const corrected = correctedRecurringSchedule(cadence, existing, Number(row.trigger_at));
+        this.db
+          .prepare(
+            `
+          UPDATE scheduled_items
+          SET recurring = ?,
+              status = CASE
+                WHEN last_error = 'Paused: recurrence label does not match stored cadence'
+                THEN 'pending' ELSE status END,
+              board_status = CASE
+                WHEN last_error = 'Paused: recurrence label does not match stored cadence'
+                THEN CASE WHEN trigger_at > 0 THEN 'scheduled' ELSE 'inbox' END
+                ELSE board_status END,
+              last_error = CASE
+                WHEN last_error = 'Paused: recurrence label does not match stored cadence'
+                THEN NULL ELSE last_error END
+          WHERE id = ?
+        `
+          )
+          .run(JSON.stringify(corrected), row.id);
+        result.cadenceCorrected++;
+      }
+
+      const farFutureRows = this.db
+        .prepare(
+          `
+        SELECT * FROM scheduled_items
+        WHERE user_id = ? AND source = 'agent' AND kind = 'task'
+          AND status = 'pending' AND board_status IN ('inbox', 'backlog')
+          AND trigger_at > ?
+      `
+        )
+        .all(userId, now + farFutureThresholdMs) as Array<Record<string, unknown>>;
+      for (const row of farFutureRows) {
+        const reason = 'Inbox task had an implausible trigger beyond the scheduling horizon';
+        auditScheduled.run(row.id, 'removed_accidental_far_future_trigger', JSON.stringify(row), reason, now);
+        // Do not touch updated_at: maintenance must not make old work look new.
+        this.db.prepare('UPDATE scheduled_items SET trigger_at = 0 WHERE id = ?').run(row.id);
+        result.farFutureTasksUnscheduled++;
+      }
+
+      const staleBlockedRows = this.db
+        .prepare(
+          `
+        SELECT * FROM scheduled_items
+        WHERE user_id = ? AND status = 'blocked' AND board_status = 'waiting'
+          AND trigger_at > 0 AND trigger_at < ? AND last_error IS NOT NULL
+      `
+        )
+        .all(userId, now - blockedGraceMs) as Array<Record<string, unknown>>;
+      for (const row of staleBlockedRows) {
+        const reason = 'Blocked scheduled occurrence passed its useful response window';
+        auditScheduled.run(row.id, 'expired_stale_blocked_occurrence', JSON.stringify(row), reason, now);
+        this.db
+          .prepare(
+            `
+          UPDATE scheduled_items
+          SET status = 'expired', board_status = 'archived', updated_at = ?
+          WHERE id = ? AND status = 'blocked'
+        `
+          )
+          .run(now, row.id);
+        result.staleBlockedExpired++;
+      }
+
+      const goalRows = this.db
+        .prepare(
+          `
+        SELECT * FROM goal_registry
+        WHERE user_id = ? AND deleted_at IS NULL AND goal_type = 'goal'
+          AND status = 'active' AND json_valid(metadata)
+          AND typeof(json_extract(metadata, '$.dueDate')) IN ('integer', 'real')
+          AND json_extract(metadata, '$.dueDate') < ?
+          AND COALESCE(json_extract(metadata, '$.progress'), 0) <= 0
+      `
+        )
+        .all(userId, now - overdueGoalGraceMs) as Array<Record<string, unknown>>;
+      const auditGoal = this.db.prepare(`
+        INSERT OR IGNORE INTO goal_lifecycle_reconciliation_audit
+          (goal_id, action, goal_snapshot, reason, reconciled_at)
+        VALUES (?, 'moved_overdue_zero_progress_to_backlog', ?, ?, ?)
+      `);
+      for (const row of goalRows) {
+        const goalId = String(row.id);
+        const memory = this.getMemory(goalId) ?? this.restoreGoalMemoryFromRegistry(goalId);
+        if (!memory?.metadata) continue;
+        const reason = 'Active goal was over 30 days past due with no recorded progress';
+        auditGoal.run(goalId, JSON.stringify(row), reason, now);
+        const metadata = {
+          ...memory.metadata,
+          status: 'backlog',
+          dormantAt: now,
+          dormantReason: 'overdue_without_progress'
+        };
+        this.db
+          .prepare(
+            `
+          UPDATE memories SET metadata = ?, updated_at = ? WHERE id = ?
+        `
+          )
+          .run(JSON.stringify(metadata), now, goalId);
+        result.overdueGoalsMovedToBacklog++;
+      }
+    });
+    reconcile.immediate();
+    return result;
+  }
+
+  getNremClusterFingerprintsInBackoff(userId: string, now: number = Date.now()): Set<string> {
+    const rows = this.db
+      .prepare(
+        `
+      SELECT fingerprint FROM nrem_cluster_failures
+      WHERE user_id = ? AND next_retry_at > ?
+    `
+      )
+      .all(userId, now) as Array<{ fingerprint: string }>;
+    return new Set(rows.map(row => row.fingerprint));
+  }
+
+  getNremClusterFailureStates(userId: string): NremClusterFailureState[] {
+    const rows = this.db
+      .prepare(
+        `
+      SELECT fingerprint, failure_count, last_failure_at, next_retry_at, last_error_code
+      FROM nrem_cluster_failures WHERE user_id = ?
+      ORDER BY next_retry_at DESC, fingerprint
+    `
+      )
+      .all(userId) as Array<Record<string, unknown>>;
+    return rows.map(row => ({
+      fingerprint: String(row.fingerprint),
+      failureCount: Number(row.failure_count),
+      lastFailureAt: Number(row.last_failure_at),
+      nextRetryAt: Number(row.next_retry_at),
+      lastErrorCode: String(row.last_error_code)
+    }));
+  }
+
+  recordNremClusterFailure(
+    userId: string,
+    sourceMemoryIds: readonly string[],
+    errorCode: string,
+    now: number = Date.now()
+  ): NremClusterFailureState {
+    const fingerprint = sourceMemoryFingerprint(sourceMemoryIds);
+    const prior = this.db
+      .prepare(
+        `
+      SELECT failure_count FROM nrem_cluster_failures
+      WHERE user_id = ? AND fingerprint = ?
+    `
+      )
+      .get(userId, fingerprint) as { failure_count: number } | undefined;
+    const failureCount = (prior?.failure_count ?? 0) + 1;
+    const nextRetryAt = now + nremClusterFailureBackoffMs(failureCount);
+    this.db
+      .prepare(
+        `
+      INSERT INTO nrem_cluster_failures (
+        user_id, fingerprint, source_memory_ids, failure_count,
+        last_failure_at, next_retry_at, last_error_code
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(user_id, fingerprint) DO UPDATE SET
+        source_memory_ids = excluded.source_memory_ids,
+        failure_count = excluded.failure_count,
+        last_failure_at = excluded.last_failure_at,
+        next_retry_at = excluded.next_retry_at,
+        last_error_code = excluded.last_error_code
+    `
+      )
+      .run(
+        userId,
+        fingerprint,
+        JSON.stringify([...new Set(sourceMemoryIds)].sort()),
+        failureCount,
+        now,
+        nextRetryAt,
+        errorCode.slice(0, 100)
+      );
+    return {
+      fingerprint,
+      failureCount,
+      lastFailureAt: now,
+      nextRetryAt,
+      lastErrorCode: errorCode.slice(0, 100)
+    };
+  }
+
+  clearNremClusterFailure(userId: string, sourceMemoryIds: readonly string[]): boolean {
+    return (
+      this.db
+        .prepare(
+          `
+      DELETE FROM nrem_cluster_failures WHERE user_id = ? AND fingerprint = ?
+    `
+        )
+        .run(userId, sourceMemoryFingerprint(sourceMemoryIds)).changes > 0
+    );
   }
 
   // ============ Runtime Key Vault Operations ============

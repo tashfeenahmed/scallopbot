@@ -56,6 +56,11 @@ export async function runDreamCycle(ctx: GardenerContext): Promise<void> {
       const validIds = sourceIds.filter((id): id is string => typeof id === 'string');
       return validIds.length >= 2 ? [sourceMemoryFingerprint(validIds)] : [];
     }));
+    const deferredNremSourceSets = ctx.db.getNremClusterFingerprintsInBackoff(userId);
+    const skippedNremSourceSets = new Set([
+      ...existingNremSourceSets,
+      ...deferredNremSourceSets,
+    ]);
 
     if (eligibleMemories.length >= 3) {
       const dreamResult: DreamResult = await dream(
@@ -63,13 +68,14 @@ export async function runDreamCycle(ctx: GardenerContext): Promise<void> {
         (id) => ctx.db.getRelations(id),
         ctx.fusionProvider,
         ctx.fusionProvider,
-        { nrem: { sourceFingerprintsToSkip: existingNremSourceSets } },
+        { nrem: { sourceFingerprintsToSkip: skippedNremSourceSets } },
       );
 
       // ── Store NREM results ──
       if (dreamResult.nrem) {
         for (const result of dreamResult.nrem.fusionResults) {
           try {
+            ctx.db.clearNremClusterFailure(userId, result.sourceMemoryIds);
             const stored = await storeFusedMemory({
               scallopStore: ctx.scallopStore,
               db: ctx.db,
@@ -101,6 +107,20 @@ export async function runDreamCycle(ctx: GardenerContext): Promise<void> {
           }
         }
 
+        const failureBackoffs = (dreamResult.nrem.failureDetails ?? []).map(failure => {
+          const state = ctx.db.recordNremClusterFailure(
+            userId,
+            failure.sourceMemoryIds,
+            failure.errorCode ?? failure.reason,
+          );
+          return {
+            sourceMemoryIds: failure.sourceMemoryIds,
+            reason: failure.reason,
+            failureCount: state.failureCount,
+            nextRetryAt: state.nextRetryAt,
+          };
+        });
+
         if (dreamResult.nrem.clustersProcessed > 0) {
           ctx.logger.info({
             userId,
@@ -108,6 +128,8 @@ export async function runDreamCycle(ctx: GardenerContext): Promise<void> {
             memoriesConsolidated: dreamResult.nrem.fusionResults.length,
             failures: dreamResult.nrem.failures,
             failureDetails: dreamResult.nrem.failureDetails,
+            failureBackoffs,
+            deferredClusters: deferredNremSourceSets.size,
           }, 'NREM consolidation complete for user');
 
           triggerHook({
@@ -303,6 +325,7 @@ export async function runBoardReview(ctx: GardenerContext): Promise<void> {
     const userId = DEFAULT_USER_ID;
     const { BoardService } = await import('../board/board-service.js');
     const boardService = new BoardService(ctx.db, ctx.logger);
+    const lifecycle = ctx.db.reconcileNaturalLifecycle(userId);
 
     // Auto-archive old done items
     const archived = boardService.autoArchive(userId);
@@ -314,9 +337,9 @@ export async function runBoardReview(ctx: GardenerContext): Promise<void> {
       + (board.columns.waiting || [])
       .filter(i => Date.now() - i.updatedAt > 72 * 60 * 60 * 1000).length;
 
-    if (archived > 0 || staleItems > 0) {
+    if (archived > 0 || staleItems > 0 || Object.values(lifecycle).some(count => count > 0)) {
       ctx.logger.info(
-        { userId, autoArchived: archived, staleItems, activeItems: board.stats.totalActive },
+        { userId, autoArchived: archived, staleItems, activeItems: board.stats.totalActive, lifecycle },
         'Board review completed'
       );
     }
