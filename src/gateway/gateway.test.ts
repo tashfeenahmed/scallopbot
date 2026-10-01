@@ -12,6 +12,36 @@ vi.mock('../channels/telegram.js', () => ({
   })),
 }));
 
+// Chat channel adapters are lazily imported by the gateway; these fakes stand
+// in for them so the wiring (start, trigger source, allowlist, stop) is real.
+const chatFakes = vi.hoisted(() => {
+  const make = (name: string, opts: { failStart?: boolean } = {}) => {
+    const instances: any[] = [];
+    const Ctor = vi.fn().mockImplementation((options: { allowedUsers?: string[] }) => {
+      const allowed = options.allowedUsers ?? [];
+      const instance = {
+        name,
+        options,
+        start: vi.fn(async () => {
+          if (opts.failStart) throw new Error(`${name} auth failed`);
+        }),
+        stop: vi.fn(async () => undefined),
+        sendMessage: vi.fn(async () => ({ sent: true, channel: name, messageIds: ['m1'] })),
+        sendFile: vi.fn(async () => true),
+        isAllowedRecipient: (id: string) => allowed.length === 0 || allowed.includes(id),
+        soleRecipient: () => (allowed.length === 1 ? allowed[0] : null),
+      };
+      instances.push(instance);
+      return instance;
+    });
+    return { Ctor, instances };
+  };
+  return { discord: make('discord'), slack: make('slack', { failStart: true }) };
+});
+
+vi.mock('../channels/discord.js', () => ({ DiscordChannel: chatFakes.discord.Ctor }));
+vi.mock('../channels/slack.js', () => ({ SlackChannel: chatFakes.slack.Ctor }));
+
 // Helper to create complete mock config
 const createMockConfig = (testDir: string, overrides: Record<string, unknown> = {}) => ({
   providers: {
@@ -531,6 +561,77 @@ describe('Gateway', () => {
       await gateway.start();
 
       expect(TelegramChannel).toHaveBeenCalled();
+    });
+
+    it('does not construct chat channels that are disabled or missing credentials', async () => {
+      const { Gateway } = await import('./gateway.js');
+      const { pino } = await import('pino');
+      const gateway = new Gateway({
+        config: createMockConfig(testDir, {
+          channels: {
+            telegram: { enabled: false, botToken: '', allowedUsers: [], enableVoiceReply: false },
+            discord: { enabled: true, botToken: '', applicationId: '', allowedUsers: [] },
+            slack: { enabled: false, botToken: 'xoxb-1', appToken: 'xapp-1', allowedUsers: [] },
+            api: { enabled: false, port: 3000, host: '127.0.0.1' },
+          },
+        }),
+        logger: pino({ level: 'silent' }),
+      });
+
+      await gateway.initialize();
+      await gateway.start();
+
+      expect(chatFakes.discord.Ctor).not.toHaveBeenCalled();
+      expect(chatFakes.slack.Ctor).not.toHaveBeenCalled();
+      await gateway.stop();
+    });
+
+    it('starts configured chat channels, survives one failing, and routes proactive delivery within allowlists', async () => {
+      const { Gateway } = await import('./gateway.js');
+      const { pino } = await import('pino');
+      const gateway = new Gateway({
+        config: createMockConfig(testDir, {
+          channels: {
+            telegram: { enabled: false, botToken: '', allowedUsers: [], enableVoiceReply: false },
+            discord: { enabled: true, botToken: 'discord-token', applicationId: '', allowedUsers: ['111'] },
+            slack: { enabled: true, botToken: 'xoxb-1', appToken: 'xapp-1', allowedUsers: [] },
+            api: { enabled: false, port: 3000, host: '127.0.0.1' },
+          },
+        }),
+        logger: pino({ level: 'silent' }),
+      });
+
+      await gateway.initialize();
+      // Slack's start() rejects; the gateway must still come up with Discord.
+      await expect(gateway.start()).resolves.toBeUndefined();
+
+      expect(chatFakes.discord.Ctor).toHaveBeenCalledWith(expect.objectContaining({
+        botToken: 'discord-token',
+        allowedUsers: ['111'],
+      }));
+      expect(chatFakes.slack.instances.at(-1)?.start).toHaveBeenCalled();
+
+      const internals = gateway as unknown as {
+        triggerSources: Map<string, { getName(): string }>;
+        resolveTriggerSource(userId: string): { source: { getName(): string } | null; rawUserId: string };
+        handleProactiveMessage(userId: string, message: string): Promise<unknown>;
+      };
+      expect([...internals.triggerSources.keys()]).toEqual(['discord']);
+
+      expect(internals.resolveTriggerSource('discord:111').source?.getName()).toBe('discord');
+      expect(internals.resolveTriggerSource('discord:999')).toEqual({ source: null, rawUserId: '999' });
+      expect(internals.resolveTriggerSource('slack:U1')).toEqual({ source: null, rawUserId: 'U1' });
+      // No Telegram: the sole allowlisted Discord user is the unambiguous default.
+      const resolvedDefault = internals.resolveTriggerSource('default');
+      expect(resolvedDefault.source?.getName()).toBe('discord');
+      expect(resolvedDefault.rawUserId).toBe('111');
+
+      await internals.handleProactiveMessage('discord:111', 'Time to stretch');
+      const discord = chatFakes.discord.instances.at(-1);
+      expect(discord.sendMessage).toHaveBeenCalledWith('111', 'Time to stretch');
+
+      await gateway.stop();
+      expect(discord.stop).toHaveBeenCalled();
     });
   });
 

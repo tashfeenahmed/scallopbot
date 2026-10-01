@@ -101,6 +101,11 @@ export interface TriggerSource {
  */
 export type TriggerSourceRegistry = Map<string, TriggerSource>;
 
+/** Channels whose session user IDs are written as `<channel>:<id>`. */
+const KNOWN_CHANNEL_PREFIXES = new Set([
+  'telegram', 'api', 'discord', 'slack', 'whatsapp', 'signal', 'matrix',
+]);
+
 /**
  * Parse a prefixed userId to determine which trigger source to use.
  *
@@ -116,7 +121,7 @@ export function parseUserIdPrefix(userId: string): { channel?: string; rawUserId
     const channel = userId.substring(0, colonIndex);
     const rawUserId = userId.substring(colonIndex + 1);
     // Only recognize known channel prefixes
-    if (channel === 'telegram' || channel === 'api') {
+    if (KNOWN_CHANNEL_PREFIXES.has(channel)) {
       return { channel, rawUserId };
     }
   }

@@ -193,7 +193,7 @@ describe('WhatsAppChannel', () => {
 
     expect(sessionId).toBe('test-session');
     expect(mockSessionManager.createSession).toHaveBeenCalledWith({
-      userId: '1234567890',
+      userId: 'whatsapp:1234567890',
       channelId: 'whatsapp',
     });
   });
@@ -215,7 +215,7 @@ describe('WhatsAppChannel', () => {
     await channel.handleReset('1234567890');
 
     expect(mockSessionManager.startNewSession).toHaveBeenCalledWith({
-      userId: '1234567890',
+      userId: 'whatsapp:1234567890',
       channelId: 'whatsapp',
     }, 'test-session');
     expect(mockSessionManager.deleteSession).not.toHaveBeenCalled();
@@ -314,7 +314,7 @@ describe('SlackChannel', () => {
 
     expect(sessionId).toBe('test-session');
     expect(mockSessionManager.createSession).toHaveBeenCalledWith({
-      userId: 'U12345',
+      userId: 'slack:U12345',
       channelId: 'slack',
     });
   });
@@ -334,7 +334,7 @@ describe('SlackChannel', () => {
     await channel.handleReset('U12345');
 
     expect(mockSessionManager.startNewSession).toHaveBeenCalledWith({
-      userId: 'U12345',
+      userId: 'slack:U12345',
       channelId: 'slack',
     }, 'test-session');
     expect(mockSessionManager.deleteSession).not.toHaveBeenCalled();
@@ -418,7 +418,7 @@ describe('SignalChannel', () => {
 
     expect(sessionId).toBe('test-session');
     expect(mockSessionManager.createSession).toHaveBeenCalledWith({
-      userId: '+15551234567',
+      userId: 'signal:+15551234567',
       channelId: 'signal',
     });
   });
@@ -438,7 +438,7 @@ describe('SignalChannel', () => {
     await channel.handleReset('+15551234567');
 
     expect(mockSessionManager.startNewSession).toHaveBeenCalledWith({
-      userId: '+15551234567',
+      userId: 'signal:+15551234567',
       channelId: 'signal',
     }, 'test-session');
     expect(mockSessionManager.deleteSession).not.toHaveBeenCalled();
@@ -538,7 +538,7 @@ describe('MatrixChannel', () => {
 
     expect(sessionId).toBe('test-session');
     expect(mockSessionManager.createSession).toHaveBeenCalledWith({
-      userId: '!room:matrix.org',
+      userId: 'matrix:!room:matrix.org',
       channelId: 'matrix',
     });
   });
@@ -558,7 +558,7 @@ describe('MatrixChannel', () => {
     await channel.handleReset('!room:matrix.org');
 
     expect(mockSessionManager.startNewSession).toHaveBeenCalledWith({
-      userId: '!room:matrix.org',
+      userId: 'matrix:!room:matrix.org',
       channelId: 'matrix',
     }, 'test-session');
     expect(mockSessionManager.deleteSession).not.toHaveBeenCalled();

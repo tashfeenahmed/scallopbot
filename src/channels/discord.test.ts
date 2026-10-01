@@ -21,6 +21,12 @@ vi.mock('discord.js', () => ({
     user: { tag: 'TestBot#1234', id: 'bot-123' },
     application: { id: 'app-123' },
   })),
+  Events: {
+    ClientReady: 'clientReady',
+    MessageCreate: 'messageCreate',
+    InteractionCreate: 'interactionCreate',
+    Error: 'error',
+  },
   GatewayIntentBits: {
     Guilds: 1,
     GuildMessages: 2,
@@ -373,7 +379,7 @@ describe('DiscordChannel', () => {
       await channel.handleSlashCommand(mockInteraction as any);
 
       expect(mockSessionManager.startNewSession).toHaveBeenCalledWith({
-        userId: 'user-123',
+        userId: 'discord:user-123',
         channelId: 'discord',
       }, 'session-123');
       expect(mockSessionManager.deleteSession).not.toHaveBeenCalled();
@@ -409,7 +415,7 @@ describe('DiscordChannel', () => {
       const sessionId = await channel.getOrCreateSession('user-123');
 
       expect(mockSessionManager.createSession).toHaveBeenCalledWith({
-        userId: 'user-123',
+        userId: 'discord:user-123',
         channelId: 'discord',
       });
       expect(sessionId).toBe('session-123');
@@ -427,7 +433,7 @@ describe('DiscordChannel', () => {
       await channel.handleReset('user-123');
 
       expect(mockSessionManager.startNewSession).toHaveBeenCalledWith({
-        userId: 'user-123',
+        userId: 'discord:user-123',
         channelId: 'discord',
       }, 'session-123');
       expect(mockSessionManager.deleteSession).not.toHaveBeenCalled();

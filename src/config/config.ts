@@ -117,6 +117,51 @@ const discordChannelSchema = z.object({
   enabled: z.boolean().default(false),
   botToken: z.string().default(''),
   applicationId: z.string().default(''),
+  /** Discord user IDs allowed to talk to the bot. Empty = allow all */
+  allowedUsers: z.array(z.string()).default([]),
+});
+
+const slackChannelSchema = z.object({
+  enabled: z.boolean().default(false),
+  /** Bot token (xoxb-...) */
+  botToken: z.string().default(''),
+  /** App-level token (xapp-...) for Socket Mode */
+  appToken: z.string().default(''),
+  /** Slack member IDs (U...) allowed to talk to the bot. Empty = allow all */
+  allowedUsers: z.array(z.string()).default([]),
+});
+
+const whatsappChannelSchema = z.object({
+  enabled: z.boolean().default(false),
+  /** Directory for the linked-device session (empty = <cwd>/.whatsapp-auth) */
+  authDir: z.string().default(''),
+  /** Linked account's own number; when set, a pairing code is logged instead of a QR */
+  phoneNumber: z.string().default(''),
+  /** Phone numbers allowed to talk to the bot. Required: the bot rides a real account */
+  allowedNumbers: z.array(z.string()).default([]),
+});
+
+const signalChannelSchema = z.object({
+  enabled: z.boolean().default(false),
+  /** The bot's registered Signal number (+countrycode...) */
+  phoneNumber: z.string().default(''),
+  cliPath: z.string().default('signal-cli'),
+  /** signal-cli --config directory (empty = signal-cli default) */
+  configPath: z.string().default(''),
+  /** Phone numbers allowed to talk to the bot. Empty = allow all */
+  allowedNumbers: z.array(z.string()).default([]),
+});
+
+const matrixChannelSchema = z.object({
+  enabled: z.boolean().default(false),
+  homeserverUrl: z.string().default(''),
+  accessToken: z.string().default(''),
+  /** Bot MXID (@bot:server). Optional; resolved via whoami when empty */
+  userId: z.string().default(''),
+  /** Matrix user IDs allowed to talk to the bot. Empty = allow all */
+  allowedUsers: z.array(z.string()).default([]),
+  /** Room IDs the bot may respond in. Empty = any room */
+  allowedRooms: z.array(z.string()).default([]),
 });
 
 const apiChannelSchema = z.object({
@@ -128,7 +173,15 @@ const apiChannelSchema = z.object({
 
 const channelsSchema = z.object({
   telegram: telegramChannelSchema,
-  discord: discordChannelSchema.default({ enabled: false, botToken: '', applicationId: '' }),
+  discord: discordChannelSchema.default({ enabled: false, botToken: '', applicationId: '', allowedUsers: [] }),
+  slack: slackChannelSchema.default({ enabled: false, botToken: '', appToken: '', allowedUsers: [] }),
+  whatsapp: whatsappChannelSchema.default({ enabled: false, authDir: '', phoneNumber: '', allowedNumbers: [] }),
+  signal: signalChannelSchema.default({
+    enabled: false, phoneNumber: '', cliPath: 'signal-cli', configPath: '', allowedNumbers: [],
+  }),
+  matrix: matrixChannelSchema.default({
+    enabled: false, homeserverUrl: '', accessToken: '', userId: '', allowedUsers: [], allowedRooms: [],
+  }),
   api: apiChannelSchema.default({ enabled: false, port: DEFAULT_API_PORT, host: DEFAULT_HOST }),
 });
 
@@ -445,6 +498,11 @@ export type ToolPolicyConfig = z.infer<typeof toolPolicySchema>;
 export type TuningConfig = z.infer<typeof tuningSchema>;
 export type EvolutionConfigSchema = z.infer<typeof evolutionSchema>;
 
+/** Split a comma-separated env value into trimmed, non-empty entries. */
+function parseCsvEnv(value: string | undefined): string[] {
+  return value ? value.split(',').map((entry) => entry.trim()).filter(Boolean) : [];
+}
+
 /**
  * Load configuration from environment variables
  * @returns Validated configuration object
@@ -630,9 +688,39 @@ export function loadConfig(): Config {
         enableVoiceReply: process.env.TELEGRAM_VOICE_REPLY === 'true',
       },
       discord: {
-        enabled: !!discordBotToken,
+        enabled: !!discordBotToken && process.env.DISCORD_ENABLED !== 'false',
         botToken: discordBotToken || '',
         applicationId: discordAppId || '',
+        allowedUsers: parseCsvEnv(process.env.DISCORD_ALLOWED_USERS),
+      },
+      slack: {
+        enabled: !!process.env.SLACK_BOT_TOKEN && !!process.env.SLACK_APP_TOKEN
+          && process.env.SLACK_ENABLED !== 'false',
+        botToken: process.env.SLACK_BOT_TOKEN || '',
+        appToken: process.env.SLACK_APP_TOKEN || '',
+        allowedUsers: parseCsvEnv(process.env.SLACK_ALLOWED_USERS),
+      },
+      whatsapp: {
+        enabled: process.env.WHATSAPP_ENABLED === 'true',
+        authDir: process.env.WHATSAPP_AUTH_DIR || '',
+        phoneNumber: process.env.WHATSAPP_PHONE_NUMBER || '',
+        allowedNumbers: parseCsvEnv(process.env.WHATSAPP_ALLOWED_NUMBERS),
+      },
+      signal: {
+        enabled: !!process.env.SIGNAL_PHONE_NUMBER && process.env.SIGNAL_ENABLED !== 'false',
+        phoneNumber: process.env.SIGNAL_PHONE_NUMBER || '',
+        cliPath: process.env.SIGNAL_CLI_PATH || 'signal-cli',
+        configPath: process.env.SIGNAL_CONFIG_PATH || '',
+        allowedNumbers: parseCsvEnv(process.env.SIGNAL_ALLOWED_NUMBERS),
+      },
+      matrix: {
+        enabled: !!process.env.MATRIX_HOMESERVER_URL && !!process.env.MATRIX_ACCESS_TOKEN
+          && process.env.MATRIX_ENABLED !== 'false',
+        homeserverUrl: process.env.MATRIX_HOMESERVER_URL || '',
+        accessToken: process.env.MATRIX_ACCESS_TOKEN || '',
+        userId: process.env.MATRIX_USER_ID || '',
+        allowedUsers: parseCsvEnv(process.env.MATRIX_ALLOWED_USERS),
+        allowedRooms: parseCsvEnv(process.env.MATRIX_ALLOWED_ROOMS),
       },
       api: {
         enabled: process.env.WEB_UI_ENABLED === 'true',
