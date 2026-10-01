@@ -335,6 +335,16 @@ export function wrapCommand(
       ];
       for (const p of config.writable) args.push('-v', `${path.resolve(p)}:${path.resolve(p)}:rw`);
       for (const f of readOnlyFiles) args.push('-v', `${f}:${f}:ro`);
+      // Only mounted paths are visible in the container, so mask secrets that
+      // sit inside one: files shadowed with /dev/null, directories with a tmpfs.
+      const mounted = [workspace, ...config.writable.map(p => path.resolve(p)), ...readOnlyFiles];
+      for (const p of config.hide) {
+        const abs = path.resolve(p);
+        if (!existsSync(abs)) continue;
+        if (!mounted.some(m => abs === m || abs.startsWith(m + path.sep))) continue;
+        if (isDirectory(abs)) args.push('--tmpfs', `${abs}:ro,size=1k`);
+        else args.push('-v', `/dev/null:${abs}:ro`);
+      }
       args.push('-w', cwd);
       // Pass env by NAME only: values come from this process's env and never
       // appear on the docker command line (visible in `ps`). Host PATH/HOME

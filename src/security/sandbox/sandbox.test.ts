@@ -97,6 +97,24 @@ describe('command construction', () => {
     expect(w.args.join(' ')).toContain('-v /tmp/x.py:/tmp/x.py:ro');
   });
 
+  it('docker masks hidden secrets that sit inside a mounted path', () => {
+    const ws = realpathSync(mkdtempSync(path.join(tmpdir(), 'sb-docker-hide-')));
+    try {
+      writeFileSync(path.join(ws, '.env'), 'SECRET=1');
+      mkdirSync(path.join(ws, 'vault'));
+      const outside = path.join(tmpdir(), 'not-mounted.env');
+      writeFileSync(outside, 'x');
+      const hide = [path.join(ws, '.env'), path.join(ws, 'vault'), outside];
+      const a = wrapCommand({ ...spec, cwd: ws, workspace: ws }, 'docker', { ...baseConfig, hide }).args.join(' ');
+      expect(a).toContain(`-v /dev/null:${path.join(ws, '.env')}:ro`);
+      expect(a).toContain(`--tmpfs ${path.join(ws, 'vault')}:ro,size=1k`);
+      expect(a).not.toContain(outside);
+      rmSync(outside, { force: true });
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
   it('bwrap: read-only root, writable workspace, network kept unless off', () => {
     const w = wrapCommand(spec, 'bwrap', baseConfig);
     expect(w.command).toBe('bwrap');
