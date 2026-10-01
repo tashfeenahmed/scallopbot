@@ -2,9 +2,13 @@ import { z } from 'zod';
 import dotenv from 'dotenv';
 import { parseModelRef, DEFAULT_MODELS, type ModelRef, type ModelsConfig } from './model-routing.js';
 import { DEFAULT_EVOLUTION_CONFIG } from '../evolution/config.js';
+import { loadVaultIntoEnv } from '../security/vault.js';
 
 // Load environment variables from .env file
 dotenv.config();
+// Then the encrypted vault (~/.scallopbot/secrets.enc): it only fills names
+// the shell/.env left unset. Never throws; problems are logged at startup.
+export const vaultLoadResult = loadVaultIntoEnv();
 
 // Shared defaults (single source of truth)
 const DEFAULT_HOST = '127.0.0.1';

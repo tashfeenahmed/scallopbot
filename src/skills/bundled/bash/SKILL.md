@@ -118,7 +118,7 @@ The `cwd` parameter is validated to prevent escaping the workspace:
 - Symlinks that resolve outside workspace are blocked
 - All paths are resolved relative to the workspace root
 
-**Note:** These are basic protections to prevent obvious accidents, not a security sandbox. They don't protect against determined malicious use.
+**Note:** These patterns are basic protections against obvious accidents. Real isolation comes from the operator's `SANDBOX_MODE` setting (seatbelt, bwrap or docker); when it is on, writes outside the workspace fail and network may be off. If a command fails with a sandbox error, report it rather than looking for a way around it.
 
 ## Examples
 

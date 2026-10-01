@@ -62,6 +62,7 @@ import { resolveStateUserId } from '../utils/state-user-id.js';
 import { compactCompletedConversationHistory } from '../memory/session-message-view.js';
 import { isMemoryLiveForContext } from '../memory/state-relevance.js';
 import { ApprovalStore, APPROVAL_PROMPT_HINT } from './approvals.js';
+import { guardToolResults } from '../security/prompt-injection.js';
 import {
   assessToolCallForTurn,
   describeToolCallForUser,
@@ -1428,7 +1429,7 @@ export class Agent {
       // Execute tools and gather results
       this.logger.info({ toolCount: toolUses.length, tools: toolUses.map(t => t.name) }, 'Executing tools');
       const userId = currentSession?.metadata?.userId;
-      const toolResults = await this.executeTools(
+      const rawToolResults = await this.executeTools(
         toolUses,
         sessionId,
         userId,
@@ -1439,6 +1440,9 @@ export class Agent {
         turnDeadline,
         abortSignal,
       );
+      // Untrusted output (web pages, MCP, PDFs, files) is scanned for prompt
+      // injection once here, before the model or any later check sees it.
+      const toolResults = guardToolResults(toolUses, rawToolResults, { logger: this.logger, sessionId });
       this.logger.info({
         resultCount: toolResults.length,
         results: toolResults.map(r => ({

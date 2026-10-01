@@ -8,13 +8,15 @@
 import { spawn, type ChildProcess } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
+import { prepareSandboxedCommand } from '../../../../security/sandbox/index.js';
 
 // Configuration
 const DEFAULT_TIMEOUT = 60000; // 60 seconds
 const DEFAULT_OUTPUT_SIZE = 30 * 1024; // 30KB
 const ABSOLUTE_MAX_OUTPUT = 200 * 1024; // 200KB hard ceiling
 
-// Dangerous command patterns (basic protection, not a security sandbox)
+// Dangerous command patterns (basic protection; isolation comes from the
+// optional sandbox layer in src/security/sandbox, see SANDBOX_MODE)
 const DANGEROUS_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
   // rm -rf / variations
   {
@@ -303,9 +305,22 @@ async function executeBash(args: BashArgs): Promise<void> {
   let killed = false;
   let timeoutId: ReturnType<typeof setTimeout> | null = null;
 
-  const proc: ChildProcess = spawn('bash', ['-c', args.command], {
-    cwd: args.cwd,
+  const workspaceRoot = process.env.SKILL_WORKSPACE || process.cwd();
+  const prepared = prepareSandboxedCommand({
+    argv: ['bash', '-c', args.command],
+    cwd: args.cwd ?? workspaceRoot,
+    workspace: workspaceRoot,
     env: { ...process.env },
+  });
+  if (!prepared.ok) {
+    outputResult({ success: false, output: '', error: prepared.error, exitCode: 126 });
+    return;
+  }
+  const { wrapped } = prepared;
+
+  const proc: ChildProcess = spawn(wrapped.command, wrapped.args, {
+    cwd: args.cwd,
+    env: wrapped.env,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 
@@ -373,7 +388,9 @@ async function executeBash(args: BashArgs): Promise<void> {
     outputResult({
       success: false,
       output: '',
-      error: `Failed to execute command: ${err.message}`,
+      error: wrapped.backend === 'off'
+        ? `Failed to execute command: ${err.message}`
+        : `Failed to start ${wrapped.backend} sandbox: ${err.message}`,
       exitCode: 1,
     });
   });

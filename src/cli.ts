@@ -15,6 +15,7 @@ import { explainProactiveDecisions, type ProactiveDecision } from './proactive/d
 import { explainEvolution } from './evolution/decision-log.js';
 import { SkillStore } from './evolution/skill-store.js';
 import type { EvolutionSignal, EvolutionDecision } from './evolution/types.js';
+import { registerSecretsCommand } from './security/secrets-cli.js';
 
 const VERSION = '0.1.0';
 
@@ -835,5 +836,8 @@ program
       process.exitCode = 1;
     }
   });
+
+// secrets - encrypted vault for API keys
+registerSecretsCommand(program);
 
 program.parse();

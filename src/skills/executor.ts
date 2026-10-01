@@ -13,6 +13,7 @@ import type { Logger } from 'pino';
 import type { Skill, SkillExecutionRequest, SkillExecutionResult } from './types.js';
 import { redactSensitiveText } from '../security/redaction.js';
 import { resolveStateUserId } from '../utils/state-user-id.js';
+import { SANDBOX_ENV_KEYS } from '../security/sandbox/index.js';
 
 /** Default timeout for script execution (120 seconds for browser/screenshot operations) */
 const DEFAULT_TIMEOUT_MS = 120000;
@@ -82,6 +83,7 @@ export function buildSkillSubprocessEnv(
   const env: Record<string, string> = {};
   copyDefinedEnv(env, SAFE_BASE_ENV_KEYS);
   copyDefinedEnv(env, SAFE_SMARTBOT_ENV_KEYS);
+  copyDefinedEnv(env, SANDBOX_ENV_KEYS);
 
   const openclaw = skill.frontmatter.metadata?.openclaw;
   const explicitlyAllowed = new Set(openclaw?.requires?.env ?? []);

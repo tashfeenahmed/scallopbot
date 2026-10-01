@@ -11,6 +11,23 @@ const TOKEN_PATTERNS: Array<[RegExp, string]> = [
   [/\b((?:API[_-]?KEY|TOKEN|SECRET|PASSWORD|AUTHORIZATION)\s*=\s*)[^\s]+/gi, '$1[REDACTED]'],
 ];
 
+/**
+ * Secret values registered at runtime (e.g. loaded from the encrypted vault).
+ * They are redacted even when the variable name does not look sensitive.
+ */
+const registeredSecrets = new Set<string>();
+
+export function registerSecretValues(values: Iterable<string>): void {
+  for (const value of values) {
+    if (typeof value === 'string' && value.length >= 8) registeredSecrets.add(value);
+  }
+}
+
+/** Test helper. */
+export function clearRegisteredSecretValues(): void {
+  registeredSecrets.clear();
+}
+
 function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -33,7 +50,7 @@ export function redactSensitiveText(
   env: NodeJS.ProcessEnv = process.env,
 ): string {
   let redacted = text;
-  const values = [...new Set([...environmentSecrets(env), ...additionalSecrets])]
+  const values = [...new Set([...environmentSecrets(env), ...registeredSecrets, ...additionalSecrets])]
     .filter(value => value.length >= 8)
     .sort((a, b) => b.length - a.length);
   for (const value of values) {

@@ -370,6 +370,26 @@ BUDGET_WARNING_THRESHOLD=0.75      # default; dashboard bars turn amber past thi
 
 Common options: [.env.example](.env.example); every variable is read in [`src/config/config.ts`](src/config/config.ts).
 
+## Security
+
+Three opt-in layers sit on top of the existing tool-intent gates, workspace path checks and log redaction. They reduce risk; they do not make it safe to give the bot untrusted users or untrusted skills.
+
+**Sandboxed execution** (`bash`, `run_code`). `SANDBOX_MODE` picks the backend; the dangerous-command blocklist still runs first.
+
+| Mode | What it does |
+|------|--------------|
+| `off` (default) | Runs on the host, as before |
+| `auto` | Best native backend: `seatbelt` on macOS, `bwrap` on Linux if it works; otherwise `off` with a startup warning |
+| `seatbelt` | macOS `sandbox-exec`: writes denied outside the workspace and temp dirs |
+| `bwrap` | Linux bubblewrap: read-only root, writable workspace, private `/tmp` and PID namespace |
+| `docker` | Throwaway container per command, workspace bind-mounted, `--cap-drop ALL`, CPU/memory/PID limits, no network unless `SANDBOX_NETWORK=on` |
+
+An explicitly named backend that is missing makes commands fail rather than run unsandboxed. All backends hide the vault, its key file and the bot's `.env` from sandboxed commands. The default stays `off` because a read-only root breaks commands that write outside the workspace (global `pip`/`npm`, `~/.cache`, a memory DB under `/opt`); try `SANDBOX_MODE=auto` and add paths to `SANDBOX_WRITABLE` as needed. On a Pi: `sudo apt install bubblewrap`. `auto` never picks Docker, because the image must carry your tools (set `SANDBOX_IMAGE`). The startup log names the active backend.
+
+**Encrypted secret vault.** `scallopbot secrets set|get|list|rm|import-env` keeps keys in `~/.scallopbot/secrets.enc` (AES-256-GCM, scrypt-derived key). The key comes from `SCALLOPBOT_VAULT_KEY` or a `0600` key file (`~/.scallopbot/vault.key`, created on first `set`). At startup vault values fill only variables that the shell or `.env` left unset, so environment variables win; run `scallopbot secrets import-env --strip` to move keys out of `.env`. Vault values are added to log and output redaction. With the key file beside the vault, this protects against leaked `.env` files, backups and screenshots. It does not protect against someone who can read your home directory; for that, supply `SCALLOPBOT_VAULT_KEY` from systemd credentials or a keychain.
+
+**Prompt-injection scanning.** Every tool result is scored with heuristics before the model sees it: "ignore previous instructions", role-tag and tool-call spoofing, hidden Unicode tag characters, base64-encoded instructions, exfiltration URLs and requests for secrets. Flagged output is wrapped in markers with a warning that it is data, not instructions, and a warning is logged (rule names and score only). `PROMPT_INJECTION_SCAN=block` also withholds high-confidence hits from external-content tools (`webfetch`, `web_search`, `browser`, `pdf`, `mcp`). It is a heuristic: expect some misses and the occasional harmless page being wrapped.
+
 ## Reminders
 
 Natural language scheduling with timezone awareness:
@@ -520,6 +540,9 @@ sudo systemctl enable --now scallopbot
 | `skill-curator pin <name>` | Keep an agent-created skill active |
 | `skill-curator restore <name>` | Restore a recoverably archived skill |
 | `migrate run` | Migrate legacy JSONL memories to SQLite |
+| `secrets set <name> [value]` | Store a secret in the encrypted vault (omit the value to type it hidden) |
+| `secrets get <name>` / `list` / `rm <name>` | Read, list names, or delete vault secrets |
+| `secrets import-env [file]` | Move credential-looking variables from `.env` into the vault (`--strip` removes them from the file) |
 
 ## Project Structure
 
