@@ -241,7 +241,7 @@ skillCommand
 // skill install
 skillCommand
   .command('install <slug>')
-  .description('Install a skill from ClawHub (clawhub.ai)')
+  .description('Install a skill from ClawHub (clawhub.ai) or a GitHub folder URL')
   .option('--url <url>', 'Install from a specific URL instead of ClawHub')
   .option('-v, --version <version>', 'Install a specific version')
   .option('--deps', 'Also install skill dependencies')
@@ -252,7 +252,11 @@ skillCommand
       console.log(`Installing skill: ${slug}...`);
 
       let result;
-      if (options.url) {
+      if (slug.startsWith('https://github.com/')) {
+        // Plain agentskills.io / Anthropic skill folders work as-is.
+        const { installSkillFromGitHub } = await import('./skills/github-install.js');
+        result = await installSkillFromGitHub(slug);
+      } else if (options.url) {
         // Install from direct URL
         result = await manager.installFromUrl(slug, options.url);
       } else {

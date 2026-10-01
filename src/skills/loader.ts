@@ -20,7 +20,7 @@ import { homedir, platform } from 'os';
 import { constants } from 'fs';
 import { EventEmitter } from 'events';
 import type { Logger } from 'pino';
-import type { Skill, SkillLoaderConfig, SkillMetadata } from './types.js';
+import type { Skill, SkillFrontmatter, SkillLoaderConfig, SkillMetadata } from './types.js';
 import { parseFrontmatter, SkillParseError } from './parser.js';
 
 /**
@@ -38,6 +38,35 @@ export interface SkillLoaderEvents {
 const DEFAULT_LOCAL_DIR = join(homedir(), '.scallopbot', 'skills');
 const WORKSPACE_SKILL_DIR = '.scallopbot/skills';
 const BUNDLED_SKILL_DIR = join(dirname(import.meta.url.replace('file://', '')), 'bundled');
+
+const ENTRYPOINT_EXTENSIONS = ['.ts', '.sh', '.js'];
+
+/**
+ * A `scripts/` folder makes a skill an executable tool only when the skill
+ * opts into ScallopBot's convention: an `inputSchema`, a `scripts` action map,
+ * or a `scripts/run.*` / `scripts/default.*` entrypoint. Otherwise (plain
+ * Anthropic / agentskills.io skills) the scripts are bundled helpers that the
+ * instructions reference, and the skill stays instruction-only.
+ */
+export async function hasExecutableEntrypoint(
+  skillDir: string,
+  frontmatter: Pick<SkillFrontmatter, 'inputSchema' | 'scripts'>,
+): Promise<boolean> {
+  if (frontmatter.inputSchema || (frontmatter.scripts && Object.keys(frontmatter.scripts).length > 0)) {
+    return true;
+  }
+  for (const base of ['run', 'default']) {
+    for (const ext of ENTRYPOINT_EXTENSIONS) {
+      try {
+        await access(join(skillDir, 'scripts', `${base}${ext}`), constants.R_OK);
+        return true;
+      } catch {
+        // try next candidate
+      }
+    }
+  }
+  return false;
+}
 
 /**
  * Gate check result
@@ -295,7 +324,8 @@ export class SkillLoader extends EventEmitter {
       // Check for scripts/ directory
       const skillDir = dirname(path);
       const scriptsDir = join(skillDir, 'scripts');
-      const hasScripts = await this.directoryExists(scriptsDir);
+      const hasScripts = await this.directoryExists(scriptsDir) &&
+        await hasExecutableEntrypoint(skillDir, parsed.frontmatter);
 
       // Validate script paths from frontmatter if present
       if (hasScripts && parsed.frontmatter.scripts) {
