@@ -136,6 +136,14 @@ function scanBase64(text: string): boolean {
 }
 
 /** Score a piece of untrusted text. Pure; safe on large inputs (bounded). */
+function decodeJsonEscapes(text: string): string {
+  if (!text.includes('\\')) return text;
+  return text
+    .replace(/\\u([0-9a-fA-F]{4})/g, (_, hex: string) => String.fromCharCode(parseInt(hex, 16)))
+    .replace(/\\[nrt]/g, '\n')
+    .replace(/\\(["\\/])/g, '$1');
+}
+
 export function scanForPromptInjection(content: string, maxChars = 400_000): InjectionScanResult {
   const findings: InjectionFinding[] = [];
   const text = content.length > maxChars ? content.slice(0, maxChars) : content;
@@ -154,7 +162,14 @@ export function scanForPromptInjection(content: string, maxChars = 400_000): Inj
   const smuggled = tagCount > 0
     ? [...text.matchAll(TAG_CHARS)].map(m => String.fromCodePoint(m[0].codePointAt(0)! - 0xE0000)).join('')
     : '';
-  const haystack = smuggled ? `${visible}\n${smuggled}` : visible;
+  // Tool output is often JSON-encoded (MCP results, API bodies): "<system>IGNORE"
+  // arrives as "\u003csystem\u003eIGNORE", which hides word boundaries from the
+  // rules. Scan a decoded view as well.
+  const decoded = decodeJsonEscapes(visible);
+  const parts = [visible];
+  if (decoded !== visible) parts.push(decoded);
+  if (smuggled) parts.push(smuggled);
+  const haystack = parts.join('\n');
 
   for (const { rule, points, pattern } of RULES) {
     if (pattern.test(haystack)) findings.push({ rule, points });
