@@ -88,6 +88,12 @@ server. Point Claude Code, Codex, or any other MCP client at it and that client 
 writes the same memory the bot uses -- store something from your editor, and the bot
 recalls it in Telegram.
 
+The `mcp` skill talks to local stdio servers (`command`) and remote servers over
+Streamable HTTP or the older SSE transport (`url` + `transport: "http" | "sse"`), with
+headers or a bearer token that can reference `${MCP_*}` environment variables. Each call
+opens a short-lived session; tools must be allow-listed per server. See the
+[skill's README](src/skills/bundled/mcp/SKILL.md) for the config format.
+
 Three tools are exposed:
 
 | Tool | Purpose |
@@ -175,7 +181,7 @@ ACT-R-inspired spreading activation over typed relation graphs (UPDATES, EXTENDS
 
 ### Hybrid Memory Engine
 
-SQLite-backed memory with ACID guarantees. Combines BM25 keyword scoring with semantic embeddings (Ollama/OpenAI) and optional LLM re-ranking. Recall uses smooth activation from temporal decay, lifecycle, genuine topic relevance, salience, and user confirmation: an old topic fades from general context but can return naturally when it becomes relevant, without magic "history" wording. Automatic retrieval is telemetry only and never reinforces freshness or utility. Assistant self-reflection and agent-subject facts remain separate from user memory. The lifecycle includes category-specific half-lives (14 days for events to 346 days for relationships), BFS-clustered fusion, and utility-based forgetting with soft-archive before hard-prune.
+SQLite-backed memory with ACID guarantees. Combines BM25 keyword scoring with semantic embeddings and optional LLM re-ranking. `EMBEDDING_PROVIDER` picks `ollama` (local `nomic-embed-text` or `mxbai-embed-large`), `openai`, or `tfidf`; unset, it tries Ollama and falls back to TF-IDF. Each stored vector is tagged with its model, so vectors from different models are never compared, and `reembed` moves an existing memory store to a new model. Recall uses smooth activation from temporal decay, lifecycle, genuine topic relevance, salience, and user confirmation: an old topic fades from general context but can return naturally when it becomes relevant, without magic "history" wording. Automatic retrieval is telemetry only and never reinforces freshness or utility. Assistant self-reflection and agent-subject facts remain separate from user memory. The lifecycle includes category-specific half-lives (14 days for events to 346 days for relationships), BFS-clustered fusion, and utility-based forgetting with soft-archive before hard-prune.
 
 ### Cost-Aware Model Routing
 
@@ -188,6 +194,8 @@ Speech-to-text via faster-whisper (CTranslate2-optimized Whisper) and text-to-sp
 ### Skills-Only Architecture
 
 All capabilities -- bash, browser, file I/O, git, Docker, PDF, web search, memory -- are implemented as self-contained skills using the [OpenClaw](https://github.com/openclaw/openclaw) SKILL.md format. Skills declare their own requirements (binaries, env vars, OS) and are gated at load time. Community skills install from [ClawHub](https://clawhub.ai) with a single CLI command.
+
+Plain [agentskills.io](https://agentskills.io) / Anthropic skills (just `name` + `description`, optional `license`, `allowed-tools`, `metadata`) load unchanged. Only the name and description go in the prompt; the body is loaded when the model calls `load_procedure`, and bundled `references/` or `scripts/` files are listed and read on demand. A `scripts/` folder only turns a skill into a callable tool when it also has an `inputSchema` or a `scripts/run.*` entrypoint. `allowed-tools` is shown to the model but does not grant permissions.
 
 ### Evidence-Gated Procedural Learning
 
@@ -321,10 +329,11 @@ sent as a bearer token.
 | `reminder` | Reminders (deprecated; use `board`) |
 | `progress` | Goal progress (deprecated; use `board`) |
 
-Install community skills from ClawHub:
+Install community skills from ClawHub, or any skill folder on GitHub:
 
 ```bash
 node dist/cli.js skill install elicitation
+node dist/cli.js skill install https://github.com/anthropics/skills/tree/main/skills/pdf
 ```
 
 ## Channels
@@ -511,7 +520,7 @@ sudo systemctl enable --now scallopbot
 | `config` | Show current configuration (`--json` for machine output) |
 | `version` | Show version |
 | `skill search <query>` | Search ClawHub |
-| `skill install <slug>` | Install from ClawHub |
+| `skill install <slug\|github-url>` | Install from ClawHub or a GitHub skill folder |
 | `skill uninstall <name>` | Remove a skill |
 | `skill list` | List installed skills |
 | `skill update [name]` | Update one or all skills |
@@ -520,6 +529,7 @@ sudo systemctl enable --now scallopbot
 | `skill-curator pin <name>` | Keep an agent-created skill active |
 | `skill-curator restore <name>` | Restore a recoverably archived skill |
 | `migrate run` | Migrate legacy JSONL memories to SQLite |
+| `reembed` | Re-embed memories into the current `EMBEDDING_PROVIDER`/`EMBEDDING_MODEL` (`--dry-run`, `--limit`, `--all`; resumable) |
 
 ## Project Structure
 
