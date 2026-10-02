@@ -44,6 +44,8 @@ dotenv.config({ path: path.resolve(import.meta.dirname, '../../.env') });
 export interface TrackedProvider extends LLMProvider {
   callLog: CognitiveCallLogEntry[];
   callCount: number;
+  /** Token totals across every call (cached input is a subset of input). */
+  usage: { inputTokens: number; cachedInputTokens: number; outputTokens: number };
 }
 
 function detectOperationType(request: CompletionRequest): string {
@@ -66,11 +68,17 @@ export function createTrackedProvider(inner: LLMProvider): TrackedProvider {
     callLog: [],
     callCount: 0,
     isAvailable() { return inner.isAvailable(); },
+    usage: { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 },
+    model: inner.model,
     async complete(request: CompletionRequest): Promise<CompletionResponse> {
       this.callCount++;
       const operation = detectOperationType(request);
       this.callLog.push({ operation, timestamp: Date.now() });
-      return inner.complete(request);
+      const response = await inner.complete(request);
+      this.usage.inputTokens += response.usage.inputTokens;
+      this.usage.cachedInputTokens += response.usage.cachedInputTokens ?? 0;
+      this.usage.outputTokens += response.usage.outputTokens;
+      return response;
     },
   };
 }
@@ -97,7 +105,7 @@ export function createEvalProviders(): EvalProviders {
   // The harness pins Moonshot as the provider for reproducibility; only the model
   // id is configurable here.
   const evalRef = parseModelRef(process.env.MODEL_EVAL);
-  const evalModel = evalRef && 'provider' in evalRef && evalRef.model ? evalRef.model : 'kimi-k2.5';
+  const evalModel = evalRef && 'provider' in evalRef && evalRef.model ? evalRef.model : 'kimi-k2.6';
 
   const moonshot = new MoonshotProvider({
     apiKey: moonshotKey,

@@ -35,6 +35,7 @@
     "bench:agentic": "tsx evals/agentic/run.ts",
     "postmortem": "tsx scripts/postmortem.ts",
     "bench:compaction": "tsx benchmarks/compaction-recall.ts",
+    "bench:locomo": "vitest run -c /dev/null src/eval/locomo-landing.test.ts",
     "bench:codemode": "tsx evals/codemode/bench.ts",
     "lint": "eslint src/",
     "check:secrets": "node scripts/check-no-secrets.mjs",

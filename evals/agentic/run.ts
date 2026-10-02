@@ -18,6 +18,7 @@
  *   --keep                            keep temp workspaces for inspection
  *   --verbose                         agent logs to stderr
  *   --env-file <path>                 env file (default: nearest .env walking up from cwd)
+ *   --balance-floor <usd>             stop starting tasks once the Moonshot balance is at or below this
  */
 
 import { existsSync } from 'node:fs';
@@ -30,6 +31,7 @@ import { runTask, type HarnessOptions } from './harness.js';
 import { resolveBenchModel, type BenchModel } from './providers.js';
 import { buildScorecard, formatScorecard } from './scorecard.js';
 import { selectTasks } from './tasks/index.js';
+import { createBudgetGuard } from './budget.js';
 
 interface CliArgs {
   models: string[];
@@ -45,6 +47,8 @@ interface CliArgs {
   envFile?: string;
   exportPath?: string;
   scorePath?: string;
+  /** Stop starting tasks once the Moonshot balance is at or below this (USD). */
+  balanceFloor?: number;
 }
 
 function parseArgs(argv: string[]): CliArgs {
@@ -65,6 +69,7 @@ function parseArgs(argv: string[]): CliArgs {
       case '--tasks': args.tasks = value(); break;
       case '--concurrency': args.concurrency = Math.max(1, Number(value())); break;
       case '--repeat': args.repeat = Math.max(1, Number(value())); break;
+      case '--balance-floor': args.balanceFloor = Number(value()); break;
       case '--max-iterations': args.maxIterations = Math.max(1, Number(value())); break;
       case '--timeout': args.timeoutS = Math.max(10, Number(value())); break;
       case '--no-outcome-brain': args.outcomeBrain = false; break;
@@ -123,15 +128,23 @@ async function runBench(args: CliArgs): Promise<void> {
   };
   const startedAt = new Date();
   const sha = commitSha();
+  const canSpend = args.balanceFloor === undefined
+    ? async () => true
+    : createBudgetGuard(args.balanceFloor, { log: (line) => console.error(line) });
 
   for (const model of models) {
     const jobs = tasks.flatMap(task => Array.from({ length: args.repeat }, (_, repeat) => async () => {
+      if (!(await canSpend())) return null;
       const result = await runTask(task, model, { ...harness, repeat });
       const calls = result.trace.turns.reduce((sum, t) => sum + t.llmCalls, 0);
       console.error(`[${model.label}] ${result.pass ? 'PASS' : 'FAIL'} ${task.id}#${repeat} (${(result.durationMs / 1000).toFixed(1)}s, ${calls} calls) ${result.details}`);
       return result;
     }));
-    const results = await pool(jobs, args.concurrency);
+    const settled = await pool(jobs, args.concurrency);
+    const results = settled.filter((result): result is NonNullable<typeof result> => result !== null);
+    if (results.length < settled.length) {
+      console.error(`[budget] ${settled.length - results.length} task run(s) skipped by the balance floor`);
+    }
     const scorecard = buildScorecard(model.label, results);
     console.log(formatScorecard(scorecard, results));
     console.log('');
@@ -145,6 +158,7 @@ async function runBench(args: CliArgs): Promise<void> {
       finishedAt: new Date().toISOString(),
       options: {
         tasks: args.tasks, repeat: args.repeat, concurrency: args.concurrency,
+        ...(args.balanceFloor !== undefined && { balanceFloor: args.balanceFloor }),
         maxIterations: args.maxIterations, outcomeBrain: args.outcomeBrain, timeoutS: args.timeoutS,
       },
       scorecard,

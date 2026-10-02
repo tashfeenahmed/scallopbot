@@ -28,6 +28,7 @@ import {
   estimateImportance,
   extractFactsWithLLM,
   decideMem0Action,
+  type TrackedProvider,
 } from './eval-runner.js';
 import {
   createModeSearch,
@@ -93,6 +94,10 @@ export interface LoCoMoModeResult {
   }>;
   llmCalls: number;
   qaCount: number;
+  /** Token totals for this mode (for cost accounting). */
+  usage?: { inputTokens: number; cachedInputTokens: number; outputTokens: number };
+  /** True when a spend check stopped the mode before every conversation ran. */
+  partial?: boolean;
 }
 
 export interface LoCoMoResults {
@@ -101,6 +106,12 @@ export interface LoCoMoResults {
   conversations: number;
   totalQA: number;
   modes: LoCoMoModeResult[];
+}
+
+/** The eval model id actually used (MODEL_EVAL=moonshot:<model>, default kimi-k2.6). */
+function evalModelLabel(): string {
+  const match = /^moonshot:(.+)$/.exec(process.env.MODEL_EVAL ?? '');
+  return match?.[1] ?? 'kimi-k2.6';
 }
 
 // ============ Data Loading ============
@@ -397,13 +408,20 @@ function printRunningTable(
 async function evaluateMode(
   mode: EvalModeConfig,
   conversations: LoCoMoConversation[],
+  canSpend?: (usage: TrackedProvider['usage']) => Promise<boolean>,
 ): Promise<LoCoMoModeResult> {
   const { embedder, llmProvider } = createEvalProviders();
+  let partial = false;
 
   const perConversation: LoCoMoModeResult['perConversation'] = [];
   const allResults: QAResult[] = [];
 
   for (const conv of conversations) {
+    if (canSpend && !(await canSpend(llmProvider.usage))) {
+      console.log(`[locomo] ${mode.name}: spend limit reached; skipping ${conv.sampleId} and the rest`);
+      partial = true;
+      break;
+    }
     console.log(`[locomo] ${mode.name}/${conv.sampleId}: starting (${conv.sessions.length} sessions, ${conv.qa.length} QA)`);
 
     // Isolated DB per mode+conversation
@@ -415,6 +433,8 @@ async function evaluateMode(
       embedder,
       decayConfig: mode.enableDecay ? mode.decayOverrides : { baseDecayRate: 1.0 },
       rerankProvider: mode.enableReranking ? llmProvider : undefined,
+      // The store only reranks when asked (production default is off).
+      foregroundRerank: mode.enableReranking,
     });
 
     const db = store.getDatabase();
@@ -648,6 +668,8 @@ async function evaluateMode(
     emByCategory,
     perConversation,
     llmCalls: llmProvider.callCount,
+    usage: { ...llmProvider.usage },
+    ...(partial && { partial }),
     qaCount: allResults.length,
   };
 }
@@ -754,6 +776,8 @@ export async function runLoCoMo(options?: {
   outputPath?: string;
   selectedIds?: Set<string>;
   modes?: EvalModeConfig[];
+  /** Checked before each conversation; false stops the mode (results marked partial). */
+  canSpend?: (usage: TrackedProvider['usage']) => Promise<boolean>;
 }): Promise<LoCoMoResults> {
   const dataPath = options?.dataPath ?? path.resolve(process.cwd(), 'data/locomo/locomo10.json');
   const outputPath = options?.outputPath ?? path.resolve(process.cwd(), 'results/locomo-results.json');
@@ -768,7 +792,7 @@ export async function runLoCoMo(options?: {
 
   for (const mode of modes) {
     console.log(`\n${'='.repeat(40)}\n[locomo] Starting mode: ${mode.label}\n${'='.repeat(40)}`);
-    const result = await evaluateMode(mode, conversations);
+    const result = await evaluateMode(mode, conversations, options?.canSpend);
     modeResults.push(result);
     console.log(`[locomo] ${mode.label} done: F1=${result.overallF1.toFixed(3)}, EM=${result.overallEM.toFixed(3)}, LLM calls=${result.llmCalls}`);
 
@@ -776,7 +800,7 @@ export async function runLoCoMo(options?: {
     if (modeResults.length > 0) {
       printLoCoMoReport({
         timestamp: new Date().toISOString(),
-        model: 'kimi-k2.5',
+        model: evalModelLabel(),
         conversations: conversations.length,
         totalQA,
         modes: modeResults,
@@ -786,7 +810,7 @@ export async function runLoCoMo(options?: {
 
   const results: LoCoMoResults = {
     timestamp: new Date().toISOString(),
-    model: 'kimi-k2.5',
+    model: evalModelLabel(),
     conversations: conversations.length,
     totalQA,
     modes: modeResults,
