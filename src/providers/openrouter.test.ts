@@ -17,7 +17,7 @@ describe('OpenRouterProvider', () => {
   describe('constructor', () => {
     it('should create provider with default model', () => {
       expect(provider.name).toBe('openrouter');
-      expect(provider.model).toBe('anthropic/claude-3.5-sonnet');
+      expect(provider.model).toBe('anthropic/claude-sonnet-5.5');
     });
 
     it('should create provider with custom model', () => {
@@ -705,7 +705,7 @@ describe('OpenRouterProvider', () => {
 
   describe('model routing', () => {
     it('should support switching models dynamically', () => {
-      expect(provider.model).toBe('anthropic/claude-3.5-sonnet');
+      expect(provider.model).toBe('anthropic/claude-sonnet-5.5');
 
       const fastProvider = new OpenRouterProvider({
         apiKey: 'test-key',

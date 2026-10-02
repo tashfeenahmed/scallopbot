@@ -57,7 +57,7 @@ function parseCostModelPricingEnv(): Record<string, z.infer<typeof modelPricingS
 // Provider configuration schemas
 const anthropicProviderSchema = z.object({
   apiKey: z.string().default(''),
-  model: z.string().default('claude-sonnet-4-20250514'),
+  model: z.string().default('claude-sonnet-5-5'),
 });
 
 const openaiProviderSchema = z.object({
@@ -78,12 +78,12 @@ const ollamaProviderSchema = z.object({
 
 const openrouterProviderSchema = z.object({
   apiKey: z.string().default(''),
-  model: z.string().default('anthropic/claude-3.5-sonnet'),
+  model: z.string().default('anthropic/claude-sonnet-5.5'),
 });
 
 const moonshotProviderSchema = z.object({
   apiKey: z.string().default(''),
-  model: z.string().default('kimi-k2.5'),
+  model: z.string().default('kimi-k3'),
   /** Enable extended thinking mode for Kimi K2.5 (uses more tokens, better reasoning) */
   enableThinking: z.boolean().default(true),
 });
@@ -95,11 +95,11 @@ const xaiProviderSchema = z.object({
 
 const providersSchema = z.object({
   anthropic: anthropicProviderSchema,
-  openai: openaiProviderSchema.default({ apiKey: '', model: 'gpt-4o' }),
+  openai: openaiProviderSchema.default({ apiKey: '', model: 'gpt-5.6-luna' }),
   groq: groqProviderSchema.default({ apiKey: '', model: 'llama-3.3-70b-versatile' }),
   ollama: ollamaProviderSchema.default({ baseUrl: DEFAULT_OLLAMA_BASE_URL, model: 'llama3.2' }),
-  openrouter: openrouterProviderSchema.default({ apiKey: '', model: 'anthropic/claude-3.5-sonnet' }),
-  moonshot: moonshotProviderSchema.default({ apiKey: '', model: 'kimi-k2.5', enableThinking: true }),
+  openrouter: openrouterProviderSchema.default({ apiKey: '', model: 'anthropic/claude-sonnet-5.5' }),
+  moonshot: moonshotProviderSchema.default({ apiKey: '', model: 'kimi-k3', enableThinking: true }),
   xai: xaiProviderSchema.default({ apiKey: '', model: 'grok-4' }),
 });
 
@@ -649,12 +649,12 @@ export function loadConfig(): Config {
     providers: {
       anthropic: {
         apiKey: anthropicApiKey,
-        model: process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-20250514',
+        model: process.env.ANTHROPIC_MODEL || 'claude-sonnet-5-5',
       },
       openai: {
         apiKey: openaiApiKey || '',
         baseUrl: process.env.OPENAI_BASE_URL || undefined,
-        model: process.env.OPENAI_MODEL || 'gpt-4o',
+        model: process.env.OPENAI_MODEL || 'gpt-5.6-luna',
       },
       groq: {
         apiKey: groqApiKey || '',
@@ -666,11 +666,11 @@ export function loadConfig(): Config {
       },
       openrouter: {
         apiKey: openrouterApiKey || '',
-        model: process.env.OPENROUTER_MODEL || 'anthropic/claude-3.5-sonnet',
+        model: process.env.OPENROUTER_MODEL || 'anthropic/claude-sonnet-5.5',
       },
       moonshot: {
         apiKey: process.env.MOONSHOT_API_KEY || '',
-        model: process.env.MOONSHOT_MODEL || 'kimi-k2.5',
+        model: process.env.MOONSHOT_MODEL || 'kimi-k3',
         enableThinking: process.env.KIMI_THINKING_ENABLED !== 'false',
       },
       xai: {

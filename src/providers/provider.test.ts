@@ -34,7 +34,7 @@ describe('AnthropicProvider', () => {
         apiKey: 'sk-ant-test-key',
       });
 
-      expect(provider.model).toBe('claude-sonnet-4-5-20250929');
+      expect(provider.model).toBe('claude-sonnet-5-5');
     });
 
     it('should use custom model if specified', async () => {
@@ -96,7 +96,7 @@ describe('AnthropicProvider', () => {
       const response = await provider.complete(request);
 
       expect(mockCreate).toHaveBeenCalledWith({
-        model: 'claude-sonnet-4-5-20250929',
+        model: 'claude-sonnet-5-5',
         messages: [{ role: 'user', content: 'Hello' }],
         system: [
           {

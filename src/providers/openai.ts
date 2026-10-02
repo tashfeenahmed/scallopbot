@@ -98,7 +98,8 @@ export class OpenAIProvider implements LLMProvider {
 
   async complete(request: CompletionRequest): Promise<CompletionResponse> {
     const messages = this.formatMessages(request);
-    const isReasoning = REASONING_MODELS.has(this.model);
+    // Every GPT-5.x and o-series model takes max_completion_tokens and no temperature.
+    const isReasoning = REASONING_MODELS.has(this.model) || /^(?:gpt-5|o\d)/.test(this.model);
 
     const params: OpenAI.ChatCompletionCreateParams = {
       model: this.model,

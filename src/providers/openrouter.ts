@@ -8,7 +8,7 @@ import type {
 import { flattenSystem } from './types.js';
 import { DEFAULT_MAX_RETRIES, RETRY_DELAY_MS } from './constants.js';
 
-const DEFAULT_MODEL = 'anthropic/claude-3.5-sonnet';
+const DEFAULT_MODEL = 'anthropic/claude-sonnet-5.5';
 const API_URL = 'https://openrouter.ai/api/v1/chat/completions';
 
 /** Models that support extended thinking/reasoning via OpenRouter */

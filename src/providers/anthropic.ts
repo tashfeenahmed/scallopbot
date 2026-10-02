@@ -39,7 +39,7 @@ export const ANTHROPIC_MODELS = {
   'sonnet': 'claude-sonnet-4-5-20250929',
 } as const;
 
-const DEFAULT_MODEL = 'claude-sonnet-4-5-20250929';
+const DEFAULT_MODEL = 'claude-sonnet-5-5';
 const DEFAULT_MAX_TOKENS = 8192;
 
 export class AnthropicProvider implements LLMProvider {

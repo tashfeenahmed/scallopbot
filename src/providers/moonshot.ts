@@ -40,10 +40,11 @@ export const MOONSHOT_MODELS = {
   'moonshot-v1-32k': 'moonshot-v1-32k',
   'moonshot-v1-8k': 'moonshot-v1-8k',
   // Aliases
-  'kimi': 'kimi-k2.5',
+  'kimi': 'kimi-k3',
+  'kimi-k3': 'kimi-k3',
 } as const;
 
-const DEFAULT_MODEL = 'kimi-k2.5';
+const DEFAULT_MODEL = 'kimi-k3';
 const DEFAULT_BASE_URL = 'https://api.moonshot.ai/v1';
 const DEFAULT_MAX_TOKENS = 4096;
 /** Higher token budget for thinking mode — reasoning tokens count against max_tokens */
@@ -113,7 +114,8 @@ export class MoonshotProvider implements LLMProvider {
   }
 
   async complete(request: CompletionRequest): Promise<CompletionResponse> {
-    const isKimiK2 = this.model.includes('kimi-k2');
+    // K2 and later accept the same `thinking` toggle.
+    const isKimiK2 = /kimi-k[2-9]/.test(this.model);
     // Enable thinking mode if explicitly requested AND model supports it
     const enableThinking = request.enableThinking === true && isKimiK2;
 

@@ -25,7 +25,7 @@ describe('MoonshotProvider', () => {
   describe('constructor', () => {
     it('should create provider with default model', () => {
       expect(provider.name).toBe('moonshot');
-      expect(provider.model).toBe('kimi-k2.5');
+      expect(provider.model).toBe('kimi-k3');
     });
 
     it('should create provider with custom model', () => {

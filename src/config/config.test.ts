@@ -69,7 +69,7 @@ describe('Config Schema', () => {
           circuitBreakerThreshold: 8,
         });
         expect(result.data.logging.level).toBe('info');
-        expect(result.data.providers.anthropic.model).toBe('claude-sonnet-4-20250514');
+        expect(result.data.providers.anthropic.model).toBe('claude-sonnet-5-5');
         expect(result.data.evolution).toMatchObject({
           enabled: false,
           requireFitnessGate: true,
