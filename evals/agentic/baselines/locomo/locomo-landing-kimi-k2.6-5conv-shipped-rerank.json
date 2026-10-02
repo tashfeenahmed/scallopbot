@@ -1,0 +1,67 @@
+{
+  "timestamp": "2023-09-21T02:00:00.000Z",
+  "model": "kimi-k2.6",
+  "conversations": 5,
+  "totalQA": 1049,
+  "modes": [
+    {
+      "mode": "scallopbot",
+      "label": "ScallopBot",
+      "overallF1": 0.4809104546415184,
+      "overallEM": 0.30219256434699715,
+      "f1ByCategory": {
+        "Single-hop": 0.16735200087571567,
+        "Temporal": 0.32677364252027563,
+        "Open-domain": 0.10481019312111395,
+        "Multi-hop": 0.4306883581551182,
+        "Adversarial": 0.9741379310344828
+      },
+      "emByCategory": {
+        "Single-hop": 0.006622516556291391,
+        "Temporal": 0.023529411764705882,
+        "Open-domain": 0,
+        "Multi-hop": 0.19239373601789708,
+        "Adversarial": 0.9741379310344828
+      },
+      "perConversation": [
+        {
+          "sampleId": "conv-26",
+          "f1": 0.49557627978261415,
+          "em": 0.3015075376884422,
+          "qaCount": 199
+        },
+        {
+          "sampleId": "conv-41",
+          "f1": 0.48121910212001634,
+          "em": 0.29533678756476683,
+          "qaCount": 193
+        },
+        {
+          "sampleId": "conv-42",
+          "f1": 0.46546036420033116,
+          "em": 0.3,
+          "qaCount": 260
+        },
+        {
+          "sampleId": "conv-44",
+          "f1": 0.48881076192081185,
+          "em": 0.3291139240506329,
+          "qaCount": 158
+        },
+        {
+          "sampleId": "conv-48",
+          "f1": 0.4800347508680948,
+          "em": 0.2928870292887029,
+          "qaCount": 239
+        }
+      ],
+      "llmCalls": 1503,
+      "usage": {
+        "inputTokens": 1010620,
+        "cachedInputTokens": 8140,
+        "outputTokens": 74392
+      },
+      "qaCount": 1049
+    }
+  ]
+}

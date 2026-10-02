@@ -1,0 +1,185 @@
+{
+  "timestamp": "2023-09-21T02:00:00.000Z",
+  "model": "kimi-k2.6",
+  "conversations": 5,
+  "totalQA": 1049,
+  "modes": [
+    {
+      "mode": "openclaw",
+      "label": "OpenClaw",
+      "overallF1": 0.46691721327676416,
+      "overallEM": 0.30123927550047663,
+      "f1ByCategory": {
+        "Single-hop": 0.16886155541710898,
+        "Temporal": 0.31250072749732305,
+        "Open-domain": 0.10673910658559396,
+        "Multi-hop": 0.4047935614364721,
+        "Adversarial": 0.9698275862068966
+      },
+      "emByCategory": {
+        "Single-hop": 0.026490066225165563,
+        "Temporal": 0.01764705882352941,
+        "Open-domain": 0,
+        "Multi-hop": 0.18791946308724833,
+        "Adversarial": 0.9698275862068966
+      },
+      "perConversation": [
+        {
+          "sampleId": "conv-26",
+          "f1": 0.47698918809609836,
+          "em": 0.2814070351758794,
+          "qaCount": 199
+        },
+        {
+          "sampleId": "conv-41",
+          "f1": 0.4776185044023,
+          "em": 0.29015544041450775,
+          "qaCount": 193
+        },
+        {
+          "sampleId": "conv-42",
+          "f1": 0.4414735805552889,
+          "em": 0.3,
+          "qaCount": 260
+        },
+        {
+          "sampleId": "conv-44",
+          "f1": 0.5047384347351196,
+          "em": 0.36075949367088606,
+          "qaCount": 158
+        },
+        {
+          "sampleId": "conv-48",
+          "f1": 0.45256541135579026,
+          "em": 0.28870292887029286,
+          "qaCount": 239
+        }
+      ],
+      "llmCalls": 1049,
+      "usage": {
+        "inputTokens": 401896,
+        "cachedInputTokens": 57967,
+        "outputTokens": 31946
+      },
+      "qaCount": 1049
+    },
+    {
+      "mode": "scallopbot",
+      "label": "ScallopBot",
+      "overallF1": 0.47349781569754784,
+      "overallEM": 0.30791229742612014,
+      "f1ByCategory": {
+        "Single-hop": 0.14980129584560767,
+        "Temporal": 0.3177179810916178,
+        "Open-domain": 0.10936605469021182,
+        "Multi-hop": 0.4176917662833241,
+        "Adversarial": 0.9827586206896551
+      },
+      "emByCategory": {
+        "Single-hop": 0.019867549668874173,
+        "Temporal": 0.01764705882352941,
+        "Open-domain": 0,
+        "Multi-hop": 0.19910514541387025,
+        "Adversarial": 0.9827586206896551
+      },
+      "perConversation": [
+        {
+          "sampleId": "conv-26",
+          "f1": 0.49003470561754453,
+          "em": 0.2964824120603015,
+          "qaCount": 199
+        },
+        {
+          "sampleId": "conv-41",
+          "f1": 0.4724724797697389,
+          "em": 0.2849740932642487,
+          "qaCount": 193
+        },
+        {
+          "sampleId": "conv-42",
+          "f1": 0.473607926274745,
+          "em": 0.3230769230769231,
+          "qaCount": 260
+        },
+        {
+          "sampleId": "conv-44",
+          "f1": 0.4780570362034221,
+          "em": 0.34177215189873417,
+          "qaCount": 158
+        },
+        {
+          "sampleId": "conv-48",
+          "f1": 0.4574227661159102,
+          "em": 0.29707112970711297,
+          "qaCount": 239
+        }
+      ],
+      "llmCalls": 1131,
+      "usage": {
+        "inputTokens": 726994,
+        "cachedInputTokens": 6911,
+        "outputTokens": 46450
+      },
+      "qaCount": 1049
+    },
+    {
+      "mode": "scallopbot-rerank",
+      "label": "ScallopBot + rerank",
+      "overallF1": 0.4955876611917942,
+      "overallEM": 0.3098188751191611,
+      "f1ByCategory": {
+        "Single-hop": 0.21607069309296859,
+        "Temporal": 0.337430856788219,
+        "Open-domain": 0.12024606513402977,
+        "Multi-hop": 0.4384552104867757,
+        "Adversarial": 0.9827586206896551
+      },
+      "emByCategory": {
+        "Single-hop": 0.026490066225165563,
+        "Temporal": 0.023529411764705882,
+        "Open-domain": 0,
+        "Multi-hop": 0.19910514541387025,
+        "Adversarial": 0.9827586206896551
+      },
+      "perConversation": [
+        {
+          "sampleId": "conv-26",
+          "f1": 0.4994642032257886,
+          "em": 0.2814070351758794,
+          "qaCount": 199
+        },
+        {
+          "sampleId": "conv-41",
+          "f1": 0.5076873395024202,
+          "em": 0.30569948186528495,
+          "qaCount": 193
+        },
+        {
+          "sampleId": "conv-42",
+          "f1": 0.481565550563178,
+          "em": 0.3192307692307692,
+          "qaCount": 260
+        },
+        {
+          "sampleId": "conv-44",
+          "f1": 0.5353617405839726,
+          "em": 0.37341772151898733,
+          "qaCount": 158
+        },
+        {
+          "sampleId": "conv-48",
+          "f1": 0.4715490605255177,
+          "em": 0.28451882845188287,
+          "qaCount": 239
+        }
+      ],
+      "llmCalls": 1968,
+      "usage": {
+        "inputTokens": 1474403,
+        "cachedInputTokens": 17114,
+        "outputTokens": 217042
+      },
+      "qaCount": 1049
+    }
+  ]
+}

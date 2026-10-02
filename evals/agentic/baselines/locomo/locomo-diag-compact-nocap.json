@@ -1,0 +1,49 @@
+{
+  "timestamp": "2023-11-23T03:00:00.000Z",
+  "model": "kimi-k2.6",
+  "conversations": 2,
+  "totalQA": 357,
+  "modes": [
+    {
+      "mode": "scallopbot",
+      "label": "ScallopBot",
+      "overallF1": 0.5065227380067289,
+      "overallEM": 0.3165266106442577,
+      "f1ByCategory": {
+        "Single-hop": 0.23148077109000237,
+        "Temporal": 0.3696510676677164,
+        "Open-domain": 0.1510128609255188,
+        "Multi-hop": 0.46142300995894636,
+        "Adversarial": 0.975609756097561
+      },
+      "emByCategory": {
+        "Single-hop": 0.04838709677419355,
+        "Temporal": 0.01639344262295082,
+        "Open-domain": 0,
+        "Multi-hop": 0.2196969696969697,
+        "Adversarial": 0.975609756097561
+      },
+      "perConversation": [
+        {
+          "sampleId": "conv-26",
+          "f1": 0.5049537431838147,
+          "em": 0.2864321608040201,
+          "qaCount": 199
+        },
+        {
+          "sampleId": "conv-44",
+          "f1": 0.508498877055842,
+          "em": 0.35443037974683544,
+          "qaCount": 158
+        }
+      ],
+      "llmCalls": 738,
+      "usage": {
+        "inputTokens": 675830,
+        "cachedInputTokens": 256,
+        "outputTokens": 48821
+      },
+      "qaCount": 357
+    }
+  ]
+}

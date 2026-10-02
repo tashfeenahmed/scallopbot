@@ -435,6 +435,8 @@ async function evaluateMode(
       rerankProvider: mode.enableReranking ? llmProvider : undefined,
       // The store only reranks when asked (production default is off).
       foregroundRerank: mode.enableReranking,
+      // LOCOMO_RERANK_TIMEOUT_MS overrides the production rerank time limit.
+      ...(process.env.LOCOMO_RERANK_TIMEOUT_MS && { rerankTimeoutMs: Number(process.env.LOCOMO_RERANK_TIMEOUT_MS) }),
     });
 
     const db = store.getDatabase();
@@ -620,7 +622,9 @@ async function evaluateMode(
           return { question: qa.question, predicted: 'ERROR', label: qa.answer, category: qa.category, f1: 0, em: 0 };
         }
       },
-      10,
+      // LOCOMO_QA_CONCURRENCY: 10 parallel questions inflate per-call latency
+      // far beyond one user's; use 1–2 to measure time-limited reranking fairly.
+      Number(process.env.LOCOMO_QA_CONCURRENCY) || 10,
     );
 
     allResults.push(...qaResults);

@@ -1,0 +1,78 @@
+{
+  "timestamp": "2023-10-23T02:00:00.000Z",
+  "model": "kimi-k2.6",
+  "conversations": 1,
+  "totalQA": 199,
+  "modes": [
+    {
+      "mode": "openclaw",
+      "label": "OpenClaw",
+      "overallF1": 0.4853766251383715,
+      "overallEM": 0.2864321608040201,
+      "f1ByCategory": {
+        "Single-hop": 0.14460519833279487,
+        "Temporal": 0.4390144010428439,
+        "Open-domain": 0.13445045801319036,
+        "Multi-hop": 0.4138741894732825,
+        "Adversarial": 0.9574468085106383
+      },
+      "emByCategory": {
+        "Single-hop": 0,
+        "Temporal": 0.02702702702702703,
+        "Open-domain": 0,
+        "Multi-hop": 0.15714285714285714,
+        "Adversarial": 0.9574468085106383
+      },
+      "perConversation": [
+        {
+          "sampleId": "conv-26",
+          "f1": 0.4853766251383715,
+          "em": 0.2864321608040201,
+          "qaCount": 199
+        }
+      ],
+      "llmCalls": 199,
+      "usage": {
+        "inputTokens": 77230,
+        "cachedInputTokens": 0,
+        "outputTokens": 6586
+      },
+      "qaCount": 199
+    },
+    {
+      "mode": "scallopbot",
+      "label": "ScallopBot",
+      "overallF1": 0.47751884568709063,
+      "overallEM": 0.271356783919598,
+      "f1ByCategory": {
+        "Single-hop": 0.12854595283717304,
+        "Temporal": 0.45047715635950925,
+        "Open-domain": 0.15375369782279152,
+        "Multi-hop": 0.37494752777061946,
+        "Adversarial": 0.9787234042553191
+      },
+      "emByCategory": {
+        "Single-hop": 0,
+        "Temporal": 0,
+        "Open-domain": 0,
+        "Multi-hop": 0.11428571428571428,
+        "Adversarial": 0.9787234042553191
+      },
+      "perConversation": [
+        {
+          "sampleId": "conv-26",
+          "f1": 0.47751884568709063,
+          "em": 0.271356783919598,
+          "qaCount": 199
+        }
+      ],
+      "llmCalls": 214,
+      "usage": {
+        "inputTokens": 262426,
+        "cachedInputTokens": 15087,
+        "outputTokens": 11677
+      },
+      "qaCount": 199
+    }
+  ]
+}
