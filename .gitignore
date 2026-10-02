@@ -71,8 +71,10 @@ test-vision*.ts
 pdf/
 *.pdf
 
-# Evals
-evals/
+# Evals (local datasets stay untracked; ScallopBench is tracked — its run
+# results/ are ignored above, recorded baselines/ are committed)
+evals/*
+!evals/agentic/
 
 # Web UI
 web/node_modules/
