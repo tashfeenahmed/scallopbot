@@ -27,10 +27,12 @@ export function registerAgentTools(
 
 /**
  * Hooks the core tools contribute: large-output persistence, the verify nudge
- * and review-on-stop (off with REVIEW_ON_STOP=false).
+ * and review-on-stop (opt-in with REVIEW_ON_STOP=true: on ScallopBench v2 it
+ * left the pass rate unchanged at 105/108 while adding ~11% cost and ~9s median
+ * latency per task, so it is off by default).
  */
 export function coreToolHooks(options: { workspace: string; contextWindowTokens?: number; review?: boolean }): AgentHooks {
-  const review = options.review ?? process.env.REVIEW_ON_STOP !== 'false';
+  const review = options.review ?? process.env.REVIEW_ON_STOP === 'true';
   return {
     postProcessToolResult: ({ sessionId, toolName, content }) =>
       persistLargeOutput(sessionId, toolName, content, { contextWindowTokens: options.contextWindowTokens }),
