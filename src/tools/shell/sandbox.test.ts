@@ -3,32 +3,27 @@ import { existsSync, mkdtempSync, mkdirSync, realpathSync, rmSync } from 'node:f
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { SkillExecutor } from '../../../executor.js';
-import type { Skill } from '../../../types.js';
+import { SkillExecutor } from '../../skills/executor.js';
+import type { Skill } from '../../skills/types.js';
+import { runBash } from './bash.js';
+import { BackgroundProcessManager } from './process-manager.js';
 
-const scriptsDir = dirname(fileURLToPath(import.meta.url));
-const bashSkill: Skill = {
-  name: 'bash',
-  description: 'test bash skill',
-  path: join(scriptsDir, '..', 'SKILL.md'),
+const here = dirname(fileURLToPath(import.meta.url));
+const runCodeDir = join(here, '..', '..', 'skills', 'bundled', 'run_code', 'scripts');
+const runCodeSkill: Skill = {
+  name: 'run_code',
+  description: 'run code',
+  path: join(runCodeDir, '..', 'SKILL.md'),
   source: 'bundled',
-  frontmatter: { name: 'bash', description: 'test bash skill' },
+  frontmatter: { name: 'run_code', description: 'run code' },
   content: '',
   available: true,
   hasScripts: true,
-  scriptsDir,
-};
-const runCodeDir = join(scriptsDir, '..', '..', 'run_code', 'scripts');
-const runCodeSkill: Skill = {
-  ...bashSkill,
-  name: 'run_code',
-  path: join(runCodeDir, '..', 'SKILL.md'),
-  frontmatter: { name: 'run_code', description: 'run code' },
   scriptsDir: runCodeDir,
 };
 
 const hasSeatbelt = process.platform === 'darwin' && existsSync('/usr/bin/sandbox-exec');
-const ENV_KEYS = ['AGENT_WORKSPACE', 'SANDBOX_MODE', 'SANDBOX_BACKEND', 'SANDBOX_NETWORK', 'SANDBOX_HIDE_PATHS'] as const;
+const ENV_KEYS = ['AGENT_WORKSPACE', 'SANDBOX_MODE', 'SANDBOX_BACKEND', 'SANDBOX_NETWORK', 'SANDBOX_HIDE_PATHS', 'SCALLOPBOT_HOME'] as const;
 
 describe.runIf(hasSeatbelt)('bash / run_code routed through the seatbelt sandbox', () => {
   let root: string;
@@ -46,7 +41,11 @@ describe.runIf(hasSeatbelt)('bash / run_code routed through the seatbelt sandbox
     process.env.SANDBOX_MODE = 'seatbelt';
     delete process.env.SANDBOX_BACKEND;
     delete process.env.SANDBOX_HIDE_PATHS;
+    process.env.SCALLOPBOT_HOME = join(root, 'home');
   });
+
+  const bash = (command: string, extra: Record<string, unknown> = {}) =>
+    runBash({ command, ...extra }, { args: {}, workspace, sessionId: 'sbx' }, { manager: new BackgroundProcessManager() });
 
   afterEach(() => {
     for (const k of ENV_KEYS) {
@@ -58,18 +57,14 @@ describe.runIf(hasSeatbelt)('bash / run_code routed through the seatbelt sandbox
   });
 
   it('bash can write inside the workspace', async () => {
-    const result = await new SkillExecutor().execute(bashSkill, {
-      skillName: 'bash', cwd: workspace, args: { command: 'echo ok > a.txt && cat a.txt' },
-    });
+    const result = await bash('echo ok > a.txt && cat a.txt');
     expect(result.success).toBe(true);
     expect(result.output).toContain('ok');
   });
 
   it('bash cannot write outside the workspace', async () => {
     const target = join(outside, 'escape.txt');
-    const result = await new SkillExecutor().execute(bashSkill, {
-      skillName: 'bash', cwd: workspace, args: { command: `echo pwned > '${target}'` },
-    });
+    const result = await bash(`echo pwned > '${target}'`);
     expect(result.success).toBe(false);
     expect(existsSync(target)).toBe(false);
   });
@@ -94,11 +89,15 @@ describe.runIf(hasSeatbelt)('bash / run_code routed through the seatbelt sandbox
 
   it('an unavailable explicit backend refuses instead of running unsandboxed', async () => {
     process.env.SANDBOX_MODE = 'bwrap';
-    const result = await new SkillExecutor().execute(bashSkill, {
-      skillName: 'bash', cwd: workspace, args: { command: 'echo should-not-run' },
-    });
+    const result = await bash('echo should-not-run');
     expect(result.success).toBe(false);
-    expect(`${result.output}${result.error ?? ''}`).toMatch(/Sandbox unavailable/);
-    expect(result.output).not.toContain('should-not-run\\n');
+    expect(result.output).toMatch(/Sandbox unavailable/);
+    expect(result.output).not.toContain('\nshould-not-run');
+  });
+
+  it('refuses a cwd outside the workspace while sandboxed', async () => {
+    const result = await bash('pwd', { cwd: outside });
+    expect(result.success).toBe(false);
+    expect(result.output).toMatch(/outside the workspace/);
   });
 });
