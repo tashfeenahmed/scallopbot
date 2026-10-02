@@ -894,6 +894,44 @@ interface SqliteTableColumn {
 /**
  * SQLite Database Manager for ScallopMemory
  */
+export interface CoreMemoryHistoryRow {
+  id: number;
+  userId: string;
+  block: string;
+  action: string;
+  before: string[];
+  after: string[];
+  source: string | null;
+  reason: string | null;
+  at: number;
+  rolledBack: boolean;
+}
+
+function parseCoreMemoryEntries(raw: unknown): string[] {
+  if (typeof raw !== 'string') return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed) ? parsed.filter((entry): entry is string => typeof entry === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+function rowToCoreMemoryHistory(row: Record<string, unknown>): CoreMemoryHistoryRow {
+  return {
+    id: Number(row.id),
+    userId: String(row.user_id),
+    block: String(row.block),
+    action: String(row.action),
+    before: parseCoreMemoryEntries(row.before_entries),
+    after: parseCoreMemoryEntries(row.after_entries),
+    source: (row.source as string | null) ?? null,
+    reason: (row.reason as string | null) ?? null,
+    at: Number(row.at),
+    rolledBack: Number(row.rolled_back) === 1,
+  };
+}
+
 export class ScallopDatabase {
   private db: Database.Database;
   private dbPath: string;
@@ -1749,6 +1787,9 @@ export class ScallopDatabase {
 
     // Migration: record why each LLM call was made (nullable, additive).
     this.migrateAddCostUsagePurpose();
+
+    // Migration: curated per-user core memory blocks (additive).
+    this.migrateAddCoreMemory();
   }
 
   /** Add the nullable `purpose` column to cost_usage. Legacy rows stay NULL. */
@@ -1766,6 +1807,111 @@ export class ScallopDatabase {
         console.warn(`[migration] migrateAddCostUsagePurpose: ${error.message}`);
       }
     }
+  }
+
+  /**
+   * Core memory: two small curated blocks per user ('user', 'environment')
+   * frozen into the session prompt, plus an append-only edit history that
+   * makes every write roll-back-able by id.
+   */
+  private migrateAddCoreMemory(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS core_memory_blocks (
+        user_id TEXT NOT NULL,
+        block TEXT NOT NULL,
+        entries TEXT NOT NULL DEFAULT '[]',
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (user_id, block)
+      );
+      CREATE TABLE IF NOT EXISTS core_memory_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT NOT NULL,
+        block TEXT NOT NULL,
+        action TEXT NOT NULL,
+        before_entries TEXT NOT NULL,
+        after_entries TEXT NOT NULL,
+        source TEXT,
+        reason TEXT,
+        at INTEGER NOT NULL,
+        rolled_back INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE INDEX IF NOT EXISTS idx_core_memory_history_user
+        ON core_memory_history(user_id, at DESC);
+    `);
+  }
+
+  // ============ Core Memory ============
+
+  /** Current entries of one core-memory block (empty when never written). */
+  getCoreMemoryEntries(userId: string, block: string): string[] {
+    const row = this.db.prepare(
+      'SELECT entries FROM core_memory_blocks WHERE user_id = ? AND block = ?',
+    ).get(userId, block) as { entries: string } | undefined;
+    return row ? parseCoreMemoryEntries(row.entries) : [];
+  }
+
+  /**
+   * Replace a block's entries and append a history row in one transaction.
+   * `expectedBefore`, when given, makes the write a compare-and-swap: it throws
+   * if the block changed since the caller read it. Returns the history id.
+   */
+  writeCoreMemoryEntries(input: {
+    userId: string;
+    block: string;
+    entries: string[];
+    action: string;
+    source?: string | null;
+    reason?: string | null;
+    at?: number;
+    expectedBefore?: string[];
+  }): number {
+    const at = input.at ?? Date.now();
+    const write = this.db.transaction(() => {
+      const before = this.getCoreMemoryEntries(input.userId, input.block);
+      if (input.expectedBefore
+        && JSON.stringify(before) !== JSON.stringify(input.expectedBefore)) {
+        throw new Error('core memory changed concurrently; re-read and retry');
+      }
+      this.db.prepare(`
+        INSERT INTO core_memory_blocks (user_id, block, entries, updated_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(user_id, block) DO UPDATE SET entries = excluded.entries, updated_at = excluded.updated_at
+      `).run(input.userId, input.block, JSON.stringify(input.entries), at);
+      const history = this.db.prepare(`
+        INSERT INTO core_memory_history
+          (user_id, block, action, before_entries, after_entries, source, reason, at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        input.userId,
+        input.block,
+        input.action,
+        JSON.stringify(before),
+        JSON.stringify(input.entries),
+        input.source ?? null,
+        input.reason ?? null,
+        at,
+      );
+      return Number(history.lastInsertRowid);
+    });
+    return write();
+  }
+
+  /** Newest-first edit history for a user's core memory. */
+  getCoreMemoryHistory(userId: string, limit = 50): CoreMemoryHistoryRow[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM core_memory_history WHERE user_id = ? ORDER BY id DESC LIMIT ?
+    `).all(userId, limit) as Record<string, unknown>[];
+    return rows.map(rowToCoreMemoryHistory);
+  }
+
+  getCoreMemoryHistoryEntry(id: number): CoreMemoryHistoryRow | null {
+    const row = this.db.prepare('SELECT * FROM core_memory_history WHERE id = ?')
+      .get(id) as Record<string, unknown> | undefined;
+    return row ? rowToCoreMemoryHistory(row) : null;
+  }
+
+  markCoreMemoryHistoryRolledBack(id: number): void {
+    this.db.prepare('UPDATE core_memory_history SET rolled_back = 1 WHERE id = ?').run(id);
   }
 
   /**
@@ -8369,6 +8515,31 @@ export class ScallopDatabase {
       FROM evolution_versions WHERE status = 'active' ORDER BY at DESC
     `).all() as Array<{ id: number; target: string; kind: string; at: number; baseline_fitness: number | null }>;
     return rows.map(r => ({ id: r.id, target: r.target, kind: r.kind, at: r.at, baselineFitness: r.baseline_fitness }));
+  }
+
+  /** One ledger row by id, any status (rollback-by-id). */
+  getEvolutionVersionById(id: number): {
+    id: number; target: string; kind: string; at: number; status: string;
+    baselineFitness: number | null; snapshot: string | null; detail: Record<string, unknown> | null;
+  } | null {
+    const row = this.db.prepare(`
+      SELECT id, target, kind, at, status, baseline_fitness, snapshot, detail
+      FROM evolution_versions WHERE id = ?
+    `).get(id) as {
+      id: number; target: string; kind: string; at: number; status: string;
+      baseline_fitness: number | null; snapshot: string | null; detail: string | null;
+    } | undefined;
+    if (!row) return null;
+    let detail: Record<string, unknown> | null = null;
+    try {
+      detail = row.detail ? JSON.parse(row.detail) as Record<string, unknown> : null;
+    } catch {
+      detail = null;
+    }
+    return {
+      id: row.id, target: row.target, kind: row.kind, at: row.at, status: row.status,
+      baselineFitness: row.baseline_fitness, snapshot: row.snapshot, detail,
+    };
   }
 
   /** Mark a version row as rolled back. */

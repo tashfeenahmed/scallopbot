@@ -53,8 +53,16 @@ export interface ScallopMemoryStoreOptions {
   relationOptions?: RelationDetectionOptions;
   /** Profile update options */
   profileOptions?: ProfileUpdateOptions;
-  /** Optional LLM provider for re-ranking search results */
+  /**
+   * Optional LLM provider for re-ranking search results. Only used when a
+   * search opts in (`rerank: true`) or `foregroundRerank` is enabled.
+   */
   rerankProvider?: LLMProvider;
+  /**
+   * Default for `ScallopSearchOptions.rerank` (MEMORY_FOREGROUND_RERANK).
+   * Default false: search() is BM25 + embeddings (+graph) with zero LLM calls.
+   */
+  foregroundRerank?: boolean;
   /** Optional LLM provider for LLM-based relation classification */
   relationsProvider?: LLMProvider;
   /** Optional spreading activation config for related memory retrieval */
@@ -109,6 +117,12 @@ export interface ScallopSearchOptions {
   includeAllSources?: boolean;
   /** Exclude only dated events older than this instant; undated facts remain. */
   excludeEventsBefore?: number;
+  /**
+   * LLM-rerank this search (requires a rerankProvider). Defaults to the
+   * store's `foregroundRerank` (false). Background jobs (gardener) may opt in;
+   * foreground recall and fact extraction never should.
+   */
+  rerank?: boolean;
 }
 
 /**
@@ -130,6 +144,7 @@ export class ScallopMemoryStore {
   private logger: Logger;
   private embedder?: EmbeddingProvider;
   private rerankProvider?: LLMProvider;
+  private foregroundRerank: boolean;
   private activationConfig?: ActivationConfig;
   private mmrEnabled: boolean;
   private mmrLambda: number;
@@ -145,6 +160,7 @@ export class ScallopMemoryStore {
     // Wrap embedder with cache to avoid recomputing embeddings for seen texts
     this.embedder = options.embedder ? new CachedEmbedder(options.embedder) : undefined;
     this.rerankProvider = options.rerankProvider;
+    this.foregroundRerank = options.foregroundRerank ?? false;
     this.activationConfig = options.activationConfig;
     this.mmrEnabled = options.mmrEnabled ?? false;
     this.mmrLambda = options.mmrLambda ?? 0.7;
@@ -624,14 +640,15 @@ export class ScallopMemoryStore {
     // choice. The old MMR path received exactly `limit` rows, so it could only
     // reorder duplicates, never replace one with a more diverse candidate.
     results.sort((a, b) => b.score - a.score);
-    const needsCandidatePool = Boolean(this.rerankProvider) || this.mmrEnabled;
+    const rerankProvider = (options.rerank ?? this.foregroundRerank) ? this.rerankProvider : undefined;
+    const needsCandidatePool = Boolean(rerankProvider) || this.mmrEnabled;
     const candidatePoolSize = needsCandidatePool
       ? Math.min(results.length, Math.max(limit, limit * 4))
       : limit;
     let topResults = results.slice(0, candidatePoolSize);
 
     // LLM re-ranking: refine top results using semantic relevance scoring
-    if (this.rerankProvider && topResults.length > 0) {
+    if (rerankProvider && topResults.length > 0) {
       try {
         const rerankCandidates: RerankCandidate[] = topResults.map(r => ({
           id: r.memory.id,
@@ -639,7 +656,7 @@ export class ScallopMemoryStore {
           originalScore: r.score,
         }));
 
-        const reranked = await rerankResults(query, rerankCandidates, this.rerankProvider, {
+        const reranked = await rerankResults(query, rerankCandidates, rerankProvider, {
           maxCandidates: 20,
           circuitStore: this.db,
         });

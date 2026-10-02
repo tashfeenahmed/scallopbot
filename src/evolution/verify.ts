@@ -27,6 +27,8 @@ const SAFE_SKILL_NAME = /^[a-z][a-z0-9_-]{0,127}$/;
 /** Fits in full alongside evaluation prompts across every supported judge model. */
 export const MAX_EVOLUTION_ARTIFACT_BYTES = 12 * 1024;
 const ALLOWED_DOCUMENTATION_FILES = new Set(['SKILL.md']);
+/** Markdown reference files load_procedure can serve on demand (Hermes references/). */
+const ALLOWED_REFERENCE_FILE = /^references\/[a-z0-9][a-z0-9_-]{0,63}\.md$/;
 const ALLOWED_DOCUMENTATION_FRONTMATTER = new Set([
   'name',
   'description',
@@ -91,7 +93,8 @@ export async function verifyMutation(mutation: SkillMutation, _deps: VerifyDeps)
       detail: { why: `machine-authored executable file '${executableFile}' is forbidden` },
     };
   }
-  const unsupportedFile = fileNames.find(name => !ALLOWED_DOCUMENTATION_FILES.has(name));
+  const unsupportedFile = fileNames.find(name =>
+    !ALLOWED_DOCUMENTATION_FILES.has(name) && !ALLOWED_REFERENCE_FILE.test(name));
   if (unsupportedFile) {
     return {
       ok: false,

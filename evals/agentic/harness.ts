@@ -23,6 +23,7 @@ import { createSkillExecutor } from '../../src/skills/executor.js';
 import { SkillLoader } from '../../src/skills/loader.js';
 import { SkillRegistry } from '../../src/skills/registry.js';
 import { defineSkill } from '../../src/skills/sdk.js';
+import { registerAgentTools, coreToolHooks } from '../../src/tools/index.js';
 import type { BenchModel } from './providers.js';
 import { CANNED_REFUSAL_RE, TracingProvider, extractTurnTranscript } from './trace.js';
 import type { BenchTask, TaskRunResult, TaskTrace, ToolCallTrace, TurnTrace } from './types.js';
@@ -67,6 +68,8 @@ export async function createBenchSkills(sandbox: BenchSandbox, logger: Logger) {
   }, logger);
   const registry = new SkillRegistry(loader, logger);
   await registry.initialize();
+  // Same native tools as the gateway (bash, process, todo, webfetch, web_search…).
+  registerAgentTools(registry);
   const executor = createSkillExecutor(logger);
   return { registry, executor };
 }
@@ -150,6 +153,7 @@ export async function runTask(task: BenchTask, model: BenchModel, options: Harne
       maxToolCallsPerResponse: 64,
       toolLoopDetection: { historySize: 30, warningThreshold: 3, criticalThreshold: 5, circuitBreakerThreshold: 8 },
       enableThinking: model.enableThinking,
+      hooks: coreToolHooks({ workspace: sandbox.workspace }),
     });
 
     const session = await sessions.createSession({ userId: 'api:bench', channelId: 'api' });

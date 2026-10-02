@@ -55,7 +55,7 @@ export const DEFAULT_EVOLUTION_CONFIG: EvolutionConfig = {
   rollbackWindow: 5,
   useLlmJudge: true,
   curatorEnabled: true,
-  curatorStaleDays: 30,
-  curatorArchiveDays: 90,
+  curatorStaleDays: 14,
+  curatorArchiveDays: 30,
   curatorBackupKeep: 5,
 };

@@ -94,8 +94,8 @@ describe('harness through the real Agent (scripted provider)', () => {
     expect(giant.trace.llmCalls.some(call => call.purpose === 'tool_call' && call.toolUses.includes('bash'))).toBe(true);
     const grep = giant.trace.toolCalls.find(call => call.name === 'bash');
     expect(grep?.result).toBeDefined();
-    // Production wiring includes the outcome brain; its calls are traced by purpose.
-    expect(giant.trace.llmCalls.some(call => call.purpose === 'outcome_brain')).toBe(true);
+    // The outcome brain no longer rewrites foreground replies: no extra call.
+    expect(giant.trace.llmCalls.some(call => call.purpose === 'outcome_brain')).toBe(false);
 
     // Multi-turn: tool calls are attributed to the turn that made them.
     const multi = results[2]!;

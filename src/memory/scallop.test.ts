@@ -939,6 +939,7 @@ describe('ScallopMemoryStore search with re-ranking', () => {
       dbPath: RERANK_DB_PATH,
       logger,
       rerankProvider,
+      foregroundRerank: true,
     });
 
     try {
@@ -982,6 +983,7 @@ describe('ScallopMemoryStore search with re-ranking', () => {
       dbPath: RERANK_DB_PATH,
       logger,
       rerankProvider: failingProvider,
+      foregroundRerank: true,
     });
 
     try {
