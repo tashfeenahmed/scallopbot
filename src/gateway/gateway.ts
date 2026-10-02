@@ -76,6 +76,18 @@ import { registerMediaSkills, type MediaSkills } from '../skills/media-skills.js
 import { backgroundProcesses, createBashDoneRouter, type BackgroundExitEvent } from '../tools/shell/index.js';
 import { registerAgentTools, coreToolHooks } from '../tools/index.js';
 import { getTodoSnapshot } from '../tools/todo/index.js';
+import {
+  codeModeConfigFromEnv,
+  resolveAgentMode,
+  registerCodeModeTool,
+  registerExecuteCodeTool,
+  buildCodeModePrompt,
+  listKernelVariables,
+  CODE_MODE_COMPACTION_NOTE,
+  CODE_TOOL_NAME,
+  EXECUTE_CODE_TOOL_NAME,
+  type BackgroundEvent,
+} from '../codemode/index.js';
 import { buildRecallBlock, buildRecallDigest } from '../memory/recall.js';
 import { enqueueInLane, laneIsBusy } from '../agent/command-queue.js';
 import type { FileTools } from '../tools/files/index.js';
@@ -762,6 +774,8 @@ export class Gateway {
       logger: this.logger,
     });
 
+    this.setupCodeMode();
+
     // Initialize outbound queue (rate-limits proactive messages across all subsystems)
     this.outboundQueue = new OutboundQueue({
       sendMessage: (userId: string, message: string) => this.handleProactiveMessage(userId, message),
@@ -1307,6 +1321,62 @@ export class Gateway {
       };
     }
     return hooks;
+  }
+
+  /**
+   * Code mode (AGENT_MODE=code|hybrid, default tool): a persistent JS kernel
+   * per session with the tools as async functions. Registered after every
+   * other tool so its API listing is complete. Per turn, `selectTools` offers
+   * only `exec` (code), normal tools + `execute_code` (hybrid), or neither.
+   */
+  private setupCodeMode(): void {
+    const registry = this.skillRegistry;
+    if (!registry || !this.agent) return;
+    const config = codeModeConfigFromEnv();
+    if (config.mode === 'tool') return;
+
+    const workspace = this.config.agent.workspace;
+    const onBashDone = (event: BackgroundEvent): void => {
+      this.onIdleWake(event.sessionId, event.text, { kind: 'bash-done' });
+    };
+    const exec = registerCodeModeTool(registry, {
+      workspace,
+      skillExecutor: this.skillExecutor,
+      logger: this.logger,
+      toolName: config.mode === 'code' ? CODE_TOOL_NAME : EXECUTE_CODE_TOOL_NAME,
+      onBashDone,
+    });
+    if (config.mode === 'code' && config.fallback === 'hybrid') {
+      registerExecuteCodeTool(registry, { workspace, skillExecutor: this.skillExecutor, logger: this.logger, manager: exec.manager, setAsDefault: false });
+    }
+
+    let codePrompt: string | null = null;
+    const compactedSessions = new Set<string>();
+    this.agent.setHooks({
+      selectTools: (tools, modelId) => {
+        const mode = resolveAgentMode(modelId, config);
+        if (mode === 'code') return tools.filter((tool) => tool.name === CODE_TOOL_NAME);
+        if (mode === 'hybrid') return tools.filter((tool) => tool.name !== CODE_TOOL_NAME);
+        return tools.filter((tool) => tool.name !== CODE_TOOL_NAME && tool.name !== EXECUTE_CODE_TOOL_NAME);
+      },
+      frozenPromptSections: async (input) => {
+        const base = await this.buildAgentHooks().frozenPromptSections?.(input) ?? [];
+        if (resolveAgentMode(input.modelId, config) !== 'code') return base;
+        codePrompt ??= buildCodeModePrompt(registry);
+        return [...base, codePrompt];
+      },
+      compactionExtraState: (sessionId) => {
+        compactedSessions.add(sessionId);
+        return [getTodoSnapshot(sessionId), CODE_MODE_COMPACTION_NOTE].filter(Boolean).join('\n\n');
+      },
+      // After a compaction, tell the model which kernel variables still exist.
+      turnContextSections: async ({ sessionId }) => {
+        if (!compactedSessions.delete(sessionId)) return [];
+        const vars = await listKernelVariables(sessionId);
+        return vars.trim() ? [vars] : [];
+      },
+    });
+    this.logger.info({ mode: config.mode, fallback: config.fallback, denylist: config.denylist }, 'Code mode enabled');
   }
 
   /**

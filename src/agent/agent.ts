@@ -12,6 +12,7 @@ import type {
   Message,
   SystemPrompt,
   StreamHandlers,
+  ToolDefinition,
 } from '../providers/types.js';
 import { flattenSystem } from '../providers/types.js';
 import type { SessionManager } from './session.js';
@@ -189,6 +190,11 @@ export interface AgentHooks {
   postProcessToolResult?: (input: { sessionId: string; toolName: string; content: string; isError: boolean }) => string;
   /** Builds the message list replayed to the model from the stored history. */
   buildReplay?: (messages: Message[]) => Message[];
+  /**
+   * Final say over the tools offered to the model this turn (e.g. code mode
+   * offers only `exec`). Must be deterministic per model to keep caching.
+   */
+  selectTools?: (tools: ToolDefinition[], modelId: string) => ToolDefinition[];
   /** Skills index for the frozen prompt; replaces the built-in procedure index. */
   skillIndex?: () => string;
   /** Extra frozen-prompt sections (core memory, skill index, code-mode API…). */
@@ -901,6 +907,10 @@ export class Agent {
             policy: channelId ? this.channelToolPolicies[channelId] : undefined,
           },
         ]);
+      }
+
+      if (this.hooks.selectTools) {
+        tools = this.hooks.selectTools(tools, activeProvider.model || activeProvider.name);
       }
 
       // Check budget before each iteration
