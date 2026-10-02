@@ -15,6 +15,7 @@ import {
   type LLMProvider,
 } from '../providers/index.js';
 import { defineSkill } from '../skills/sdk.js';
+import { registerSessionSearchTool } from '../context/session-search.js';
 import { SessionManager } from '../agent/session.js';
 import { Agent } from '../agent/agent.js';
 import { initSecurityLayers } from '../security/startup.js';
@@ -1451,6 +1452,15 @@ export class Gateway {
       })
       .build();
     this.skillRegistry.registerSkill(memoryGetSkill.skill);
+
+    // session_search: FTS5/BM25 recall over the caller's own transcripts,
+    // including turns that lean compaction removed from the context.
+    if (this.scallopMemoryStore) {
+      registerSessionSearchTool(this.skillRegistry, {
+        db: this.scallopMemoryStore.getDatabase(),
+        canonicalSingleUserIds: () => this.canonicalSingleUserIds,
+      });
+    }
 
     // Safe on-demand access to documentation-only (including learned) skills.
     // Explicit selection is the usage signal that drives curator decisions.

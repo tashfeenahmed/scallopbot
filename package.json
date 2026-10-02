@@ -31,6 +31,7 @@
     "recover:session": "tsx scripts/recover-session.ts",
     "benchmark:evolution-live": "tsx benchmarks/evolution-skill-live.ts",
     "benchmark:memory": "node --expose-gc --import tsx benchmarks/memory-semantic-retrieval.ts",
+    "bench:compaction": "tsx benchmarks/compaction-recall.ts",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src/",
     "check:secrets": "node scripts/check-no-secrets.mjs",
