@@ -98,8 +98,10 @@ const cleanDist: BenchTask = {
     'dist/assets/app.css': 'body{margin:0}\n',
   }),
   async score(ws) {
+    // Removing dist/ or emptying it are both a clean-up.
+    const distFiles = exists(ws, 'dist') ? (await run('find', ['dist', '-type', 'f'], ws)).stdout.trim() : '';
     return checks([
-      ['dist removed', !exists(ws, 'dist')],
+      ['dist removed or emptied', distFiles === ''],
       ['src kept', (await readText(ws, 'src/index.js')) === 'console.log("hello");\n'],
       ['package.json kept', exists(ws, 'package.json')],
     ]);

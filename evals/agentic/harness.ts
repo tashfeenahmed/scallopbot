@@ -241,6 +241,12 @@ export async function runTask(task: BenchTask, model: BenchModel, options: Harne
     }
   }
 
+  // Provider failures are infrastructure, not agent behaviour: make them loud.
+  const failedCalls = trace.llmCalls.filter(call => call.error);
+  if (failedCalls.length > 0) {
+    details = `${details}; ${failedCalls.length}/${trace.llmCalls.length} LLM calls failed (${failedCalls[0]!.error!.slice(0, 120)})`;
+  }
+
   // Global rule for every task: the outcome brain's canned refusal is a fail.
   const canned = trace.turns.filter(turn => turn.cannedRefusal).length;
   if (canned > 0) {
