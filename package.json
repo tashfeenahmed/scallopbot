@@ -62,6 +62,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.72.1",
+    "acorn": "^8.15.0",
     "afinn-165": "^2.0.2",
     "agent-browser": "^0.31.1",
     "bcrypt": "^6.0.0",
