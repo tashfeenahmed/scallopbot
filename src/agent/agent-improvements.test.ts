@@ -1039,6 +1039,39 @@ describe('Agent improvements integration', () => {
       expect(secondRequest.messages.at(-1).content).toBe(UNMADE_TOOL_CALL_NUDGE);
     });
 
+    it('does not nudge "I\'ll report back" after starting a background job', async () => {
+      const { Agent } = await import('./agent.js');
+      const { SessionManager } = await import('./session.js');
+      const handler = vi.fn().mockResolvedValue({ success: true, output: '{"pid":1,"id":2,"log":"/tmp/x.log"}' });
+      const skill = {
+        name: 'bash', description: 'Shell', path: '/tmp/bash/SKILL.md', source: 'sdk' as const,
+        frontmatter: { name: 'bash', description: 'Shell' }, content: '', available: true, hasScripts: true, handler,
+      };
+      const registry = {
+        getSkill: vi.fn((name: string) => name === 'bash' ? skill : null),
+        getToolDefinitions: vi.fn(() => [{ name: 'bash', description: 'Shell', input_schema: { type: 'object', properties: {} } }]),
+        generateSkillPrompt: vi.fn(() => ''),
+      };
+      const provider = seqProvider([
+        {
+          content: [{ type: 'tool_use', id: 'b1', name: 'bash', input: { command: 'sleep 20', background: true } }],
+          stopReason: 'tool_use', usage: { inputTokens: 5, outputTokens: 5 }, model: 'mock',
+        },
+        endTurn("Started it in the background. I'll check the output when it finishes."),
+        endTurn('should never be reached'),
+      ]);
+      const sessions = new SessionManager(db);
+      const session = await sessions.createSession();
+      const agent = new Agent({
+        provider, sessionManager: sessions, skillRegistry: registry as any,
+        workspace: testDir, logger: pino({ level: 'silent' }), maxIterations: 5,
+      });
+
+      const result = await agent.processMessage(session.id, 'Run sleep 20 in the background');
+      expect(result.response).toBe("Started it in the background. I'll check the output when it finishes.");
+      expect(provider.complete).toHaveBeenCalledTimes(2);
+    });
+
     it('stops after two nudges instead of looping', async () => {
       const { Agent } = await import('./agent.js');
       const { SessionManager } = await import('./session.js');

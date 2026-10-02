@@ -803,6 +803,7 @@ export class Agent {
     let malformedTurnNudges = 0;
     let stopNudges = 0;
     let compactedThisTurn = false;
+    let startedBackgroundWork = false;
     const repeatGuard = new RepeatedResponseGuard(2);
     // Provider-reported prompt size of the last call drives the compaction trigger.
     let lastPromptTokens: number | undefined;
@@ -1241,6 +1242,9 @@ export class Agent {
         const describedUnmadeCall =
           !taskComplete &&
           !finalSummaryCall &&
+          // "I'll report back when it finishes" is right after starting
+          // background work: the harness wakes the agent, so don't nudge.
+          !startedBackgroundWork &&
           response.stopReason === 'end_turn' &&
           emittedToolUses.length === 0 &&
           !!textContent.trim() &&
@@ -1479,6 +1483,13 @@ export class Agent {
         });
       }
       this.logger.info({ iteration: iterations }, 'Tool results added to session, continuing loop');
+
+      if (toolUses.some((toolUse) =>
+        (toolUse.name === 'bash' && toolUse.input.background === true)
+        || toolUse.name === 'spawn_agent'
+        || toolUse.name === 'heartbeat')) {
+        startedBackgroundWork = true;
+      }
 
       // Self-evolution signal accounting: count calls and map errored results back
       // to their skill name (for skill_failure capture at turn end).
