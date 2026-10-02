@@ -20,9 +20,9 @@ import { ContextManager } from '../routing/context.js';
 import { Router } from '../routing/router.js';
 import { CostTracker } from '../routing/cost.js';
 import { LLMFactExtractor } from '../memory/fact-extractor.js';
+import { registerAgentTools } from '../tools/index.js';
 import { createSkillRegistry, type SkillRegistry } from '../skills/registry.js';
 import { createSkillExecutor } from '../skills/executor.js';
-import { registerFileTools } from '../tools/files/index.js';
 import type {
   LLMProvider,
   CompletionRequest,
@@ -30,9 +30,6 @@ import type {
   ContentBlock,
 } from '../providers/types.js';
 import type { EmbeddingProvider } from '../memory/embeddings.js';
-import { registerShellTools } from '../tools/shell/index.js';
-import { registerTodoTool } from '../tools/todo/index.js';
-import { registerWebTools } from '../tools/web/index.js';
 import type { ActivationConfig } from '../memory/relations.js';
 
 // ---------------------------------------------------------------------------
@@ -318,11 +315,8 @@ export async function createE2EGateway(
   const skillRegistry = createSkillRegistry('/tmp', testLogger);
   await skillRegistry.initialize();
   // Native tools the gateway registers (bash/process, todo, webfetch/web_search).
-  registerShellTools(skillRegistry);
-  registerTodoTool(skillRegistry);
-  registerWebTools(skillRegistry);
+  registerAgentTools(skillRegistry, { files: { checkpoints: false, lint: false } });
   // Native file tools (read_file/write_file/patch/edit_file/undo), as the gateway registers them.
-  registerFileTools(skillRegistry, { checkpoints: false, lint: false });
 
   // 11. Create SkillExecutor
   const skillExecutor = createSkillExecutor(testLogger);

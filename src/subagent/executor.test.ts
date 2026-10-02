@@ -20,6 +20,7 @@ import { AnnounceQueue } from './announce-queue.js';
 import { SessionManager } from '../agent/session.js';
 import { ScallopMemoryStore } from '../memory/scallop-store.js';
 import { Router } from '../routing/router.js';
+import { registerAgentTools } from '../tools/index.js';
 import { createSkillRegistry } from '../skills/registry.js';
 import { createSkillExecutor } from '../skills/executor.js';
 import type {
@@ -33,8 +34,6 @@ import type { EmbeddingProvider } from '../memory/embeddings.js';
 import { CostTracker } from '../routing/cost.js';
 import { EvolutionRecorder } from '../evolution/signals.js';
 import { DEFAULT_EVOLUTION_CONFIG } from '../evolution/config.js';
-import { registerShellTools } from '../tools/shell/index.js';
-import { registerFileTools } from '../tools/files/index.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -172,8 +171,7 @@ async function buildExecutor(
 ) {
   const skillRegistry = createSkillRegistry('/tmp', logger);
   await skillRegistry.initialize();
-  registerShellTools(skillRegistry);
-  registerFileTools(skillRegistry, { checkpoints: false, lint: false });
+  registerAgentTools(skillRegistry, { files: { checkpoints: false, lint: false } });
   const skillExecutor = createSkillExecutor(logger);
 
   // Fresh router per executor so mock providers don't collide
@@ -531,22 +529,24 @@ describe('SubAgentExecutor integration', () => {
     expect(systemPrompt).not.toContain('**bash**');
   }, 30_000);
 
-  it('keeps implicit sub-agent tools read-only', async () => {
-    const provider = createTrackingProvider(['Read-only defaults confirmed. [DONE]']);
+  it('gives implicit sub-agents the real coding toolkit that exists in the registry', async () => {
+    const provider = createTrackingProvider(['Defaults confirmed. [DONE]']);
     const { executor } = await buildExecutor(provider);
     const parentSession = await ctx.sessionManager.createSession({ label: 'parent' });
 
     await executor.spawnAndWait(parentSession.id, {
-      task: 'Read the project file and summarize it',
-      label: 'readonly-defaults',
+      task: 'Summarize the weather',
+      label: 'real-defaults',
     });
 
     const toolNames = (provider.allRequests[0].tools ?? []).map(tool => tool.name);
-    expect(toolNames).toContain('read_file');
-    expect(toolNames).not.toContain('bash');
-    expect(toolNames).not.toContain('write_file');
-    expect(toolNames).not.toContain('edit_file');
+    for (const name of ['read_file', 'grep', 'glob', 'ls', 'edit_file', 'write_file', 'bash', 'webfetch']) {
+      expect(toolNames).toContain(name);
+    }
+    // Tools outside the default list, or missing from the registry, are not invented.
     expect(toolNames).not.toContain('agent_browser');
+    expect(toolNames).not.toContain('undo');
+    expect(toolNames).not.toContain('send_message');
   }, 30_000);
 
   // -----------------------------------------------------------------------
