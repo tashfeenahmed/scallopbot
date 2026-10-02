@@ -166,7 +166,8 @@ export async function buildRecallBlock(
   options: RecallBlockOptions = {},
 ): Promise<string> {
   if (isTrivialMessage(message)) return '';
-  const budgetMs = options.budgetMs ?? 1500;
+  // Search (~10–300 ms) plus one time-limited rerank (2.5s) with headroom.
+  const budgetMs = options.budgetMs ?? 3_500;
   const limit = options.limit ?? 8;
   const now = options.now ?? Date.now();
 
@@ -174,7 +175,7 @@ export async function buildRecallBlock(
   let results: ScallopSearchResult[] | typeof TIMEOUT;
   try {
     results = await Promise.race([
-      store.search(message, { userId, minProminence: 0.1, limit: Math.max(limit, 10), rerank: false }),
+      store.search(message, { userId, minProminence: 0.1, limit: Math.max(limit, 10) }),
       new Promise<typeof TIMEOUT>(resolve => {
         timer = setTimeout(() => resolve(TIMEOUT), budgetMs);
       }),

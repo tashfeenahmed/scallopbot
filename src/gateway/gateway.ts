@@ -1314,7 +1314,7 @@ export class Gateway {
       // Fast recall: BM25 + embeddings with a hard latency budget, no LLM.
       // A session's first turn also gets the ranked digest.
       hooks.recall = async ({ userId, userMessage, timezone, coldStart }) => {
-        const block = await buildRecallBlock(store, userId, userMessage, { budgetMs: 1_500, timezone });
+        const block = await buildRecallBlock(store, userId, userMessage, { timezone });
         if (!coldStart) return block;
         const digest = buildRecallDigest(store, userId, { goal: userMessage, recentMessages: [userMessage] });
         return [digest, block].filter((part) => part.trim()).join('\n\n');

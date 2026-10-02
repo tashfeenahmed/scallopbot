@@ -18,7 +18,7 @@ import { calculateBM25Score, buildDocFreqMap } from '../memory/bm25.js';
 
 export type ModeSearchFn = (query: string, limit: number) => Promise<ScallopSearchResult[]>;
 
-export type EvalModeName = 'openclaw' | 'mem0' | 'scallopbot' | 'scallopbot-rerank' | 'scallopbot-tuned';
+export type EvalModeName = 'openclaw' | 'mem0' | 'scallopbot' | 'scallopbot-no-rerank' | 'scallopbot-tuned';
 
 export interface EvalModeConfig {
   name: EvalModeName;
@@ -97,10 +97,9 @@ export const MEM0_MODE: EvalModeConfig = {
 };
 
 /**
- * ScallopBot mode, as shipped: hybrid retrieval, decay and the sleep-cycle
- * pipeline (fusion, dreams, reflection). No LLM reranking on retrieval: since
- * 2 Oct 2026 production keeps the reranker off the reply path
- * (MEMORY_FOREGROUND_RERANK defaults to off).
+ * ScallopBot mode, as shipped: hybrid retrieval, decay, the sleep-cycle
+ * pipeline (fusion, dreams, reflection) and time-limited LLM reranking
+ * (MEMORY_FOREGROUND_RERANK, on by default).
  */
 export const SCALLOPBOT_MODE: EvalModeConfig = {
   name: 'scallopbot',
@@ -113,22 +112,18 @@ export const SCALLOPBOT_MODE: EvalModeConfig = {
   enableProactive: true,
   enableFactExtraction: false,
   enableLLMDedup: false,
-  enableReranking: false,
+  enableReranking: true,
   decayOverrides: {
     categoryDecayRates: EVAL_CATEGORY_DECAY_RATES,
   },
 };
 
-/**
- * ScallopBot with LLM reranking on retrieval (MEMORY_FOREGROUND_RERANK=on):
- * the configuration behind the February 2026 published figures. Slower and
- * dearer per reply; kept as an opt-in.
- */
-export const SCALLOPBOT_RERANK_MODE: EvalModeConfig = {
+/** ScallopBot with reranking turned off (MEMORY_FOREGROUND_RERANK=false). */
+export const SCALLOPBOT_NO_RERANK_MODE: EvalModeConfig = {
   ...SCALLOPBOT_MODE,
-  name: 'scallopbot-rerank',
-  label: 'ScallopBot + rerank',
-  enableReranking: true,
+  name: 'scallopbot-no-rerank',
+  label: 'ScallopBot, no rerank',
+  enableReranking: false,
 };
 
 /**

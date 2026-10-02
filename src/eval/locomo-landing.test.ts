@@ -15,7 +15,7 @@
 import path from 'node:path';
 import { it } from 'vitest';
 import { runLoCoMo } from './locomo-eval.js';
-import { OPENCLAW_MODE, MEM0_MODE, SCALLOPBOT_MODE, SCALLOPBOT_RERANK_MODE, type EvalModeConfig } from './modes.js';
+import { OPENCLAW_MODE, MEM0_MODE, SCALLOPBOT_MODE, SCALLOPBOT_NO_RERANK_MODE, type EvalModeConfig } from './modes.js';
 import { createBudgetGuard } from '../../evals/agentic/budget.js';
 
 /** USD per million tokens: uncached input, cached input, output. */
@@ -30,7 +30,7 @@ const MODES: Record<string, EvalModeConfig> = {
   openclaw: OPENCLAW_MODE,
   mem0: MEM0_MODE,
   scallopbot: SCALLOPBOT_MODE,
-  'scallopbot-rerank': SCALLOPBOT_RERANK_MODE,
+  'scallopbot-no-rerank': SCALLOPBOT_NO_RERANK_MODE,
 };
 
 function arg(name: string): string | undefined {

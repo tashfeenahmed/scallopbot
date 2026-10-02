@@ -264,7 +264,7 @@ Rules:
 - Consider whether the memory would be useful context when answering the query
 - If NONE of the memories are relevant, score ALL 0.0. Be strict: tangential content should score below 0.3
 
-Respond with a JSON object only: {"scores":[{ "index": number, "score": number }, ...]}`;
+Respond with a JSON object only: {"scores":[s1, s2, ...]} — one number per memory, in the order given, e.g. {"scores":[0.9,0.1,0.0]}.`;
 
   const candidateLines = candidates
     .map((c, i) => `${i + 1}. "${truncateCandidateContent(c.content, options?.maxContentChars)}"`)
@@ -275,7 +275,7 @@ Respond with a JSON object only: {"scores":[{ "index": number, "score": number }
 Memories:
 ${candidateLines}
 
-Score each memory's relevance to the query (JSON object only):`;
+Score each memory's relevance to the query (JSON object only, ${candidates.length} scores in order):`;
 
   return {
     messages: [{ role: 'user', content: userMessage }],
@@ -288,17 +288,12 @@ Score each memory's relevance to the query (JSON object only):`;
         type: 'object',
         additionalProperties: false,
         properties: {
+          // One score per candidate, in order: about a third of the output
+          // tokens of {index, score} objects, and output speed is what makes
+          // reranking slow on the reply path.
           scores: {
             type: 'array',
-            items: {
-              type: 'object',
-              additionalProperties: false,
-              properties: {
-                index: { type: 'integer', minimum: 0 },
-                score: { type: 'number', minimum: 0, maximum: 1 },
-              },
-              required: ['index', 'score'],
-            },
+            items: { type: 'number', minimum: 0, maximum: 1 },
           },
         },
         required: ['scores'],
@@ -316,7 +311,8 @@ function truncateCandidateContent(content: string, maxChars = DEFAULT_CANDIDATE_
 /**
  * Parse the LLM response to extract relevance scores.
  *
- * Expects a JSON array of { index: number, score: number }.
+ * Expects a JSON array of scores in candidate order (the requested form), or
+ * the older array of { index: number, score: number }.
  * Returns a Map from index to score, or null if parsing fails.
  * Follows the fact-extractor.ts pattern: extract JSON with regex, then parse.
  */
@@ -332,7 +328,7 @@ export function parseRerankResponse(responseText: string): Map<number, number> |
   }
 
   try {
-    const parsed = JSON.parse(arrayMatch[0]) as Array<{ index: number; score: number }>;
+    const parsed = JSON.parse(arrayMatch[0]) as Array<{ index: number; score: number } | number>;
 
     if (!Array.isArray(parsed)) {
       return null;
@@ -340,10 +336,19 @@ export function parseRerankResponse(responseText: string): Map<number, number> |
 
     const scores = new Map<number, number>();
 
+    // Compact form: a plain list of scores in candidate order.
+    if (parsed.length > 0 && parsed.every((entry) => typeof entry === 'number')) {
+      (parsed as number[]).forEach((score, index) => {
+        if (Number.isFinite(score) && score >= 0 && score <= 1) scores.set(index, score);
+      });
+      return scores.size > 0 ? scores : null;
+    }
+
     // Detect if LLM returned 1-based indices (prompt numbers candidates 1-based).
     // If the minimum index is >= 1 and no index is 0, assume 1-based and convert.
-    const validEntries = parsed.filter(
+    const validEntries = (parsed as Array<{ index?: unknown; score?: unknown } | null>).filter(
       (e): e is { index: number; score: number } =>
+        typeof e === 'object' && e !== null &&
         typeof e.index === 'number' &&
         typeof e.score === 'number' &&
         e.score >= 0 &&

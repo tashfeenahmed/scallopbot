@@ -1,7 +1,7 @@
 /**
- * Phase 5: the reranker is off the critical path. Foreground search() must make
- * zero LLM calls by default, even when a rerank provider is configured, and
- * stay fast (micro-benchmark below).
+ * Recall reranking: on by default (+6% on LoCoMo) but time-limited, so a slow
+ * reranker falls back to the fused ranking instead of stalling the reply.
+ * rerank:false (fact extraction, dedupe) makes zero LLM calls and stays fast.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
@@ -79,27 +79,47 @@ describe('foreground recall makes no LLM calls', () => {
 
   const queryVector = Array.from({ length: 128 }, (_, i) => Math.sin(i + 1));
 
-  it('search() does not call the rerank provider by default', async () => {
+  it('search() reranks by default with one LLM call', async () => {
     const store = makeStore();
     try {
       await seed(store, 20);
       const results = await store.search('who likes sushi', { userId: 'u1', queryEmbedding: queryVector });
       expect(results.length).toBeGreaterThan(0);
-      expect(results[0].memory.content).toContain('sushi');
-      expect(provider.complete).not.toHaveBeenCalled();
+      expect(provider.complete).toHaveBeenCalledTimes(1);
     } finally {
       store.close();
     }
   });
 
-  it('reranks only when a background caller opts in per call', async () => {
+  it('rerank:false opts a call out; foregroundRerank:false turns the default off', async () => {
     const store = makeStore();
     try {
       await seed(store, 10);
-      await store.search('sushi', { userId: 'u1', queryEmbedding: queryVector });
+      await store.search('sushi', { userId: 'u1', rerank: false, queryEmbedding: queryVector });
       expect(provider.complete).not.toHaveBeenCalled();
-      await store.search('sushi', { userId: 'u1', rerank: true, queryEmbedding: queryVector });
-      expect(provider.complete).toHaveBeenCalledTimes(1);
+    } finally {
+      store.close();
+    }
+    const off = makeStore({ dbPath: path.join(dir, 'off.db'), foregroundRerank: false });
+    try {
+      await seed(off, 10);
+      await off.search('sushi', { userId: 'u1', queryEmbedding: queryVector });
+      expect(provider.complete).not.toHaveBeenCalled();
+    } finally {
+      off.close();
+    }
+  });
+
+  it('a slow reranker falls back to the fused ranking within the time limit', async () => {
+    const slow = { ...provider, complete: vi.fn(() => new Promise<never>(() => {})) };
+    const store = makeStore({ rerankProvider: slow as never, rerankTimeoutMs: 100 });
+    try {
+      await seed(store, 10);
+      const started = performance.now();
+      const results = await store.search('who likes sushi', { userId: 'u1', queryEmbedding: queryVector });
+      expect(performance.now() - started).toBeLessThan(1_000);
+      expect(results.length).toBeGreaterThan(0);
+      expect(results[0].memory.content).toContain('sushi');
     } finally {
       store.close();
     }
@@ -118,7 +138,7 @@ describe('foreground recall makes no LLM calls', () => {
     }
   });
 
-  it('micro-benchmark: 500 memories, 20 foreground searches, zero LLM calls, well under 300ms median', async () => {
+  it('micro-benchmark: 500 memories, 20 searches with rerank:false, zero LLM calls, well under 300ms median', async () => {
     const store = makeStore();
     try {
       await seed(store, 500);
@@ -128,7 +148,7 @@ describe('foreground recall makes no LLM calls', () => {
       const timings: number[] = [];
       for (let i = 0; i < 20; i++) {
         const started = performance.now();
-        const hits = await store.search(queries[i % queries.length], { userId: 'u1', minProminence: 0.1, limit: 10, queryEmbedding: queryVector });
+        const hits = await store.search(queries[i % queries.length], { userId: 'u1', minProminence: 0.1, limit: 10, queryEmbedding: queryVector, rerank: false });
         expect(hits.length).toBeGreaterThan(0);
         timings.push(performance.now() - started);
       }

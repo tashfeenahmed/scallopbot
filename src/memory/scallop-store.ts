@@ -34,6 +34,13 @@ import { reembedStale } from './reembed.js';
 /**
  * Options for ScallopMemoryStore
  */
+/**
+ * Rerank time limit on the reply path. A compact-output rerank on a cloud
+ * model takes ~1.4–2.2s at the 90th percentile; past the limit the fused
+ * BM25 + embedding ranking is used, so recall never stalls a reply for long.
+ */
+const DEFAULT_RERANK_TIMEOUT_MS = 2_500;
+
 export interface ScallopMemoryStoreOptions {
   /** Path to SQLite database */
   dbPath: string;
@@ -60,9 +67,12 @@ export interface ScallopMemoryStoreOptions {
   rerankProvider?: LLMProvider;
   /**
    * Default for `ScallopSearchOptions.rerank` (MEMORY_FOREGROUND_RERANK).
-   * Default false: search() is BM25 + embeddings (+graph) with zero LLM calls.
+   * Default true: reranking adds +2.9 F1 (+6%) on LoCoMo; a time limit keeps
+   * it off the critical path when the reranker model is slow.
    */
   foregroundRerank?: boolean;
+  /** Time limit for one rerank call before falling back to the fused ranking (default 2,500 ms). */
+  rerankTimeoutMs?: number;
   /** Optional LLM provider for LLM-based relation classification */
   relationsProvider?: LLMProvider;
   /** Optional spreading activation config for related memory retrieval */
@@ -119,10 +129,11 @@ export interface ScallopSearchOptions {
   excludeEventsBefore?: number;
   /**
    * LLM-rerank this search (requires a rerankProvider). Defaults to the
-   * store's `foregroundRerank` (false). Background jobs (gardener) may opt in;
-   * foreground recall and fact extraction never should.
+   * store's `foregroundRerank` (on). Fact extraction and dedupe pass false.
    */
   rerank?: boolean;
+  /** Rerank time limit; past it the fused ranking is used. Default: the store's (2.5s). */
+  rerankTimeoutMs?: number;
 }
 
 /**
@@ -145,6 +156,7 @@ export class ScallopMemoryStore {
   private embedder?: EmbeddingProvider;
   private rerankProvider?: LLMProvider;
   private foregroundRerank: boolean;
+  private rerankTimeoutMs: number;
   private activationConfig?: ActivationConfig;
   private mmrEnabled: boolean;
   private mmrLambda: number;
@@ -160,7 +172,8 @@ export class ScallopMemoryStore {
     // Wrap embedder with cache to avoid recomputing embeddings for seen texts
     this.embedder = options.embedder ? new CachedEmbedder(options.embedder) : undefined;
     this.rerankProvider = options.rerankProvider;
-    this.foregroundRerank = options.foregroundRerank ?? false;
+    this.foregroundRerank = options.foregroundRerank ?? true;
+    this.rerankTimeoutMs = options.rerankTimeoutMs ?? DEFAULT_RERANK_TIMEOUT_MS;
     this.activationConfig = options.activationConfig;
     this.mmrEnabled = options.mmrEnabled ?? false;
     this.mmrLambda = options.mmrLambda ?? 0.7;
@@ -659,6 +672,7 @@ export class ScallopMemoryStore {
         const reranked = await rerankResults(query, rerankCandidates, rerankProvider, {
           maxCandidates: 20,
           circuitStore: this.db,
+          timeoutMs: options.rerankTimeoutMs ?? this.rerankTimeoutMs,
         });
 
         // Map re-ranked scores back to search results. MMR needs the over-fetched

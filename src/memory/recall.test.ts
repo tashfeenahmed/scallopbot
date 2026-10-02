@@ -59,7 +59,7 @@ describe('buildRecallBlock', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
-  it('returns a marked <memory-context> block with live, user-grounded hits and never reranks', async () => {
+  it('returns a marked <memory-context> block with live, user-grounded hits, reranked by default', async () => {
     await store.add({ userId: 'u1', content: 'Sarah is planning the Lisbon trip in May', detectRelations: false });
     await store.add({ userId: 'u1', content: 'Assistant thinks Lisbon is lovely', source: 'assistant', detectRelations: false });
     await store.add({ userId: 'u1', content: 'Prefers aisle seats on flights', detectRelations: false });
@@ -70,8 +70,8 @@ describe('buildRecallBlock', () => {
     expect(block).not.toContain('Assistant thinks');
     expect(block).toMatch(/\[Recorded: \d{4}-\d{2}-\d{2}\]/);
     expect(block.trimEnd().endsWith('</memory-context>')).toBe(true);
-    // Even with foregroundRerank on, prefetch passes rerank:false.
-    expect(reranker.complete).not.toHaveBeenCalled();
+    // Recall uses the store's default: one time-limited rerank call.
+    expect(reranker.complete).toHaveBeenCalledTimes(1);
   });
 
   it('skips trivial messages without searching', async () => {
