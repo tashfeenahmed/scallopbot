@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { execSync } from 'child_process';
 import { fileURLToPath } from 'url';
+import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import { pino } from 'pino';
 import { SkillExecutor } from '../../executor.js';
@@ -104,5 +106,40 @@ describe('run_code skill (integration)', () => {
     const payload = JSON.parse(result.output!);
     expect(payload.success).toBe(true);
     expect(JSON.parse(payload.output.trim())).toEqual({ product: 42 });
+  }, 30000);
+  it('resolves relative imports against the workspace, not the temp dir', async () => {
+    const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'runcode-ws-'));
+    try {
+      fs.mkdirSync(path.join(ws, 'src'));
+      fs.writeFileSync(path.join(ws, 'package.json'), '{"type":"module"}');
+      fs.writeFileSync(path.join(ws, 'src', 'answer.js'), 'export const answer = 42;\n');
+      const result = await executor.execute(runCodeSkill(), {
+        skillName: 'run_code',
+        args: { language: 'javascript', code: "import { answer } from './src/answer.js';\nconsole.log(answer);" },
+        cwd: ws,
+      });
+      const payload = JSON.parse(result.output!);
+      expect(payload.error).toBe('');
+      expect(payload.output.trim()).toBe('42');
+    } finally {
+      fs.rmSync(ws, { recursive: true, force: true });
+    }
+  }, 30000);
+
+  it.runIf(hasBin('python3'))('imports python modules from the workspace', async () => {
+    const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'runcode-ws-'));
+    try {
+      fs.mkdirSync(path.join(ws, 'pkg'));
+      fs.writeFileSync(path.join(ws, 'pkg', 'vals.py'), 'v = 7\n');
+      const result = await executor.execute(runCodeSkill(), {
+        skillName: 'run_code',
+        args: { language: 'python', code: 'from pkg.vals import v\nprint(v * 6)' },
+        cwd: ws,
+      });
+      const payload = JSON.parse(result.output!);
+      expect(payload.output.trim()).toBe('42');
+    } finally {
+      fs.rmSync(ws, { recursive: true, force: true });
+    }
   }, 30000);
 });

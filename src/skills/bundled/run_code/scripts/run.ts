@@ -1,9 +1,12 @@
 /**
  * Run Code Skill Execution Script
  *
- * Writes a throwaway program to a temp file, runs it with the appropriate
- * interpreter (python3 / node / bash), captures stdout/stderr/exit, and returns
- * JSON. Receives arguments via the SKILL_ARGS environment variable.
+ * Runs a throwaway program with the appropriate interpreter (python3 / node /
+ * bash) in the workspace, captures stdout/stderr/exit, and returns JSON.
+ * Python and node read the program from stdin so relative imports
+ * (`./src/x.js`, `from pkg import y`) resolve against the workspace, not the
+ * temp dir; bash runs from a temp file so the script can still read stdin.
+ * Receives arguments via the SKILL_ARGS environment variable.
  */
 
 import { spawn } from 'child_process';
@@ -33,23 +36,26 @@ interface RunCodeResult {
   language: Language;
 }
 
-const RUNNERS: Record<Language, { cmd: string; args: (file: string) => string[]; ext: string; missingHint: string }> = {
+const RUNNERS: Record<Language, { cmd: string; args: (file: string) => string[]; ext: string; stdin: boolean; missingHint: string }> = {
   python: {
     cmd: 'python3',
-    args: (file) => [file],
+    args: () => ['-'],
     ext: '.py',
+    stdin: true,
     missingHint: 'python3 not found on PATH. Install it (e.g. `brew install python3` or `apt-get install python3`) or use language "javascript".',
   },
   javascript: {
     cmd: 'node',
-    args: (file) => [file],
+    args: () => ['-'],
     ext: '.js',
+    stdin: true,
     missingHint: 'node not found on PATH.',
   },
   bash: {
     cmd: 'bash',
     args: (file) => [file],
     ext: '.sh',
+    stdin: false,
     missingHint: 'bash not found on PATH.',
   },
 };
@@ -84,24 +90,26 @@ async function main(): Promise<void> {
   const timeout = Math.min(Math.max(1000, args.timeout || DEFAULT_TIMEOUT), MAX_TIMEOUT);
   const runner = RUNNERS[language];
 
-  // Write the program to a uniquely-named temp file.
-  const tmpFile = path.join(os.tmpdir(), `runcode-${Date.now()}-${randomBytes(4).toString('hex')}${runner.ext}`);
-  try {
-    fs.writeFileSync(tmpFile, args.code, 'utf-8');
-  } catch (e) {
-    fail(language, `Failed to write temp file: ${(e as Error).message}`);
-    return;
+  // Bash runs from a uniquely-named temp file; python and node read stdin.
+  const tmpFile = runner.stdin ? null : path.join(os.tmpdir(), `runcode-${Date.now()}-${randomBytes(4).toString('hex')}${runner.ext}`);
+  if (tmpFile) {
+    try {
+      fs.writeFileSync(tmpFile, args.code, 'utf-8');
+    } catch (e) {
+      fail(language, `Failed to write temp file: ${(e as Error).message}`);
+      return;
+    }
   }
 
   const cwd = process.env.SKILL_WORKSPACE || process.env.AGENT_WORKSPACE || process.cwd();
-  const cleanup = () => { try { fs.unlinkSync(tmpFile); } catch { /* ignore */ } };
+  const cleanup = () => { if (tmpFile) try { fs.unlinkSync(tmpFile); } catch { /* ignore */ } };
 
   const prepared = prepareSandboxedCommand({
-    argv: [runner.cmd, ...runner.args(tmpFile)],
+    argv: [runner.cmd, ...runner.args(tmpFile ?? '-')],
     cwd,
     workspace: cwd,
     env: { ...process.env },
-    readOnlyFiles: [tmpFile],
+    readOnlyFiles: tmpFile ? [tmpFile] : [],
   });
   if (!prepared.ok) {
     cleanup();
@@ -120,8 +128,12 @@ async function main(): Promise<void> {
     const child = spawn(wrapped.command, wrapped.args, {
       cwd,
       env: wrapped.env,
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: [runner.stdin ? 'pipe' : 'ignore', 'pipe', 'pipe'],
     });
+    if (runner.stdin) {
+      child.stdin?.on('error', () => { /* child exited before reading all of it */ });
+      child.stdin?.end(args.code);
+    }
 
     const finish = (result: RunCodeResult) => {
       if (settled) return;
