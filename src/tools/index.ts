@@ -11,6 +11,7 @@ import { registerTodoTool } from './todo/index.js';
 import { registerWebTools } from './web/index.js';
 import { persistLargeOutput } from './tool-output.js';
 import { verifyOnStopNudge } from './verify/ledger.js';
+import { reviewOnStop, reviewNote } from './review/review.js';
 
 /** Register every built-in native tool; returns the stateful file tools. */
 export function registerAgentTools(
@@ -24,11 +25,21 @@ export function registerAgentTools(
   return { fileTools };
 }
 
-/** Hooks the core tools contribute: large-output persistence and the verify nudge. */
-export function coreToolHooks(options: { workspace: string; contextWindowTokens?: number }): AgentHooks {
+/**
+ * Hooks the core tools contribute: large-output persistence, the verify nudge
+ * and review-on-stop (off with REVIEW_ON_STOP=false).
+ */
+export function coreToolHooks(options: { workspace: string; contextWindowTokens?: number; review?: boolean }): AgentHooks {
+  const review = options.review ?? process.env.REVIEW_ON_STOP !== 'false';
   return {
     postProcessToolResult: ({ sessionId, toolName, content }) =>
       persistLargeOutput(sessionId, toolName, content, { contextWindowTokens: options.contextWindowTokens }),
     verifyOnStop: (sessionId) => verifyOnStopNudge(sessionId, { workspace: options.workspace }),
+    ...(review ? {
+      reviewOnStop: async ({ sessionId, ...input }) => {
+        const findings = await reviewOnStop({ ...input, workspace: options.workspace, traceSessionId: sessionId });
+        return findings ? reviewNote(findings) : null;
+      },
+    } : {}),
   };
 }

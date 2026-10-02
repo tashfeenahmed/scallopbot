@@ -57,7 +57,7 @@ function response(content: ContentBlock[], stopReason: CompletionResponse['stopR
  * the number of assistant messages after it. Outcome-brain calls get the
  * candidate echoed back unchanged ("send"), which is what a cooperative
  * arbiter model would do; whatever the brain's sanitizer then strips is the
- * harness measuring the brain, not the scripted model.
+ * harness measuring the brain, not the scripted model. Review calls get LGTM.
  */
 export class ScriptedProvider implements LLMProvider {
   readonly name = 'scripted';
@@ -88,6 +88,9 @@ export class ScriptedProvider implements LLMProvider {
         text: JSON.stringify({ decision: 'send', message: candidates.join('\n\n'), reason_code: 'scripted_echo' }),
       }], 'end_turn');
     }
+
+    // Review-on-stop: a cooperative reviewer that finds nothing to fix.
+    if (request.purpose === 'review') return response([{ type: 'text', text: 'LGTM' }], 'end_turn');
 
     const { turn, step } = this.locate(request.messages);
     const reference = this.task.reference[Math.min(turn, this.task.reference.length - 1)];

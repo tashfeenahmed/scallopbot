@@ -72,6 +72,7 @@ import {
 } from '../security/evidence-grounding.js';
 import { modelGuidanceFor } from './model-guidance.js';
 import { prepareContext } from '../context/lean-compaction.js';
+import { isGenuineHuman } from '../context/replay.js';
 import { runRecoveryLadder, RepeatedResponseGuard } from './recovery-ladder.js';
 import { effortFor } from './effort-ladder.js';
 import { formatAnnounceEntry, isHarnessMessage } from '../subagent/messages.js';
@@ -186,6 +187,19 @@ export interface AgentOptions {
 export interface AgentHooks {
   /** One-line nudge when code was edited after the last passing verify run. */
   verifyOnStop?: (sessionId: string) => string | null;
+  /**
+   * Second look before a turn that changed files ends: findings from a
+   * fresh-context review of the request and the changed files, or null.
+   * Runs at most once per turn; the agent decides what to do with them.
+   */
+  reviewOnStop?: (input: {
+    sessionId: string;
+    requests: string[];
+    reply: string;
+    turnStartedAt: number;
+    provider: LLMProvider;
+    signal?: AbortSignal;
+  }) => Promise<string | null>;
   /** Rewrites one tool result before the model sees it (e.g. persist huge output). */
   postProcessToolResult?: (input: { sessionId: string; toolName: string; content: string; isError: boolean }) => string;
   /** Builds the message list replayed to the model from the stored history. */
@@ -802,6 +816,7 @@ export class Agent {
     let emptyEndTurnRetries = 0;
     let malformedTurnNudges = 0;
     let stopNudges = 0;
+    let reviewed = false;
     let compactedThisTurn = false;
     let startedBackgroundWork = false;
     const repeatGuard = new RepeatedResponseGuard(2);
@@ -1283,6 +1298,30 @@ export class Agent {
           await this.sessionManager.addMessage(sessionId, { role: 'user', content: `[System: verify] ${verifyNudge}` });
           this.logger.info({ sessionId }, 'Verify-on-stop nudge added');
           continue;
+        }
+
+        // Review-on-stop: once per turn, after the work is verified, a
+        // fresh-context reviewer checks the changed files against the request.
+        if (
+          this.hooks.reviewOnStop && !reviewed && !finalSummaryCall && !repeatedReply &&
+          !this.subAgentMode && totalToolCalls > 0 && !abortSignal?.aborted
+        ) {
+          reviewed = true;
+          const requests = await this.recentHumanRequests(sessionId);
+          const findings = await this.hooks.reviewOnStop({
+            sessionId,
+            requests,
+            reply: this.stripDoneMarker(textContent || ''),
+            turnStartedAt,
+            provider: activeProvider,
+            signal: abortSignal,
+          }).catch(() => null);
+          if (findings) {
+            await this.persistAssistantMessage(sessionId, responseContent);
+            await this.sessionManager.addMessage(sessionId, { role: 'user', content: findings });
+            this.logger.info({ sessionId }, 'Review-on-stop findings added');
+            continue;
+          }
         }
 
         // No interrupts — normal exit
@@ -2317,6 +2356,24 @@ Install new skills from ClawHub with manage_skills (search, install, uninstall, 
     if (!textContent) return false;
     // Check for [DONE] at the end of the response (case insensitive, allow trailing whitespace)
     return /\[done\]\s*$/i.test(textContent.trim());
+  }
+
+  /** The last few genuine human messages, oldest first (for review-on-stop). */
+  private async recentHumanRequests(sessionId: string, limit = 4): Promise<string[]> {
+    const session = await this.sessionManager.getSession(sessionId);
+    const out: string[] = [];
+    for (const message of [...(session?.messages ?? [])].reverse()) {
+      if (out.length >= limit) break;
+      if (!isGenuineHuman(message)) continue;
+      const text = typeof message.content === 'string'
+        ? message.content
+        : message.content
+          .filter((block): block is { type: 'text'; text: string } => block.type === 'text')
+          .map(block => block.text)
+          .join('\n');
+      if (text.trim()) out.push(text);
+    }
+    return out.reverse();
   }
 
   /**
