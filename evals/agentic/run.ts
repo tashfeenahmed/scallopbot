@@ -3,12 +3,14 @@
  *
  *   npm run bench:agentic -- --model moonshot --tasks trap
  *   npm run bench:agentic -- --models scripted,openrouter:qwen/qwen3.6-plus --tasks all --concurrency 4 --repeat 2
- *   npm run bench:agentic -- --export tasks.json          # neutral task export for Hermes/Prime adapters
- *   npm run bench:agentic -- --score external-run.json    # score another agent's workspaces + replies
+ *   npm run bench:agentic -- --export tasks.json --tasks all              # neutral task export for Hermes/Prime/OpenClaw adapters
+ *   npm run bench:agentic -- --score external-run.json --cross-agent      # score another agent's workspaces + replies
+ *   npm run bench:agentic -- --model moonshot:kimi-k2.6 --tasks hard --cross-agent
  *
  * Flags:
  *   --model <spec> / --models a,b,c   scripted | moonshot[:m] | openrouter:<m> | openai[:m] | anthropic[:m] | local[:m]
- *   --tasks <sel>                     all | trap | coding | assistant | comma list of ids (default all)
+ *   --tasks <sel>                     all | trap | coding | assistant | hard | comma list of ids (default all)
+ *   --cross-agent                     outcome-only scoring (workspace + replies; tool names/counts reported, not scored)
  *   --concurrency N                   parallel task runs (default 1)
  *   --repeat N                        runs per task (default 1)
  *   --max-iterations N                agent loop cap per turn (default 40; production is 100)
@@ -45,12 +47,13 @@ interface CliArgs {
   envFile?: string;
   exportPath?: string;
   scorePath?: string;
+  crossAgent: boolean;
 }
 
 function parseArgs(argv: string[]): CliArgs {
   const args: CliArgs = {
     models: [], tasks: 'all', concurrency: 1, repeat: 1, maxIterations: 40, timeoutS: 600,
-    outcomeBrain: true, keep: false, verbose: false,
+    outcomeBrain: true, keep: false, verbose: false, crossAgent: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i]!;
@@ -74,8 +77,9 @@ function parseArgs(argv: string[]): CliArgs {
       case '--env-file': args.envFile = value(); break;
       case '--export': args.exportPath = value(); break;
       case '--score': args.scorePath = value(); break;
+      case '--cross-agent': args.crossAgent = true; break;
       case '--help': case '-h':
-        console.log(`Usage: npm run bench:agentic -- [--model <spec>|--models a,b] [--tasks all|trap|coding|assistant|<ids>] [--concurrency N] [--repeat N] [--export file] [--score file]`);
+        console.log(`Usage: npm run bench:agentic -- [--model <spec>|--models a,b] [--tasks all|trap|coding|assistant|hard|<ids>] [--concurrency N] [--repeat N] [--cross-agent] [--export file] [--score file]`);
         process.exit(0);
         break;
       default: throw new Error(`Unknown flag ${flag}`);
@@ -120,6 +124,7 @@ async function runBench(args: CliArgs): Promise<void> {
     taskTimeoutMs: args.timeoutS * 1000,
     keepWorkspace: args.keep,
     logger,
+    crossAgent: args.crossAgent,
   };
   const startedAt = new Date();
   const sha = commitSha();
@@ -132,7 +137,7 @@ async function runBench(args: CliArgs): Promise<void> {
       return result;
     }));
     const results = await pool(jobs, args.concurrency);
-    const scorecard = buildScorecard(model.label, results);
+    const scorecard = buildScorecard(model.label, results, args.crossAgent ? 'cross-agent' : 'default');
     console.log(formatScorecard(scorecard, results));
     console.log('');
 
@@ -146,6 +151,7 @@ async function runBench(args: CliArgs): Promise<void> {
       options: {
         tasks: args.tasks, repeat: args.repeat, concurrency: args.concurrency,
         maxIterations: args.maxIterations, outcomeBrain: args.outcomeBrain, timeoutS: args.timeoutS,
+        crossAgent: args.crossAgent,
       },
       scorecard,
       results,
@@ -169,12 +175,14 @@ async function main(): Promise<void> {
   const envFile = loadEnv(args.envFile);
   if (envFile && args.verbose) console.error(`env: ${envFile}`);
   if (args.exportPath) {
-    const { count, file, fixturesDir } = await exportTasks(args.exportPath);
+    const { count, file, fixturesDir } = await exportTasks(args.exportPath, selectTasks(args.tasks));
     console.log(`exported ${count} tasks to ${file} (fixtures in ${fixturesDir})`);
     return;
   }
   if (args.scorePath) {
-    const { scorecard, results, file } = await scoreExternal(args.scorePath, path.join(BENCH_DIR, 'results'));
+    const { scorecard, results, file } = await scoreExternal(
+      args.scorePath, path.join(BENCH_DIR, 'results'), { crossAgent: args.crossAgent },
+    );
     console.log(formatScorecard(scorecard, results));
     console.error(`results: ${path.relative(process.cwd(), file)}`);
     return;

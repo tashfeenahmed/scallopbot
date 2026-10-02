@@ -1,13 +1,17 @@
 import type { BenchTask } from '../types.js';
 import { ASSISTANT_TASKS } from './assistant.js';
 import { CODING_TASKS } from './coding.js';
+import { HARD_CODE_TASKS } from './hard-code.js';
+import { HARD_OPS_TASKS } from './hard-ops.js';
 import { TRAP_TASKS } from './trap.js';
 
-export const ALL_TASKS: BenchTask[] = [...TRAP_TASKS, ...CODING_TASKS, ...ASSISTANT_TASKS];
+export const HARD_TASKS: BenchTask[] = [...HARD_CODE_TASKS, ...HARD_OPS_TASKS];
+
+export const ALL_TASKS: BenchTask[] = [...TRAP_TASKS, ...CODING_TASKS, ...ASSISTANT_TASKS, ...HARD_TASKS];
 
 /**
  * Resolve a `--tasks` selector: `all`, a category (`trap`, `coding`,
- * `assistant`), or a comma list of task ids / categories.
+ * `assistant`, `hard`), or a comma list of task ids / categories.
  */
 export function selectTasks(selector: string): BenchTask[] {
   const aliases: Record<string, string> = { traps: 'trap', code: 'coding', assist: 'assistant' };

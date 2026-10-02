@@ -3,8 +3,10 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import type { TaskTrace } from '../types.js';
 
 export async function writeFiles(root: string, files: Record<string, string>): Promise<void> {
@@ -37,10 +39,16 @@ export interface CommandResult {
   stderr: string;
 }
 
-/** Run a command for scoring (never through the agent). */
-export function run(file: string, args: string[], cwd: string, timeoutMs = 60_000): Promise<CommandResult> {
+/** Run a command for scoring (never through the agent). `env` replaces the environment when given. */
+export function run(
+  file: string,
+  args: string[],
+  cwd: string,
+  timeoutMs = 60_000,
+  env?: NodeJS.ProcessEnv,
+): Promise<CommandResult> {
   return new Promise((resolve) => {
-    execFile(file, args, { cwd, timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 }, (error, stdout, stderr) => {
+    execFile(file, args, { cwd, timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024, ...(env && { env }) }, (error, stdout, stderr) => {
       const code = error ? (typeof error.code === 'number' ? error.code : 1) : 0;
       resolve({ code, stdout: String(stdout), stderr: String(stderr) });
     });
@@ -113,4 +121,79 @@ export function nodeProject(name: string, files: Record<string, string>): Record
     'package.json': `${JSON.stringify({ name, version: '1.0.0', type: 'module', scripts: { test: 'node --test' } }, null, 2)}\n`,
     ...files,
   };
+}
+
+/** Run `fn` against a scratch dir (deleted afterwards). */
+export async function withTempDir<T>(prefix: string, fn: (dir: string) => Promise<T>): Promise<T> {
+  const dir = await mkdtemp(path.join(os.tmpdir(), `scallopbench-${prefix}-`));
+  try {
+    return await fn(dir);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Run a hidden `node --test` file the agent never sees. It lives in a scratch
+ * dir outside the workspace; `@ws/` in the source becomes the workspace's
+ * file URL, so `import x from '@ws/src/a.js'` reaches the agent's code.
+ */
+export function runHiddenTest(ws: string, id: string, source: string): Promise<CommandResult> {
+  const base = `${pathToFileURL(ws).href}/`;
+  return withTempDir(`hidden-${id}`, async (dir) => {
+    const file = path.join(dir, `${id}.test.mjs`);
+    await writeFile(file, source.replaceAll('@ws/', base));
+    return run('node', ['--test', file], dir);
+  });
+}
+
+/** sha256 of every file under `root` (relative paths), skipping .git and node_modules. */
+export async function fileHashes(root: string, relative = ''): Promise<Map<string, string>> {
+  const hashes = new Map<string, string>();
+  let entries;
+  try {
+    entries = await readdir(path.join(root, relative), { withFileTypes: true });
+  } catch {
+    return hashes;
+  }
+  for (const entry of entries) {
+    const child = path.join(relative, entry.name);
+    if (entry.isDirectory()) {
+      if (entry.name === '.git' || entry.name === 'node_modules') continue;
+      for (const [file, hash] of await fileHashes(root, child)) hashes.set(file, hash);
+    } else if (entry.isFile()) {
+      hashes.set(child, createHash('sha256').update(await readFile(path.join(root, child))).digest('hex'));
+    }
+  }
+  return hashes;
+}
+
+/**
+ * Files of the pristine seed (re-created with `setup` in a scratch dir) that
+ * the agent deleted or changed, ignoring `allowed` paths.
+ */
+export async function changedSeedFiles(
+  ws: string,
+  setup: (dir: string) => Promise<void> | void,
+  allowed: readonly string[] = [],
+): Promise<string[]> {
+  const seed = await withTempDir('seed', async (dir) => {
+    await setup(dir);
+    return fileHashes(dir);
+  });
+  const now = await fileHashes(ws);
+  return [...seed].filter(([file, hash]) => !allowed.includes(file) && now.get(file) !== hash).map(([file]) => file).sort();
+}
+
+/** Count whole-word matches of `word` in every .js/.mjs file under the given dirs. */
+export async function countWord(ws: string, dirs: string[], word: string): Promise<number> {
+  const re = new RegExp(`\\b${word}\\b`, 'g');
+  let total = 0;
+  for (const dir of dirs) {
+    for (const file of (await fileHashes(path.join(ws, dir))).keys()) {
+      if (!/\.m?js$/.test(file)) continue;
+      total += ((await readText(path.join(ws, dir), file)) ?? '').match(re)?.length ?? 0;
+    }
+  }
+  return total;
 }

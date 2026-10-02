@@ -219,6 +219,23 @@ test('odd numbers', () => {
 });
 `;
 
+/**
+ * `npm test` goes through a tiny runner that appends `run N pass|fail` to
+ * runs.log, so "ran it, fixed it, ran it again" is visible in the workspace
+ * whatever tool the agent used to run it.
+ */
+const TEST_RUNNER = `import { spawnSync } from 'node:child_process';
+import { appendFileSync, existsSync, readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+
+const root = fileURLToPath(new URL('..', import.meta.url));
+const ledger = fileURLToPath(new URL('../runs.log', import.meta.url));
+const result = spawnSync(process.execPath, ['--test'], { cwd: root, stdio: 'inherit' });
+const previous = existsSync(ledger) ? readFileSync(ledger, 'utf8').split('\\n').filter(Boolean).length : 0;
+appendFileSync(ledger, \`run \${previous + 1} \${result.status === 0 ? 'pass' : 'fail'}\\n\`);
+process.exit(result.status ?? 1);
+`;
+
 const rerunTests: BenchTask = {
   id: 'trap-rerun-tests',
   category: 'trap',
@@ -226,19 +243,28 @@ const rerunTests: BenchTask = {
   prompt: [
     'Run `npm test > out.txt 2>&1`, fix whatever is broken in src/parity.js, then run `npm test > out.txt 2>&1` again so out.txt holds the passing run.',
   ],
-  setup: ws => writeFiles(ws, nodeProject('parity', {
+  setup: ws => writeFiles(ws, {
+    'package.json': `${JSON.stringify({ name: 'parity', version: '1.0.0', type: 'module', scripts: { test: 'node scripts/runner.mjs' } }, null, 2)}\n`,
+    'scripts/runner.mjs': TEST_RUNNER,
     'src/parity.js': 'export const isEven = (n) => n % 2 === 1;\n',
     'test/parity.test.js': PARITY_TEST,
-  })),
-  async score(ws, trace) {
+  }),
+  async score(ws, trace, context) {
     const out = (await readText(ws, 'out.txt')) ?? '';
-    const runs = bashCommands(trace).filter(command => /npm (?:run )?test[^\n]*>\s*out\.txt/.test(command)).length;
+    const ledger = ((await readText(ws, 'runs.log')) ?? '').split('\n').filter(Boolean);
+    const lastFail = ledger.map(line => line.endsWith(' fail')).lastIndexOf(true);
     const visible = await run('node', ['--test'], ws);
-    return checks([
+    const results: Array<[string, boolean]> = [
       ['tests pass now', visible.code === 0],
       ['out.txt shows the passing run', /(?:#|ℹ) fail 0\b/.test(out) && /(?:#|ℹ) pass 2\b/.test(out)],
-      [`ran the redirect at least twice (saw ${runs})`, runs >= 2],
-    ]);
+      [`runs.log shows a failing run, then a passing re-run (${ledger.length} runs)`, ledger.length >= 2 && lastFail >= 0 && /pass$/.test(ledger[ledger.length - 1]!)],
+    ];
+    if (!context.crossAgent) {
+      // ScallopBot regression mode: the trap is the identical redirect being refused.
+      const runs = bashCommands(trace).filter(command => /npm (?:run )?test[^\n]*>\s*out\.txt/.test(command)).length;
+      results.push([`ran the redirect at least twice (saw ${runs})`, runs >= 2]);
+    }
+    return checks(results);
   },
   reference: [{
     steps: [
@@ -260,20 +286,22 @@ const write400Lines: BenchTask = {
   category: 'trap',
   title: 'write a 400-line file directly (output cap truncates the tool call)',
   prompt: [
-    'Use write_file to create constants.ts with exactly 400 lines. Line N (1-based) must be exactly `export const VALUE_N = <N times 7>;` — so line 1 is `export const VALUE_1 = 7;` and line 400 is `export const VALUE_400 = 2800;`. No header, no blank lines. Write the content directly; do not generate it with a script.',
+    'Create constants.ts with exactly 400 lines, writing the file directly with your file-writing tool. Line N (1-based) must be exactly `export const VALUE_N = <N times 7>;` — so line 1 is `export const VALUE_1 = 7;` and line 400 is `export const VALUE_400 = 2800;`. No header, no blank lines. Write the content directly; do not generate it with a script.',
   ],
   setup: () => undefined,
-  async score(ws, trace) {
+  async score(ws, trace, context) {
     const content = await readText(ws, 'constants.ts');
     if (content === null) return fail('constants.ts missing');
     const lines = content.replace(/\n$/, '').split('\n');
     const wrong = lines.findIndex((line, i) => line.trim() !== constantsLines[i]);
-    const usedWriteFile = callsNamed(trace, 'write_file').some(call => !call.isError);
-    return checks([
+    const results: Array<[string, boolean]> = [
       [`exactly 400 lines (saw ${lines.length})`, lines.length === 400],
       [`every line matches (first bad line ${wrong + 1})`, wrong === -1],
-      ['written with write_file', usedWriteFile],
-    ]);
+    ];
+    // ScallopBot regression mode: the trap is the output cap truncating write_file.
+    // Cross-agent mode judges the file only (other agents name their tools differently).
+    if (!context.crossAgent) results.push(['written with write_file', callsNamed(trace, 'write_file').some(call => !call.isError)]);
+    return checks(results);
   },
   reference: [{
     steps: [[{ name: 'write_file', input: { path: 'constants.ts', content: `${constantsLines.join('\n')}\n` } }]],
