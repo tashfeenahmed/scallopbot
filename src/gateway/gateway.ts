@@ -23,6 +23,7 @@ import { EvolutionRecorder } from '../evolution/signals.js';
 import { EvolutionEngine } from '../evolution/engine.js';
 import { createLoadProcedureSkill } from '../evolution/procedure-skill.js';
 import { SkillStore } from '../evolution/skill-store.js';
+import { LearningRuntime } from '../learning/index.js';
 import { TelegramChannel } from '../channels/telegram.js';
 import { TelegramGateway } from '../channels/telegram-gateway.js';
 import { ApiChannel } from '../channels/api.js';
@@ -84,6 +85,8 @@ export class Gateway {
   private router: Router | null = null;
   private purposeRouter: PurposeRouter | null = null;
   private evolutionEngine: EvolutionEngine | null = null;
+  /** Core memory, skill authoring, curator, background review + refine (Phase 5). */
+  private learning: LearningRuntime | null = null;
   private costTracker: CostTracker | null = null;
   private scallopMemoryStore: ScallopMemoryStore | null = null;
   private backgroundGardener: BackgroundGardener | null = null;
@@ -231,6 +234,9 @@ export class Gateway {
       embedder,
       embeddingModel: embeddingSetup.key,
       rerankProvider,
+      // Foreground recall is BM25 + embeddings (+graph) only unless
+      // MEMORY_FOREGROUND_RERANK=true; no LLM call sits before the reply.
+      foregroundRerank: this.config.memory.foregroundRerank,
       relationsProvider: rerankProvider,
       mmrEnabled: this.config.memory.mmrEnabled,
       mmrLambda: this.config.memory.mmrLambda,
@@ -371,7 +377,10 @@ export class Gateway {
       },
       onSleepTick: async () => {
         await this.evolutionEngine?.runOptimizer();
-        await this.evolutionEngine?.runCurator();
+        // Archive agent-created skills unused for 30 days (pinned/bundled exempt).
+        // Runs even when the evolution optimizer is disabled.
+        if (this.evolutionEngine) await this.evolutionEngine.runCurator();
+        else await this.learning?.curator.runNightly();
       },
     });
 
@@ -416,7 +425,7 @@ export class Gateway {
         maxOutputBytes: this.config.tuning?.skills?.maxOutputBytes,
         canonicalSingleUserIds: this.canonicalSingleUserIds,
         onSkillExecuted: async (name: string, success: boolean) => {
-          if (success) await this.evolutionEngine?.recordSkillUse(name);
+          if (success) await this.learning?.curator.recordSkillUse(name);
         },
       }
     );
@@ -424,6 +433,8 @@ export class Gateway {
 
     // Self-evolution engine (Layer 2). Constructed now that the skill registry +
     // executor exist; the gardener's deep/sleep ticks drive it (late-bound above).
+    // One SkillStore (one .usage.json write queue) shared by evolution + learning.
+    const sharedSkillStore = new SkillStore({ logger: this.logger });
     if (this.config.evolution?.enabled) {
       const evoDb = this.scallopMemoryStore.getDatabase();
       const registry = this.skillRegistry;
@@ -443,9 +454,37 @@ export class Gateway {
             : { exists: false };
         },
         config: this.config.evolution,
+        store: sharedSkillStore,
         logger: this.logger,
       });
       this.logger.debug('Self-evolution engine initialized');
+    }
+
+    {
+      const purposeRouter = this.purposeRouter;
+      const evolutionConfig = this.config.evolution;
+      this.learning = new LearningRuntime({
+        db: this.scallopMemoryStore.getDatabase(),
+        scallopStore: this.scallopMemoryStore,
+        registry: this.skillRegistry,
+        workspace: this.config.agent.workspace,
+        canonicalSingleUserIds: this.canonicalSingleUserIds,
+        skillStore: sharedSkillStore,
+        getReviewProvider: () => purposeRouter.providerFor('evolution'),
+        getCheapProvider: () => purposeRouter.providerFor('cognition'),
+        getJudgeProvider: evolutionConfig?.useLlmJudge === false
+          ? undefined
+          : () => purposeRouter.providerFor('evolution'),
+        curator: evolutionConfig
+          ? {
+              enabled: evolutionConfig.curatorEnabled,
+              staleAfterDays: evolutionConfig.curatorStaleDays,
+              archiveAfterDays: evolutionConfig.curatorArchiveDays,
+              backupKeep: evolutionConfig.curatorBackupKeep,
+            }
+          : undefined,
+        logger: this.logger,
+      });
     }
 
     // Initialize voice manager (for voice reply tool)
@@ -471,7 +510,7 @@ export class Gateway {
       synthesize: mediaVoice ? (text) => mediaVoice.synthesize(text, { format: 'mp3' }) : undefined,
     });
     this.logger.debug(
-      { nativeSkills: ['send_message', 'send_file', 'inspect_artifact', 'voice_reply', 'memory_get', 'load_procedure'].filter(n => this.skillRegistry!.hasSkill(n)) },
+      { nativeSkills: ['send_message', 'send_file', 'inspect_artifact', 'voice_reply', 'memory_get', 'load_procedure', 'memory', 'skill_manage'].filter(n => this.skillRegistry!.hasSkill(n)) },
       'Native skills registered'
     );
 
@@ -1128,6 +1167,11 @@ export class Gateway {
     return this.agent;
   }
 
+  /** Phase 5 learning runtime (core memory, recall helpers, review, refine, curator). */
+  getLearningRuntime(): LearningRuntime | null {
+    return this.learning;
+  }
+
   getSkillRegistry(): SkillRegistry {
     if (!this.skillRegistry) {
       throw new Error('Gateway not initialized');
@@ -1456,8 +1500,11 @@ export class Gateway {
     // Explicit selection is the usage signal that drives curator decisions.
     this.skillRegistry.registerSkill(createLoadProcedureSkill(
       this.skillRegistry,
-      name => this.evolutionEngine?.recordSkillUse(name),
+      name => this.learning?.curator.recordSkillUse(name),
     ));
+
+    // Core memory (`memory` tool) + verified/versioned skill authoring (`skill_manage`).
+    this.learning?.registerTools();
   }
 
   /**

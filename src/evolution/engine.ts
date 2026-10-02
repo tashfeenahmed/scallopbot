@@ -50,6 +50,8 @@ export interface EvolutionEngineDeps {
   config: EvolutionConfig;
   /** Local skills dir the registry loads from (where promotions land). */
   localSkillsDir?: string;
+  /** Share one SkillStore (one usage-write queue) with other learning components. */
+  store?: SkillStore;
   logger?: Logger;
 }
 
@@ -60,7 +62,7 @@ export class EvolutionEngine {
 
   constructor(private readonly deps: EvolutionEngineDeps) {
     this.logger = deps.logger?.child({ component: 'evolution' });
-    this.store = new SkillStore({ localDir: deps.localSkillsDir, logger: this.logger });
+    this.store = deps.store ?? new SkillStore({ localDir: deps.localSkillsDir, logger: this.logger });
     // A standalone loader is enough for loadSkillFile(path) during verification.
     this.loader = new SkillLoader({}, this.logger);
   }

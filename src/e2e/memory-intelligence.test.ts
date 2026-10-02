@@ -110,6 +110,8 @@ describe('E2E Memory Intelligence', () => {
         logger: testLogger,
         embedder: mockEmbedder,
         rerankProvider,
+        // Exercises the opt-in MEMORY_FOREGROUND_RERANK=true path (off by default).
+        foregroundRerank: true,
       });
 
       const sessionManager = new SessionManager(scallopStore.getDatabase());

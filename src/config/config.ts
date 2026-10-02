@@ -244,6 +244,12 @@ const memorySchema = z.object({
   mmrEnabled: z.boolean().default(false),
   /** MMR lambda: balance between relevance (1.0) and diversity (0.0) */
   mmrLambda: z.number().min(0).max(1).default(0.7),
+  /**
+   * LLM-rerank foreground recall (MEMORY_FOREGROUND_RERANK). Off by default:
+   * foreground search is BM25 + embeddings (+graph) fusion only, so no LLM call
+   * sits before the reply. Background jobs opt in per call.
+   */
+  foregroundRerank: z.boolean().default(false),
 });
 
 // Tool policy configuration schema
@@ -445,7 +451,7 @@ export const configSchema = z.object({
   cost: costSchema.default({ warningThreshold: 0.75, customPricing: {} }),
   eventRelay: eventRelaySchema.default({ webhookTimeoutMs: 5000, agentId: 'scallopbot' }),
   context: contextSchema.default({ hotWindowSize: 200, maxContextTokens: 128000, compressionThreshold: 0.7, maxToolOutputBytes: 30000 }),
-  memory: memorySchema.default({ filePath: 'memories.jsonl', persist: true, dbPath: 'memories.db', mmrEnabled: false, mmrLambda: 0.7 }),
+  memory: memorySchema.default({ filePath: 'memories.jsonl', persist: true, dbPath: 'memories.db', mmrEnabled: false, mmrLambda: 0.7, foregroundRerank: false }),
   tools: toolPolicySchema.default({
     loopDetection: {
       maxCallsPerResponse: 64,
@@ -774,6 +780,7 @@ export function loadConfig(): Config {
       dbPath: process.env.MEMORY_DB_PATH || 'memories.db',
       mmrEnabled: process.env.MMR_ENABLED === 'true',
       mmrLambda: process.env.MMR_LAMBDA ? parseFloat(process.env.MMR_LAMBDA) : 0.7,
+      foregroundRerank: process.env.MEMORY_FOREGROUND_RERANK === 'true',
     },
     tools: {
       policy: parsePolicyJson('TOOL_POLICY_JSON'),

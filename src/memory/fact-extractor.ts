@@ -12,7 +12,8 @@ import type { CostTracker } from '../routing/cost.js';
 import { completionBudgetForPurpose } from '../routing/model-limits.js';
 import { completeWithTruncationRetry } from '../providers/completion-retry.js';
 import { resolveStateUserId } from '../utils/state-user-id.js';
-import { cosineSimilarity, type EmbeddingProvider } from './embeddings.js';
+import type { EmbeddingProvider } from './embeddings.js';
+import { isNearDuplicateFact } from './fact-dedupe.js';
 import type { ScallopMemoryStore } from './scallop-store.js';
 import type { MemoryCategory, RecurringSchedule } from './db.js';
 import {
@@ -894,6 +895,7 @@ export class LLMFactExtractor {
           limit: 10,
           minProminence: 0.1,
           queryEmbedding: fact.embedding,
+          rerank: false,
         })
       )
     );
@@ -913,30 +915,30 @@ export class LLMFactExtractor {
         allCandidateMemoryIds.add(r.memory.id);
       }
 
-      // Check for exact duplicates using embeddings
+      // Check for duplicates by embedding similarity + BM25 lexical overlap
+      // (no LLM rerank: that used to cost one call per extracted fact).
       let isDuplicate = false;
-      if (fact.embedding && scallopResults.length > 0) {
-        for (const r of scallopResults) {
-          if (r.memory.embedding) {
-            const similarity = cosineSimilarity(fact.embedding, r.memory.embedding);
-            if (similarity >= this.deduplicationThreshold) {
-              const existingEventDay = r.memory.metadata?.eventDay as string | undefined
-                ?? (r.memory.eventDate == null ? undefined : this.localDay(r.memory.eventDate, userId));
-              // A repeated activity on a different local day is a distinct
-              // episode. Do not reinforce the older row and erase the new date.
-              if (fact.eventDay && fact.eventDay !== existingEventDay) continue;
-              isDuplicate = true;
-              // Reinforce the existing memory: bump confidence, prominence, times_confirmed
-              const db = this.scallopStore.getDatabase();
-              db.reinforceMemory(r.memory.id);
-              this.logger.debug(
-                { memoryId: r.memory.id, content: fact.content },
-                'Duplicate fact reinforced existing memory'
-              );
-              break;
-            }
-          }
-        }
+      for (const r of scallopResults) {
+        const duplicate = isNearDuplicateFact(fact, {
+          content: r.memory.content,
+          embedding: r.memory.embedding,
+          matchType: r.matchType,
+        }, { embeddingThreshold: this.deduplicationThreshold });
+        if (!duplicate) continue;
+        const existingEventDay = r.memory.metadata?.eventDay as string | undefined
+          ?? (r.memory.eventDate == null ? undefined : this.localDay(r.memory.eventDate, userId));
+        // A repeated activity on a different local day is a distinct
+        // episode. Do not reinforce the older row and erase the new date.
+        if (fact.eventDay && fact.eventDay !== existingEventDay) continue;
+        isDuplicate = true;
+        // Reinforce the existing memory: bump confidence, prominence, times_confirmed
+        const db = this.scallopStore.getDatabase();
+        db.reinforceMemory(r.memory.id);
+        this.logger.debug(
+          { memoryId: r.memory.id, content: fact.content },
+          'Duplicate fact reinforced existing memory'
+        );
+        break;
       }
 
       if (isDuplicate) {
@@ -1235,6 +1237,7 @@ export class LLMFactExtractor {
       userId,
       limit: 10,
       minProminence: 0.05, // Include low-prominence memories too
+      rerank: false,
     });
 
     const db = this.scallopStore.getDatabase();
@@ -1280,9 +1283,9 @@ export class LLMFactExtractor {
 
     // Search with multiple queries to find all related facts that should be superseded
     const candidateSets = await Promise.all([
-      this.scallopStore.search(searchQuery, { userId, limit: 5, minProminence: 0.1 }),
+      this.scallopStore.search(searchQuery, { userId, limit: 5, minProminence: 0.1, rerank: false }),
       // Also search by category keywords (e.g., for "Works at Google" → search "works at")
-      correction.category ? this.scallopStore.search(correction.category, { userId, limit: 5, minProminence: 0.1 }) : Promise.resolve([]),
+      correction.category ? this.scallopStore.search(correction.category, { userId, limit: 5, minProminence: 0.1, rerank: false }) : Promise.resolve([]),
     ]);
 
     // Deduplicate candidates
@@ -1395,6 +1398,7 @@ export class LLMFactExtractor {
           userId,
           minProminence: 0.05,
           limit: 5,
+          rerank: false,
         });
         for (const s of similar) {
           if (!newIdSet.has(s.memory.id) && s.memory.isLatest) {
@@ -1657,6 +1661,7 @@ Respond with JSON only:
               userId,
               limit: 3,
               minProminence: 0.1,
+              rerank: false,
             });
             const supersededPrefIds: string[] = [];
             for (const existing of existingPrefs) {
