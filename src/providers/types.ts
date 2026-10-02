@@ -94,6 +94,12 @@ export interface CompletionRequest {
   /** Token budget for thinking/reasoning (used by thinking levels system) */
   thinkingBudgetTokens?: number;
   /**
+   * Reasoning effort for effort-style APIs (GPT-5.x, o-series, OpenRouter
+   * reasoning.effort). Applies only when thinking is enabled; without it the
+   * provider keeps its previous default.
+   */
+  reasoningEffort?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+  /**
    * Provider-enforced JSON shape for strict background routes. Providers with
    * native JSON Schema support send the full schema; compatible providers that
    * only support JSON mode may enforce JSON and leave final schema validation

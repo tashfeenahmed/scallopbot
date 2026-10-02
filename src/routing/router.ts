@@ -12,6 +12,13 @@ export interface ProviderHealth {
   lastError?: string;
   /** When the provider was marked unhealthy (for auto-recovery timing) */
   unhealthySince?: Date;
+  /**
+   * Explicit cooldown end set by coolProvider() (billing, auth, long rate
+   * limits). While set, it replaces the exponential recovery schedule.
+   */
+  cooldownUntil?: Date;
+  /** Error class that caused the explicit cooldown. */
+  cooldownReason?: string;
 }
 
 /** Auto-recovery cooldown: retry unhealthy providers after this many ms (5 minutes). */
@@ -183,6 +190,7 @@ export class Router {
 
   /** Check if an unhealthy provider should be retried (auto-recovery) */
   private shouldRetryUnhealthy(health: ProviderHealth): boolean {
+    if (health.cooldownUntil) return Date.now() >= health.cooldownUntil.getTime();
     if (health.isHealthy) return true;
     if (!health.unhealthySince) return false;
     // Exponential backoff: 5min * 2^(failures-3), capped at 1 hour
@@ -203,13 +211,41 @@ export class Router {
     health.consecutiveFailures = 0;
     health.lastError = undefined;
     health.unhealthySince = undefined;
+    health.cooldownUntil = undefined;
+    health.cooldownReason = undefined;
     health.lastCheck = new Date();
+  }
+
+  /**
+   * Bench a provider for a fixed window regardless of its failure count. Used
+   * by the recovery ladder for errors that will not clear on a retry: billing
+   * or quota exhaustion, bad credentials, and rate limits with a long
+   * Retry-After. A later success clears it.
+   */
+  coolProvider(name: string, cooldownMs: number, reason?: string): void {
+    const health = this.providerHealth.get(name) || {
+      isHealthy: true,
+      lastCheck: new Date(),
+      consecutiveFailures: 0,
+    };
+    const until = Date.now() + Math.max(0, cooldownMs);
+    // Never shorten an existing, longer cooldown.
+    if (!health.cooldownUntil || health.cooldownUntil.getTime() < until) {
+      health.cooldownUntil = new Date(until);
+      health.cooldownReason = reason;
+    }
+    health.isHealthy = false;
+    health.unhealthySince = health.unhealthySince ?? new Date();
+    health.lastCheck = new Date();
+    this.providerHealth.set(name, health);
   }
 
   /** Whether a provider may be attempted now, including a cooldown-expired probe. */
   canAttemptProvider(name: string): boolean {
     const health = this.providerHealth.get(name);
-    return !health || health.isHealthy || this.shouldRetryUnhealthy(health);
+    if (!health) return true;
+    if (health.cooldownUntil) return this.shouldRetryUnhealthy(health);
+    return health.isHealthy || this.shouldRetryUnhealthy(health);
   }
 
   /** Feed outcomes from dynamic/background provider chains into shared health. */
@@ -233,7 +269,8 @@ export class Router {
 
     health.consecutiveFailures++;
     health.lastError = error.message;
-    health.isHealthy = health.consecutiveFailures < this.unhealthyThreshold;
+    const cooling = !!health.cooldownUntil && health.cooldownUntil.getTime() > Date.now();
+    health.isHealthy = health.consecutiveFailures < this.unhealthyThreshold && !cooling;
     health.lastCheck = new Date();
     if (!health.isHealthy) {
       // Start (or restart after a failed half-open attempt) the recovery clock.

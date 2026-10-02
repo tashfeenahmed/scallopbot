@@ -242,7 +242,7 @@ export class OpenRouterProvider implements LLMProvider {
       // effort used for "off" is per-model (see reasoningOffEffortForModel).
       ...(request.enableThinking !== undefined && {
         reasoning: request.enableThinking
-          ? { effort: 'high' }
+          ? { effort: request.reasoningEffort ?? 'high' }
           : { effort: reasoningOffEffortForModel(this.model), exclude: true },
       }),
     };

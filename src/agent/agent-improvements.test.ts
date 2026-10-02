@@ -1053,7 +1053,9 @@ describe('Agent improvements integration', () => {
       const agent = new Agent({ provider, sessionManager: sessions, workspace: testDir, logger: pino({ level: 'silent' }), maxIterations: 6 });
 
       const result = await agent.processMessage(session.id, 'What is on my calendar today?');
-      expect(provider.complete).toHaveBeenCalledTimes(3);
+      // The identical reply after the first nudge shows nudging isn't working:
+      // it is delivered as written instead of nudging again.
+      expect(provider.complete).toHaveBeenCalledTimes(2);
       expect(result.response).toBe('Let me check the calendar now.');
     });
   });

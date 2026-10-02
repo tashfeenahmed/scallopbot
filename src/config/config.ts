@@ -196,6 +196,8 @@ const agentSchema = z.object({
   // operator-configured hard cap; normal turns are governed by per-call and
   // progress-aware safeguards instead of a cumulative wall-clock deadline.
   turnTimeoutMs: z.number().int().min(0).max(900_000).default(0),
+  // /goal runs stop after this many agent turns (GOAL_MAX_TURNS).
+  goalMaxTurns: z.number().int().positive().max(1_000).default(30),
 });
 
 // Logging configuration schema
@@ -537,6 +539,9 @@ export function loadConfig(): Config {
   const turnTimeoutMs = process.env.AGENT_TURN_TIMEOUT_MS
     ? parseInt(process.env.AGENT_TURN_TIMEOUT_MS, 10)
     : 0;
+  const goalMaxTurns = process.env.GOAL_MAX_TURNS
+    ? parseInt(process.env.GOAL_MAX_TURNS, 10)
+    : 30;
   const logLevel = process.env.LOG_LEVEL || 'info';
   const parsePolicyJson = (name: string): unknown => {
     const raw = process.env[name];
@@ -745,6 +750,7 @@ export function loadConfig(): Config {
       maxIterations,
       foregroundCallTimeoutMs,
       turnTimeoutMs,
+      goalMaxTurns,
     },
     logging: {
       level: logLevel,
