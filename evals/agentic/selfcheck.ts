@@ -18,7 +18,10 @@ function emptyTurn(turn: number, userMessage: string, response: string): TurnTra
   };
 }
 
-export async function scoreReference(task: BenchTask, options: { applySteps?: boolean } = {}): Promise<ScoreResult> {
+export async function scoreReference(
+  task: BenchTask,
+  options: { applySteps?: boolean; crossAgent?: boolean } = {},
+): Promise<ScoreResult> {
   delete process.env.AGENT_WORKSPACE;
   const logger = pino({ level: 'silent' });
   const sandbox = await createSandbox(`${task.id}-ref`);
@@ -57,7 +60,7 @@ export async function scoreReference(task: BenchTask, options: { applySteps?: bo
     }
     trace.finalResponse = trace.turns[trace.turns.length - 1]?.response ?? '';
     trace.allResponses = trace.turns.map(turn => turn.response).join('\n\n');
-    return await task.score(sandbox.workspace, trace);
+    return await task.score(sandbox.workspace, trace, { crossAgent: options.crossAgent === true });
   } finally {
     await rm(sandbox.root, { recursive: true, force: true });
   }

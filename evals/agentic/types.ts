@@ -4,9 +4,26 @@
  * A task seeds a fresh workspace, sends one or more user turns to the real
  * Agent, and is scored from the workspace state and the recorded trace —
  * never from the model's own claims about what it did.
+ *
+ * Two scoring modes (see BASELINES.md):
+ * - default: ScallopBot's own regression mode. A few trap scorers also look
+ *   at the trace (which tool ran, how often), because that is the waste
+ *   pattern they reproduce.
+ * - cross-agent (`crossAgent: true`): outcome only. Every scorer judges the
+ *   workspace and the user-visible reply, never tool names or call counts,
+ *   so agents with different tool sets are judged identically. Process
+ *   signals are still reported, as efficiency metrics, not pass/fail.
  */
 
-export type TaskCategory = 'trap' | 'coding' | 'assistant';
+export type TaskCategory = 'trap' | 'coding' | 'assistant' | 'hard';
+
+export interface ScoreContext {
+  /** Outcome-only scoring: never pass/fail on tool names or tool-call counts. */
+  crossAgent: boolean;
+}
+
+/** Process signals reported next to pass/fail (lower is usually better). Never part of the score. */
+export type EfficiencyMetrics = Record<string, number>;
 
 /** One tool call as a reference solution (or a scripted model) would emit it. */
 export interface ReferenceCall {
@@ -36,8 +53,13 @@ export interface BenchTask {
   prompt: string[];
   /** Seed the workspace (absolute path to an empty temp dir). */
   setup(workspace: string): Promise<void> | void;
-  /** Score from workspace state + trace. Must not trust the reply's claims. */
-  score(workspace: string, trace: TaskTrace): Promise<ScoreResult> | ScoreResult;
+  /**
+   * Score from workspace state + trace. Must not trust the reply's claims.
+   * With `context.crossAgent` it may only read the workspace and the replies.
+   */
+  score(workspace: string, trace: TaskTrace, context: ScoreContext): Promise<ScoreResult> | ScoreResult;
+  /** Task-specific process metrics (e.g. tool rounds for a parallel-lookup task). */
+  efficiency?(trace: TaskTrace): EfficiencyMetrics;
   /** One entry per prompt turn. */
   reference: ReferenceTurn[];
   /** Optional per-task wall-clock cap in ms (default from the CLI). */
@@ -130,6 +152,8 @@ export interface TaskRunResult {
   details: string;
   durationMs: number;
   trace: TaskTrace;
+  /** Process signals (tool calls, LLM calls, task-specific); reported, never scored. */
+  efficiency?: EfficiencyMetrics;
   error?: string;
   /** Kept temp workspace (only with --keep). */
   workspace?: string;
@@ -143,6 +167,8 @@ export interface CategoryStats {
 
 export interface ModelScorecard {
   model: string;
+  /** Scoring mode the results were judged in. */
+  scoring?: 'default' | 'cross-agent';
   runs: number;
   passed: number;
   passRate: number;
@@ -163,4 +189,7 @@ export interface ModelScorecard {
   systemNudges: number;
   completionReasons: Record<string, number>;
   llmCallsByPurpose: Record<string, number>;
+  /** Mean tool calls and LLM calls per task run (efficiency, not part of the score). */
+  meanToolCallsPerTask?: number;
+  meanLlmCallsPerTask?: number;
 }

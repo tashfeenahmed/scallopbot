@@ -51,6 +51,8 @@ function codingTask(spec: CodingSpec): BenchTask {
     score: ws => scoreCoding(ws, spec),
     reference: [{
       steps: [
+        // Read first: write_file refuses a blind overwrite of an unread file.
+        [{ name: 'read_file', input: { path: spec.module } }],
         [{ name: 'write_file', input: { path: spec.module, content: spec.solution } }],
         [{ name: 'bash', input: { command: 'npm test 2>&1 | tail -8' } }],
       ],

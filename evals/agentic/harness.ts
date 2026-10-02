@@ -25,6 +25,7 @@ import { SkillRegistry } from '../../src/skills/registry.js';
 import { defineSkill } from '../../src/skills/sdk.js';
 import { registerAgentTools, coreToolHooks } from '../../src/tools/index.js';
 import type { BenchModel } from './providers.js';
+import { efficiencyOf } from './scorecard.js';
 import { CANNED_REFUSAL_RE, TracingProvider, extractTurnTranscript } from './trace.js';
 import type { BenchTask, TaskRunResult, TaskTrace, ToolCallTrace, TurnTrace } from './types.js';
 
@@ -39,6 +40,8 @@ export interface HarnessOptions {
   keepWorkspace?: boolean;
   logger?: Logger;
   repeat?: number;
+  /** Outcome-only scoring (workspace + replies), as for external agents. */
+  crossAgent?: boolean;
 }
 
 export interface BenchSandbox {
@@ -237,7 +240,7 @@ export async function runTask(task: BenchTask, model: BenchModel, options: Harne
   let details = runError ? `run error: ${runError}` : '';
   if (!runError || trace.turns.length > 0) {
     try {
-      const score = await task.score(sandbox.workspace, trace);
+      const score = await task.score(sandbox.workspace, trace, { crossAgent: options.crossAgent === true });
       pass = score.pass;
       details = runError ? `${score.details} (run error: ${runError})` : score.details;
     } catch (error) {
@@ -270,6 +273,7 @@ export async function runTask(task: BenchTask, model: BenchModel, options: Harne
     details,
     durationMs: Date.now() - startedAt,
     trace,
+    efficiency: efficiencyOf(task, trace),
     ...(runError && { error: runError }),
     ...(options.keepWorkspace && { workspace: sandbox.workspace }),
   };
