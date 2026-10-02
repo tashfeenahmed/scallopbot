@@ -33,6 +33,24 @@ import {
 import { DEFAULT_MAX_RETRIES, RETRY_STATUS_CODES, RETRY_DELAY_MS } from './constants.js';
 
 /**
+ * Kimi ids Moonshot no longer serves (404 "Not found the model" since late
+ * Sep 2026), mapped to their direct successor so an old .env keeps working.
+ */
+const RETIRED_MOONSHOT_MODELS: Record<string, string> = {
+  'kimi-k2.5': 'kimi-k2.6',
+  'kimi-k2.5-thinking': 'kimi-k2.6',
+  'kimi-k2-0905': 'kimi-k2.6',
+  'kimi-k2-thinking': 'kimi-k2.6',
+};
+
+export function resolveMoonshotModel(model: string, logger?: { warn: (obj: object, msg: string) => void }): string {
+  const replacement = RETIRED_MOONSHOT_MODELS[model];
+  if (!replacement) return model;
+  logger?.warn({ configured: model, using: replacement }, 'Moonshot model is retired; using its successor');
+  return replacement;
+}
+
+/**
  * Moonshot/Kimi Model IDs
  */
 export const MOONSHOT_MODELS = {
@@ -84,7 +102,7 @@ export class MoonshotProvider implements LLMProvider {
     this.logger = logger;
     // Support both single apiKey and multiple apiKeys
     this.apiKeys = options.apiKeys?.length ? options.apiKeys : [options.apiKey];
-    this.model = options.model || DEFAULT_MODEL;
+    this.model = resolveMoonshotModel(options.model || DEFAULT_MODEL, logger);
     this.maxRetries = options.maxRetries || DEFAULT_MAX_RETRIES;
     this.baseUrl = options.baseUrl || DEFAULT_BASE_URL;
     this.timeout = options.timeout;

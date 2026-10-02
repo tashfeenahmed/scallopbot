@@ -42,7 +42,7 @@ export const OPENAI_MODELS = {
 /** Models that support reasoning_effort parameter */
 const REASONING_MODELS = new Set(['gpt-5.2', 'gpt-5.2-pro', 'o3', 'o4-mini']);
 
-const DEFAULT_MODEL = 'gpt-4.1';
+const DEFAULT_MODEL = 'gpt-5.6-luna';
 // Bumped from 4096 so thinking-heavy models (qwen3.6 on Dell) don't burn the whole
 // budget on reasoning_content and return empty visible output. 8192 leaves room for
 // ~4k thinking + ~4k actual reply.

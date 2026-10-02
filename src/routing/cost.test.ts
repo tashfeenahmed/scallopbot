@@ -856,3 +856,15 @@ describe('CostTracker', () => {
     });
   });
 });
+
+describe('current model pricing and cached input', () => {
+  it('prices current Kimi/GPT models and bills cached input at the cache-read rate', () => {
+    const tracker = new CostTracker({});
+    expect(tracker.calculateCost('kimi-k3', { inputTokens: 1_000_000, outputTokens: 0 })).toBeCloseTo(3);
+    // 800k of 1M input tokens came from cache: 0.2M × $3 + 0.8M × $0.30.
+    expect(tracker.calculateCost('kimi-k3', { inputTokens: 1_000_000, outputTokens: 0, cachedInputTokens: 800_000 }))
+      .toBeCloseTo(0.6 + 0.24);
+    expect(tracker.calculateCost('kimi-k2.6', { inputTokens: 0, outputTokens: 1_000_000 })).toBeCloseTo(4);
+    expect(tracker.calculateCost('gpt-5.6-luna', { inputTokens: 1_000_000, outputTokens: 1_000_000 })).toBeCloseTo(1.4);
+  });
+});

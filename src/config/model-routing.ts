@@ -52,7 +52,7 @@ export type ModelPurpose = keyof ModelsConfig;
  * Canonical per-purpose defaults — the single source of truth. Each value
  * reproduces the prior inline selection exactly, so default behavior is unchanged:
  *   reranker/cognition → fast tier · factExtraction → 2nd non-local upstream
- *   critic/evolution   → primary chain · eval → Moonshot kimi-k2.5 (reproducibility)
+ *   critic/evolution   → primary chain · eval → Moonshot kimi-k2.6 (reproducibility)
  */
 export const DEFAULT_MODELS: ModelsConfig = {
   reranker: { tier: 'fast' },
@@ -60,7 +60,7 @@ export const DEFAULT_MODELS: ModelsConfig = {
   cognition: { tier: 'fast' },
   critic: { use: 'main' },
   evolution: { use: 'main' },
-  eval: { provider: 'moonshot', model: 'kimi-k2.5' },
+  eval: { provider: 'moonshot', model: 'kimi-k2.6' },
 };
 
 /**

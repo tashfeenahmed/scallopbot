@@ -63,7 +63,7 @@ const anthropicProviderSchema = z.object({
 const openaiProviderSchema = z.object({
   apiKey: z.string().default(''),
   baseUrl: z.string().optional(),
-  model: z.string().default('gpt-4.1'),
+  model: z.string().default('gpt-5.6-luna'),
 });
 
 const groqProviderSchema = z.object({

@@ -31,9 +31,9 @@ describe('MoonshotProvider', () => {
     it('should create provider with custom model', () => {
       const customProvider = new MoonshotProvider({
         apiKey: 'test-key',
-        model: 'kimi-k2-thinking',
+        model: 'kimi-k2.7-code',
       });
-      expect(customProvider.model).toBe('kimi-k2-thinking');
+      expect(customProvider.model).toBe('kimi-k2.7-code');
     });
   });
 
@@ -461,5 +461,13 @@ describe('MoonshotProvider', () => {
         })
       );
     });
+  });
+});
+
+describe('retired Kimi models', () => {
+  it('maps ids Moonshot no longer serves to their successor', async () => {
+    const { resolveMoonshotModel } = await import('./moonshot.js');
+    expect(resolveMoonshotModel('kimi-k2.5')).toBe('kimi-k2.6');
+    expect(resolveMoonshotModel('kimi-k3')).toBe('kimi-k3');
   });
 });

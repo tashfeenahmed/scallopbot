@@ -25,7 +25,7 @@ describe('OpenAIProvider', () => {
   describe('constructor', () => {
     it('should create provider with default model', () => {
       expect(provider.name).toBe('openai');
-      expect(provider.model).toBe('gpt-4.1');
+      expect(provider.model).toBe('gpt-5.6-luna');
     });
 
     it('should create provider with custom model', () => {

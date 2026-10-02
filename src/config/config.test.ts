@@ -261,7 +261,10 @@ describe('Config Schema', () => {
     it('should use default workspace if not provided', async () => {
       process.env.ANTHROPIC_API_KEY = 'sk-ant-env-key';
       process.env.TELEGRAM_BOT_TOKEN = 'env-bot-token';
-      delete process.env.AGENT_WORKSPACE;
+      // Empty rather than deleted: loadConfig() reads .env, and dotenv only
+      // fills variables that are undefined, so a developer's own .env would
+      // otherwise supply AGENT_WORKSPACE here.
+      process.env.AGENT_WORKSPACE = '';
 
       const { loadConfig } = await import('./config.js');
       const config = loadConfig();
@@ -425,7 +428,7 @@ describe('Config Schema', () => {
       expect(config.models.cognition).toEqual({ tier: 'fast' });
       expect(config.models.critic).toEqual({ use: 'main' });
       expect(config.models.evolution).toEqual({ use: 'main' });
-      expect(config.models.eval).toEqual({ provider: 'moonshot', model: 'kimi-k2.5' });
+      expect(config.models.eval).toEqual({ provider: 'moonshot', model: 'kimi-k2.6' });
     });
 
     it('should apply MODEL_<PURPOSE> env overrides', async () => {
@@ -536,7 +539,7 @@ describe('Config Schema', () => {
         const config = loadConfig();
 
         expect(config.models.reranker).toEqual({ tier: 'fast' });
-        expect(config.models.eval).toEqual({ provider: 'moonshot', model: 'kimi-k2.5' });
+        expect(config.models.eval).toEqual({ provider: 'moonshot', model: 'kimi-k2.6' });
         expect(config.routing.providerOrder).toEqual(['moonshot', 'anthropic', 'openai', 'groq', 'xai', 'ollama']);
       });
     });

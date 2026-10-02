@@ -10,6 +10,8 @@ import type { CompletionResponse, LLMProvider } from '../providers/types.js';
 export interface ModelPricing {
   inputPerMillion: number;
   outputPerMillion: number;
+  /** Price of input served from the prompt cache. Default: 10% of input. */
+  cachedInputPerMillion?: number;
 }
 
 export interface UsageRecord {
@@ -59,7 +61,8 @@ export interface RequestCheck {
 
 // Default pricing per million tokens.
 const DEFAULT_PRICING: Record<string, ModelPricing> = {
-  // Anthropic
+  // Anthropic (Sonnet 5.5: no published list price found on 2 Oct 2026; Sonnet's standard rate)
+  'claude-sonnet-5-5': { inputPerMillion: 3, outputPerMillion: 15, cachedInputPerMillion: 0.3 },
   'claude-sonnet-4-20250514': { inputPerMillion: 3, outputPerMillion: 15 },
   'claude-sonnet-4-5-20250929': { inputPerMillion: 3, outputPerMillion: 15 },
   'claude-opus-4-20250514': { inputPerMillion: 15, outputPerMillion: 75 },
@@ -84,6 +87,7 @@ const DEFAULT_PRICING: Record<string, ModelPricing> = {
   'gpt-5-nano': { inputPerMillion: 0.05, outputPerMillion: 0.4 },
   'gpt-5-pro': { inputPerMillion: 15, outputPerMillion: 120 },
   // OpenAI — GPT-4.1
+  'gpt-5.6-luna': { inputPerMillion: 0.2, outputPerMillion: 1.2, cachedInputPerMillion: 0.02 },
   'gpt-4.1': { inputPerMillion: 2, outputPerMillion: 8 },
   'gpt-4.1-mini': { inputPerMillion: 0.4, outputPerMillion: 1.6 },
   'gpt-4.1-nano': { inputPerMillion: 0.1, outputPerMillion: 0.4 },
@@ -115,7 +119,13 @@ const DEFAULT_PRICING: Record<string, ModelPricing> = {
   'llama-3.1-70b-versatile': { inputPerMillion: 0.59, outputPerMillion: 0.79 },
   'mixtral-8x7b-32768': { inputPerMillion: 0.24, outputPerMillion: 0.24 },
 
-  // Moonshot (Kimi)
+  // Moonshot (Kimi). Current models first (prices checked 2 Oct 2026).
+  'kimi-k3': { inputPerMillion: 3, outputPerMillion: 15, cachedInputPerMillion: 0.3 },
+  'kimi-k2.6': { inputPerMillion: 0.95, outputPerMillion: 4, cachedInputPerMillion: 0.19 },
+  'kimi-k2.7-code': { inputPerMillion: 0.95, outputPerMillion: 4, cachedInputPerMillion: 0.19 },
+  'kimi-k2.7-code-highspeed': { inputPerMillion: 1.9, outputPerMillion: 8, cachedInputPerMillion: 0.38 },
+  'moonshotai/kimi-k3': { inputPerMillion: 3, outputPerMillion: 15, cachedInputPerMillion: 0.3 },
+  'moonshotai/kimi-k2.6': { inputPerMillion: 0.95, outputPerMillion: 4, cachedInputPerMillion: 0.19 },
   'kimi-k2.5': { inputPerMillion: 0.6, outputPerMillion: 3 },
   'kimi-k2.5-thinking': { inputPerMillion: 0.6, outputPerMillion: 3 },
   'kimi-k2-0905': { inputPerMillion: 0.6, outputPerMillion: 2.5 },
@@ -125,6 +135,8 @@ const DEFAULT_PRICING: Record<string, ModelPricing> = {
   'moonshot-v1-8k': { inputPerMillion: 0.6, outputPerMillion: 2.5 },
 
   // OpenRouter
+  'anthropic/claude-sonnet-5.5': { inputPerMillion: 3, outputPerMillion: 15, cachedInputPerMillion: 0.3 },
+  'openai/gpt-5.6-luna': { inputPerMillion: 0.2, outputPerMillion: 1.2, cachedInputPerMillion: 0.02 },
   'anthropic/claude-3.5-sonnet': { inputPerMillion: 6, outputPerMillion: 30 },
   'anthropic/claude-sonnet-4.5': { inputPerMillion: 3, outputPerMillion: 15 },
   'qwen/qwen3.6-plus': { inputPerMillion: 0.325, outputPerMillion: 1.95 },
@@ -331,11 +343,15 @@ export class CostTracker {
 
   calculateCost(
     model: string,
-    usage: { inputTokens: number; outputTokens: number },
+    usage: { inputTokens: number; outputTokens: number; cachedInputTokens?: number },
     provider?: string
   ): number {
     const pricing = this.getModelPricing(model, provider);
-    const inputCost = (usage.inputTokens / 1_000_000) * pricing.inputPerMillion;
+    // Cached input is a subset of inputTokens, billed at the cache-read rate.
+    const cached = Math.min(Math.max(0, usage.cachedInputTokens ?? 0), usage.inputTokens);
+    const cachedRate = pricing.cachedInputPerMillion ?? pricing.inputPerMillion * 0.1;
+    const inputCost = ((usage.inputTokens - cached) / 1_000_000) * pricing.inputPerMillion
+      + (cached / 1_000_000) * cachedRate;
     const outputCost = (usage.outputTokens / 1_000_000) * pricing.outputPerMillion;
     return inputCost + outputCost;
   }
@@ -344,6 +360,7 @@ export class CostTracker {
     model: string;
     inputTokens: number;
     outputTokens: number;
+    cachedInputTokens?: number;
     provider: string;
     sessionId: string;
     purpose?: string;
@@ -351,6 +368,7 @@ export class CostTracker {
     const cost = this.calculateCost(params.model, {
       inputTokens: params.inputTokens,
       outputTokens: params.outputTokens,
+      cachedInputTokens: params.cachedInputTokens,
     }, params.provider);
 
     const record: UsageRecord = {
@@ -446,6 +464,7 @@ export class CostTracker {
       model: response.model || provider,
       inputTokens: response.usage.inputTokens,
       outputTokens: response.usage.outputTokens,
+      ...(response.usage.cachedInputTokens && { cachedInputTokens: response.usage.cachedInputTokens }),
       provider,
       sessionId,
       ...(purpose && { purpose }),
