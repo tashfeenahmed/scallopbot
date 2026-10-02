@@ -25,11 +25,11 @@ export const BLOCKED_ESCALATION_MESSAGE =
   'BLOCKED_ESCALATION: the same policy applies to every tool. Ask the user the one-line confirmation question instead.';
 
 /** Tools that can act as a detour to an already-blocked target. */
-const ESCALATION_TOOLS = /^(?:bash|run_code|write_file|edit_file|execute_workflow|spawn_agent|execute_goal)$/i;
+const ESCALATION_TOOLS = /^(?:bash|run_code|write_file|edit_file|patch|execute_workflow|spawn_agent|execute_goal)$/i;
 
 /** Executors whose name says nothing about the target. */
 const GENERIC_TOOLS = new Set([
-  'bash', 'run_code', 'write_file', 'edit_file', 'execute_workflow', 'spawn_agent',
+  'bash', 'run_code', 'write_file', 'edit_file', 'patch', 'execute_workflow', 'spawn_agent',
   'execute_goal', 'send_message', 'read_file', 'ls', 'grep', 'glob', 'webfetch',
   'web_search', 'question',
 ]);

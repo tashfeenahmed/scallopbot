@@ -366,11 +366,11 @@ sent as a bearer token.
 | Skill | Description |
 |-------|-------------|
 | `bash` | Execute shell commands |
-| `read_file` | Read file contents |
-| `write_file` | Create/overwrite files |
-| `edit_file` | Make targeted edits |
-| `multi_edit` | Apply several replacements to one file atomically |
-| `apply_patch` | Apply a unified diff patch |
+| `read_file` | Read a file as numbered 2,000-line pages; says "unchanged" on identical re-reads, suggests similar names for wrong paths |
+| `write_file` | Create/overwrite files; hints once before overwriting a file not read this session |
+| `patch` | Main editor: fuzzy old/new replacement (9-step matching chain), atomic multi-edit, unified/Codex diffs; reports only new lint problems |
+| `edit_file` | Alias of `patch` for a single old/new replacement |
+| `undo` | Restore the shadow-git checkpoint taken before the agent's edits (skips files changed since) |
 | `ls` | List files and directories |
 | `glob` | Find files by glob pattern |
 | `grep` | Search file contents with regex |

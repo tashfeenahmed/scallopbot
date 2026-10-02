@@ -67,6 +67,7 @@ import { resolveStateUserId, resolveStateUserTimezone } from '../utils/state-use
 import { inspectArtifact, validateArtifactForDelivery } from '../artifacts/delivery.js';
 import { OutcomeBrain } from '../brain/index.js';
 import { registerMediaSkills, type MediaSkills } from '../skills/media-skills.js';
+import { registerFileTools, type FileTools } from '../tools/files/index.js';
 
 export interface GatewayOptions {
   config: Config;
@@ -107,6 +108,8 @@ export class Gateway {
   private outboundQueue: OutboundQueue | null = null;
   private outcomeBrain: OutcomeBrain | null = null;
   private mediaSkills: MediaSkills | null = null;
+  /** Native file tools (read_file/write_file/patch/edit_file/undo); per-session state lives here. */
+  private fileTools: FileTools | null = null;
   private subAgentDeliveryTimer: NodeJS.Timeout | null = null;
   /** Opt-in email inbox trigger + calendar heads-up (src/triggers/mail-calendar.ts). */
   private mailCalendarTriggers: { stop(): void } | null = null;
@@ -1142,6 +1145,11 @@ export class Gateway {
     return this.mediaProcessor;
   }
 
+  /** Native file tools; e.g. `getFileTools()?.store.resetReads(sessionId)` after compaction. */
+  getFileTools(): FileTools | null {
+    return this.fileTools;
+  }
+
   isGatewayRunning(): boolean {
     return this.isRunning;
   }
@@ -1152,6 +1160,9 @@ export class Gateway {
    */
   private registerNativeSkills(ttsAvailable: boolean): void {
     if (!this.skillRegistry) return;
+
+    // read_file / write_file / patch / edit_file / undo: in-process, per-session stateful.
+    this.fileTools = registerFileTools(this.skillRegistry, { logger: this.logger });
 
     // send_message skill
     const sendMessageSkill = defineSkill('send_message', 'Send a text message to the user immediately. Use this for conversational, human-like messaging.')

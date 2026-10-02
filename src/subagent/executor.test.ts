@@ -33,6 +33,7 @@ import type { EmbeddingProvider } from '../memory/embeddings.js';
 import { CostTracker } from '../routing/cost.js';
 import { EvolutionRecorder } from '../evolution/signals.js';
 import { DEFAULT_EVOLUTION_CONFIG } from '../evolution/config.js';
+import { registerFileTools } from '../tools/files/index.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -170,6 +171,7 @@ async function buildExecutor(
 ) {
   const skillRegistry = createSkillRegistry('/tmp', logger);
   await skillRegistry.initialize();
+  registerFileTools(skillRegistry, { checkpoints: false, lint: false });
   const skillExecutor = createSkillExecutor(logger);
 
   // Fresh router per executor so mock providers don't collide
