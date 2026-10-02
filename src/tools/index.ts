@@ -6,15 +6,22 @@
 import type { SkillRegistry } from '../skills/registry.js';
 import type { AgentHooks } from '../agent/agent.js';
 import { registerShellTools } from './shell/index.js';
+import { registerFileTools, type FileTools, type FileToolsDeps } from './files/index.js';
 import { registerTodoTool } from './todo/index.js';
 import { registerWebTools } from './web/index.js';
 import { persistLargeOutput } from './tool-output.js';
 import { verifyOnStopNudge } from './verify/ledger.js';
 
-export function registerAgentTools(registry: Pick<SkillRegistry, 'registerSkill' | 'getSkill'>): void {
+/** Register every built-in native tool; returns the stateful file tools. */
+export function registerAgentTools(
+  registry: Pick<SkillRegistry, 'registerSkill' | 'getSkill'>,
+  options: { files?: FileToolsDeps } = {},
+): { fileTools: FileTools } {
+  const fileTools = registerFileTools(registry, options.files);
   registerShellTools(registry);
   registerTodoTool(registry);
   registerWebTools(registry);
+  return { fileTools };
 }
 
 /** Hooks the core tools contribute: large-output persistence and the verify nudge. */

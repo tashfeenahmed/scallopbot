@@ -656,9 +656,9 @@ New content.
     it('should include instructions to read SKILL.md when skill applies', () => {
       const prompt = registry.generateSkillPrompt();
 
-      // Should tell agent to use read_file to load full instructions
-      expect(prompt).toContain('read_file');
-      expect(prompt).toContain('SKILL.md');
+      // Should tell agent how to load full instructions
+      expect(prompt).toContain('load_procedure');
+      expect(prompt).toContain('read its SKILL.md');
     });
   });
 });

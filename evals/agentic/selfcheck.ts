@@ -35,9 +35,13 @@ export async function scoreReference(task: BenchTask, options: { applySteps?: bo
         for (const [index, call] of batch.entries()) {
           const skill = registry.getSkill(call.name);
           if (!skill) throw new Error(`reference uses unknown skill ${call.name}`);
-          const result = skill.handler
+          const runOnce = async () => skill.handler
             ? await skill.handler({ args: call.input, workspace: sandbox.workspace, sessionId: 'reference' })
             : await executor.execute(skill, { skillName: call.name, args: call.input, cwd: sandbox.workspace });
+          let result = await runOnce();
+          // write_file refuses a blind overwrite once with a hint; repeating the
+          // identical call goes through, which is what a model does next.
+          if (!result.success && /not written \(hint/i.test(`${result.output ?? ''} ${result.error ?? ''}`)) result = await runOnce();
           const record: ToolCallTrace = {
             turn,
             id: `ref-${turn}-${trace.toolCalls.length}-${index}`,

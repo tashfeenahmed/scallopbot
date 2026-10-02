@@ -72,6 +72,7 @@ import { registerMediaSkills, type MediaSkills } from '../skills/media-skills.js
 import { backgroundProcesses, createBashDoneRouter, type BackgroundExitEvent } from '../tools/shell/index.js';
 import { registerAgentTools, coreToolHooks } from '../tools/index.js';
 import { enqueueInLane, laneIsBusy } from '../agent/command-queue.js';
+import type { FileTools } from '../tools/files/index.js';
 
 export interface GatewayOptions {
   config: Config;
@@ -114,6 +115,8 @@ export class Gateway {
   private outboundQueue: OutboundQueue | null = null;
   private outcomeBrain: OutcomeBrain | null = null;
   private mediaSkills: MediaSkills | null = null;
+  /** Native file tools (read_file/write_file/patch/edit_file/undo); per-session state lives here. */
+  private fileTools: FileTools | null = null;
   private subAgentDeliveryTimer: NodeJS.Timeout | null = null;
   /** Opt-in email inbox trigger + calendar heads-up (src/triggers/mail-calendar.ts). */
   private mailCalendarTriggers: { stop(): void } | null = null;
@@ -503,7 +506,6 @@ export class Gateway {
     // Register native skills (comms + memory_get) that need runtime access
     this.registerNativeSkills(voiceStatus.tts);
     // Native coding/web tools: bash + process, todo, webfetch + web_search
-    registerAgentTools(this.skillRegistry);
     // image_gen / phone_call / sms: bundled SKILL.md, in-process handlers
     const mediaVoice = voiceStatus.tts ? this.voiceManager : null;
     this.mediaSkills = registerMediaSkills({
@@ -1188,6 +1190,11 @@ export class Gateway {
     return this.mediaProcessor;
   }
 
+  /** Native file tools; e.g. `getFileTools()?.store.resetReads(sessionId)` after compaction. */
+  getFileTools(): FileTools | null {
+    return this.fileTools;
+  }
+
   isGatewayRunning(): boolean {
     return this.isRunning;
   }
@@ -1211,6 +1218,10 @@ export class Gateway {
    */
   private registerNativeSkills(ttsAvailable: boolean): void {
     if (!this.skillRegistry) return;
+
+    // Built-in native tools: read_file/write_file/patch/edit_file/undo (per-session
+    // stateful), bash + process, todo, webfetch + web_search.
+    this.fileTools = registerAgentTools(this.skillRegistry, { files: { logger: this.logger } }).fileTools;
 
     // send_message skill
     const sendMessageSkill = defineSkill('send_message', 'Send a text message to the user immediately. Use this for conversational, human-like messaging.')

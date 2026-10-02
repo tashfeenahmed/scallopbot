@@ -15,8 +15,8 @@ const SHA256_RE = /^[a-f0-9]{64}$/i;
  */
 export const NEVER_AUTHORITATIVE_EVIDENCE_TOOLS = new Set([
   'bash', 'shell', 'run_code', 'python', 'node',
-  'memory_search', 'read_file', 'write_file', 'edit_file', 'multi_edit',
-  'apply_patch', 'grep', 'glob', 'ls', 'codesearch',
+  'memory_search', 'read_file', 'write_file', 'edit_file', 'patch', 'undo',
+  'grep', 'glob', 'ls', 'codesearch',
   'board', 'goals', 'reminder', 'triggers', 'progress', 'question',
   'telegram_send', 'send_message', 'spawn_agent',
 ]);

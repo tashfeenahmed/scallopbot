@@ -3,7 +3,7 @@
  *
  * Boots the full pipeline (WebSocket -> Agent -> Mock LLM -> Skill Executor)
  * and simulates a realistic multi-turn conversation where the agent uses
- * the new bundled skills (ls, glob, grep, read_file, multi_edit, apply_patch).
+ * the bundled skills (ls, glob, grep) and the native file tools (read_file, patch).
  *
  * Validates:
  * - Tool execution via real SkillExecutor (spawns tsx scripts)
@@ -198,8 +198,9 @@ describe('E2E Tool Conversation', () => {
       expect(toolNames).toContain('glob');
       expect(toolNames).toContain('grep');
       expect(toolNames).toContain('codesearch');
-      expect(toolNames).toContain('multi_edit');
-      expect(toolNames).toContain('apply_patch');
+      expect(toolNames).toContain('patch');
+      expect(toolNames).not.toContain('multi_edit');
+      expect(toolNames).not.toContain('apply_patch');
 
       // batch should NOT be a tool (disable-model-invocation: true)
       expect(toolNames).not.toContain('batch');
@@ -863,7 +864,7 @@ describe('E2E Tool Conversation', () => {
       // The 8 new skills that have scripts (batch is doc-only, no tool)
       const expectedSkills = [
         'ls', 'glob', 'grep', 'codesearch',
-        'webfetch', 'question', 'multi_edit', 'apply_patch',
+        'webfetch', 'question', 'patch',
       ];
 
       for (const skill of expectedSkills) {
@@ -901,7 +902,7 @@ describe('E2E Tool Conversation', () => {
       const toolNames = tools.map(t => t.name);
 
       // Pre-existing bundled skills should still be here
-      const preExisting = ['read_file', 'write_file', 'edit_file', 'bash'];
+      const preExisting = ['read_file', 'write_file', 'edit_file', 'patch', 'undo', 'bash'];
       for (const skill of preExisting) {
         expect(toolNames).toContain(skill);
       }

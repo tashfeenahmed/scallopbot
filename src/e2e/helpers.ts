@@ -22,6 +22,7 @@ import { CostTracker } from '../routing/cost.js';
 import { LLMFactExtractor } from '../memory/fact-extractor.js';
 import { createSkillRegistry, type SkillRegistry } from '../skills/registry.js';
 import { createSkillExecutor } from '../skills/executor.js';
+import { registerFileTools } from '../tools/files/index.js';
 import type {
   LLMProvider,
   CompletionRequest,
@@ -320,6 +321,8 @@ export async function createE2EGateway(
   registerShellTools(skillRegistry);
   registerTodoTool(skillRegistry);
   registerWebTools(skillRegistry);
+  // Native file tools (read_file/write_file/patch/edit_file/undo), as the gateway registers them.
+  registerFileTools(skillRegistry, { checkpoints: false, lint: false });
 
   // 11. Create SkillExecutor
   const skillExecutor = createSkillExecutor(testLogger);

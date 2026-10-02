@@ -52,8 +52,8 @@ const READ_ONLY_TOOLS = new Set([
   'webfetch', 'memory_search', 'get', 'list', 'search', 'find', 'status',
 ]);
 const KNOWN_LOCAL_MUTATING_TOOLS = new Set([
-  'apply_patch', 'board', 'edit_file', 'git', 'goals', 'manage_skills',
-  'multi_edit', 'npm', 'reminder', 'run_code', 'triggers', 'write_file',
+  'board', 'edit_file', 'git', 'goals', 'manage_skills',
+  'npm', 'patch', 'reminder', 'run_code', 'triggers', 'undo', 'write_file',
 ]);
 const READ_ONLY_ACTION = /^(?:check|count|describe|detail|details|dry_run|exists|export|fetch|get|help|history|inspect|known|list|preview|query|read|schema|search|show|stats|status|summary|view)$/i;
 

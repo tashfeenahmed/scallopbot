@@ -34,6 +34,7 @@ import { CostTracker } from '../routing/cost.js';
 import { EvolutionRecorder } from '../evolution/signals.js';
 import { DEFAULT_EVOLUTION_CONFIG } from '../evolution/config.js';
 import { registerShellTools } from '../tools/shell/index.js';
+import { registerFileTools } from '../tools/files/index.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -172,6 +173,7 @@ async function buildExecutor(
   const skillRegistry = createSkillRegistry('/tmp', logger);
   await skillRegistry.initialize();
   registerShellTools(skillRegistry);
+  registerFileTools(skillRegistry, { checkpoints: false, lint: false });
   const skillExecutor = createSkillExecutor(logger);
 
   // Fresh router per executor so mock providers don't collide

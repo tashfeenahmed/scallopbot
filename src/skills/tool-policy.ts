@@ -20,7 +20,7 @@ export interface ToolPolicy {
  */
 export const TOOL_GROUPS: Record<string, string[]> = {
   'group:read':     ['read_file', 'ls', 'glob', 'grep', 'codesearch', 'inspect_artifact'],
-  'group:write':    ['write_file', 'edit_file', 'multi_edit'],
+  'group:write':    ['write_file', 'patch', 'edit_file', 'undo'],
   'group:exec':     ['bash'],
   'group:web':      ['web_search', 'webfetch'],
   'group:memory':   ['memory_search'],
