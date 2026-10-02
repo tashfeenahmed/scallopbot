@@ -91,6 +91,21 @@ export class OpenAIProvider implements LLMProvider {
     });
   }
 
+  /**
+   * Bench the active key and switch to the next one in the pool. Used by the
+   * agent's recovery ladder for rate-limit, auth and quota errors. Returns
+   * false when there is no other key to switch to.
+   */
+  rotateCredential(): boolean {
+    if (!this.credentialPool?.canRotate()) return false;
+    this.credentialPool.reportFailure(this.apiKey);
+    const nextKey = this.credentialPool.next();
+    if (nextKey === this.apiKey) return false;
+    this.apiKey = nextKey;
+    this.client = this.buildClient(nextKey);
+    return true;
+  }
+
   isAvailable(): boolean {
     if (this.credentialPool) return this.credentialPool.availableCount() > 0;
     return !!this.apiKey && this.apiKey.length > 0;

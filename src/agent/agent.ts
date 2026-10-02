@@ -2192,42 +2192,11 @@ Install new skills from ClawHub with manage_skills (search, install, uninstall, 
   }
 
   /**
-   * Check if an error is a rate limit or transient server error worth retrying.
-   */
-  private isRateLimitError(error: Error & { status?: number; code?: string }): boolean {
-    if (error.status === 429 || error.status === 529) return true;
-    const msg = error.message.toLowerCase();
-    return msg.includes('too many requests') || msg.includes('rate limit') || msg.includes('overloaded');
-  }
-
-  /**
-   * Extract retry delay from error headers or use exponential backoff.
-   */
-  private getRetryDelay(error: Error & { headers?: Record<string, string> }, attempt: number): number {
-    // Check for Retry-After header
-    const headers = (error as { headers?: Record<string, string> }).headers;
-    if (headers) {
-      const retryAfterMs = headers['retry-after-ms'];
-      if (retryAfterMs) return Math.min(parseInt(retryAfterMs, 10), 30000);
-
-      const retryAfter = headers['retry-after'];
-      if (retryAfter) {
-        const secs = parseInt(retryAfter, 10);
-        if (!isNaN(secs)) return Math.min(secs * 1000, 30000);
-      }
-    }
-
-    // Exponential backoff: 2s * 2^attempt with 20% jitter, capped at 30s
-    const base = 2000 * Math.pow(2, attempt);
-    const jitter = base * 0.2 * Math.random();
-    return Math.min(base + jitter, 30000);
-  }
-
-  /**
-   * Execute LLM call with error recovery:
-   * 1. Rate limit retry with exponential backoff
-   * 2. Graduated context compaction on overflow (prune → emergency compress)
-   * 3. Provider fallback via router
+   * Execute an LLM call through the recovery ladder (src/agent/recovery-ladder.ts):
+   * typed error classes with their own action (retry with Retry-After or
+   * backoff, compress, rotate credentials, strip thinking or a bad param,
+   * fail over through the Router's chain with per-provider cooldowns, or
+   * surface), plus a stalled-call kill (180s cloud, 900s local).
    */
   private async executeWithRecovery(
     provider: LLMProvider,
@@ -2235,136 +2204,64 @@ Install new skills from ClawHub with manage_skills (search, install, uninstall, 
     sessionId: string,
     tier: 'fast' | 'standard' | 'capable'
   ): Promise<CompletionResponse> {
-    const MAX_RETRIES = 3;
-    // Provider overrides/defaults may not belong to this Router. Only feed
-    // outcomes back for a provider the Router actually owns.
-    const reportSuccess = (): void => {
-      if (this.router?.getProviderHealth(provider.name)) {
-        this.router.recordProviderSuccess(provider.name);
-      }
-    };
-    const reportFailure = (error: Error): void => {
-      if (this.router?.getProviderHealth(provider.name)) {
-        this.router.recordProviderFailure(provider.name, error);
-      }
-    };
+    const { runRecoveryLadder } = await import('./recovery-ladder.js');
+    const contextManager = this.contextManager;
 
-    // Layer 0: Rate limit retry with exponential backoff
-    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-      try {
-        const response = await provider.complete(request);
-        reportSuccess();
-        return response;
-      } catch (error) {
-        const err = error as Error & { status?: number; headers?: Record<string, string>; code?: string };
-
-        // Local policy/budget failures are deterministic. Trying another
-        // provider cannot make the forbidden call permissible.
-        if (err.code === 'LOCAL_BUDGET_EXCEEDED') throw err;
-
-        // Rate limit — retry with backoff
-        if (this.isRateLimitError(err) && attempt < MAX_RETRIES) {
-          const delay = this.getRetryDelay(err, attempt);
-          this.logger.warn(
-            { attempt: attempt + 1, maxRetries: MAX_RETRIES, delayMs: delay, provider: provider.name },
-            'Rate limited, retrying with backoff'
-          );
-          await new Promise(resolve => setTimeout(resolve, delay));
-          continue;
-        }
-
-        // Not a rate limit — fall through to other recovery strategies
-        // Layer 1: Graduated context compaction on overflow
-        if (this.isContextOverflowError(err)) {
-          this.logger.warn({ error: err.message }, 'Context overflow detected, attempting graduated compaction');
-
-          if (this.contextManager && request.messages.length > 6) {
-            const maxTokens = effectiveContextWindowTokens(
-              provider,
-              this.contextManager.getMaxContextTokens()
-            );
-
-            // Graduated cheapest-first pipeline: dedupe → snip → drop-thinking →
-            // prune → (LLM) summarize, stopping as soon as we fit. The provider
-            // is passed so the summary stage can escalate only if the cheap
-            // stages aren't enough.
-            try {
-              const result = await compact(request.messages, {
-                targetTokens: Math.floor(maxTokens * 0.7),
-                preserveLastN: 6,
-                provider,
-                contextWindowTokens: maxTokens,
-              });
-              this.logger.info(
-                {
-                  stages: result.stagesApplied,
-                  before: result.estimatedTokensBefore,
-                  after: result.estimatedTokensAfter,
-                  model: provider.model || provider.name,
-                  contextWindowTokens: maxTokens,
-                },
-                'Graduated compaction (recovery) applied'
-              );
-              triggerHook({
-                type: 'agent',
-                action: 'compaction',
-                sessionId,
-                context: { messagesBefore: request.messages.length, messagesAfter: result.messages.length, stages: result.stagesApplied },
-                timestamp: new Date(),
-              }).catch(() => {});
-
-              try {
-                const response = await provider.complete({ ...request, messages: result.messages });
-                reportSuccess();
-                return response;
-              } catch (compactError) {
-                this.logger.warn({ error: (compactError as Error).message }, 'Compacted request still overflowed, trying emergency slice');
-              }
-            } catch (compactErr) {
-              this.logger.warn({ error: (compactErr as Error).message }, 'Graduated compaction failed, trying emergency slice');
-            }
-
-            // Last resort: keep only the most recent 3 messages.
-            try {
-              const response = await provider.complete({ ...request, messages: request.messages.slice(-3) });
-              reportSuccess();
-              return response;
-            } catch (retryError) {
-              this.logger.error({ error: (retryError as Error).message }, 'Retry after emergency compression failed');
-            }
-          }
-        }
-
-        // Layer 2: Try fallback providers via router
-        if (this.router) {
-          // Same-provider retries and compaction are exhausted. Feed the
-          // concrete primary failure into shared health before selecting a
-          // fallback, so the next turn honors cooldown.
-          reportFailure(err);
-          this.logger.warn({ provider: provider.name, error: err.message }, 'Provider failed, trying fallback');
-
-          try {
-            // The active provider already failed above; do not immediately pay
-            // for the same dead endpoint again inside the fallback chain.
-            const result = await this.router.executeWithFallback(request, tier, {
-              excludeProviders: [provider.name],
+    // Context overflow: stage 0 = graduated cheapest-first compaction
+    // (dedupe -> snip -> drop-thinking -> prune -> LLM summary), stage 1 = keep
+    // only the last 3 messages. Nothing to do for very short histories.
+    const compress = contextManager
+      ? async (
+          messages: CompletionRequest['messages'],
+          stage: number,
+          activeProvider: LLMProvider,
+        ): Promise<CompletionRequest['messages'] | null> => {
+          if (stage === 0) {
+            if (messages.length <= 6) return null;
+            const maxTokens = effectiveContextWindowTokens(activeProvider, contextManager.getMaxContextTokens());
+            const result = await compact(messages, {
+              targetTokens: Math.floor(maxTokens * 0.7),
+              preserveLastN: 6,
+              provider: activeProvider,
+              contextWindowTokens: maxTokens,
             });
-            this.costTracker?.recordResponse(result.response, result.provider, sessionId);
-            this.logger.info({ fallbackProvider: result.provider, attempted: result.attemptedProviders }, 'Fallback succeeded');
-            return result.response;
-          } catch (fallbackError) {
-            this.logger.error({ error: (fallbackError as Error).message }, 'All fallback providers failed');
-            throw fallbackError;
+            this.logger.info(
+              {
+                stages: result.stagesApplied,
+                before: result.estimatedTokensBefore,
+                after: result.estimatedTokensAfter,
+                model: activeProvider.model || activeProvider.name,
+                contextWindowTokens: maxTokens,
+              },
+              'Graduated compaction (recovery) applied'
+            );
+            triggerHook({
+              type: 'agent',
+              action: 'compaction',
+              sessionId,
+              context: { messagesBefore: messages.length, messagesAfter: result.messages.length, stages: result.stagesApplied },
+              timestamp: new Date(),
+            }).catch(() => {});
+            return result.messages;
           }
+          if (stage === 1 && messages.length > 3) return messages.slice(-3);
+          return null;
         }
+      : undefined;
 
-        // No recovery possible
-        throw error;
-      }
-    }
-
-    // Should not reach here, but TypeScript needs this
-    throw new Error('Exhausted retry attempts');
+    return runRecoveryLadder({
+      provider,
+      request,
+      tier,
+      // The ladder feeds health back only for providers the Router owns, so
+      // per-user overrides outside the Router are tried as primary only.
+      router: this.router ?? null,
+      logger: this.logger,
+      compress,
+      onFallbackResponse: (response, providerName) => {
+        this.costTracker?.recordResponse(response, providerName, sessionId);
+      },
+    });
   }
 
   /**
@@ -2445,32 +2342,6 @@ Install new skills from ClawHub with manage_skills (search, install, uninstall, 
       'Best-of-N selection complete'
     );
     return selection.best.text;
-  }
-
-  /**
-   * Check if error is a context overflow error
-   */
-  private isContextOverflowError(error: Error & { status?: number }): boolean {
-    const message = error.message.toLowerCase();
-
-    // Match specific context/token overflow phrases, not generic words
-    const contextOverflowPatterns = [
-      'context length',
-      'context window',
-      'token limit',
-      'too many tokens',
-      'maximum context',
-      'input too long',
-      'request too large',
-      'content too large',
-      'prompt is too long',
-      'exceeds.*context',
-      'exceeds.*token',
-    ];
-
-    return contextOverflowPatterns.some(pattern =>
-      pattern.includes('.*') ? new RegExp(pattern).test(message) : message.includes(pattern)
-    );
   }
 
   /** Read-only tools: always safe to run alongside each other. */
