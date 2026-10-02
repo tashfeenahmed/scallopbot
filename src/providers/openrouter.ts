@@ -226,6 +226,8 @@ export class OpenRouterProvider implements LLMProvider {
       messages,
       max_tokens: isReasoning ? (request.maxTokens || 8192) : (request.maxTokens || 4096),
       usage: { include: true },
+      // Sticky routing: requests sharing a key reuse the same upstream cache.
+      ...(request.cacheKey && { prompt_cache_key: request.cacheKey }),
       // OpenRouter otherwise infers reasoning from the model. An explicit
       // false is a hard route contract for schema-only background work; the
       // effort used for "off" is per-model (see reasoningOffEffortForModel).

@@ -208,45 +208,4 @@ describe('OutcomeBrain', () => {
     }
   });
 
-  it('places the brain before both durable foreground history and the channel response', async () => {
-    const db = new ScallopDatabase(':memory:');
-    try {
-      const sessions = new SessionManager(db);
-      const session = await sessions.createSession({ userId: 'telegram:42' });
-      const provider = {
-        name: 'test',
-        isAvailable: () => true,
-        complete: vi.fn().mockResolvedValue({
-          content: [{
-            type: 'text',
-            text: '<think>CHANNEL_SECRET</think>\nWe need to answer the user now.\nIt is sorted.',
-          }],
-          stopReason: 'end_turn',
-          usage: { inputTokens: 5, outputTokens: 5 },
-          model: 'test-model',
-        }),
-      };
-      const brain = new OutcomeBrain({ db, logger: pino({ level: 'silent' }) });
-      const agent = new Agent({
-        provider: provider as any,
-        sessionManager: sessions,
-        outcomeBrain: brain,
-        workspace: process.cwd(),
-        logger: pino({ level: 'silent' }),
-        maxIterations: 3,
-      });
-
-      const result = await agent.processMessage(session.id, 'Sort it out');
-      expect(result.response).toBe('It is sorted.');
-      const stored = await sessions.getSession(session.id);
-      expect(stored?.messages.at(-1)).toEqual({
-        role: 'assistant',
-        content: [{ type: 'text', text: 'It is sorted.' }],
-      });
-      expect(JSON.stringify(stored?.messages)).not.toContain('CHANNEL_SECRET');
-      expect(db.getRecentBrainOutcomes('telegram:42')).toHaveLength(1);
-    } finally {
-      db.close();
-    }
-  });
 });

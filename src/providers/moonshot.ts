@@ -442,8 +442,11 @@ export class MoonshotProvider implements LLMProvider {
     // Extract reasoning tokens from completion_tokens_details if available
     const usage = response.usage as typeof response.usage & {
       completion_tokens_details?: { reasoning_tokens?: number };
+      /** Kimi reports automatic context-cache hits at the top level. */
+      cached_tokens?: number;
     };
     const reasoningTokens = usage?.completion_tokens_details?.reasoning_tokens;
+    const cachedInputTokens = usage?.cached_tokens ?? usage?.prompt_tokens_details?.cached_tokens;
 
     return {
       content,
@@ -451,6 +454,7 @@ export class MoonshotProvider implements LLMProvider {
       usage: {
         inputTokens: response.usage?.prompt_tokens || 0,
         outputTokens: response.usage?.completion_tokens || 0,
+        ...(cachedInputTokens ? { cachedInputTokens } : {}),
         ...(reasoningTokens !== undefined && { reasoningTokens }),
       },
       model: response.model,

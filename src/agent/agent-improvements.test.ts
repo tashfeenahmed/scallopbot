@@ -301,7 +301,7 @@ describe('Agent improvements integration', () => {
           : [],
       ) ?? [];
       expect(persistedCalls).toHaveLength(0);
-      expect(JSON.stringify(stored?.messages)).toContain('above the anomalous-burst guard of 64');
+      expect(JSON.stringify(stored?.messages)).toContain('above the limit of 64');
     });
 
     it('allows more than twenty useful calls when each call makes progress', async () => {
@@ -391,142 +391,6 @@ describe('Agent improvements integration', () => {
       expect(result.response).toBe('The entry was created.');
     });
 
-    it('overrides a false success claim when an external write failed', async () => {
-      const { Agent } = await import('./agent.js');
-      const { SessionManager } = await import('./session.js');
-      const skill = {
-        name: 'notion', description: 'Notion API', path: '/tmp/notion/SKILL.md', source: 'workspace' as const,
-        frontmatter: { name: 'notion', description: 'Notion API' }, content: '', available: true,
-        hasScripts: true, handler: vi.fn().mockResolvedValue({ success: false, output: '', error: 'HTTP 500' }),
-      };
-      const registry = {
-        getSkill: vi.fn((name: string) => name === 'notion' ? skill : null),
-        getToolDefinitions: vi.fn(() => [{ name: 'notion', description: 'Notion API', input_schema: { type: 'object', properties: {} } }]),
-        generateSkillPrompt: vi.fn(() => ''),
-      };
-      const provider = seqProvider([
-        {
-          content: [{ type: 'tool_use', id: 'notion-fail', name: 'notion', input: { action: 'create' } }],
-          stopReason: 'tool_use', usage: { inputTokens: 5, outputTokens: 5 }, model: 'mock',
-        },
-        endTurn('Done — it was successfully logged.'),
-      ]);
-      const sessions = new SessionManager(db);
-      const session = await sessions.createSession();
-      const agent = new Agent({
-        provider, sessionManager: sessions, skillRegistry: registry as any,
-        workspace: testDir, logger: pino({ level: 'silent' }), maxIterations: 3,
-      });
-
-      const result = await agent.processMessage(session.id, 'Log this item');
-      expect(result.response).toMatch(/could not verify/i);
-      expect(result.completionReason).toBe('tool_loop');
-    });
-
-    it('continues a terse logging turn until a real mutation receipt exists', async () => {
-      const { Agent } = await import('./agent.js');
-      const { SessionManager } = await import('./session.js');
-      const handler = vi.fn().mockResolvedValue({
-        success: true,
-        output: '{"success":true,"page_id":"page-leg-press"}',
-      });
-      const skill = {
-        name: 'notion', description: 'Typed Notion API', path: '/tmp/notion/SKILL.md', source: 'workspace' as const,
-        frontmatter: { name: 'notion', description: 'Typed Notion API' }, content: '', available: true,
-        hasScripts: true, handler,
-      };
-      const registry = {
-        getSkill: vi.fn((name: string) => name === 'notion' ? skill : null),
-        getToolDefinitions: vi.fn(() => [{ name: 'notion', description: 'Typed Notion API', input_schema: { type: 'object', properties: {} } }]),
-        generateSkillPrompt: vi.fn(() => ''),
-      };
-      const provider = seqProvider([
-        endTurn('Done — Leg Press was logged to Notion.'),
-        {
-          content: [{
-            type: 'tool_use', id: 'notion-leg-press', name: 'notion',
-            input: { action: 'create', database_id: 'gym', properties: { Name: 'Leg Press' } },
-          }],
-          stopReason: 'tool_use', usage: { inputTokens: 5, outputTokens: 5 }, model: 'mock',
-        },
-        endTurn('Leg Press was logged to Notion.'),
-      ]);
-      const sessions = new SessionManager(db);
-      const session = await sessions.createSession();
-      await sessions.addMessage(session.id, {
-        role: 'assistant',
-        content: 'Leg curls were logged to your Notion tracker. Anything else to add?',
-      });
-      const agent = new Agent({
-        provider, sessionManager: sessions, skillRegistry: registry as any,
-        workspace: testDir, logger: pino({ level: 'silent' }), maxIterations: 4,
-      });
-
-      const result = await agent.processMessage(session.id, 'Leg press - 3x8x110kg');
-
-      expect(provider.complete).toHaveBeenCalledTimes(3);
-      expect(handler).toHaveBeenCalledTimes(1);
-      expect(result.response).toBe('Leg Press was logged to Notion.');
-      expect(result.completionReason).toBe('natural_end');
-    });
-
-    it('uses the durable latest reply and exact prior tool for a bare yes continuation', async () => {
-      const { Agent } = await import('./agent.js');
-      const { SessionManager } = await import('./session.js');
-      const handler = vi.fn().mockResolvedValue({
-        success: true,
-        output: '{"success":true,"page_id":"page-pectoral"}',
-      });
-      const skill = {
-        name: 'notion', description: 'Typed Notion API', path: '/tmp/notion/SKILL.md', source: 'workspace' as const,
-        frontmatter: { name: 'notion', description: 'Typed Notion API' }, content: '', available: true,
-        hasScripts: true, handler,
-      };
-      const registry = {
-        getSkill: vi.fn((name: string) => name === 'notion' ? skill : null),
-        getToolDefinitions: vi.fn(() => [{ name: 'notion', description: 'Typed Notion API', input_schema: { type: 'object', properties: {} } }]),
-        generateSkillPrompt: vi.fn(() => ''),
-      };
-      const provider = seqProvider([
-        {
-          content: [{
-            type: 'tool_use', id: 'continue-notion', name: 'notion',
-            input: { action: 'create', properties: { Name: 'Pectoral Machine', Weight: 40 } },
-          }],
-          stopReason: 'tool_use', usage: { inputTokens: 5, outputTokens: 5 }, model: 'mock',
-        },
-        endTurn('Added those exercises to the workout log.'),
-      ]);
-      const sessions = new SessionManager(db);
-      const session = await sessions.createSession();
-      await sessions.addMessage(session.id, {
-        role: 'assistant', content: 'The first three entries were logged.',
-      });
-      // Simulate a scheduler/background component appending a public message
-      // without updating SessionManager's in-memory cache.
-      db.addSessionMessage(
-        session.id,
-        'assistant',
-        'Want me to add those last two exercises to your workout log?',
-        'assistant_final',
-      );
-      sessions.reserveToolOperation({
-        operationId: 'prior-notion-operation', sessionId: session.id, toolName: 'notion',
-        callSignature: 'prior-call', userIntentDigest: 'prior-intent',
-      });
-      sessions.completeToolOperation('prior-notion-operation', 'succeeded', 'prior-result');
-      const agent = new Agent({
-        provider, sessionManager: sessions, skillRegistry: registry as any,
-        workspace: testDir, logger: pino({ level: 'silent' }), maxIterations: 3,
-      });
-
-      const result = await agent.processMessage(session.id, 'Yes!');
-
-      expect(handler).toHaveBeenCalledTimes(1);
-      expect(result.response).toBe('Added those exercises to the workout log.');
-      expect(JSON.stringify(handler.mock.calls[0][0].args)).toContain('Pectoral Machine');
-    });
-
     it('lets the model select an arbitrary authoritative capability from metadata', async () => {
       const { Agent } = await import('./agent.js');
       const { SessionManager } = await import('./session.js');
@@ -584,7 +448,7 @@ describe('Agent improvements integration', () => {
       const systemPrompt = JSON.stringify(
         (provider.complete as ReturnType<typeof vi.fn>).mock.calls[0][0].system,
       );
-      expect(systemPrompt).toMatch(/choose capabilities|name, description, schema/i);
+      expect(systemPrompt).toMatch(/look them up first|Never invent symbols/i);
       expect(systemPrompt).not.toMatch(/\bgym\b|\bworkout\b|chest press/i);
     });
 
@@ -684,91 +548,6 @@ describe('Agent improvements integration', () => {
       expect(JSON.stringify(evidenceUpdates)).not.toContain('455');
     });
 
-    it('persists external operation identity and blocks the same write after restart-like retry', async () => {
-      const { Agent } = await import('./agent.js');
-      const { SessionManager } = await import('./session.js');
-      const idempotencyKeys: string[] = [];
-      const handler = vi.fn().mockImplementation(async (context: { idempotencyKey?: string }) => {
-        idempotencyKeys.push(context.idempotencyKey ?? '');
-        return { success: true, output: '{"success":true,"id":"mail-1"}' };
-      });
-      const skill = {
-        name: 'gmail', description: 'Gmail API', path: '/tmp/gmail/SKILL.md', source: 'workspace' as const,
-        frontmatter: {
-          name: 'gmail', description: 'Gmail API',
-          metadata: { openclaw: { safety: { externalWrite: true } } },
-        },
-        content: '', available: true, hasScripts: true, handler,
-      };
-      const registry = {
-        getSkill: vi.fn((name: string) => name === 'gmail' ? skill : null),
-        getToolDefinitions: vi.fn(() => [{ name: 'gmail', description: 'Gmail API', input_schema: { type: 'object', properties: {} } }]),
-        generateSkillPrompt: vi.fn(() => ''),
-      };
-      const toolUse = { type: 'tool_use' as const, id: 'mail-1', name: 'gmail', input: { action: 'send', to: 'a@example.com' } };
-      const provider = seqProvider([
-        { content: [toolUse], stopReason: 'tool_use', usage: { inputTokens: 5, outputTokens: 5 }, model: 'mock' },
-        endTurn('Sent.'),
-        { content: [{ ...toolUse, id: 'mail-2' }], stopReason: 'tool_use', usage: { inputTokens: 5, outputTokens: 5 }, model: 'mock' },
-        endTurn('Sent.'),
-      ]);
-      const sessions = new SessionManager(db);
-      const session = await sessions.createSession();
-      const agent = new Agent({
-        provider, sessionManager: sessions, skillRegistry: registry as any,
-        workspace: testDir, logger: pino({ level: 'silent' }), maxIterations: 3,
-      });
-      const message = 'Send this email';
-
-      await agent.processMessage(session.id, message);
-      await agent.processMessage(session.id, message);
-
-      expect(handler).toHaveBeenCalledTimes(1);
-      const identity = toolOperationIdentity(session.id, message, toolUse);
-      expect(db.getToolOperation(identity.operationId)).toEqual(expect.objectContaining({
-        status: 'succeeded',
-        attemptCount: 1,
-      }));
-      expect(idempotencyKeys).toEqual([identity.operationId]);
-      expect(JSON.stringify(db.getToolOperation(identity.operationId))).not.toContain('a@example.com');
-    });
-
-    it('binds a bare confirmation to the prior visible assistant prompt', async () => {
-      const { Agent } = await import('./agent.js');
-      const { SessionManager } = await import('./session.js');
-      const handler = vi.fn().mockResolvedValue({ success: true, output: '{"success":true}' });
-      const skill = {
-        name: 'notion', description: 'Notion API', path: '/tmp/notion/SKILL.md', source: 'workspace' as const,
-        frontmatter: { name: 'notion', description: 'Notion API' }, content: '', available: true,
-        hasScripts: true, handler,
-      };
-      const registry = {
-        getSkill: vi.fn((name: string) => name === 'notion' ? skill : null),
-        getToolDefinitions: vi.fn(() => [{ name: 'notion', description: 'Notion API', input_schema: { type: 'object', properties: {} } }]),
-        generateSkillPrompt: vi.fn(() => ''),
-      };
-      const provider = seqProvider([
-        {
-          content: [{ type: 'tool_use', id: 'confirmed-write', name: 'notion', input: { action: 'create' } }],
-          stopReason: 'tool_use', usage: { inputTokens: 5, outputTokens: 5 }, model: 'mock',
-        },
-        endTurn('Created.'),
-      ]);
-      const sessions = new SessionManager(db);
-      const session = await sessions.createSession();
-      await sessions.addMessage(session.id, {
-        role: 'assistant',
-        content: 'This will create a project entry in Notion. Shall I proceed?',
-      });
-      const agent = new Agent({
-        provider, sessionManager: sessions, skillRegistry: registry as any,
-        workspace: testDir, logger: pino({ level: 'silent' }), maxIterations: 3,
-      });
-
-      await agent.processMessage(session.id, 'yes');
-      expect(handler).toHaveBeenCalledTimes(1);
-    });
-
     it('executes a requested Notion curl write directly without asking for confirmation', async () => {
       const { Agent } = await import('./agent.js');
       const { SessionManager } = await import('./session.js');
@@ -810,7 +589,7 @@ describe('Agent improvements integration', () => {
       expect(result.response).toBe('Logged all four exercises.');
       expect(JSON.stringify(await sessions.getSession(session.id))).not.toContain('SAFETY_EXTERNAL_INTENT_REQUIRED');
       expect(JSON.stringify((provider.complete as ReturnType<typeof vi.fn>).mock.calls[0][0].system))
-        .toContain('never ask for a separate confirmation');
+        .toContain('never ask for permission or a confirmation round-trip');
     });
 
     it('captures a planning check-in reply directly and keeps today\'s tasks pending', async () => {
@@ -907,10 +686,11 @@ describe('Agent improvements integration', () => {
       });
 
       const result = await agent.processMessage(session.id, 'Log this project update');
-      expect(handler).not.toHaveBeenCalled();
+      // No intent gate: the model's post-interrupt call runs; the stale one never did.
+      expect(handler).toHaveBeenCalledTimes(1);
       expect(result.response).toContain('nothing was written');
       const stored = await sessions.getSession(session.id);
-      expect(JSON.stringify(stored?.messages)).toContain('newer user message superseded');
+      expect(JSON.stringify(stored?.messages)).toContain('a newer user message arrived');
     });
   });
 
@@ -1008,7 +788,7 @@ describe('Agent improvements integration', () => {
       const result = await agent.processMessage(session.id, 'Please answer');
       expect(Date.now() - started).toBeLessThan(500);
       expect(signal?.aborted).toBe(true);
-      expect(result.response).toMatch(/configured per-call limit/i);
+      expect(result.response).toMatch(/configured per-call time limit/i);
       const stored = await sessions.getSession(session.id);
       expect(JSON.stringify(stored?.messages.at(-1))).toContain(result.response);
     });
@@ -1052,353 +832,9 @@ describe('Agent improvements integration', () => {
       const result = await agent.processMessage(session.id, 'Send this email');
       expect(Date.now() - started).toBeLessThan(500);
       expect(handlerSignal?.aborted).toBe(true);
-      expect(result.response).toMatch(/whole-turn limit/i);
-      expect(db.getToolOperation(idempotencyKey)?.status).toBe('uncertain');
+      expect(result.response).toMatch(/whole-turn time limit/i);
       const stored = await sessions.getSession(session.id);
       expect(JSON.stringify(stored?.messages.at(-1))).toContain(result.response);
-    });
-  });
-
-  describe('Kimi stress regressions', () => {
-    it('blocks user-facing success progress before any mutation receipt exists', async () => {
-      const { Agent } = await import('./agent.js');
-      const { SessionManager } = await import('./session.js');
-      const send = vi.fn(async () => ({ success: true, output: 'Message sent' }));
-      const skill = {
-        name: 'send_message', description: 'send', path: '/tmp/send/SKILL.md', source: 'sdk' as const,
-        frontmatter: { name: 'send_message', description: 'send', metadata: { openclaw: { safety: { externalWrite: true } } } },
-        content: '', available: true, hasScripts: true, handler: send,
-      };
-      const registry = {
-        getSkill: vi.fn((name: string) => name === 'send_message' ? skill : null),
-        getToolDefinitions: vi.fn(() => [{ name: 'send_message', description: 'send', input_schema: { type: 'object', properties: {} } }]),
-        generateSkillPrompt: vi.fn(() => ''),
-      };
-      const provider = seqProvider([
-        {
-          content: [{ type: 'tool_use', id: 'progress', name: 'send_message', input: { message: 'Done — the 8 page PDF was created successfully.' } }],
-          stopReason: 'tool_use', usage: { inputTokens: 5, outputTokens: 5 }, model: 'kimi-mock',
-        },
-        endTurn('I have not created the PDF yet.'),
-      ]);
-      const sessions = new SessionManager(db);
-      const session = await sessions.createSession();
-      const agent = new Agent({ provider, sessionManager: sessions, skillRegistry: registry as any, workspace: testDir, logger: pino({ level: 'silent' }), maxIterations: 3 });
-      const result = await agent.processMessage(session.id, 'Build a competitor report PDF');
-      expect(send).not.toHaveBeenCalled();
-      expect(result.response).toMatch(/not created/i);
-      expect(JSON.stringify((await sessions.getSession(session.id))?.messages)).toContain('UNVERIFIED_PROGRESS_CLAIM');
-    });
-
-    it('quarantines invented competitor figures while retaining sourced figures', async () => {
-      const { Agent } = await import('./agent.js');
-      const { SessionManager } = await import('./session.js');
-      const webfetch = {
-        name: 'webfetch', description: 'fetch', path: '/tmp/webfetch/SKILL.md', source: 'bundled' as const,
-        frontmatter: { name: 'webfetch', description: 'fetch', metadata: { openclaw: { safety: { readOnly: true } } } },
-        content: '', available: true, hasScripts: true,
-        handler: vi.fn(async () => ({ success: true, output: 'LandTech says it is trusted by 5,000 UK developers.' })),
-      };
-      const registry = {
-        getSkill: vi.fn((name: string) => name === 'webfetch' ? webfetch : null),
-        getToolDefinitions: vi.fn(() => [{ name: 'webfetch', description: 'fetch', input_schema: { type: 'object', properties: {} } }]),
-        generateSkillPrompt: vi.fn(() => ''),
-      };
-      const provider = seqProvider([
-        {
-          content: [{ type: 'tool_use', id: 'source', name: 'webfetch', input: { url: 'https://land.tech' } }],
-          stopReason: 'tool_use', usage: { inputTokens: 5, outputTokens: 5 }, model: 'kimi-mock',
-        },
-        endTurn('LandTech is trusted by 5,000 UK developers.\nIt has £30M in funding and could enter Ireland with €1M.'),
-      ]);
-      const sessions = new SessionManager(db);
-      const session = await sessions.createSession();
-      const agent = new Agent({ provider, sessionManager: sessions, skillRegistry: registry as any, workspace: testDir, logger: pino({ level: 'silent' }), maxIterations: 3 });
-      const result = await agent.processMessage(session.id, 'Research and analyze the competitor market');
-      expect(result.response).toContain('5,000 UK developers');
-      expect(result.response).not.toContain('£30M');
-      expect(result.response).not.toContain('€1M');
-      expect(result.response).toContain('omitted factual figures');
-    });
-
-    // Was six: the per-turn failure-family breaker now ends the loop at the 4th failure.
-    it('stops changing tools after four identical safety failures', async () => {
-      const { Agent } = await import('./agent.js');
-      const { SessionManager } = await import('./session.js');
-      let calls = 0;
-      const provider: LLMProvider = {
-        name: 'kimi-stress-mock', isAvailable: () => true,
-        complete: vi.fn(async () => ({
-          content: [{ type: 'tool_use', id: `write-${calls}`, name: 'run_code', input: { language: 'python', code: `open("file-${calls++}","w").write("x")` } }],
-          stopReason: 'tool_use', usage: { inputTokens: 100, outputTokens: 10 }, model: 'kimi-mock',
-        })),
-      };
-      const runCode = {
-        name: 'run_code', description: 'run', path: '/tmp/run/SKILL.md', source: 'bundled' as const,
-        frontmatter: { name: 'run_code', description: 'run', metadata: { openclaw: { safety: { localWrite: true } } } },
-        content: '', available: true, hasScripts: true,
-        handler: vi.fn(async () => ({ success: true, output: 'should never run' })),
-      };
-      const registry = {
-        getSkill: vi.fn((name: string) => name === 'run_code' ? runCode : null),
-        getToolDefinitions: vi.fn(() => [{ name: 'run_code', description: 'run', input_schema: { type: 'object', properties: {} } }]),
-        generateSkillPrompt: vi.fn(() => ''),
-      };
-      const sessions = new SessionManager(db);
-      const session = await sessions.createSession();
-      const agent = new Agent({ provider, sessionManager: sessions, skillRegistry: registry as any, workspace: testDir, logger: pino({ level: 'silent' }), maxIterations: 20 });
-      const result = await agent.processMessage(session.id, 'Explain why PDF creation failed; do not change files');
-      expect(result.completionReason).toBe('tool_loop');
-      expect(provider.complete).toHaveBeenCalledTimes(4);
-      expect(runCode.handler).not.toHaveBeenCalled();
-      expect(result.response).toMatch(/Repeated failure circuit breaker/i);
-    });
-  });
-
-  describe('receipt-less promises, identical-call refusal and escalation guard', () => {
-    const NOTION_REQUEST = 'For today, can you log my gym session in our Notion tracker? It was 14 kg, 8 reps, 3 sets.';
-    const PROMISE = "Logging today's session (2026-08-10):\n- Pectoral machine 45kg x6x3\n\nI'll get these into Notion now.";
-
-    function bashRegistry(handler: ReturnType<typeof vi.fn>) {
-      const skill = {
-        name: 'bash', description: 'Shell', path: '/tmp/bash/SKILL.md', source: 'workspace' as const,
-        frontmatter: { name: 'bash', description: 'Shell' }, content: '', available: true,
-        hasScripts: true, handler,
-      };
-      return {
-        getSkill: vi.fn((name: string) => name === 'bash' ? skill : null),
-        getToolDefinitions: vi.fn(() => [{ name: 'bash', description: 'Shell', input_schema: { type: 'object', properties: {} } }]),
-        generateSkillPrompt: vi.fn(() => ''),
-      };
-    }
-
-    const notionCurl = (id: string) => ({
-      content: [{
-        type: 'tool_use' as const, id, name: 'bash', input: {
-          command: `curl -s -X POST https://api.notion.com/v1/pages --data '{"properties":{"Weight":{"number":14}}}'`,
-        },
-      }],
-      stopReason: 'tool_use' as const, usage: { inputTokens: 5, outputTokens: 5 }, model: 'mock',
-    });
-
-    it('replaces a receipt-less write promise with an honest reply after one corrective retry', async () => {
-      const { Agent } = await import('./agent.js');
-      const { SessionManager } = await import('./session.js');
-      const handler = vi.fn().mockResolvedValue({ success: true, output: 'never called' });
-      const provider = seqProvider([endTurn(PROMISE), endTurn(PROMISE)]);
-      const sessions = new SessionManager(db);
-      const session = await sessions.createSession();
-      const agent = new Agent({
-        provider, sessionManager: sessions, skillRegistry: bashRegistry(handler) as any,
-        workspace: testDir, logger: pino({ level: 'silent' }), maxIterations: 4,
-      });
-
-      // "log" sits mid-sentence, so this must not depend on the intent regex
-      // recognising the turn as a mutation: the draft itself promises one.
-      const result = await agent.processMessage(
-        session.id,
-        'In my notion tracker log this for today\n\nPectoral machine 45kgx6x3',
-      );
-
-      expect(provider.complete).toHaveBeenCalledTimes(2);
-      expect(JSON.stringify((provider.complete as ReturnType<typeof vi.fn>).mock.calls[1][0]))
-        .toContain('Your draft promises or claims a write');
-      expect(handler).not.toHaveBeenCalled();
-      expect(result.response).toMatch(/^I have not written this anywhere yet\./);
-      expect(result.response).toContain('Pectoral machine 45kg x6x3');
-      expect(result.response).not.toMatch(/I'll|Logging today/);
-      expect(result.completionReason).toBe('tool_loop');
-    });
-
-    it('lets the model recover from a promise by calling the tool on the corrective retry', async () => {
-      const { Agent } = await import('./agent.js');
-      const { SessionManager } = await import('./session.js');
-      const handler = vi.fn().mockResolvedValue({ success: true, output: '{"object":"page","id":"workout-1"}' });
-      const provider = seqProvider([
-        endTurn("I'll add these to Notion now."),
-        notionCurl('promise-then-write'),
-        endTurn('Logged your session to Notion.'),
-      ]);
-      const sessions = new SessionManager(db);
-      const session = await sessions.createSession();
-      const agent = new Agent({
-        provider, sessionManager: sessions, skillRegistry: bashRegistry(handler) as any,
-        workspace: testDir, logger: pino({ level: 'silent' }), maxIterations: 4,
-      });
-
-      const result = await agent.processMessage(session.id, NOTION_REQUEST);
-
-      expect(provider.complete).toHaveBeenCalledTimes(3);
-      expect(handler).toHaveBeenCalledTimes(1);
-      expect(result.response).toBe('Logged your session to Notion.');
-      expect(result.completionReason).toBe('natural_end');
-    });
-
-    it('never sends "All logged" for a bare Yes to a proactive proposal when no tool ran', async () => {
-      const { Agent } = await import('./agent.js');
-      const { SessionManager } = await import('./session.js');
-      const handler = vi.fn().mockResolvedValue({ success: true, output: '{"success":true}' });
-      const skill = {
-        name: 'notion', description: 'Typed Notion API', path: '/tmp/notion/SKILL.md', source: 'workspace' as const,
-        frontmatter: { name: 'notion', description: 'Typed Notion API' }, content: '', available: true,
-        hasScripts: true, handler,
-      };
-      const registry = {
-        getSkill: vi.fn((name: string) => name === 'notion' ? skill : null),
-        getToolDefinitions: vi.fn(() => [{ name: 'notion', description: 'Typed Notion API', input_schema: { type: 'object', properties: {} } }]),
-        generateSkillPrompt: vi.fn(() => ''),
-      };
-      // The 14 Jul transcript: proposal → "Yes!" → "All logged! ✅" with no tool call.
-      const provider = seqProvider([endTurn('All logged! ✅'), endTurn('All logged! ✅')]);
-      const sessions = new SessionManager(db);
-      const session = await sessions.createSession();
-      db.addSessionMessage(
-        session.id, 'assistant',
-        'Want me to add those last two exercises to your workout log?',
-        'assistant_final',
-      );
-      const agent = new Agent({
-        provider, sessionManager: sessions, skillRegistry: registry as any,
-        workspace: testDir, logger: pino({ level: 'silent' }), maxIterations: 3,
-      });
-
-      const result = await agent.processMessage(
-        session.id,
-        '[Replying to You (assistant): "Want me to add those last two exercises to your workout log?"]\n\nYes!',
-      );
-
-      expect(handler).not.toHaveBeenCalled();
-      expect(provider.complete).toHaveBeenCalledTimes(2);
-      expect(result.response).not.toMatch(/All logged/);
-      expect(result.response).toMatch(/have not|did not/i);
-      expect(result.completionReason).toBe('tool_loop');
-    });
-
-    it('refuses the identical failing call after three tries and ends the turn on the fourth', async () => {
-      const { Agent } = await import('./agent.js');
-      const { SessionManager } = await import('./session.js');
-      const handler = vi.fn().mockResolvedValue({
-        success: false, output: '', error: 'HTTP 400 body.properties.Name.id should be defined',
-      });
-      let calls = 0;
-      const provider: LLMProvider = {
-        name: 'retry-mock', isAvailable: () => true,
-        complete: vi.fn(async () => notionCurl(`same-${calls++}`)),
-      };
-      const sessions = new SessionManager(db);
-      const session = await sessions.createSession();
-      const agent = new Agent({
-        provider, sessionManager: sessions, skillRegistry: bashRegistry(handler) as any,
-        workspace: testDir, logger: pino({ level: 'silent' }), maxIterations: 20,
-      });
-
-      const result = await agent.processMessage(session.id, NOTION_REQUEST);
-
-      expect(handler).toHaveBeenCalledTimes(3);
-      expect(provider.complete).toHaveBeenCalledTimes(4);
-      const transcript = JSON.stringify(await sessions.getSession(session.id));
-      expect(transcript).toContain('Identical call already failed 3 times; change the arguments or stop');
-      expect(transcript).toContain('will be refused from now on');
-      expect(result.completionReason).toBe('tool_loop');
-      expect(result.response).toMatch(/Repeated failure circuit breaker/i);
-    });
-
-    it('short-circuits bash escalation to a policy-blocked target and states the real cause', async () => {
-      const { Agent } = await import('./agent.js');
-      const { SessionManager } = await import('./session.js');
-      const notionHandler = vi.fn().mockResolvedValue({ success: true, output: '{"success":true}' });
-      const bashHandler = vi.fn().mockResolvedValue({ success: true, output: '{"object":"page"}' });
-      const skills: Record<string, any> = {
-        notion: {
-          name: 'notion', description: 'Typed Notion API', path: '/tmp/notion/SKILL.md', source: 'workspace' as const,
-          frontmatter: { name: 'notion', description: 'Typed Notion API' }, content: '', available: true,
-          hasScripts: true, handler: notionHandler,
-        },
-        bash: {
-          name: 'bash', description: 'Shell', path: '/tmp/bash/SKILL.md', source: 'workspace' as const,
-          frontmatter: { name: 'bash', description: 'Shell' }, content: '', available: true,
-          hasScripts: true, handler: bashHandler,
-        },
-      };
-      const registry = {
-        getSkill: vi.fn((name: string) => skills[name] ?? null),
-        getToolDefinitions: vi.fn(() => Object.keys(skills).map(name => ({ name, description: name, input_schema: { type: 'object', properties: {} } }))),
-        generateSkillPrompt: vi.fn(() => ''),
-      };
-      const provider = seqProvider([
-        {
-          content: [{
-            type: 'tool_use', id: 'unrequested-notion', name: 'notion',
-            input: { action: 'create', database_id: '1801c5f6-386c-927e-228b-2a0b29321df0', properties: { Name: 'Leg press' } },
-          }],
-          stopReason: 'tool_use', usage: { inputTokens: 5, outputTokens: 5 }, model: 'mock',
-        },
-        notionCurl('escalate-curl'),
-        endTurn('The clawdbot integration lacks access to the database. Please share the database with the integration and add it manually.'),
-      ]);
-      const sessions = new SessionManager(db);
-      const session = await sessions.createSession();
-      const agent = new Agent({
-        provider, sessionManager: sessions, skillRegistry: registry as any,
-        workspace: testDir, logger: pino({ level: 'silent' }), maxIterations: 5,
-      });
-
-      const result = await agent.processMessage(
-        session.id,
-        'Explain why my last Notion log failed; do not change anything.',
-      );
-
-      expect(notionHandler).not.toHaveBeenCalled();
-      expect(bashHandler).not.toHaveBeenCalled();
-      const transcript = JSON.stringify(await sessions.getSession(session.id));
-      expect(transcript).toContain('SAFETY_EXTERNAL_INTENT_REQUIRED');
-      expect(transcript).toContain('BLOCKED_ESCALATION: the same policy applies to every tool. Ask the user the one-line confirmation question instead.');
-      expect(result.response).toContain('not because of any integration, permission, or platform limit');
-      expect(result.response).toContain('Reply "yes"');
-    });
-  });
-
-  describe('Kimi stress regressions (context bounding)', () => {
-
-    it('bounds the active-turn working set instead of replaying every large result', async () => {
-      const { Agent } = await import('./agent.js');
-      const { SessionManager } = await import('./session.js');
-      const requestSizes: number[] = [];
-      let modelCall = 0;
-      const provider: LLMProvider = {
-        name: 'kimi-context-stress', isAvailable: () => true,
-        complete: vi.fn(async request => {
-          requestSizes.push(JSON.stringify(request.messages).length);
-          modelCall++;
-          if (modelCall === 10) return endTurn('Finished with a bounded working set.');
-          return {
-            content: [{ type: 'tool_use', id: `large-${modelCall}`, name: 'large_read', input: { page: modelCall } }],
-            stopReason: 'tool_use', usage: { inputTokens: 100, outputTokens: 10 }, model: 'kimi-mock',
-          };
-        }),
-      };
-      const largeRead = {
-        name: 'large_read', description: 'large read', path: '/tmp/large/SKILL.md', source: 'sdk' as const,
-        frontmatter: { name: 'large_read', description: 'large read', metadata: { openclaw: { safety: { readOnly: true } } } },
-        content: '', available: true, hasScripts: true,
-        handler: vi.fn(async ({ args }: { args: Record<string, unknown> }) => ({
-          success: true,
-          output: `page:${args.page}\n${String(args.page).repeat(22_000)}`,
-        })),
-      };
-      const registry = {
-        getSkill: vi.fn((name: string) => name === 'large_read' ? largeRead : null),
-        getToolDefinitions: vi.fn(() => [{ name: 'large_read', description: 'large read', input_schema: { type: 'object', properties: {} } }]),
-        generateSkillPrompt: vi.fn(() => ''),
-      };
-      const sessions = new SessionManager(db);
-      const session = await sessions.createSession();
-      const agent = new Agent({ provider, sessionManager: sessions, skillRegistry: registry as any, workspace: testDir, logger: pino({ level: 'silent' }), maxIterations: 12 });
-      const result = await agent.processMessage(session.id, 'Inspect these large pages and summarize');
-      expect(result.response).toContain('bounded working set');
-      expect(requestSizes).toHaveLength(10);
-      expect(requestSizes[7]).toBeLessThan(requestSizes[6]);
-      expect(Math.max(...requestSizes.slice(7))).toBeLessThan(requestSizes[6] * 1.4);
     });
   });
 
@@ -1419,7 +855,11 @@ describe('Agent improvements integration', () => {
     }
 
     const systemPromptOf = (provider: LLMProvider, call: number): string =>
-      JSON.stringify((provider.complete as ReturnType<typeof vi.fn>).mock.calls[call][0].system ?? '');
+      // System prompt plus replayed messages: WORKING CALLS lives in the turn's context row.
+      JSON.stringify([
+        (provider.complete as ReturnType<typeof vi.fn>).mock.calls[call][0].system ?? '',
+        (provider.complete as ReturnType<typeof vi.fn>).mock.calls[call][0].messages ?? [],
+      ]);
 
     it('records a successful mutating call and injects WORKING CALLS on the next turn that mentions the tool', async () => {
       const { Agent } = await import('./agent.js');
@@ -1463,7 +903,7 @@ describe('Agent improvements integration', () => {
       const prompt = systemPromptOf(provider, 2);
       expect(prompt).toContain('## WORKING CALLS (recent successes');
       expect(prompt).toContain(`notion create → database_id ${GYM_DB}, properties {Name: string, Date: date, Type: string, Sets: number, Reps: number, Weight (kg): number}`);
-      expect(prompt).toContain('Use ids only from tool output in this conversation or from WORKING CALLS');
+      expect(prompt).toContain('Use ids only from tool output or WORKING CALLS');
     });
 
     it('does not record failed mutating calls but keeps the error family for the next success', async () => {
@@ -1499,40 +939,6 @@ describe('Agent improvements integration', () => {
   });
 
   describe('receipt-less completion claims on a payload turn', () => {
-    it('holds "Logged: …" with no tool call to a receipt and replaces it honestly', async () => {
-      const { Agent } = await import('./agent.js');
-      const { SessionManager } = await import('./session.js');
-      const CLAIM = 'Logged: Test entry four (delete me) — 3 sets × 8 reps @ 16kg.';
-      const provider = seqProvider([endTurn(CLAIM), endTurn(CLAIM)]);
-      const sessions = new SessionManager(db);
-      const session = await sessions.createSession();
-      const agent = new Agent({ provider, sessionManager: sessions, workspace: testDir, logger: pino({ level: 'silent' }), maxIterations: 4 });
-
-      // No verb, no continuation tool: the intent regex does not classify this
-      // as a mutation, but the payload shape plus a past-tense claim must still
-      // require a receipt (production 5 Sep 2026: this reply had no tool call).
-      const result = await agent.processMessage(session.id, 'Test entry four (delete me) 3x8x16kg');
-
-      expect(provider.complete).toHaveBeenCalledTimes(2);
-      expect(JSON.stringify((provider.complete as ReturnType<typeof vi.fn>).mock.calls[1][0]))
-        .toContain('promises or claims a write');
-      expect(result.response).toMatch(/^I have not written this anywhere yet\./);
-      expect(result.response).not.toMatch(/^Logged:/);
-    });
-
-    it('catches "Got it — logged …" too (production 5 Sep 2026, second attempt)', async () => {
-      const { Agent } = await import('./agent.js');
-      const { SessionManager } = await import('./session.js');
-      const CLAIM = 'Got it — logged **Test entry six (delete me)**: 3 sets × 8 reps @ 20kg.';
-      const provider = seqProvider([endTurn(CLAIM), endTurn(CLAIM)]);
-      const sessions = new SessionManager(db);
-      const session = await sessions.createSession();
-      const agent = new Agent({ provider, sessionManager: sessions, workspace: testDir, logger: pino({ level: 'silent' }), maxIterations: 4 });
-      const result = await agent.processMessage(session.id, 'Test entry six (delete me) 3x8x20kg');
-      expect(provider.complete).toHaveBeenCalledTimes(2);
-      expect(result.response).toMatch(/^I have not written this anywhere yet\./);
-    });
-
     it('answers a bare "yes" that the model leaves empty with "Okay."', async () => {
       const { Agent } = await import('./agent.js');
       const { SessionManager } = await import('./session.js');

@@ -824,8 +824,10 @@ describe('E2E Tool Conversation', () => {
         if (Array.isArray(m.content)) {
           return (m.content as Array<{ type: string; text?: string }>).some(
             b => {
-              if (b.type !== 'text' || !b.text) return false;
-              const lc = b.text.toLowerCase();
+              // Loop warnings are appended to the newest tool result.
+              const text = b.type === 'text' ? b.text : b.type === 'tool_result' ? String((b as { content?: unknown }).content ?? '') : '';
+              if (!text) return false;
+              const lc = text.toLowerCase();
               return lc.includes('loop') ||
                      lc.includes('repetitive') ||
                      lc.includes('same tool') ||

@@ -122,6 +122,22 @@ export interface CompletionRequest {
   purpose?: string;
   /** Session/run id attached to the trace row (metadata only). */
   traceSessionId?: string;
+  /**
+   * Stable prompt-cache key (the session root id). Providers with keyed
+   * caching (OpenAI, OpenRouter) send it as `prompt_cache_key` so every
+   * request of one conversation lands on the same cache shard.
+   */
+  cacheKey?: string;
+  /**
+   * Prompt-cache lifetime hint. '1h' for interactive chat, '5m' (default)
+   * for cron and sub-agent work. Anthropic honours it on its breakpoints.
+   */
+  cacheTtl?: '5m' | '1h';
+  /**
+   * Add cache breakpoints on the last messages so multi-step turns stop
+   * re-billing the whole history (Anthropic-style explicit caching).
+   */
+  cacheMessages?: boolean;
   /** Extra local diagnostics for trace rows. Metadata only; never sent upstream. */
   traceMetadata?: Record<string, unknown>;
 }
@@ -134,6 +150,8 @@ export interface TokenUsage {
   reasoningTokens?: number;
   /** Input tokens served from prompt cache (subset of inputTokens) */
   cachedInputTokens?: number;
+  /** Input tokens written to the prompt cache this call (subset of inputTokens) */
+  cacheWriteTokens?: number;
   /**
    * Largest single-iteration prompt size in a multi-iteration turn.
    * `inputTokens` is the sum across iterations (for billing); `peakInputTokens`

@@ -126,7 +126,8 @@ describe('E2E Chat Scenarios', () => {
         // Session should have 4 messages: user, assistant(tool_use), user(tool_result), assistant(final)
         const sessionId = response!.sessionId!;
         const session = await ctx.sessionManager.getSession(sessionId);
-        expect(session!.messages.length).toBe(4);
+        // user, [context: turn], assistant tool_use, tool_result, final
+        expect(session!.messages.length).toBe(5);
       }, 30000);
     });
 
@@ -201,7 +202,7 @@ describe('E2E Chat Scenarios', () => {
         // Session should have 6 messages
         const response = messages.find(m => m.type === 'response')!;
         const session = await ctx.sessionManager.getSession(response.sessionId!);
-        expect(session!.messages.length).toBe(6);
+        expect(session!.messages.length).toBe(7);
       }, 30000);
     });
 
@@ -759,7 +760,8 @@ describe('E2E Chat Scenarios', () => {
 
         // Session should have 8 messages total
         const session = await ctx.sessionManager.getSession(sessionId);
-        expect(session!.messages.length).toBe(8);
+        // two turns, each with its [context: turn] row
+        expect(session!.messages.length).toBe(10);
       }, 30000);
     });
   });
@@ -818,7 +820,7 @@ describe('E2E Chat Scenarios', () => {
 
         // Inspect the system prompt of the last LLM call
         const lastRequest = ctx.mockProvider.lastRequest!;
-        const systemPrompt = lastRequest.system ? flattenSystem(lastRequest.system) : '';
+        const systemPrompt = ((lastRequest.system ? flattenSystem(lastRequest.system) : '') + JSON.stringify(lastRequest.messages ?? []));
         expect(systemPrompt).toContain('Emotion:');
         expect(systemPrompt).toContain('Valence:');
       }, 30000);

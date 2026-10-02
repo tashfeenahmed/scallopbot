@@ -235,7 +235,7 @@ describe('E2E Memory Intelligence', () => {
       const lastRequest = ctx.mockProvider.lastRequest;
       expect(lastRequest).not.toBeNull();
 
-      const systemPrompt = lastRequest!.system ? flattenSystem(lastRequest!.system) : '';
+      const systemPrompt = ((lastRequest!.system ? flattenSystem(lastRequest!.system) : '') + JSON.stringify(lastRequest!.messages ?? []));
 
       // Food-related memories should be in the context
       const hasItalianFood = systemPrompt.includes('Italian food');
@@ -367,7 +367,7 @@ describe('E2E Memory Intelligence', () => {
       const lastRequest = ctx.mockProvider.lastRequest;
       expect(lastRequest).not.toBeNull();
 
-      const systemPrompt = lastRequest!.system ? flattenSystem(lastRequest!.system) : '';
+      const systemPrompt = ((lastRequest!.system ? flattenSystem(lastRequest!.system) : '') + JSON.stringify(lastRequest!.messages ?? []));
       const hasJobFact = systemPrompt.includes('Google') && systemPrompt.includes('engineer');
       const hasSalaryFact = systemPrompt.includes('$200k') || systemPrompt.includes('salary');
       // At least the job fact should be in the context (directly matched by query)
@@ -460,7 +460,7 @@ describe('E2E Memory Intelligence', () => {
       const lastRequest = ctx.mockProvider.lastRequest;
       expect(lastRequest).not.toBeNull();
 
-      const systemPrompt = lastRequest!.system ? flattenSystem(lastRequest!.system) : '';
+      const systemPrompt = ((lastRequest!.system ? flattenSystem(lastRequest!.system) : '') + JSON.stringify(lastRequest!.messages ?? []));
 
       // San Francisco should definitely be there (direct search match)
       expect(systemPrompt).toContain('San Francisco');

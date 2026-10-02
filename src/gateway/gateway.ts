@@ -64,6 +64,7 @@ import { registerWebhookEventRelay } from '../hooks/webhook-relay.js';
 import { SafeWorkflowExecutor, createExecuteWorkflowSkill } from '../workflow/index.js';
 import { matchesPolicy } from '../skills/tool-policy.js';
 import { resolveStateUserId, resolveStateUserTimezone } from '../utils/state-user-id.js';
+import { stripThinkTags } from '../utils/output-safety.js';
 import { inspectArtifact, validateArtifactForDelivery } from '../artifacts/delivery.js';
 import { OutcomeBrain } from '../brain/index.js';
 import { registerMediaSkills, type MediaSkills } from '../skills/media-skills.js';
@@ -614,24 +615,9 @@ export class Gateway {
         const channelPolicy = channelId ? this.config.tools?.channelPolicies?.[channelId] : undefined;
         return !channelPolicy || matchesPolicy(toolName, channelPolicy);
       },
-      authorizeStep: async (toolUse, skill, context) => {
-        if (!this.outcomeBrain) return false;
-        const userId = context.userId ?? 'default';
-        const decision = await this.outcomeBrain.decideAction({
-          source: 'workflow',
-          userId,
-          sessionId: context.sessionId,
-          toolUse,
-          skill,
-          turn: {
-            userMessage: context.userMessage ?? 'Run the requested workflow.',
-            previousAssistantMessage: context.previousAssistantMessage,
-            timezone: this.getUserTimezone(userId),
-            now: new Date(context.turnStartedAt ?? Date.now()),
-          },
-        });
-        return decision.assessment.allowed;
-      },
+      // Workflow steps run like any other tool call: the user's request is
+      // the authorization, and tool policy above is the only filter.
+      authorizeStep: async () => true,
     });
     this.skillRegistry!.registerSkill(createExecuteWorkflowSkill(workflowExecutor));
     if (this.goalService) {
@@ -1172,12 +1158,7 @@ export class Gateway {
         if (!ctx.userId) {
           return { success: false, output: 'Cannot send message - user ID not available' };
         }
-        const ok = await this.handleMessageSend(
-          ctx.userId,
-          message.trim(),
-          ctx.sessionId,
-          ctx.userMessage,
-        );
+        const ok = await this.handleMessageSend(ctx.userId, message.trim());
         return ok
           ? { success: true, output: 'Message sent' }
           : { success: false, output: 'Failed to send message - check logs for details' };
@@ -1991,25 +1972,12 @@ export class Gateway {
    * This allows the agent to send multiple messages during its execution loop
    * Uses trigger source abstraction for multi-channel support
    */
-  private async handleMessageSend(
-    userId: string,
-    message: string,
-    sessionId?: string,
-    activeRequest?: string,
-  ): Promise<boolean> {
+  private async handleMessageSend(userId: string, message: string): Promise<boolean> {
     this.logger.debug({ userId, messageLength: message.length }, 'Sending message to user');
 
-    if (this.outcomeBrain) {
-      const decision = await this.outcomeBrain.decideMessage({
-        source: 'progress',
-        userId,
-        sessionId,
-        messages: [message],
-        activeRequest,
-      });
-      if (decision.decision !== 'send' || !decision.message) return false;
-      message = decision.message;
-    }
+    // Progress updates go out as the model wrote them, minus private reasoning.
+    message = stripThinkTags(message).trim();
+    if (!message) return false;
 
     const { source: triggerSource, rawUserId } = this.resolveTriggerSource(userId);
 

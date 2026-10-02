@@ -22,6 +22,12 @@ function createMockProvider(responses: CompletionResponse[]): LLMProvider {
   };
 }
 
+
+/** Everything the model sees for one call: the frozen system prompt plus the replayed messages (where the per-turn context row lives). */
+function modelVisiblePrompt(request: { system?: Parameters<typeof flattenSystem>[0]; messages?: unknown[] }): string {
+  return `${request.system ? flattenSystem(request.system) : ''}\n${JSON.stringify(request.messages ?? [])}`;
+}
+
 describe('Agent', () => {
   let testDir: string;
   let dbPath: string;
@@ -605,9 +611,8 @@ describe('Agent', () => {
     it('instructs the default agent to omit user-excluded items instead of reciting them', async () => {
       const { DEFAULT_SYSTEM_PROMPT } = await import('./agent.js');
       expect(DEFAULT_SYSTEM_PROMPT).toContain('Honor exclusions literally');
-      expect(DEFAULT_SYSTEM_PROMPT).toContain('omit those items entirely');
-      expect(DEFAULT_SYSTEM_PROMPT).toContain('A past memory is not an unfinished task');
-      expect(DEFAULT_SYSTEM_PROMPT).toContain('current goal/board state');
+      expect(DEFAULT_SYSTEM_PROMPT).toContain('omit it entirely');
+      expect(DEFAULT_SYSTEM_PROMPT).toContain('A past memory is not an open task');
     });
 
     it('should load SOUL.md if present in workspace', async () => {
@@ -1000,7 +1005,7 @@ describe('Agent', () => {
       await agent.processMessage(session.id, 'ok test');
 
       const callArgs = (provider.complete as any).mock.calls[0][0];
-      const systemPrompt: string = flattenSystem(callArgs.system);
+      const systemPrompt: string = modelVisiblePrompt(callArgs);
 
       // Verify affect observation block is present
       expect(systemPrompt).toContain('## USER AFFECT CONTEXT');
@@ -1043,7 +1048,7 @@ describe('Agent', () => {
       await agent.processMessage(session.id, 'Hello there');
 
       const callArgs = (provider.complete as any).mock.calls[0][0];
-      const systemPrompt: string = flattenSystem(callArgs.system);
+      const systemPrompt: string = modelVisiblePrompt(callArgs);
 
       // Verify affect observation block is NOT present
       expect(systemPrompt).not.toContain('## USER AFFECT CONTEXT');
@@ -1187,7 +1192,7 @@ describe('Agent', () => {
       await agent.processMessage(session.id, 'ok test');
 
       const callArgs = (provider.complete as any).mock.calls[0][0];
-      const systemPrompt: string = flattenSystem(callArgs.system);
+      const systemPrompt: string = modelVisiblePrompt(callArgs);
 
       // Verify affect block is present but without mood trend (goalSignal is 'stable')
       expect(systemPrompt).toContain('## USER AFFECT CONTEXT');
@@ -1287,7 +1292,7 @@ describe('Agent', () => {
         await agent.processMessage(betaSession.id, 'Show my Project Birch board');
 
         const prompts = (provider.complete as any).mock.calls
-          .map((call: any[]) => flattenSystem(call[0].system));
+          .map((call: any[]) => modelVisiblePrompt(call[0]));
         expect(prompts[0]).toContain('Owner Profile');
         expect(prompts[0]).toContain('Project Amber');
         expect(prompts[0]).not.toContain('Alpha Profile');

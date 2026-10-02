@@ -241,7 +241,7 @@ describe('Agent approval flow', () => {
     content: [{ type: 'text', text }], stopReason: 'end_turn', usage: { inputTokens: 1, outputTokens: 1 }, model: 'test',
   });
 
-  async function buildAgent(responses: CompletionResponse[], toolName = 'notion') {
+  async function buildAgent(responses: CompletionResponse[], toolName = 'notion', confirmTools: string[] = [toolName]) {
     const { Agent } = await import('./agent.js');
     const { SessionManager } = await import('./session.js');
     const { ScallopDatabase } = await import('../memory/db.js');
@@ -268,11 +268,27 @@ describe('Agent approval flow', () => {
       logger: pino({ level: 'silent' }),
       maxIterations: 4,
       approvals,
+      confirmTools,
     });
     return { agent, sessions, session, handler, complete, approvals, db };
   }
 
-  it('returns pendingApproval when the intent gate blocks an unrequested write', async () => {
+  it('runs writes directly when the tool is not on the opt-in confirm list', async () => {
+    const { agent, session, handler, db } = await buildAgent([
+      toolTurn(gymCall('c1')),
+      textTurn('Logged Leg Press.'),
+    ], 'notion', []);
+    try {
+      const result = await agent.processMessage(session.id, 'What did I do at the gym on Monday?');
+      expect(handler).toHaveBeenCalledTimes(1);
+      expect(result.pendingApproval).toBeUndefined();
+      expect(result.response).toBe('Logged Leg Press.');
+    } finally {
+      db.close();
+    }
+  });
+
+  it('returns pendingApproval when an opt-in confirm tool is called', async () => {
     const { agent, session, handler, complete, approvals, db } = await buildAgent([
       toolTurn(gymCall('c1')),
       textTurn('Do you want me to log Leg Press to Notion?'),
@@ -288,7 +304,6 @@ describe('Agent approval flow', () => {
       // The model saw the hint on the tool error so it asks once, not twice.
       const secondCall = complete.mock.calls[1]![0] as { messages: Array<{ content: unknown }> };
       expect(JSON.stringify(secondCall.messages)).toContain(APPROVAL_PROMPT_HINT);
-      expect(JSON.stringify(secondCall.messages)).toContain('SAFETY_EXTERNAL_INTENT_REQUIRED');
     } finally {
       db.close();
     }
@@ -367,7 +382,7 @@ describe('Agent approval flow', () => {
       textTurn('I cannot delete that.'),
     ], 'bash');
     try {
-      // Unrequested destructive call: the gate blocks it and no buttons are offered.
+      // A hard-floor call on the confirm list is refused and no buttons are offered.
       const result = await agent.processMessage(session.id, 'What is in my Notion tracker?');
       expect(handler).not.toHaveBeenCalled();
       expect(result.pendingApproval).toBeUndefined();

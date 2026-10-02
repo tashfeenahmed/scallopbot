@@ -111,6 +111,9 @@ export class OpenAIProvider implements LLMProvider {
       ...(request.temperature !== undefined && !isReasoning && { temperature: request.temperature }),
       ...(request.stopSequences && { stop: request.stopSequences }),
       ...(request.tools && { tools: this.formatTools(request.tools) }),
+      // Keyed caching keeps one conversation on one cache shard. Only the
+      // first-party API knows the field; compatible servers may reject it.
+      ...(request.cacheKey && !this.baseUrl && { prompt_cache_key: request.cacheKey }),
       ...(request.structuredOutput && {
         response_format: {
           type: 'json_schema' as const,
@@ -264,6 +267,7 @@ export class OpenAIProvider implements LLMProvider {
     // Extract reasoning tokens if present (GPT-5.2, o3, o4-mini)
     const completionDetails = response.usage?.completion_tokens_details as
       | { reasoning_tokens?: number } | undefined;
+    const cachedInputTokens = response.usage?.prompt_tokens_details?.cached_tokens;
 
     return {
       content,
@@ -271,6 +275,7 @@ export class OpenAIProvider implements LLMProvider {
       usage: {
         inputTokens: response.usage?.prompt_tokens || 0,
         outputTokens: response.usage?.completion_tokens || 0,
+        ...(cachedInputTokens ? { cachedInputTokens } : {}),
         ...(completionDetails?.reasoning_tokens && {
           reasoningTokens: completionDetails.reasoning_tokens,
         }),

@@ -139,7 +139,7 @@ describe('E2E Cognitive Affect & Heartbeat', () => {
         expect(lastRequest).not.toBeNull();
 
         // The system prompt should contain the affect context block
-        const systemPrompt = lastRequest!.system ? flattenSystem(lastRequest!.system) : '';
+        const systemPrompt = ((lastRequest!.system ? flattenSystem(lastRequest!.system) : '') + JSON.stringify(lastRequest!.messages ?? []));
 
         expect(systemPrompt).toContain('USER AFFECT CONTEXT');
 

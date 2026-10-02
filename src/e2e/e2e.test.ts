@@ -167,7 +167,7 @@ describe('E2E WebSocket Integration', () => {
     expect(lastRequest).not.toBeNull();
 
     // The system prompt should contain our pre-seeded memory
-    const systemPrompt = lastRequest!.system ? flattenSystem(lastRequest!.system) : '';
+    const systemPrompt = ((lastRequest!.system ? flattenSystem(lastRequest!.system) : '') + JSON.stringify(lastRequest!.messages ?? []));
     const hasMemoryInContext =
       systemPrompt.includes('SpaceX') ||
       systemPrompt.includes('robotics');
