@@ -79,6 +79,13 @@ export interface SubAgentRun {
   batchId?: string;
   batchIndex?: number;
   spawnDepth: number;
+  /** LLM calls made so far (live, for check_agents). */
+  iterations?: number;
+  /** Latest progress_note text from the child. */
+  progressNote?: string;
+  progressNoteAt?: number;
+  /** Where the child's final report was written (fan-in through files). */
+  reportPath?: string;
   result?: SubAgentResult;
   error?: string;
   /** Recent chat transcript for sub-agent context (injected by scheduler) */
@@ -104,8 +111,11 @@ export interface SubAgentResult extends StructuredSubAgentResult {
   costUsd: number;
 }
 
+export type AnnounceKind = 'agent-result' | 'agent-exited' | 'agent-progress';
+
 /**
- * Entry queued for the parent agent to receive on next iteration
+ * Entry queued for the parent agent to receive on next iteration.
+ * Format it with formatAnnounceEntry() from ./messages.js.
  */
 export interface AnnounceEntry {
   runId: string;
@@ -114,6 +124,18 @@ export interface AnnounceEntry {
   result: SubAgentResult;
   tokenUsage: { inputTokens: number; outputTokens: number };
   timestamp: number;
+  /** Defaults to 'agent-result' when absent (legacy entries). */
+  kind?: AnnounceKind;
+  /** Full report text (uncapped; the formatter applies the cap). */
+  report?: string;
+  /** Report file the parent can read_file for the full text. */
+  reportPath?: string;
+  /** agent-exited: why the child stopped without a final answer. */
+  exitReason?: string;
+  /** agent-exited: the child's last assistant text (tail is shown). */
+  lastText?: string;
+  /** agent-progress: the note text. */
+  progressNote?: string;
 }
 
 /**
@@ -122,7 +144,10 @@ export interface AnnounceEntry {
 export interface SubAgentConfig {
   maxConcurrentPerSession: number;
   maxConcurrentGlobal: number;
-  /** Maximum nested child depth. 0 disables child-created children. */
+  /**
+   * Maximum sub-agent nesting below a top-level session. 1 = children only,
+   * 2 (default) = children may spawn grandchildren, grandchildren cannot spawn.
+   */
   maxSpawnDepth: number;
   defaultTimeoutSeconds: number;
   maxTimeoutSeconds: number;
@@ -140,27 +165,34 @@ export interface SubAgentConfig {
   /** Retain compact, redacted run diagnostics after protocol payload cleanup. */
   diagnosticRetentionSeconds: number;
   allowMemoryWrites: boolean;
+  /** Minimum gap between a child's progress_note calls. */
+  progressNoteIntervalSeconds: number;
+  /** Forward progress notes to the parent as [agent-progress: name] (never wakes it). */
+  forwardProgressNotes: boolean;
 }
 
 /**
  * Default sub-agent configuration
  */
 export const DEFAULT_SUBAGENT_CONFIG: SubAgentConfig = {
-  maxConcurrentPerSession: 3,
-  maxConcurrentGlobal: 5,
-  maxSpawnDepth: 1,
+  maxConcurrentPerSession: 8,
+  maxConcurrentGlobal: 24,
+  maxSpawnDepth: 2,
   /** No hard wall-clock timeout by default; progress-aware idle timeout governs. */
   defaultTimeoutSeconds: 0,
   maxTimeoutSeconds: 3600,
   defaultIdleTimeoutSeconds: 300,
   maxIdleTimeoutSeconds: 1800,
-  defaultModelTier: 'fast',
-  maxIterations: 10,
-  maxInputTokens: 80_000,
+  defaultModelTier: 'standard',
+  maxIterations: 60,
+  /** Cumulative across every call of a run; the $ cap is the real guard. */
+  maxInputTokens: 4_000_000,
   maxCostUsdPerRun: 2,
-  maxSummaryChars: 12_000,
+  maxSummaryChars: 24_000,
   defaultContextMode: 'brief',
   cleanupAfterSeconds: 3600,
   diagnosticRetentionSeconds: 30 * 24 * 60 * 60,
   allowMemoryWrites: false,
+  progressNoteIntervalSeconds: 30,
+  forwardProgressNotes: true,
 };

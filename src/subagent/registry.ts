@@ -74,7 +74,7 @@ export class SubAgentRegistry {
       taskName: input.taskName,
       context: input.context,
       acceptanceCriteria: input.acceptanceCriteria,
-      label: input.label || `sub-${id.slice(0, 6)}`,
+      label: this.uniqueLabel(parentSessionId, input.label || `sub-${id.slice(0, 6)}`),
       status: 'pending',
       allowedSkills: input.skills || [],
       modelTier: input.modelTier || this.config.defaultModelTier,
@@ -117,6 +117,44 @@ export class SubAgentRegistry {
 
     this.logger.debug({ runId: id, label: run.label, parent: parentSessionId }, 'Sub-agent run created');
     return run;
+  }
+
+  /** Names are unique per parent so each child gets its own report file. */
+  private uniqueLabel(parentSessionId: string, wanted: string): string {
+    const base = wanted.trim().slice(0, 80) || 'agent';
+    const taken = new Set(this.getRunsForParent(parentSessionId).map(run => run.label));
+    if (!taken.has(base)) return base;
+    for (let n = 2; ; n++) {
+      const candidate = `${base}-${n}`;
+      if (!taken.has(candidate)) return candidate;
+    }
+  }
+
+  /** Find the run whose child session is `childSessionId`. */
+  getRunByChildSession(childSessionId: string): SubAgentRun | undefined {
+    for (const run of this.runs.values()) {
+      if (run.childSessionId === childSessionId) return run;
+    }
+    return undefined;
+  }
+
+  /** Count one more LLM call for a run (live status for check_agents). */
+  markIteration(runId: string): void {
+    const run = this.runs.get(runId);
+    if (run) run.iterations = (run.iterations ?? 0) + 1;
+  }
+
+  setProgressNote(runId: string, note: string): void {
+    const run = this.runs.get(runId);
+    if (!run) return;
+    run.progressNote = note;
+    run.progressNoteAt = Date.now();
+    this.markProgress(runId);
+  }
+
+  setReportPath(runId: string, reportPath: string): void {
+    const run = this.runs.get(runId);
+    if (run) run.reportPath = reportPath;
   }
 
   /**
@@ -214,7 +252,9 @@ export class SubAgentRegistry {
       if (role !== 'orchestrator') {
         return { allowed: false, reason: 'Only orchestrator sub-agents may spawn children' };
       }
-      if (depth >= this.config.maxSpawnDepth) {
+      // Children carry depth 0, grandchildren 1. A session at depth d would
+      // create level d+2 below the top-level session.
+      if (depth + 2 > this.config.maxSpawnDepth) {
         return { allowed: false, reason: `Maximum sub-agent spawn depth reached (${this.config.maxSpawnDepth})` };
       }
     }

@@ -527,22 +527,24 @@ describe('SubAgentExecutor integration', () => {
     expect(systemPrompt).not.toContain('**bash**');
   }, 30_000);
 
-  it('keeps implicit sub-agent tools read-only', async () => {
-    const provider = createTrackingProvider(['Read-only defaults confirmed. [DONE]']);
+  it('gives implicit sub-agents the real coding toolkit that exists in the registry', async () => {
+    const provider = createTrackingProvider(['Defaults confirmed. [DONE]']);
     const { executor } = await buildExecutor(provider);
     const parentSession = await ctx.sessionManager.createSession({ label: 'parent' });
 
     await executor.spawnAndWait(parentSession.id, {
-      task: 'Read the project file and summarize it',
-      label: 'readonly-defaults',
+      task: 'Summarize the weather',
+      label: 'real-defaults',
     });
 
     const toolNames = (provider.allRequests[0].tools ?? []).map(tool => tool.name);
-    expect(toolNames).toContain('read_file');
-    expect(toolNames).not.toContain('bash');
-    expect(toolNames).not.toContain('write_file');
-    expect(toolNames).not.toContain('edit_file');
+    for (const name of ['read_file', 'grep', 'glob', 'ls', 'edit_file', 'write_file', 'bash', 'webfetch']) {
+      expect(toolNames).toContain(name);
+    }
+    // Tools outside the default list, or missing from the registry, are not invented.
     expect(toolNames).not.toContain('agent_browser');
+    expect(toolNames).not.toContain('todo');
+    expect(toolNames).not.toContain('send_message');
   }, 30_000);
 
   // -----------------------------------------------------------------------

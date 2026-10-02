@@ -57,6 +57,10 @@ import { BotConfigManager } from '../channels/bot-config.js';
 import { GoalService, createVerifiedGoalSkill } from '../goals/index.js';
 import { BoardService } from '../board/board-service.js';
 import { SubAgentRegistry, SubAgentExecutor, AnnounceQueue } from '../subagent/index.js';
+import { createSubAgentSkills } from '../subagent/tools.js';
+import { formatAgentExited, formatAgentResult } from '../subagent/messages.js';
+import { SessionWaker, setSessionWaker, type WakeOptions, type WakeOutcome, type WakeTurnRequest } from './wake.js';
+import { laneIsBusy } from '../agent/command-queue.js';
 import { InterruptQueue } from '../agent/interrupt-queue.js';
 import { setTraceSink } from '../routing/trace-tap.js';
 import { setHookLogger } from '../hooks/hooks.js';
@@ -108,6 +112,7 @@ export class Gateway {
   private outcomeBrain: OutcomeBrain | null = null;
   private mediaSkills: MediaSkills | null = null;
   private subAgentDeliveryTimer: NodeJS.Timeout | null = null;
+  private sessionWaker: SessionWaker | null = null;
   /** Opt-in email inbox trigger + calendar heads-up (src/triggers/mail-calendar.ts). */
   private mailCalendarTriggers: { stop(): void } | null = null;
   /** Explicit aliases for this deployment's single canonical state owner. */
@@ -553,6 +558,11 @@ export class Gateway {
             payloadJson: JSON.stringify({
               runId: row.id,
               label: row.label,
+              kind: 'agent-exited',
+              message: formatAgentExited(row.label, '', {
+                reason: 'process restarted while the agent was running; check for partial side effects before retrying',
+                runId: row.id,
+              }),
               result: {
                 status: 'blocked',
                 summary: 'The worker was interrupted by a process restart, so no success was assumed.',
@@ -588,6 +598,9 @@ export class Gateway {
       config: subagentConfig,
       canonicalSingleUserIds: this.canonicalSingleUserIds,
       deliveryOutbox: this.scallopMemoryStore!.getDatabase(),
+      // The outbox row is written before this fires; drain it right away
+      // instead of waiting for the 1s tick so idle parents wake promptly.
+      onResultReady: () => { if (this.isRunning) void this.drainSubAgentDeliveriesSafely(); },
       evolutionRecorder,
       outcomeBrain: this.outcomeBrain,
       skillPolicyResolver: async (skillName, context) => {
@@ -683,6 +696,14 @@ export class Gateway {
       interruptQueue: this.interruptQueue,
     });
     this.logger.debug('Agent initialized');
+
+    // Idle wake-up for background completions (sub-agents, background bash).
+    this.sessionWaker = new SessionWaker({
+      isBusy: sessionId => laneIsBusy(`session:${sessionId}`),
+      runTurn: request => this.runWakeTurn(request),
+      logger: this.logger,
+    });
+    setSessionWaker(this.sessionWaker);
 
     // Initialize outbound queue (rate-limits proactive messages across all subsystems)
     this.outboundQueue = new OutboundQueue({
@@ -1061,6 +1082,11 @@ export class Gateway {
     if (this.subAgentDeliveryTimer) {
       clearInterval(this.subAgentDeliveryTimer);
       this.subAgentDeliveryTimer = null;
+    }
+    if (this.sessionWaker) {
+      this.sessionWaker.stop();
+      setSessionWaker(null);
+      this.sessionWaker = null;
     }
 
     this.mailCalendarTriggers?.stop();
@@ -1461,204 +1487,18 @@ export class Gateway {
   }
 
   /**
-   * Register spawn_agent and check_agents native skills for sub-agent system
+   * Register spawn_agent, check_agents and progress_note (src/subagent/tools.ts).
    */
   private registerSubAgentSkills(): void {
-    if (!this.skillRegistry || !this.subAgentRegistry || !this.subAgentExecutor) return;
-
-    const registry = this.subAgentRegistry;
-    const executor = this.subAgentExecutor;
-    const logger = this.logger;
-
-    // spawn_agent skill
-    const spawnAgentSkill = defineSkill(
-      'spawn_agent',
-      'Delegate one task or an atomic parallel batch to durable focused workers. Supports explicit context, acceptance criteria, isolated/forked context, bounded orchestrators, and isolated Git worktrees.'
-    )
-      .userInvocable(false)
-      .inputSchema({
-        type: 'object',
-        properties: {
-          task: { type: 'string', description: 'Clear description of what the sub-agent should accomplish' },
-          tasks: {
-            type: 'array',
-            description: 'Atomic fan-out batch. All capacity is checked before any child starts.',
-            items: {
-              type: 'object',
-              properties: {
-                task: { type: 'string' },
-                label: { type: 'string' },
-                context: { type: 'string' },
-                acceptance_criteria: { type: 'array', items: { type: 'string' } },
-                skills: { type: 'string' },
-              },
-              required: ['task'],
-            },
-          },
-          label: { type: 'string', description: 'Short label for tracking (e.g., "weather-check")' },
-          context: { type: 'string', description: 'Task-specific facts/context, kept separate from the instruction' },
-          acceptance_criteria: { type: 'array', items: { type: 'string' }, description: 'Concrete conditions that must pass before success' },
-          skills: { type: 'string', description: 'Comma-separated skill names to request. Empty uses read-only defaults (read_file, memory_search); every request is still filtered by parent tool policy.' },
-          model_tier: { type: 'string', description: 'fast (default/cheapest), standard, or capable' },
-          context_mode: { type: 'string', description: 'isolated, brief (default), or fork' },
-          role: { type: 'string', description: 'leaf (default) or bounded orchestrator' },
-          workspace_mode: { type: 'string', description: 'shared (default) or worktree for coding isolation' },
-          workflow: { type: 'string', description: 'Set to coding for isolated implement -> independent review/test -> conflict-checked patch' },
-          timeout_seconds: { type: 'number', description: 'Optional hard wall-clock limit; 0/default means progress-aware idle timeout only' },
-          idle_timeout_seconds: { type: 'number', description: 'Stop only after this many seconds with no model/tool progress' },
-          wait: { type: 'boolean', description: 'Wait for result inline (default: false = async)' },
-        },
-        required: [],
-      })
-      .onNativeExecute(async (ctx) => {
-        const task = ctx.args.task as string | undefined;
-        const batch = Array.isArray(ctx.args.tasks) ? ctx.args.tasks as Array<Record<string, unknown>> : [];
-        if ((!task || task.trim().length < 5) && batch.length === 0) {
-          return { success: false, output: '', error: 'Provide task or a non-empty tasks batch' };
-        }
-
-        const skillsStr = ctx.args.skills as string | undefined;
-        const skills = skillsStr ? skillsStr.split(',').map(s => s.trim()).filter(Boolean) : [];
-        const modelTier = (ctx.args.model_tier as 'fast' | 'standard' | 'capable') || undefined;
-        const timeoutSeconds = ctx.args.timeout_seconds as number | undefined;
-        const idleTimeoutSeconds = ctx.args.idle_timeout_seconds as number | undefined;
-        const wait = ctx.args.wait as boolean | undefined;
-
-        // Check concurrency
-        const session = await this.sessionManager!.getSession(ctx.sessionId);
-        const canSpawn = registry.canSpawn(ctx.sessionId, session?.metadata as Record<string, unknown> | undefined, batch.length || 1);
-        if (!canSpawn.allowed) {
-          return { success: false, output: '', error: canSpawn.reason || 'Cannot spawn sub-agent' };
-        }
-
-        const common = {
-          label: (ctx.args.label as string) || undefined,
-          skills,
-          modelTier,
-          timeoutSeconds,
-          idleTimeoutSeconds,
-          context: (ctx.args.context as string) || undefined,
-          acceptanceCriteria: Array.isArray(ctx.args.acceptance_criteria) ? ctx.args.acceptance_criteria as string[] : undefined,
-          contextMode: ctx.args.context_mode as 'isolated' | 'brief' | 'fork' | undefined,
-          role: ctx.args.role as 'leaf' | 'orchestrator' | undefined,
-          workspaceMode: ctx.args.workspace_mode as 'shared' | 'worktree' | undefined,
-          waitForResult: wait,
-        };
-        const input = { ...common, task: task?.trim() || '' };
-
-        try {
-          if (ctx.args.workflow === 'coding') {
-            if (!task || task.trim().length < 5) throw new Error('Coding workflow requires a task description');
-            const result = await executor.runCodingWorkflow(ctx.sessionId, { ...input, workspaceMode: 'worktree' });
-            return { success: result.status === 'succeeded', output: JSON.stringify(result), ...(result.status === 'succeeded' ? {} : { error: result.blockers.join('; ') || 'Coding workflow blocked' }) };
-          }
-          if (batch.length > 0) {
-            const inputs = batch.map(item => ({
-              ...common,
-              task: String(item.task || '').trim(),
-              label: typeof item.label === 'string' ? item.label : undefined,
-              context: typeof item.context === 'string' ? item.context : undefined,
-              acceptanceCriteria: Array.isArray(item.acceptance_criteria) ? item.acceptance_criteria as string[] : common.acceptanceCriteria,
-              skills: typeof item.skills === 'string' ? item.skills.split(',').map(value => value.trim()).filter(Boolean) : common.skills,
-            }));
-            if (inputs.some(item => item.task.length < 5)) throw new Error('Every batch task must be at least 5 characters');
-            const runs = await executor.spawnBatch(ctx.sessionId, inputs);
-            return { success: true, output: `${runs.length} sub-agents started atomically: ${runs.map(run => run.runId).join(', ')}` };
-          }
-          if (wait) {
-            // Synchronous: block until result
-            const result = await executor.spawnAndWait(ctx.sessionId, input);
-            return {
-              success: true,
-              output: result.response,
-            };
-          } else {
-            // Asynchronous: return immediately
-            const { runId } = await executor.spawn(ctx.sessionId, input);
-            return {
-              success: true,
-              output: `Sub-agent "${input.label || runId.slice(0, 8)}" spawned (run: ${runId}). Results will appear when complete.`,
-            };
-          }
-        } catch (error) {
-          logger.error({ error: (error as Error).message, task }, 'spawn_agent failed');
-          return { success: false, output: '', error: `Failed to spawn sub-agent: ${(error as Error).message}` };
-        }
-      })
-      .build();
-    this.skillRegistry.registerSkill(spawnAgentSkill.skill);
-
-    // check_agents skill
-    const checkAgentsSkill = defineSkill(
-      'check_agents',
-      'Inspect or control delegated work: list, info, log, cancel, steer a running child, or start a follow-up.'
-    )
-      .userInvocable(false)
-      .inputSchema({
-        type: 'object',
-        properties: {
-          action: { type: 'string', description: 'list (default), info, log, cancel, steer, or followup' },
-          run_id: { type: 'string', description: 'Run id for all actions except list' },
-          message: { type: 'string', description: 'Steering/follow-up instruction' },
-          wait: { type: 'boolean', description: 'Wait inline for a follow-up result' },
-        },
-        required: [],
-      })
-      .onNativeExecute(async (ctx) => {
-        const runs = registry.getRunsForParent(ctx.sessionId);
-        const action = String(ctx.args.action || 'list');
-        if (action !== 'list') {
-          const runId = String(ctx.args.run_id || '');
-          const run = runs.find(candidate => candidate.id === runId);
-          if (!run) return { success: false, output: '', error: 'Unknown run for this parent session' };
-          if (action === 'info') return { success: true, output: JSON.stringify(run.result ?? run, null, 2) };
-          if (action === 'log') {
-            const log = await executor.getRunLog(runId);
-            return { success: true, output: log.map(entry => `${entry.role}: ${entry.content}`).join('\n\n') || 'No retained log.' };
-          }
-          if (action === 'cancel') {
-            const applied = executor.cancel(runId);
-            return applied ? { success: true, output: `Cancelled ${run.label}.` } : { success: false, output: '', error: 'Run is not active' };
-          }
-          if (action === 'steer') {
-            const applied = executor.steer(runId, String(ctx.args.message || ''));
-            return applied ? { success: true, output: `Steering update queued for ${run.label}.` } : { success: false, output: '', error: 'Run is not active or message is empty' };
-          }
-          if (action === 'followup' && String(ctx.args.message || '').trim()) {
-            const result = await executor.followUp(ctx.sessionId, runId, String(ctx.args.message), Boolean(ctx.args.wait));
-            return { success: true, output: 'response' in result ? result.response : `Follow-up spawned: ${result.runId}` };
-          }
-          return { success: false, output: '', error: 'Unknown action or missing message' };
-        }
-        if (runs.length === 0) {
-          return { success: true, output: 'No sub-agents found for this session.' };
-        }
-
-        const lines: string[] = [];
-        for (const run of runs) {
-          const elapsed = run.startedAt
-            ? `${((Date.now() - run.startedAt) / 1000).toFixed(0)}s`
-            : 'not started';
-          let line = `- **${run.label}** [${run.status}] (${elapsed})`;
-          if (run.result) {
-            const snippet = run.result.response.length > 100
-              ? run.result.response.substring(0, 100) + '...'
-              : run.result.response;
-            line += `: ${snippet}`;
-          }
-          if (run.error) {
-            line += ` — Error: ${run.error}`;
-          }
-          lines.push(line);
-        }
-
-        return {
-          success: true,
-          output: `Sub-agents for this session (${runs.length}):\n${lines.join('\n')}`,
-        };
-      })
-      .build();
-    this.skillRegistry.registerSkill(checkAgentsSkill.skill);
+    if (!this.skillRegistry || !this.subAgentRegistry || !this.subAgentExecutor || !this.sessionManager) return;
+    for (const skill of createSubAgentSkills({
+      registry: this.subAgentRegistry,
+      executor: this.subAgentExecutor,
+      sessionManager: this.sessionManager,
+      logger: this.logger,
+    })) {
+      this.skillRegistry.registerSkill(skill);
+    }
   }
 
   /**
@@ -1858,12 +1698,15 @@ export class Gateway {
   }
 
   /**
-   * Lease and deliver background child completions. Parent context receives a
-   * system-internal receipt; the user sees only a polished outcome sentence.
+   * Lease durable child completions and hand them to the session waker. An
+   * idle parent gets a new turn carrying `[agent-result: name] …` (it reacts
+   * and replies to the user); a busy parent receives the same text from the
+   * announce queue at its next iteration and the waker drops its copy.
+   * Children of sub-agents are resumed by the executor itself.
    */
   private async drainSubAgentDeliveries(): Promise<void> {
     const db = this.scallopMemoryStore?.getDatabase();
-    if (!db || !this.sessionManager) return;
+    if (!db || !this.sessionManager || !this.sessionWaker) return;
     const deliveries = db.claimSubAgentDeliveries(10, 30_000);
     for (const delivery of deliveries) {
       if (!delivery.leaseToken) continue;
@@ -1871,60 +1714,63 @@ export class Gateway {
         const payload = JSON.parse(delivery.payloadJson) as {
           runId: string;
           label: string;
-          result: {
-            status: string;
-            summary: string;
-            blockers?: string[];
-            nextActions?: string[];
-          };
+          kind?: string;
+          message?: string;
+          result?: { status?: string; summary?: string; blockers?: string[] };
         };
-        const parent = await this.sessionManager.getSession(delivery.parentSessionId);
-        const marker = `[Sub-agent result:${payload.runId}]`;
+        const parentId = delivery.parentSessionId;
+        const parent = await this.sessionManager.getSession(parentId);
+        const runFooter = `[run ${payload.runId}]`;
+        const legacyMarker = `[Sub-agent result:${payload.runId}]`;
         const alreadyInjected = parent?.messages.some(message =>
-          typeof message.content === 'string' && message.content.startsWith(marker),
+          typeof message.content === 'string'
+          && (message.content.includes(runFooter) || message.content.startsWith(legacyMarker)),
         );
-        if (parent && !alreadyInjected) {
-          await this.sessionManager.addMessage(delivery.parentSessionId, {
-            // Provider-role `user` is the protocol carrier for internal tool/
-            // worker results. The explicit marker makes the durable kind
-            // system_internal, so dashboards never mistake this for a public
-            // assistant reply.
-            role: 'user',
-            content: `${marker}\n${JSON.stringify(payload.result)}`,
+        if (parent && !parent.metadata?.isSubAgent && !alreadyInjected) {
+          const message = payload.message
+            ?? formatAgentResult(payload.label, [
+              payload.result?.summary ?? '',
+              ...(payload.result?.blockers ?? []).map(blocker => `Blocker: ${blocker}`),
+            ].join('\n'), { runId: payload.runId });
+          const announceQueue = this.announceQueue;
+          this.sessionWaker.wake(parentId, message, {
+            kind: payload.kind === 'agent-exited' ? 'agent-exited' : 'agent-result',
+            isPending: () => !announceQueue?.wasDrained(parentId, payload.runId),
+            claim: () => { announceQueue?.acknowledge(parentId, payload.runId); },
           });
-        }
-        this.announceQueue?.acknowledge(delivery.parentSessionId, delivery.runId);
-
-        if (delivery.userId) {
-          const succeeded = payload.result.status === 'succeeded';
-          const summary = payload.result.summary.trim().replace(/\s+/g, ' ');
-          const blocker = payload.result.blockers?.find(Boolean);
-          const message = succeeded
-            ? `${payload.label} is finished — ${summary}`
-            : `${payload.label} couldn't finish yet — ${blocker || summary}`;
-          const sent = await this.outboundQueue?.createHandler()(
-            delivery.userId,
-            message,
-            {
-              scheduledItemId: `subagent:${payload.runId}`,
-              ownerUserId: delivery.userId,
-              outcome: {
-                source: 'subagent_completion',
-                sessionId: delivery.parentSessionId,
-                activeRequest: payload.label,
-                evidenceVerified: true,
-              },
-            },
-          );
-          if (!sent || (!messageWasDelivered(sent) && !isMessageDeliverySuppressed(sent))) {
-            throw new Error('No channel confirmed delivery');
-          }
         }
         db.completeSubAgentDelivery(delivery.runId, delivery.leaseToken);
       } catch (error) {
         db.failSubAgentDelivery(delivery.runId, delivery.leaseToken, (error as Error).message);
         this.logger.warn({ runId: delivery.runId, error: (error as Error).message }, 'Sub-agent delivery deferred');
       }
+    }
+  }
+
+  /**
+   * Start a parent turn for harness messages (agent results, background bash)
+   * while the session is idle. Returns 'started', 'queued' (busy: retried when
+   * idle unless the running turn consumes it first) or 'unavailable'.
+   */
+  onIdleWake(sessionId: string, message: string, opts: WakeOptions = { kind: 'wake' }): WakeOutcome | 'unavailable' {
+    return this.sessionWaker ? this.sessionWaker.wake(sessionId, message, opts) : 'unavailable';
+  }
+
+  /** One wake turn: run the parent agent and deliver its reply to the user's channel. */
+  private async runWakeTurn(request: WakeTurnRequest): Promise<void> {
+    if (!this.agent || !this.sessionManager) return;
+    const session = await this.sessionManager.getSession(request.sessionId);
+    if (!session) return;
+    // Progress notes that piled up while idle are stale once the result is here.
+    this.announceQueue?.dropProgress(request.sessionId);
+    this.logger.info({ sessionId: request.sessionId, kinds: request.kinds }, 'Waking idle session');
+    const result = await this.agent.processMessage(request.sessionId, request.message);
+    const reply = result.response?.trim();
+    const userId = typeof session.metadata?.userId === 'string' ? session.metadata.userId : undefined;
+    if (!reply || !userId) return;
+    const sent = await this.handleProactiveMessage(userId, reply);
+    if (!sent || (!messageWasDelivered(sent) && !isMessageDeliverySuppressed(sent))) {
+      this.logger.warn({ sessionId: request.sessionId }, 'Wake turn reply was not delivered');
     }
   }
 

@@ -17,10 +17,12 @@ describe('sub-agent orchestration policy', () => {
   });
 
   it('allows only bounded orchestrators to create nested children', () => {
-    const registry = new SubAgentRegistry({ logger, config: { maxSpawnDepth: 1 } });
+    const registry = new SubAgentRegistry({ logger, config: { maxSpawnDepth: 2 } });
     expect(registry.canSpawn('leaf', { isSubAgent: true, subAgentRole: 'leaf', subAgentSpawnDepth: 0 }).allowed).toBe(false);
     expect(registry.canSpawn('orchestrator', { isSubAgent: true, subAgentRole: 'orchestrator', subAgentSpawnDepth: 0 }).allowed).toBe(true);
     expect(registry.canSpawn('deep', { isSubAgent: true, subAgentRole: 'orchestrator', subAgentSpawnDepth: 1 }).allowed).toBe(false);
+    const childrenOnly = new SubAgentRegistry({ logger, config: { maxSpawnDepth: 1 } });
+    expect(childrenOnly.canSpawn('orchestrator', { isSubAgent: true, subAgentRole: 'orchestrator', subAgentSpawnDepth: 0 }).allowed).toBe(false);
   });
 
   it('reserves fan-out capacity across concurrent async preparation', () => {
