@@ -377,6 +377,24 @@ export interface SessionLifecycleEventRow {
 /**
  * Session message entry
  */
+/** Agent-created recurring wake-up (heartbeats table). */
+export interface HeartbeatRow {
+  id: string;
+  sessionId: string;
+  userId: string | null;
+  instruction: string;
+  intervalMinutes: number;
+  mode: 'steer' | 'follow_up';
+  enabled: boolean;
+  nextFireAt: number;
+  lastFiredAt: number | null;
+  fireCount: number;
+  lastOutcome: string | null;
+  lastError: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
 export interface SessionMessageRow {
   id: number;
   sessionId: string;
@@ -1737,6 +1755,9 @@ export class ScallopDatabase {
     // Migration: make conversation resets and retention lossless/auditable.
     this.migrateAddSessionLifecycleColumns();
     this.migrateSubAgentOrchestration();
+
+    // Migration: agent-created heartbeats (additive table).
+    this.migrateCreateHeartbeats();
 
     // Migration: Index embeddings written before the bounded semantic index
     // existed. This is a one-time startup cost; normal writes stay indexed.
@@ -8762,6 +8783,133 @@ export class ScallopDatabase {
       : this.db.prepare("SELECT COUNT(*) as count FROM memories WHERE source != '_cleaned_sentinel'");
     const row = (userId ? stmt.get(userId) : stmt.get()) as { count: number };
     return row.count;
+  }
+
+  // ============ Heartbeats ============
+
+  /** Agent-created recurring wake-ups (see src/proactive/heartbeats.ts). */
+  private migrateCreateHeartbeats(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS heartbeats (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        user_id TEXT,
+        instruction TEXT NOT NULL,
+        interval_minutes INTEGER NOT NULL,
+        mode TEXT NOT NULL DEFAULT 'follow_up',
+        enabled INTEGER NOT NULL DEFAULT 1,
+        next_fire_at INTEGER NOT NULL,
+        last_fired_at INTEGER,
+        fire_count INTEGER NOT NULL DEFAULT 0,
+        last_outcome TEXT,
+        last_error TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_heartbeats_due ON heartbeats(enabled, next_fire_at);
+      CREATE INDEX IF NOT EXISTS idx_heartbeats_user ON heartbeats(user_id);
+    `);
+  }
+
+  private rowToHeartbeat(row: Record<string, unknown>): HeartbeatRow {
+    return {
+      id: row.id as string,
+      sessionId: row.session_id as string,
+      userId: (row.user_id as string | null) ?? null,
+      instruction: row.instruction as string,
+      intervalMinutes: row.interval_minutes as number,
+      mode: row.mode === 'steer' ? 'steer' : 'follow_up',
+      enabled: row.enabled === 1,
+      nextFireAt: row.next_fire_at as number,
+      lastFiredAt: (row.last_fired_at as number | null) ?? null,
+      fireCount: row.fire_count as number,
+      lastOutcome: (row.last_outcome as string | null) ?? null,
+      lastError: (row.last_error as string | null) ?? null,
+      createdAt: row.created_at as number,
+      updatedAt: row.updated_at as number,
+    };
+  }
+
+  createHeartbeat(input: {
+    id: string;
+    sessionId: string;
+    userId: string | null;
+    instruction: string;
+    intervalMinutes: number;
+    mode: 'steer' | 'follow_up';
+    nextFireAt: number;
+  }): HeartbeatRow {
+    const now = Date.now();
+    this.db.prepare(`
+      INSERT INTO heartbeats (id, session_id, user_id, instruction, interval_minutes, mode, enabled, next_fire_at, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+    `).run(input.id, input.sessionId, input.userId, input.instruction, input.intervalMinutes, input.mode, input.nextFireAt, now, now);
+    return this.getHeartbeat(input.id)!;
+  }
+
+  getHeartbeat(id: string): HeartbeatRow | null {
+    const row = this.db.prepare('SELECT * FROM heartbeats WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+    return row ? this.rowToHeartbeat(row) : null;
+  }
+
+  /** Enabled heartbeats owned by any of the given user ids (or on the given session). */
+  listHeartbeats(filter: { userIds?: string[]; sessionId?: string; includeDisabled?: boolean } = {}): HeartbeatRow[] {
+    const clauses: string[] = [];
+    const params: unknown[] = [];
+    const owner: string[] = [];
+    if (filter.userIds && filter.userIds.length > 0) {
+      owner.push(`user_id IN (${filter.userIds.map(() => '?').join(', ')})`);
+      params.push(...filter.userIds);
+    }
+    if (filter.sessionId) {
+      owner.push('session_id = ?');
+      params.push(filter.sessionId);
+    }
+    if (owner.length > 0) clauses.push(`(${owner.join(' OR ')})`);
+    if (!filter.includeDisabled) clauses.push('enabled = 1');
+    const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
+    const rows = this.db.prepare(`SELECT * FROM heartbeats ${where} ORDER BY created_at`).all(...params) as Record<string, unknown>[];
+    return rows.map(row => this.rowToHeartbeat(row));
+  }
+
+  deleteHeartbeat(id: string): boolean {
+    return this.db.prepare('DELETE FROM heartbeats WHERE id = ?').run(id).changes > 0;
+  }
+
+  /**
+   * Claim due heartbeats: each claimed row's next_fire_at is advanced by its
+   * interval in the same transaction, so a crash mid-fire skips one beat
+   * instead of firing twice.
+   */
+  claimDueHeartbeats(now: number = Date.now(), limit = 20): HeartbeatRow[] {
+    const claim = this.db.transaction(() => {
+      const rows = this.db.prepare(`
+        SELECT * FROM heartbeats WHERE enabled = 1 AND next_fire_at <= ? ORDER BY next_fire_at LIMIT ?
+      `).all(now, limit) as Record<string, unknown>[];
+      const advance = this.db.prepare(`
+        UPDATE heartbeats SET next_fire_at = ?, last_fired_at = ?, fire_count = fire_count + 1, updated_at = ?
+        WHERE id = ? AND next_fire_at = ?
+      `);
+      const claimed: HeartbeatRow[] = [];
+      for (const row of rows) {
+        const hb = this.rowToHeartbeat(row);
+        const next = now + hb.intervalMinutes * 60_000;
+        if (advance.run(next, now, now, hb.id, hb.nextFireAt).changes > 0) {
+          claimed.push({ ...hb, nextFireAt: next, lastFiredAt: now, fireCount: hb.fireCount + 1 });
+        }
+      }
+      return claimed;
+    });
+    return claim();
+  }
+
+  recordHeartbeatOutcome(id: string, update: { outcome: string; error?: string | null; sessionId?: string; disable?: boolean }): void {
+    this.db.prepare(`
+      UPDATE heartbeats
+      SET last_outcome = ?, last_error = ?, session_id = COALESCE(?, session_id),
+          enabled = CASE WHEN ? THEN 0 ELSE enabled END, updated_at = ?
+      WHERE id = ?
+    `).run(update.outcome, update.error ?? null, update.sessionId ?? null, update.disable ? 1 : 0, Date.now(), id);
   }
 
   /**

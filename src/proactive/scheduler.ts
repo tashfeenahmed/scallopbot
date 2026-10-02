@@ -436,6 +436,8 @@ export interface UnifiedSchedulerOptions {
   nudgeClaimTimeoutMs?: number;
   /** Explicit deployment-owned IDs that map to the single-user `default` record. */
   canonicalSingleUserIds?: string[];
+  /** Agent-created heartbeats, fired on the scheduler's own tick. */
+  heartbeats?: { runDue(now?: number): Promise<unknown> };
 }
 
 /**
@@ -475,6 +477,7 @@ export class UnifiedScheduler {
   private taskRetryDelayMs: number;
   private nudgeClaimTimeoutMs: number;
   private canonicalSingleUserIds: string[];
+  private heartbeats?: UnifiedSchedulerOptions['heartbeats'];
   private static readonly MAX_RECENT_SEND_USERS = 500;
   private static readonly MAX_TASKS_PER_EVALUATION = 100;
 
@@ -504,6 +507,7 @@ export class UnifiedScheduler {
       Math.floor(options.nudgeClaimTimeoutMs ?? 15 * 60_000),
     );
     this.canonicalSingleUserIds = [...new Set(options.canonicalSingleUserIds ?? [])];
+    this.heartbeats = options.heartbeats;
     this.boardService = new BoardService(this.db, this.logger);
   }
 
@@ -659,6 +663,15 @@ export class UnifiedScheduler {
       // seed send dedup before a companion proactive nudge is considered.
       this.boardService.reclaimExpiredLeases();
       await this.processDueTasks();
+
+      // Heartbeats start their turns in the background; this only claims and dispatches.
+      if (this.heartbeats) {
+        try {
+          await this.heartbeats.runDue();
+        } catch (err) {
+          this.logger.warn({ error: (err as Error).message }, 'Heartbeat dispatch failed');
+        }
+      }
 
       // Nudges retain the lightweight atomic claim path. Task-kind items are
       // deliberately excluded: they are owned by durable board leases below.
