@@ -182,8 +182,16 @@ export interface AgentHooks {
   postProcessToolResult?: (input: { sessionId: string; toolName: string; content: string; isError: boolean }) => string;
   /** Builds the message list replayed to the model from the stored history. */
   buildReplay?: (messages: Message[]) => Message[];
+  /** Skills index for the frozen prompt; replaces the built-in procedure index. */
+  skillIndex?: () => string;
   /** Extra frozen-prompt sections (core memory, skill index, code-mode API…). */
   frozenPromptSections?: (input: { sessionId: string; userId: string; modelId: string }) => Promise<string[]> | string[];
+  /**
+   * Fast memory recall for this turn (no LLM, bounded latency). When set it
+   * replaces the agent's own fact search. `coldStart` marks a session's first
+   * human turn, where a broader ranked digest fits better.
+   */
+  recall?: (input: { sessionId: string; userId: string; userMessage: string; timezone: string; coldStart: boolean }) => Promise<string>;
   /** Extra per-turn context lines (recall prefetch, todo list…). */
   turnContextSections?: (input: { sessionId: string; userId: string; userMessage: string }) => Promise<string[]> | string[];
   /** Background work after the reply has been returned (learning fork, refine). */
@@ -352,6 +360,8 @@ export class Agent {
    * Rebuilt only on compaction, a model switch or a new session.
    */
   private frozenPrompts = new Map<string, { key: string; prompt: string }>();
+  /** Last request sent per session, for cache-hitting background replays. */
+  private lastRequests = new Map<string, Pick<CompletionRequest, 'system' | 'messages' | 'tools'>>();
   private hooks: AgentHooks;
 
   /** Enhanced tool loop detector */
@@ -722,9 +732,15 @@ export class Agent {
     // goes into the system prompt, so history stays cacheable across turns.
     const systemPrompt = await this.getFrozenSystemPrompt(sessionId, resolvedUserId, activeProvider);
     const harnessTurn = isHarnessMessage(userMessage);
+    const coldStart = !session.messages.some((message, index) =>
+      index < session.messages.length - 1
+      && message.role === 'user'
+      && typeof message.content === 'string'
+      && !message.content.startsWith('[')
+    );
     const { context: turnContext, memoryStats, memoryItems } = harnessTurn
       ? { context: '', memoryStats: { factsFound: 0, conversationsFound: 0 }, memoryItems: [] }
-      : await this.buildTurnContext(userMessage, sessionId, resolvedUserId, userTimezone);
+      : await this.buildTurnContext(userMessage, sessionId, resolvedUserId, userTimezone, coldStart);
     // Harness wake-ups ([agent-result …], [bash-done …]) carry their own
     // content; recall and time for them would only bury it.
     if (turnContext) {
@@ -949,6 +965,7 @@ export class Agent {
         ...(tools.length > 0 && { purpose: 'tool_call', traceSessionId: sessionId }),
       };
 
+      this.rememberRequest(sessionId, request);
       this.logger.info({ iteration: iterations, messageCount: messages.length, provider: activeProvider.name }, 'Agent iteration starting');
 
       // Call LLM with error recovery (fallback and emergency compression)
@@ -1545,6 +1562,23 @@ export class Agent {
     };
   }
 
+  /**
+   * The last request this agent sent for a session (system, messages, tools).
+   * Background learning replays it byte-for-byte so the provider cache hits.
+   */
+  getLastRequest(sessionId: string): Pick<CompletionRequest, 'system' | 'messages' | 'tools'> | undefined {
+    return this.lastRequests.get(sessionId);
+  }
+
+  private rememberRequest(sessionId: string, request: CompletionRequest): void {
+    this.lastRequests.delete(sessionId);
+    this.lastRequests.set(sessionId, { system: request.system, messages: request.messages, tools: request.tools });
+    if (this.lastRequests.size > 200) {
+      const oldest = this.lastRequests.keys().next().value;
+      if (oldest !== undefined) this.lastRequests.delete(oldest);
+    }
+  }
+
   /** Replace or extend the gateway-wired integrations. */
   setHooks(hooks: Partial<AgentHooks>): void {
     this.hooks = { ...this.hooks, ...hooks };
@@ -1621,7 +1655,7 @@ For **generated files** (PDFs, images, archives, diagrams), save them under **ou
 Install new skills from ClawHub with manage_skills (search, install, uninstall, list, set_key, remove_key). Installed skills and keys work immediately. When the user gives you an API key, store it with set_key. Install a skill when the user asks or when the current request clearly needs it, and say what you installed.`);
     }
 
-    const skillIndex = this.buildProcedureIndex();
+    const skillIndex = this.hooks.skillIndex ? this.hooks.skillIndex() : this.buildProcedureIndex();
     if (skillIndex) sections.push(skillIndex);
 
     // Machine-authored learned guidance from the self-evolution engine.
@@ -1736,6 +1770,7 @@ Install new skills from ClawHub with manage_skills (search, install, uninstall, 
     sessionId: string,
     userId: string,
     userTimezone: string,
+    coldStart = false,
   ): Promise<{
     context: string;
     memoryStats: { factsFound: number; conversationsFound: number };
@@ -1756,7 +1791,7 @@ Install new skills from ClawHub with manage_skills (search, install, uninstall, 
     }
 
     const memoryPromise = this.scallopStore
-      ? this.buildMemoryContext(userMessage, sessionId, userId)
+      ? this.buildMemoryContext(userMessage, sessionId, userId, { timezone: userTimezone, coldStart })
       : Promise.resolve(emptyMemory);
     const goalPromise = this.goalService
       ? this.goalService.getGoalContext(userId, userMessage).catch((error: Error) => {
@@ -1851,7 +1886,12 @@ Install new skills from ClawHub with manage_skills (search, install, uninstall, 
    * facts and matching past sessions. Identity and profile live in the frozen
    * prompt (buildStableMemoryContext).
    */
-  private async buildMemoryContext(userMessage: string, _sessionId: string, userId: string = 'default'): Promise<{
+  private async buildMemoryContext(
+    userMessage: string,
+    sessionId: string,
+    userId: string = 'default',
+    options: { timezone?: string; coldStart?: boolean } = {},
+  ): Promise<{
     dynamicContext: string;
     stats: { factsFound: number; conversationsFound: number };
     items: { type: 'fact' | 'conversation'; content: string; subject?: string }[];
@@ -1894,81 +1934,98 @@ Install new skills from ClawHub with manage_skills (search, install, uninstall, 
         // Behavioral patterns not available, that's fine
       }
 
-      // Tier 2: Memory retrieval — short-term recall plus request-relevant
-      // long-term recall. High prominence alone is never a reason to inject a
-      // fact into every turn; that resurrects unrelated old topics.
-      const contextMemoryContent = (mem: {
-        content: string;
-        eventDate: number | null;
-        documentDate: number;
-      }): string => mem.eventDate == null
-        ? `[Recorded: ${localIsoDate(new Date(mem.documentDate), userTimezone)}] ${mem.content}`
-        : `[Event date: ${localIsoDate(new Date(mem.eventDate), userTimezone)}] ${mem.content}`;
-
-      const SHORT_TERM_WINDOW_MS = 6 * 60 * 60 * 1000;
-      const isUserGroundedMemory = (memory: {
-        source?: string;
-        memoryType: string;
-        learnedFrom?: string;
-        metadata?: Record<string, unknown> | null;
-      }): boolean => memory.source !== 'assistant'
-        && memory.learnedFrom !== 'self_reflection'
-        && memory.metadata?.audience !== 'assistant'
-        && memory.metadata?.subject !== 'agent'
-        // Goals have their own lifecycle/status context. Treating their durable
-        // memory projection as an ordinary fact bypasses that lifecycle.
-        && !memory.metadata?.goalType;
-
-      const [recentFacts, relevantResults] = await Promise.all([
-        Promise.resolve(this.scallopStore.getRecentMemories(userId, SHORT_TERM_WINDOW_MS)),
-        this.scallopStore.search(userMessage, {
+      if (this.hooks.recall) {
+        // Fast recall (BM25 + embeddings, bounded latency, no LLM).
+        const recall = await this.hooks.recall({
+          sessionId,
           userId,
-          minProminence: 0.1,
-          limit: 10,
-        }),
-      ]);
-
-      const seenIds = new Set<string>();
-      const allFactTexts: { content: string; subject?: string }[] = [];
-
-      for (const fact of recentFacts) {
-        if (isUserGroundedMemory(fact)
-          && isMemoryLiveForContext(fact, userMessage)
-          && !seenIds.has(fact.id)) {
-          seenIds.add(fact.id);
-          const subject = fact.metadata?.subject as string | undefined;
-          allFactTexts.push({ content: contextMemoryContent(fact), subject });
+          userMessage,
+          timezone: options.timezone ?? userTimezone,
+          coldStart: options.coldStart ?? false,
+        });
+        if (recall.trim()) {
+          dynamicContext += `\n\n${recall.trim()}`;
+          for (const line of recall.split('\n')) {
+            if (line.startsWith('- ')) items.push({ type: 'fact', content: line.slice(2) });
+          }
         }
-      }
-      for (const result of relevantResults) {
-        if (isUserGroundedMemory(result.memory)
-          && isMemoryLiveForContext(result.memory, userMessage, Date.now(), result.score)
-          && !seenIds.has(result.memory.id)) {
-          seenIds.add(result.memory.id);
-          const subject = result.memory.metadata?.subject as string | undefined;
-          allFactTexts.push({ content: contextMemoryContent(result.memory), subject });
+      } else {
+        // Tier 2: Memory retrieval — short-term recall plus request-relevant
+        // long-term recall. High prominence alone is never a reason to inject a
+        // fact into every turn; that resurrects unrelated old topics.
+        const contextMemoryContent = (mem: {
+          content: string;
+          eventDate: number | null;
+          documentDate: number;
+        }): string => mem.eventDate == null
+          ? `[Recorded: ${localIsoDate(new Date(mem.documentDate), userTimezone)}] ${mem.content}`
+          : `[Event date: ${localIsoDate(new Date(mem.eventDate), userTimezone)}] ${mem.content}`;
+
+        const SHORT_TERM_WINDOW_MS = 6 * 60 * 60 * 1000;
+        const isUserGroundedMemory = (memory: {
+          source?: string;
+          memoryType: string;
+          learnedFrom?: string;
+          metadata?: Record<string, unknown> | null;
+        }): boolean => memory.source !== 'assistant'
+          && memory.learnedFrom !== 'self_reflection'
+          && memory.metadata?.audience !== 'assistant'
+          && memory.metadata?.subject !== 'agent'
+          // Goals have their own lifecycle/status context. Treating their durable
+          // memory projection as an ordinary fact bypasses that lifecycle.
+          && !memory.metadata?.goalType;
+
+        const [recentFacts, relevantResults] = await Promise.all([
+          Promise.resolve(this.scallopStore.getRecentMemories(userId, SHORT_TERM_WINDOW_MS)),
+          this.scallopStore.search(userMessage, {
+            userId,
+            minProminence: 0.1,
+            limit: 10,
+          }),
+        ]);
+
+        const seenIds = new Set<string>();
+        const allFactTexts: { content: string; subject?: string }[] = [];
+
+        for (const fact of recentFacts) {
+          if (isUserGroundedMemory(fact)
+            && isMemoryLiveForContext(fact, userMessage)
+            && !seenIds.has(fact.id)) {
+            seenIds.add(fact.id);
+            const subject = fact.metadata?.subject as string | undefined;
+            allFactTexts.push({ content: contextMemoryContent(fact), subject });
+          }
         }
-      }
-      if (allFactTexts.length > 0) {
-        let memoriesText = '';
-        let charCount = 0;
-
-        for (const fact of allFactTexts) {
-          const subjectPrefix = fact.subject && fact.subject !== 'user' ? `[About ${fact.subject}] ` : '';
-          const memoryLine = `- ${subjectPrefix}${fact.content}\n`;
-          if (charCount + memoryLine.length > MAX_MEMORY_CHARS) break;
-          memoriesText += memoryLine;
-          charCount += memoryLine.length;
-
-          items.push({
-            type: 'fact',
-            content: fact.content,
-            subject: fact.subject !== 'user' ? fact.subject : undefined,
-          });
+        for (const result of relevantResults) {
+          if (isUserGroundedMemory(result.memory)
+            && isMemoryLiveForContext(result.memory, userMessage, Date.now(), result.score)
+            && !seenIds.has(result.memory.id)) {
+            seenIds.add(result.memory.id);
+            const subject = result.memory.metadata?.subject as string | undefined;
+            allFactTexts.push({ content: contextMemoryContent(result.memory), subject });
+          }
         }
+        if (allFactTexts.length > 0) {
+          let memoriesText = '';
+          let charCount = 0;
 
-        if (memoriesText) {
-          dynamicContext += `\n\n## MEMORIES FROM THE PAST\nThese are facts you've learned about the user and people they've mentioned:\n${memoriesText}`;
+          for (const fact of allFactTexts) {
+            const subjectPrefix = fact.subject && fact.subject !== 'user' ? `[About ${fact.subject}] ` : '';
+            const memoryLine = `- ${subjectPrefix}${fact.content}\n`;
+            if (charCount + memoryLine.length > MAX_MEMORY_CHARS) break;
+            memoriesText += memoryLine;
+            charCount += memoryLine.length;
+
+            items.push({
+              type: 'fact',
+              content: fact.content,
+              subject: fact.subject !== 'user' ? fact.subject : undefined,
+            });
+          }
+
+          if (memoriesText) {
+            dynamicContext += `\n\n## MEMORIES FROM THE PAST\nThese are facts you've learned about the user and people they've mentioned:\n${memoriesText}`;
+          }
         }
       }
 

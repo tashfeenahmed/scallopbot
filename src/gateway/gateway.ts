@@ -74,6 +74,7 @@ import { OutcomeBrain } from '../brain/index.js';
 import { registerMediaSkills, type MediaSkills } from '../skills/media-skills.js';
 import { backgroundProcesses, createBashDoneRouter, type BackgroundExitEvent } from '../tools/shell/index.js';
 import { registerAgentTools, coreToolHooks } from '../tools/index.js';
+import { buildRecallBlock, buildRecallDigest } from '../memory/recall.js';
 import { enqueueInLane, laneIsBusy } from '../agent/command-queue.js';
 import type { FileTools } from '../tools/files/index.js';
 
@@ -728,6 +729,12 @@ export class Gateway {
       interruptQueue: this.interruptQueue,
       hooks: this.buildAgentHooks(),
     });
+    // Background learning replays the exact last request so the cache hits.
+    const agentForReplay = this.agent;
+    this.learning?.setReplaySource((sessionId) => {
+      const last = agentForReplay.getLastRequest(sessionId);
+      return last?.system ? LearningRuntime.replay(last.system, last.messages, last.tools) : null;
+    });
     this.logger.debug('Agent initialized');
 
     // Idle wake-up for background completions (sub-agents, background bash).
@@ -1229,12 +1236,49 @@ export class Gateway {
    * result and the verify-on-stop nudge. Later phases add to this.
    */
   private buildAgentHooks(): AgentHooks {
-    return {
+    const hooks: AgentHooks = {
       ...coreToolHooks({
         workspace: this.config.agent.workspace,
         contextWindowTokens: this.config.context.maxContextTokens,
       }),
     };
+    const learning = this.learning;
+    const store = this.scallopMemoryStore;
+    if (learning) {
+      hooks.skillIndex = () => learning.renderSkillIndex();
+      hooks.frozenPromptSections = ({ userId }) => [
+        learning.renderSessionCoreMemory(userId),
+        learning.renderPromptNotes(),
+      ];
+      // Running per-session totals for the review/refine triggers.
+      const totals = new Map<string, { turns: number; toolCalls: number }>();
+      hooks.afterTurn = ({ sessionId, userId, userMessage, toolCallCount }) => {
+        const total = totals.get(sessionId) ?? { turns: 0, toolCalls: 0 };
+        total.turns++;
+        total.toolCalls += toolCallCount;
+        totals.set(sessionId, total);
+        if (totals.size > 1_000) totals.delete(totals.keys().next().value!);
+        learning.reviewer.maybeScheduleReview({
+          sessionId,
+          userId,
+          turnCount: total.turns,
+          toolCallCount: total.toolCalls,
+          userCorrection: userMessage,
+        });
+        learning.refine.maybeScheduleRefine({ sessionId, userId, turnCount: total.turns });
+      };
+    }
+    if (store) {
+      // Fast recall: BM25 + embeddings with a hard latency budget, no LLM.
+      // A session's first turn also gets the ranked digest.
+      hooks.recall = async ({ userId, userMessage, timezone, coldStart }) => {
+        const block = await buildRecallBlock(store, userId, userMessage, { budgetMs: 1_500, timezone });
+        if (!coldStart) return block;
+        const digest = buildRecallDigest(store, userId, { goal: userMessage, recentMessages: [userMessage] });
+        return [digest, block].filter((part) => part.trim()).join('\n\n');
+      };
+    }
+    return hooks;
   }
 
   /**
