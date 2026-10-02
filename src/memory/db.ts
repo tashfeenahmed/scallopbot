@@ -41,6 +41,7 @@ import {
 } from '../security/evidence-grounding.js';
 import { sourceMemoryFingerprint } from './source-fingerprint.js';
 import { LEGACY_EMBEDDING_DIMENSION, LEGACY_EMBEDDING_KEY } from './embedding-config.js';
+import { searchableMessageText } from '../context/message-text.js';
 
 const PERSISTED_MESSAGE_KIND_SQL = PERSISTED_SESSION_MESSAGE_KINDS
   .map(kind => `'${kind}'`)
@@ -1790,6 +1791,10 @@ export class ScallopDatabase {
 
     // Migration: curated per-user core memory blocks (additive).
     this.migrateAddCoreMemory();
+
+    // Migration: lean compaction state + session_search FTS index (Phase 4).
+    this.migrateCreateSessionCompactions();
+    this.migrateCreateSessionSearchIndex();
   }
 
   /** Add the nullable `purpose` column to cost_usage. Legacy rows stay NULL. */
@@ -5495,6 +5500,8 @@ export class ScallopDatabase {
       const messageCount = Number(row.message_count ?? 0);
       this.db.prepare('DELETE FROM session_messages WHERE session_id = ?').run(id);
       this.db.prepare('DELETE FROM session_message_archive WHERE session_id = ?').run(id);
+      // A forgotten transcript must not survive in its compaction summary.
+      this.db.prepare('DELETE FROM session_compactions WHERE session_id = ?').run(id);
       this.db.prepare(`
         UPDATE sessions
         SET archived_at = COALESCE(archived_at, ?),
@@ -5633,6 +5640,7 @@ export class ScallopDatabase {
     const result = stmt.run(sessionId, role, content, resolvedKind, now);
     // Update session updated_at
     this.db.prepare('UPDATE sessions SET updated_at = ? WHERE id = ?').run(now, sessionId);
+    this.indexSessionMessageForSearch(Number(result.lastInsertRowid), sessionId, role, content, resolvedKind);
     return {
       id: Number(result.lastInsertRowid), sessionId, role, content,
       messageKind: resolvedKind, createdAt: now,
@@ -5648,6 +5656,339 @@ export class ScallopDatabase {
     `);
     const rows = stmt.all(sessionId) as Record<string, unknown>[];
     return rows.map(row => this.rowToSessionMessage(row));
+  }
+
+  // ---------------------------------------------------------------------------
+  // Lean compaction state + session_search index (Phase 4)
+  // ---------------------------------------------------------------------------
+
+  /** One row per session, updated in place on every compaction. */
+  private migrateCreateSessionCompactions(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS session_compactions (
+        session_id TEXT PRIMARY KEY,
+        state_json TEXT NOT NULL,
+        summary_message TEXT NOT NULL,
+        compaction_count INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+    `);
+  }
+
+  /**
+   * FTS5 + BM25 index over session messages for the session_search tool.
+   * rowid = message id (hot or archived). Rows are indexed on insert by
+   * addSessionMessage; pre-existing rows are backfilled lazily in batches.
+   * Delete triggers keep the index in sync: a hot row that was moved to the
+   * cold archive stays indexed until the archive row is removed too.
+   */
+  private migrateCreateSessionSearchIndex(): void {
+    try {
+      const existed = !!this.db.prepare(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'session_messages_fts'",
+      ).get();
+      this.db.exec(`
+        CREATE VIRTUAL TABLE IF NOT EXISTS session_messages_fts USING fts5(
+          text, session_id UNINDEXED, role UNINDEXED, message_kind UNINDEXED,
+          tokenize = 'porter unicode61'
+        );
+        CREATE TABLE IF NOT EXISTS session_search_index_state (
+          key TEXT PRIMARY KEY,
+          value INTEGER NOT NULL
+        );
+        CREATE TRIGGER IF NOT EXISTS session_messages_fts_hot_delete
+        AFTER DELETE ON session_messages BEGIN
+          DELETE FROM session_messages_fts
+          WHERE rowid = old.id
+            AND NOT EXISTS (SELECT 1 FROM session_message_archive WHERE original_message_id = old.id);
+        END;
+        CREATE TRIGGER IF NOT EXISTS session_messages_fts_archive_delete
+        AFTER DELETE ON session_message_archive BEGIN
+          DELETE FROM session_messages_fts
+          WHERE rowid = old.original_message_id
+            AND NOT EXISTS (SELECT 1 FROM session_messages WHERE id = old.original_message_id);
+        END;
+      `);
+      if (!existed) {
+        const maxId = this.db.prepare(`
+          SELECT MAX(id) AS max_id FROM (
+            SELECT MAX(id) AS id FROM session_messages
+            UNION ALL
+            SELECT MAX(original_message_id) AS id FROM session_message_archive
+          )
+        `).get() as { max_id: number | null };
+        const upsert = this.db.prepare(
+          'INSERT OR REPLACE INTO session_search_index_state (key, value) VALUES (?, ?)',
+        );
+        upsert.run('backfill_upto', Number(maxId.max_id ?? 0));
+        upsert.run('backfill_cursor', 0);
+      }
+    } catch (error) {
+      if (error instanceof Error) {
+        console.warn(`[migration] migrateCreateSessionSearchIndex: ${error.message}`);
+      }
+    }
+  }
+
+  private static readonly UNSEARCHABLE_KINDS = new Set<string>([
+    'worker_internal', 'system_internal', 'assistant_internal',
+  ]);
+
+  /** Index one message for session_search. Never throws into the write path. */
+  private indexSessionMessageForSearch(
+    id: number,
+    sessionId: string,
+    role: string,
+    content: string,
+    messageKind: string,
+  ): boolean {
+    if (ScallopDatabase.UNSEARCHABLE_KINDS.has(messageKind)) return false;
+    try {
+      const text = searchableMessageText(content).trim();
+      if (!text) return false;
+      const exists = this.db.prepare('SELECT 1 FROM session_messages_fts WHERE rowid = ?').get(id);
+      if (exists) return false;
+      this.db.prepare(`
+        INSERT INTO session_messages_fts (rowid, text, session_id, role, message_kind)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(id, text, sessionId, role, messageKind);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Index up to `maxRows` pre-existing messages. Returns the number of rows
+   * scanned; 0 once the backfill is complete. Safe to call repeatedly.
+   */
+  backfillSessionSearchIndex(maxRows: number = 2_000): number {
+    let state: Map<string, number>;
+    try {
+      state = new Map((this.db.prepare('SELECT key, value FROM session_search_index_state').all() as Array<{ key: string; value: number }>)
+        .map(row => [row.key, Number(row.value)]));
+    } catch {
+      return 0;
+    }
+    const upto = state.get('backfill_upto') ?? 0;
+    const cursor = state.get('backfill_cursor') ?? 0;
+    if (cursor >= upto) return 0;
+    const limit = Math.max(1, maxRows);
+    const rows = this.db.prepare(`
+      SELECT id, session_id, role, content, message_kind FROM (
+        SELECT id, session_id, role, content, message_kind FROM session_messages
+        WHERE id > ? AND id <= ?
+        UNION ALL
+        SELECT original_message_id AS id, session_id, role, content, message_kind
+        FROM session_message_archive cold
+        WHERE original_message_id > ? AND original_message_id <= ?
+          AND NOT EXISTS (SELECT 1 FROM session_messages live WHERE live.id = cold.original_message_id)
+      )
+      ORDER BY id
+      LIMIT ?
+    `).all(cursor, upto, cursor, upto, limit) as Array<{
+      id: number; session_id: string; role: string; content: string; message_kind: string | null;
+    }>;
+    const run = this.db.transaction(() => {
+      for (const row of rows) {
+        const kind = isPersistedSessionMessageKind(row.message_kind)
+          ? row.message_kind
+          : inferSessionMessageKind(row.role, row.content, null);
+        this.indexSessionMessageForSearch(row.id, row.session_id, row.role, row.content, kind);
+      }
+      const next = rows.length < limit ? upto : rows[rows.length - 1].id;
+      this.db.prepare('INSERT OR REPLACE INTO session_search_index_state (key, value) VALUES (?, ?)')
+        .run('backfill_cursor', next);
+    });
+    run();
+    return rows.length;
+  }
+
+  /** SQL fragment + params restricting `s` (sessions) to the owners' user-facing sessions. */
+  private sessionOwnerFilter(userIds: readonly string[]): { sql: string; params: string[] } {
+    const ids = [...new Set(userIds.map(id => id.trim()).filter(Boolean))];
+    if (ids.length === 0) return { sql: '0', params: [] };
+    const meta = "(CASE WHEN json_valid(s.metadata) THEN s.metadata ELSE '{}' END)";
+    return {
+      sql: `json_extract(${meta}, '$.userId') IN (${ids.map(() => '?').join(', ')})
+        AND COALESCE(json_extract(${meta}, '$.isSubAgent'), 0) != 1
+        AND COALESCE(json_extract(${meta}, '$.internal'), 0) != 1
+        AND COALESCE(json_extract(${meta}, '$.background'), 0) != 1
+        AND COALESCE(json_extract(${meta}, '$.source'), '') NOT IN ('scheduler', 'worker', 'gardener')
+        AND COALESCE(json_extract(${meta}, '$.channelId'), '') NOT IN ('subagent', 'background')`,
+      params: ids,
+    };
+  }
+
+  /** BM25 full-text search over the owners' session messages (best first). */
+  searchSessionMessages(options: {
+    match: string;
+    userIds: readonly string[];
+    sessionId?: string;
+    limit?: number;
+  }): Array<{
+    messageId: number; sessionId: string; role: string; messageKind: string;
+    snippet: string; score: number; createdAt: number | null;
+  }> {
+    const owner = this.sessionOwnerFilter(options.userIds);
+    const params: unknown[] = [options.match, ...owner.params];
+    let sessionClause = '';
+    if (options.sessionId) {
+      sessionClause = 'AND f.session_id = ?';
+      params.push(options.sessionId);
+    }
+    params.push(Math.max(1, Math.min(200, options.limit ?? 20)));
+    const rows = this.db.prepare(`
+      SELECT f.rowid AS message_id, f.session_id, f.role, f.message_kind,
+        snippet(session_messages_fts, 0, '«', '»', '…', 24) AS snippet,
+        bm25(session_messages_fts) AS score,
+        COALESCE(live.created_at, cold.created_at) AS created_at
+      FROM session_messages_fts f
+      JOIN sessions s ON s.id = f.session_id
+      LEFT JOIN session_messages live ON live.id = f.rowid
+      LEFT JOIN session_message_archive cold ON cold.original_message_id = f.rowid
+      WHERE session_messages_fts MATCH ?
+        AND (live.id IS NOT NULL OR cold.original_message_id IS NOT NULL)
+        AND ${owner.sql}
+        ${sessionClause}
+      ORDER BY score ASC, f.rowid DESC
+      LIMIT ?
+    `).all(...params) as Array<Record<string, unknown>>;
+    return rows.map(row => ({
+      messageId: Number(row.message_id),
+      sessionId: String(row.session_id),
+      role: String(row.role),
+      messageKind: String(row.message_kind),
+      snippet: String(row.snippet ?? ''),
+      score: Number(row.score),
+      createdAt: row.created_at == null ? null : Number(row.created_at),
+    }));
+  }
+
+  /** True when the session belongs to one of the owners (user-facing sessions only). */
+  sessionBelongsToUsers(sessionId: string, userIds: readonly string[]): boolean {
+    const owner = this.sessionOwnerFilter(userIds);
+    return !!this.db.prepare(`SELECT 1 FROM sessions s WHERE s.id = ? AND ${owner.sql}`)
+      .get(sessionId, ...owner.params);
+  }
+
+  /**
+   * Messages of one session around an anchor id, from the hot table and the
+   * cold archive. `before`/`after` count messages strictly before/after the
+   * anchor; the anchor itself is included when `includeAnchor`.
+   */
+  getSessionMessagesAround(
+    sessionId: string,
+    anchorId: number,
+    before: number,
+    after: number,
+    includeAnchor: boolean = true,
+  ): SessionMessageRow[] {
+    const union = `
+      SELECT id, session_id, role, content, message_kind, created_at FROM session_messages WHERE session_id = ?
+      UNION ALL
+      SELECT original_message_id AS id, session_id, role, content, message_kind, created_at
+      FROM session_message_archive cold
+      WHERE session_id = ? AND NOT EXISTS (SELECT 1 FROM session_messages live WHERE live.id = cold.original_message_id)
+    `;
+    const older = before > 0
+      ? this.db.prepare(`SELECT * FROM (${union}) WHERE id < ? ORDER BY id DESC LIMIT ?`)
+        .all(sessionId, sessionId, anchorId, before) as Record<string, unknown>[]
+      : [];
+    const anchor = includeAnchor
+      ? this.db.prepare(`SELECT * FROM (${union}) WHERE id = ?`).all(sessionId, sessionId, anchorId) as Record<string, unknown>[]
+      : [];
+    const newer = after > 0
+      ? this.db.prepare(`SELECT * FROM (${union}) WHERE id > ? ORDER BY id ASC LIMIT ?`)
+        .all(sessionId, sessionId, anchorId, after) as Record<string, unknown>[]
+      : [];
+    return [...older.reverse(), ...anchor, ...newer].map(row => this.rowToSessionMessage(row));
+  }
+
+  /** Latest message id of a session (hot or archived), or null. */
+  getLatestSessionMessageId(sessionId: string): number | null {
+    const row = this.db.prepare(`
+      SELECT MAX(id) AS id FROM (
+        SELECT MAX(id) AS id FROM session_messages WHERE session_id = ?
+        UNION ALL
+        SELECT MAX(original_message_id) AS id FROM session_message_archive WHERE session_id = ?
+      )
+    `).get(sessionId, sessionId) as { id: number | null };
+    return row.id == null ? null : Number(row.id);
+  }
+
+  /** Recent user-facing sessions of the owners, newest first. */
+  listSessionsForUsers(userIds: readonly string[], limit: number = 10): Array<{
+    id: string; createdAt: number; updatedAt: number; archivedAt: number | null;
+    messageCount: number; firstUserMessage: string | null; channelId: string | null;
+  }> {
+    const owner = this.sessionOwnerFilter(userIds);
+    const rows = this.db.prepare(`
+      SELECT s.id, s.created_at, s.updated_at, s.archived_at, s.metadata,
+        (SELECT COUNT(*) FROM session_messages WHERE session_id = s.id)
+          + (SELECT COUNT(*) FROM session_message_archive cold WHERE cold.session_id = s.id
+             AND NOT EXISTS (SELECT 1 FROM session_messages live WHERE live.id = cold.original_message_id)) AS message_count,
+        COALESCE(
+          (SELECT content FROM session_messages WHERE session_id = s.id AND message_kind = 'human_user' ORDER BY id LIMIT 1),
+          (SELECT content FROM session_message_archive WHERE session_id = s.id AND message_kind = 'human_user' ORDER BY original_message_id LIMIT 1)
+        ) AS first_user
+      FROM sessions s
+      WHERE ${owner.sql}
+      ORDER BY s.updated_at DESC
+      LIMIT ?
+    `).all(...owner.params, Math.max(1, Math.min(100, limit))) as Array<Record<string, unknown>>;
+    return rows
+      .map(row => {
+        let channelId: string | null = null;
+        try {
+          const metadata = typeof row.metadata === 'string' ? JSON.parse(row.metadata) as Record<string, unknown> : null;
+          channelId = typeof metadata?.channelId === 'string' ? metadata.channelId : null;
+        } catch { /* malformed metadata: no channel */ }
+        return {
+          id: String(row.id),
+          createdAt: Number(row.created_at),
+          updatedAt: Number(row.updated_at),
+          archivedAt: row.archived_at == null ? null : Number(row.archived_at),
+          messageCount: Number(row.message_count ?? 0),
+          firstUserMessage: typeof row.first_user === 'string' ? row.first_user : null,
+          channelId,
+        };
+      })
+      .filter(row => row.messageCount > 0);
+  }
+
+  getSessionCompaction(sessionId: string): {
+    stateJson: string; summaryMessage: string; compactionCount: number; createdAt: number; updatedAt: number;
+  } | null {
+    const row = this.db.prepare('SELECT * FROM session_compactions WHERE session_id = ?')
+      .get(sessionId) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    return {
+      stateJson: String(row.state_json),
+      summaryMessage: String(row.summary_message),
+      compactionCount: Number(row.compaction_count ?? 0),
+      createdAt: Number(row.created_at),
+      updatedAt: Number(row.updated_at),
+    };
+  }
+
+  /** Upsert: the compaction summary is updated in place across compactions. */
+  saveSessionCompaction(sessionId: string, stateJson: string, summaryMessage: string, compactionCount: number): void {
+    const now = Date.now();
+    this.db.prepare(`
+      INSERT INTO session_compactions (session_id, state_json, summary_message, compaction_count, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(session_id) DO UPDATE SET
+        state_json = excluded.state_json,
+        summary_message = excluded.summary_message,
+        compaction_count = excluded.compaction_count,
+        updated_at = excluded.updated_at
+    `).run(sessionId, stateJson, summaryMessage, compactionCount, now, now);
+  }
+
+  deleteSessionCompaction(sessionId: string): boolean {
+    return this.db.prepare('DELETE FROM session_compactions WHERE session_id = ?').run(sessionId).changes > 0;
   }
 
   getSessionMessagesPaginated(sessionId: string, limit: number, before?: number): { messages: SessionMessageRow[]; hasMore: boolean } {

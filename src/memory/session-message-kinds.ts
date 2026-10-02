@@ -57,7 +57,7 @@ export function isInternalSessionMetadata(
 }
 
 function isInternalControlText(text: string): boolean {
-  return /^\s*\[(?:System:|Sub-agent\b|Previous conversation summary\b|Tool result\b|agent-(?:result|exited|progress):|bash-done\b)/i.test(text);
+  return /^\s*\[(?:System:|Sub-agent\b|Previous conversation summary\b|Tool result\b|agent-(?:result|exited|progress):|bash-done\b|CONTEXT COMPACTION\b|(?:context|goal|heartbeat|moa-advice|kernel-state|todo|wake|steering|reminder):)/i.test(text);
 }
 
 /**

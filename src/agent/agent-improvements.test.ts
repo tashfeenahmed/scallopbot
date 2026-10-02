@@ -198,13 +198,14 @@ describe('Agent improvements integration', () => {
       const { SessionManager } = await import('./session.js');
       const { ContextManager } = await import('../routing/context.js');
 
-      const provider = seqProvider([endTurn('Done summarizing.')]);
+      // First call: the lean-compaction summary; second: the actual reply.
+      const provider = seqProvider([endTurn('## Goal\nWrap up.'), endTurn('Done summarizing.')]);
       const sessionManager = new SessionManager(db);
       const session = await sessionManager.createSession();
 
       // Seed the session with a big history of bulky tool outputs to push past
       // the proactive compaction threshold (tiny max context window here).
-      for (let i = 0; i < 8; i++) {
+      for (let i = 0; i < 16; i++) {
         await sessionManager.addMessage(session.id, {
           role: 'assistant',
           content: [{ type: 'tool_use', id: `t${i}`, name: 'bash', input: { command: 'echo' } }],
@@ -218,7 +219,7 @@ describe('Agent improvements integration', () => {
       const agent = new Agent({
         provider,
         sessionManager,
-        contextManager: new ContextManager({ maxContextTokens: 4000, hotWindowSize: 50 }),
+        contextManager: new ContextManager({ maxContextTokens: 20_000, hotWindowSize: 50 }),
         workspace: testDir,
         logger: pino({ level: 'silent' }),
         maxIterations: 3,
@@ -227,8 +228,12 @@ describe('Agent improvements integration', () => {
       const result = await agent.processMessage(session.id, 'wrap up please');
       expect(result.response).toBe('Done summarizing.');
       expect(provider.complete).toHaveBeenCalled();
-      const sent = JSON.stringify((provider.complete as ReturnType<typeof vi.fn>).mock.calls[0][0].messages);
-      expect(sent).not.toContain('X'.repeat(100));
+      const calls = (provider.complete as ReturnType<typeof vi.fn>).mock.calls;
+      // The reply request carries the compaction summary and fits the window;
+      // only the newest results stay verbatim in the tail.
+      const sent = JSON.stringify(calls[calls.length - 1][0].messages);
+      expect(sent).toContain('CONTEXT COMPACTION');
+      expect(sent.length / 4).toBeLessThan(20_000 * 0.75);
     });
   });
 

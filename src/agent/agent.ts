@@ -13,6 +13,7 @@ import type {
   SystemPrompt,
   StreamHandlers,
 } from '../providers/types.js';
+import { flattenSystem } from '../providers/types.js';
 import type { SessionManager } from './session.js';
 import type { SkillRegistry } from '../skills/registry.js';
 import type { SkillExecutor } from '../skills/executor.js';
@@ -52,7 +53,6 @@ import { stripThinkTags } from '../utils/output-safety.js';
 import { ReplyStream } from './reply-stream.js';
 import { completeWithStream } from '../providers/streaming.js';
 import { resolveStateUserId } from '../utils/state-user-id.js';
-import { compactCompletedConversationHistory } from '../memory/session-message-view.js';
 import { isMemoryLiveForContext } from '../memory/state-relevance.js';
 import { ApprovalStore, APPROVAL_PROMPT_HINT, grantPatternFor } from './approvals.js';
 import { guardToolResults } from '../security/prompt-injection.js';
@@ -71,6 +71,7 @@ import {
   type EvidenceProvenanceReceipt,
 } from '../security/evidence-grounding.js';
 import { modelGuidanceFor } from './model-guidance.js';
+import { prepareContext } from '../context/lean-compaction.js';
 import { formatAnnounceEntry, isHarnessMessage } from '../subagent/messages.js';
 
 /** A single giant model-authored burst is malformed; useful work may continue in later iterations. */
@@ -197,6 +198,10 @@ export interface AgentHooks {
    * human turn, where a broader ranked digest fits better.
    */
   recall?: (input: { sessionId: string; userId: string; userMessage: string; timezone: string; coldStart: boolean }) => Promise<string>;
+  /** State to carry through a compaction summary (todo list, kernel variables…). */
+  compactionExtraState?: (sessionId: string) => string | null;
+  /** Called after a compaction (reset read-dedupe state, schedule learning…). */
+  onCompaction?: (sessionId: string) => void;
   /** Extra per-turn context lines (recall prefetch, todo list…). */
   turnContextSections?: (input: { sessionId: string; userId: string; userMessage: string }) => Promise<string[]> | string[];
   /** Background work after the reply has been returned (learning fork, refine). */
@@ -209,6 +214,8 @@ export interface AfterTurnInput {
   userMessage: string;
   finalResponse: string;
   toolCallCount: number;
+  /** A lean compaction ran during this turn. */
+  compacted: boolean;
   provider: LLMProvider;
   systemPrompt: SystemPrompt;
 }
@@ -788,6 +795,10 @@ export class Agent {
     let emptyEndTurnRetries = 0;
     let malformedTurnNudges = 0;
     let stopNudges = 0;
+    let compactedThisTurn = false;
+    // Provider-reported prompt size of the last call drives the compaction trigger.
+    let lastPromptTokens: number | undefined;
+    let lastPromptMessageCount: number | undefined;
     let finalResponse = '';
     let completionReason: AgentCompletionReason | null = null;
     // Self-evolution signal accounting (best-effort, captured at turn end).
@@ -915,49 +926,69 @@ export class Agent {
       const currentSession = await this.sessionManager.getSession(sessionId);
       const rawMessages = currentSession?.messages || [];
 
-      // Sanitize messages: remove entries with empty/null content that would cause API errors
-      // (e.g., from max_tokens responses with no content, or empty tool result arrays)
-      const sanitizedMessages = rawMessages.filter(msg => {
-        if (msg.content == null) return false;
-        if (typeof msg.content === 'string') return msg.content.length > 0;
-        if (Array.isArray(msg.content)) return msg.content.length > 0;
-        return true;
-      });
-
-      let replayMessages = this.buildReplay(sanitizedMessages);
-
-      // Process messages through context manager (compression, deduplication)
-      let messages = this.contextManager
-        ? this.contextManager.buildContextMessages(replayMessages)
-        : replayMessages;
-
-      // Proactive overflow prevention: run the cheapest-first compaction stages
-      // BEFORE sending, so we don't waste a round-trip hitting the context wall.
-      if (this.contextManager) {
-        const estimatedTokens = estimateMessagesTokens(messages);
-        const maxTokenLimit = effectiveContextWindowTokens(
-          activeProvider,
-          this.contextManager.getMaxContextTokens()
-        );
-        if (estimatedTokens > maxTokenLimit * 0.85) {
-          const result = compactSync(messages, {
-            targetTokens: Math.floor(maxTokenLimit * 0.8),
-            preserveLastN: 6,
-          });
-          this.logger.info(
-            {
-              before: result.estimatedTokensBefore,
-              after: result.estimatedTokensAfter,
-              stages: result.stagesApplied,
-              model: activeProvider.model || activeProvider.name,
-              contextWindowTokens: maxTokenLimit,
-              usage: (estimatedTokens / maxTokenLimit * 100).toFixed(1) + '%',
-            },
-            'Proactive graduated compaction applied'
-          );
-          messages = result.messages;
-          replayMessages = messages;
+      // Full history since the last compaction boundary (tool calls included),
+      // behind the stored compaction summary. Append-only, so it caches across
+      // turns. Lean compaction runs when the provider's real prompt size
+      // crosses the trigger (50% of large windows, 75% of smaller ones).
+      const windowTokens = effectiveContextWindowTokens(
+        activeProvider,
+        this.contextManager?.getMaxContextTokens() ?? modelLimits.contextWindowTokens,
+      );
+      let messages: Message[];
+      if (this.hooks.buildReplay) {
+        messages = this.hooks.buildReplay(rawMessages.filter(msg =>
+          typeof msg.content === 'string' ? msg.content.length > 0 : Array.isArray(msg.content) && msg.content.length > 0));
+      } else {
+        const prepared = await prepareContext({
+          sessionId,
+          messages: rawMessages,
+          windowTokens,
+          provider: activeProvider,
+          store: this.sessionManager.getCompactionStore(),
+          promptTokens: lastPromptTokens,
+          promptTokensMessageCount: lastPromptMessageCount,
+          overheadTokens: Math.ceil((flattenSystem(systemPrompt).length + JSON.stringify(tools).length) / 4),
+          extraState: this.hooks.compactionExtraState
+            ? () => this.hooks.compactionExtraState!(sessionId)
+            : undefined,
+          signal: abortSignal,
+          onSummaryError: (error) => this.logger.warn({ error: (error as Error)?.message }, 'Compaction summary failed; used the deterministic summary'),
+        });
+        messages = prepared.messages;
+        if (prepared.compacted) {
+          compactedThisTurn = true;
+          lastPromptTokens = undefined;
+          this.logger.info({
+            sessionId,
+            before: prepared.tokensBefore,
+            after: prepared.tokensAfter,
+            fallback: prepared.usedFallback,
+            windowTokens,
+          }, 'Lean compaction applied');
+          triggerHook({
+            type: 'agent',
+            action: 'compaction',
+            sessionId,
+            context: { tokensBefore: prepared.tokensBefore, tokensAfter: prepared.tokensAfter },
+            timestamp: new Date(),
+          }).catch(() => {});
+          this.hooks.onCompaction?.(sessionId);
         }
+      }
+
+      // Last-resort guard if a summary could not bring the prompt under the
+      // window (deterministic, no model call).
+      if (estimateMessagesTokens(messages) > windowTokens * 0.95) {
+        const result = compactSync(messages, {
+          targetTokens: Math.floor(windowTokens * 0.8),
+          preserveLastN: 6,
+        });
+        this.logger.warn({
+          before: result.estimatedTokensBefore,
+          after: result.estimatedTokensAfter,
+          stages: result.stagesApplied,
+        }, 'Emergency compaction applied');
+        messages = result.messages;
       }
 
       // Map granular thinking level to provider-specific params
@@ -1044,6 +1075,8 @@ export class Agent {
       totalInputTokens += response.usage.inputTokens;
       totalOutputTokens += response.usage.outputTokens;
       totalCachedInputTokens += response.usage.cachedInputTokens ?? 0;
+      lastPromptTokens = response.usage.inputTokens;
+      lastPromptMessageCount = rawMessages.length;
       if (response.usage.inputTokens > peakInputTokens) peakInputTokens = response.usage.inputTokens;
 
       // Process response content
@@ -1569,6 +1602,7 @@ export class Agent {
           userMessage,
           finalResponse,
           toolCallCount: totalToolCalls,
+          compacted: compactedThisTurn,
           provider: activeProvider,
           systemPrompt,
         })).catch((error) => {
@@ -1867,14 +1901,7 @@ Install new skills from ClawHub with manage_skills (search, install, uninstall, 
     };
   }
 
-  /** Stored history → the messages replayed to the model this iteration. */
-  private buildReplay(messages: Message[]): Message[] {
-    if (this.hooks.buildReplay) return this.hooks.buildReplay(messages);
-    return compactCompletedConversationHistory(messages, {
-      maxCompletedTurns: 8,
-      maxVisibleCharsPerMessage: 2_000,
-    });
-  }
+
 
   /** Apply the gateway's tool-result post-processing (large-output persistence). */
   private postProcessToolResults(

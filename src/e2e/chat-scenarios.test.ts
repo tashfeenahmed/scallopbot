@@ -746,8 +746,8 @@ describe('E2E Chat Scenarios', () => {
         // Provider should have been called 4 times total (2 per turn)
         expect(ctx.mockProvider.callCount).toBe(4);
 
-        // Turn 2 keeps the human-visible outcome from turn 1 while dropping its
-        // completed provider protocol/tool payload.
+        // Turn 2 replays turn 1 in full, tool calls included: history is
+        // append-only so the provider cache holds across turns.
         const allRequests = (ctx.mockProvider as unknown as { allRequests: unknown[] }).allRequests as Array<{ messages: Array<{ role: string; content: ContentBlock[] | string }> }>;
         // 3rd request (index 2) is the first request of turn 2
         const turn2FirstRequest = allRequests[2];
@@ -755,8 +755,9 @@ describe('E2E Chat Scenarios', () => {
         expect(replay).toContain('Increment the counter');
         expect(replay).toContain('Counter incremented to 1.');
         expect(replay).toContain('Increment again');
-        expect(replay).not.toContain('cont_1');
-        expect(replay).not.toContain('count: 1');
+        expect(replay).toContain('cont_1');
+        expect(replay).toContain('count: 1');
+        expect(replay).toContain('[context: turn]');
 
         // Session should have 8 messages total
         const session = await ctx.sessionManager.getSession(sessionId);

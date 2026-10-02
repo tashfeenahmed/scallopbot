@@ -15,6 +15,7 @@ import {
   type LLMProvider,
 } from '../providers/index.js';
 import { defineSkill } from '../skills/sdk.js';
+import { registerSessionSearchTool } from '../context/session-search.js';
 import { SessionManager } from '../agent/session.js';
 import { Agent, type AgentHooks } from '../agent/agent.js';
 import { initSecurityLayers } from '../security/startup.js';
@@ -74,6 +75,7 @@ import { OutcomeBrain } from '../brain/index.js';
 import { registerMediaSkills, type MediaSkills } from '../skills/media-skills.js';
 import { backgroundProcesses, createBashDoneRouter, type BackgroundExitEvent } from '../tools/shell/index.js';
 import { registerAgentTools, coreToolHooks } from '../tools/index.js';
+import { getTodoSnapshot } from '../tools/todo/index.js';
 import { buildRecallBlock, buildRecallDigest } from '../memory/recall.js';
 import { enqueueInLane, laneIsBusy } from '../agent/command-queue.js';
 import type { FileTools } from '../tools/files/index.js';
@@ -1244,6 +1246,12 @@ export class Gateway {
     };
     const learning = this.learning;
     const store = this.scallopMemoryStore;
+    // Compaction: carry the todo list through the summary, and forget which
+    // file ranges were read (the model no longer has that content).
+    hooks.compactionExtraState = (sessionId) => getTodoSnapshot(sessionId);
+    hooks.onCompaction = (sessionId) => {
+      this.fileTools?.store.resetReads(sessionId);
+    };
     if (learning) {
       hooks.skillIndex = () => learning.renderSkillIndex();
       hooks.frozenPromptSections = ({ userId }) => [
@@ -1252,7 +1260,7 @@ export class Gateway {
       ];
       // Running per-session totals for the review/refine triggers.
       const totals = new Map<string, { turns: number; toolCalls: number }>();
-      hooks.afterTurn = ({ sessionId, userId, userMessage, toolCallCount }) => {
+      hooks.afterTurn = ({ sessionId, userId, userMessage, toolCallCount, compacted }) => {
         const total = totals.get(sessionId) ?? { turns: 0, toolCalls: 0 };
         total.turns++;
         total.toolCalls += toolCallCount;
@@ -1263,9 +1271,10 @@ export class Gateway {
           userId,
           turnCount: total.turns,
           toolCallCount: total.toolCalls,
+          compacted,
           userCorrection: userMessage,
         });
-        learning.refine.maybeScheduleRefine({ sessionId, userId, turnCount: total.turns });
+        learning.refine.maybeScheduleRefine({ sessionId, userId, turnCount: total.turns, compacted });
       };
     }
     if (store) {
@@ -1585,6 +1594,15 @@ export class Gateway {
       })
       .build();
     this.skillRegistry.registerSkill(memoryGetSkill.skill);
+
+    // session_search: FTS5/BM25 recall over the caller's own transcripts,
+    // including turns that lean compaction removed from the context.
+    if (this.scallopMemoryStore) {
+      registerSessionSearchTool(this.skillRegistry, {
+        db: this.scallopMemoryStore.getDatabase(),
+        canonicalSingleUserIds: () => this.canonicalSingleUserIds,
+      });
+    }
 
     // Safe on-demand access to documentation-only (including learned) skills.
     // Explicit selection is the usage signal that drives curator decisions.

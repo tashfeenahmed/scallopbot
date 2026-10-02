@@ -1,3 +1,4 @@
+import type { CompactionStore } from '../context/compaction-state.js';
 import { nanoid } from 'nanoid';
 import type { Message, TokenUsage } from '../providers/types.js';
 import type {
@@ -30,6 +31,11 @@ export class SessionManager {
 
   constructor(db: ScallopDatabase) {
     this.db = db;
+  }
+
+  /** Durable per-session compaction state (lean compaction summaries). */
+  getCompactionStore(): CompactionStore {
+    return this.db;
   }
 
   /**

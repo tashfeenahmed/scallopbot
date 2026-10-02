@@ -34,6 +34,7 @@
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.bench.json",
     "bench:agentic": "tsx evals/agentic/run.ts",
     "postmortem": "tsx scripts/postmortem.ts",
+    "bench:compaction": "tsx benchmarks/compaction-recall.ts",
     "lint": "eslint src/",
     "check:secrets": "node scripts/check-no-secrets.mjs",
     "format": "prettier --write src/"
