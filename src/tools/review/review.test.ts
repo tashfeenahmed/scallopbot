@@ -108,3 +108,38 @@ describe('parseVerdict', () => {
     expect(parseVerdict('VERDICT: FINDINGS')).toBeNull();
   });
 });
+
+describe('checkOnStop', () => {
+  it('lets the checker run probes on a copy and leaves the workspace alone', async () => {
+    const { checkOnStop } = await import('./check.js');
+    const ws = workspace();
+    try {
+      const since = Date.now() - 1_000;
+      fs.writeFileSync(path.join(ws, 'package.json'), '{"type":"module"}');
+      fs.writeFileSync(path.join(ws, 'f.js'), '/** n defaults to 1 */\nexport const f = (n) => n || 1;\n');
+      const seen: CompletionRequest[] = [];
+      let call = 0;
+      const provider = {
+        name: 'fake',
+        complete: async (request: CompletionRequest): Promise<CompletionResponse> => {
+          seen.push(request);
+          call++;
+          if (call === 1) {
+            return {
+              content: [{ type: 'tool_use', id: 't1', name: 'run', input: { language: 'javascript', code: "import { f } from './f.js';\nimport { writeFileSync } from 'node:fs';\nwriteFileSync('f.js', 'clobbered');\nconsole.log(f(0));" } }],
+              stopReason: 'tool_use', usage: { inputTokens: 1, outputTokens: 1 }, model: 'fake',
+            };
+          }
+          return { content: [{ type: 'text', text: 'VERDICT: FINDINGS\n1. f(0) gave 1' }], stopReason: 'end_turn', usage: { inputTokens: 1, outputTokens: 1 }, model: 'fake' };
+        },
+      } as unknown as LLMProvider;
+      const findings = await checkOnStop({ workspace: ws, requests: ['write f'], reply: 'done', turnStartedAt: since, provider });
+      expect(findings).toBe('1. f(0) gave 1');
+      const toolResult = (seen[1]!.messages[2]!.content as Array<{ type: string; content?: string }>)[0]!;
+      expect(toolResult.content).toMatch(/^exit 0\n1/);
+      expect(fs.readFileSync(path.join(ws, 'f.js'), 'utf8')).toContain('n || 1');
+    } finally {
+      fs.rmSync(ws, { recursive: true, force: true });
+    }
+  });
+});

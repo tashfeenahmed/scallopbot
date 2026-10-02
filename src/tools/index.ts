@@ -12,6 +12,7 @@ import { registerWebTools } from './web/index.js';
 import { persistLargeOutput } from './tool-output.js';
 import { verifyOnStopNudge } from './verify/ledger.js';
 import { reviewOnStop, reviewNote } from './review/review.js';
+import { checkOnStop } from './review/check.js';
 
 /** Register every built-in native tool; returns the stateful file tools. */
 export function registerAgentTools(
@@ -27,19 +28,22 @@ export function registerAgentTools(
 
 /**
  * Hooks the core tools contribute: large-output persistence, the verify nudge
- * and review-on-stop (opt-in with REVIEW_ON_STOP=true: on ScallopBench v2 it
- * left the pass rate unchanged at 105/108 while adding ~11% cost and ~9s median
- * latency per task, so it is off by default).
+ * and the second look before a turn that changed files ends. REVIEW_ON_STOP:
+ * `read` (or `true`) = read-only review, `run` = check-on-stop, which may run
+ * probes on a throwaway copy. Off by default: the read-only review left
+ * ScallopBench v2 unchanged at 105/108 for ~11% more cost.
  */
-export function coreToolHooks(options: { workspace: string; contextWindowTokens?: number; review?: boolean }): AgentHooks {
-  const review = options.review ?? process.env.REVIEW_ON_STOP === 'true';
+export function coreToolHooks(options: { workspace: string; contextWindowTokens?: number; review?: 'read' | 'run' | false }): AgentHooks {
+  const setting = process.env.REVIEW_ON_STOP;
+  const review = options.review ?? (setting === 'run' ? 'run' : setting === 'read' || setting === 'true' ? 'read' : false);
   return {
     postProcessToolResult: ({ sessionId, toolName, content }) =>
       persistLargeOutput(sessionId, toolName, content, { contextWindowTokens: options.contextWindowTokens }),
     verifyOnStop: (sessionId) => verifyOnStopNudge(sessionId, { workspace: options.workspace }),
     ...(review ? {
       reviewOnStop: async ({ sessionId, ...input }) => {
-        const findings = await reviewOnStop({ ...input, workspace: options.workspace, traceSessionId: sessionId });
+        const run = review === 'run' ? checkOnStop : reviewOnStop;
+        const findings = await run({ ...input, workspace: options.workspace, traceSessionId: sessionId });
         return findings ? reviewNote(findings) : null;
       },
     } : {}),
