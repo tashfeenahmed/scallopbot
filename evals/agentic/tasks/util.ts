@@ -64,10 +64,15 @@ export function mentionsNumber(text: string, value: number, decimals = 2): boole
   return numbersIn(text).some(n => Math.abs(n - value) <= tolerance);
 }
 
+/** Shell commands the agent ran: bash calls plus run_code with a shell language. */
 export function bashCommands(trace: TaskTrace): string[] {
-  return trace.toolCalls
-    .filter(call => call.name === 'bash' && typeof call.input.command === 'string')
-    .map(call => call.input.command as string);
+  return trace.toolCalls.flatMap((call) => {
+    if (call.name === 'bash' && typeof call.input.command === 'string') return [call.input.command];
+    if (call.name === 'run_code'
+      && typeof call.input.code === 'string'
+      && /^(?:bash|sh|shell|zsh)$/i.test(String(call.input.language ?? ''))) return [call.input.code];
+    return [];
+  });
 }
 
 export function callsNamed(trace: TaskTrace, name: string) {
