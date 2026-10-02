@@ -19,6 +19,12 @@ import { CODE_TOOL_NAME, EXECUTE_CODE_TOOL_NAME, buildExecuteCodeDescription } f
 
 export interface CodeModeDeps {
   workspace: string;
+  /**
+   * Registry the kernel API dispatches to and lists in the prompt. Defaults
+   * to the registry the code tool is registered in. Pass the full registry
+   * here when the agent itself sees a registry holding only `exec`.
+   */
+  toolRegistry?: SkillRegistry;
   /** Tool dispatcher; default calls the registry's native handlers / script executor. */
   callTool?: CallTool;
   /** Needed by the default callTool for script (SKILL.md) tools. */
@@ -49,11 +55,12 @@ const EXEC_DESCRIPTION =
 
 export function registerCodeModeTool(registry: SkillRegistry, deps: CodeModeDeps): RegisteredCodeTool {
   const toolName = deps.toolName ?? CODE_TOOL_NAME;
-  const callTool = deps.callTool ?? createRegistryCallTool(registry, deps.skillExecutor);
+  const tools = deps.toolRegistry ?? registry;
+  const callTool = deps.callTool ?? createRegistryCallTool(tools, deps.skillExecutor);
   const manager = deps.manager ?? new KernelManager({
     workspace: deps.workspace,
     callTool,
-    catalog: registryCatalog(registry),
+    catalog: registryCatalog(tools),
     logger: deps.logger,
     cellTimeoutMs: deps.cellTimeoutMs,
     idleMs: deps.idleMs,
@@ -66,7 +73,7 @@ export function registerCodeModeTool(registry: SkillRegistry, deps: CodeModeDeps
   if (deps.setAsDefault !== false) setDefaultKernelManager(manager);
 
   const mode = toolName === EXECUTE_CODE_TOOL_NAME ? 'execute_code' : 'exec';
-  const description = mode === 'exec' ? EXEC_DESCRIPTION : buildExecuteCodeDescription(registry);
+  const description = mode === 'exec' ? EXEC_DESCRIPTION : buildExecuteCodeDescription(tools);
 
   const skill = defineSkill(toolName, description)
     .userInvocable(false)

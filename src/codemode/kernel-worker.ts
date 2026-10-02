@@ -211,8 +211,10 @@ function defineHandleMeta(target: object, spec: HandleSpec): void {
   Object.defineProperty(target, HANDLE, { value: spec, enumerable: false });
 }
 
-function makeBashHandle(started: Promise<{ id: string }>, cmd: string): any {
-  const spec: HandleSpec = { kind: 'bash', label: cmd };
+let bashSeq = 0;
+
+function makeBashHandle(started: Promise<{ id: string }>, cmd: string, id?: string): any {
+  const spec: HandleSpec = { kind: 'bash', label: cmd, id };
   started.then(info => { spec.id = info.id; }, () => {});
   const withId = <T>(fn: (id: string) => Promise<T>) => started.then(info => fn(info.id));
   const handle: any = {
@@ -277,7 +279,8 @@ const skills = new Proxy(Object.create(null), {
 const api: Record<string, unknown> = {
   bash: (cmd: unknown, opts?: unknown) => {
     if (typeof cmd !== 'string' || !cmd.trim()) throw new TypeError('bash(cmd) needs a command string');
-    return makeBashHandle(quiet(rpc('bash.start', [cmd, opts ?? {}])), cmd);
+    const id = `b${++bashSeq}`;
+    return makeBashHandle(quiet(rpc('bash.start', [cmd, opts ?? {}, id])), cmd, id);
   },
   read: call('read'),
   write: call('write'),
@@ -301,6 +304,7 @@ const api: Record<string, unknown> = {
   skills,
   print: (...args: unknown[]) => kernelConsole.log(...args),
   require: workspaceRequire,
+  WORKSPACE: workspace,
   __cm_import: kernelImport,
 };
 for (const [name, value] of Object.entries(api)) {
@@ -581,9 +585,13 @@ function restore(entries: SnapshotEntry[]): { restored: string[]; failed: Array<
         topLevelFunctions.add(entry.name);
       } else if (entry.kind === 'handle' && entry.handle?.id) {
         const started = Promise.resolve({ id: entry.handle.id });
-        g[entry.name] = entry.handle.kind === 'bash'
-          ? makeBashHandle(started, entry.handle.label)
-          : makeAgentHandle(started, entry.handle.label);
+        if (entry.handle.kind === 'bash') {
+          const seq = Number(/^b(\d+)$/.exec(entry.handle.id)?.[1] ?? 0);
+          if (seq > bashSeq) bashSeq = seq;
+          g[entry.name] = makeBashHandle(started, entry.handle.label, entry.handle.id);
+        } else {
+          g[entry.name] = makeAgentHandle(started, entry.handle.label);
+        }
       } else {
         throw new Error('empty snapshot entry');
       }

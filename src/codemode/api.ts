@@ -415,7 +415,10 @@ export class KernelApi {
   private readonly opts: KernelApiOptions;
   readonly shell: ShellBackend;
   private exec: Omit<ToolCallContext, 'signal' | 'sessionId' | 'workspace'> = {};
-  private readonly watched = new Map<string, { cmd: string; waited: boolean }>();
+  /** Backend job id → watch entry (kernelId is the id the model sees). */
+  private readonly watched = new Map<string, { cmd: string; kernelId: string; waited: boolean }>();
+  /** Kernel handle id (h.id) → backend job id. */
+  private readonly handleIds = new Map<string, string>();
   /** Jobs that finished during a cell without being awaited (yet): id → note. */
   private readonly finishedDuringCell = new Map<string, string>();
   private pollTimer: ReturnType<typeof setInterval> | null = null;
@@ -606,22 +609,25 @@ export class KernelApi {
           cwd: typeof o.cwd === 'string' ? o.cwd : undefined,
           timeout: typeof o.timeout === 'number' ? o.timeout : undefined,
         }, this.ctx());
-        this.watch(started.id, cmd);
-        return started;
+        // The kernel names the handle synchronously (h.id); map it to the backend's id.
+        const kernelId = typeof args[2] === 'string' && args[2] ? args[2] : started.id;
+        this.handleIds.set(kernelId, started.id);
+        this.watch(started.id, kernelId, cmd);
+        return { id: kernelId };
       }
       case 'bash.poll':
-        return this.shell.poll(requireString(args[0], 'poll', 'id'));
+        return this.shell.poll(this.backendId(args[0]));
       case 'bash.tail':
-        return this.shell.tail(requireString(args[0], 'tail', 'id'), typeof args[1] === 'number' ? args[1] : 20);
+        return this.shell.tail(this.backendId(args[0]), typeof args[1] === 'number' ? args[1] : 20);
       case 'bash.output':
-        return this.shell.output(requireString(args[0], 'output', 'id'));
+        return this.shell.output(this.backendId(args[0]));
       case 'bash.kill':
-        return this.shell.kill(requireString(args[0], 'kill', 'id'));
+        return this.shell.kill(this.backendId(args[0]));
       case 'bash.wait': {
-        const id = requireString(args[0], 'wait', 'id');
+        const id = this.backendId(args[0]);
         const entry = this.watched.get(id);
         if (entry) entry.waited = true;
-        this.finishedDuringCell.delete(id);
+        this.finishedDuringCell.delete(String(args[0]));
         return this.shell.wait(id, signal);
       }
       default:
@@ -635,8 +641,13 @@ export class KernelApi {
 
   // ── background job completion → [bash-done …] ─────────────────────────────
 
-  private watch(id: string, cmd: string): void {
-    this.watched.set(id, { cmd, waited: false });
+  private backendId(kernelId: unknown): string {
+    const id = requireString(kernelId, 'bash handle', 'id');
+    return this.handleIds.get(id) ?? id;
+  }
+
+  private watch(id: string, kernelId: string, cmd: string): void {
+    this.watched.set(id, { cmd, kernelId, waited: false });
     if (!this.shell.onDone) this.ensurePolling();
   }
 
@@ -664,10 +675,11 @@ export class KernelApi {
     this.pollTimer.unref?.();
   }
 
-  private jobFinished(id: string, result: BashJobResult, cmd: string): void {
-    const entry = this.watched.get(id);
-    this.watched.delete(id);
+  private jobFinished(backendId: string, result: BashJobResult, cmd: string): void {
+    const entry = this.watched.get(backendId);
+    this.watched.delete(backendId);
     if (!entry || entry.waited) return;
+    const id = entry.kernelId;
     const shortCmd = cmd.length > 120 ? cmd.slice(0, 117) + '...' : cmd;
     const text = `[bash-done ${id} exit=${result.exitCode ?? '?'}] ${shortCmd}`;
     const tail = lastLines(result.output, 20);

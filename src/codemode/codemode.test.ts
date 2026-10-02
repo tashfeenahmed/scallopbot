@@ -136,10 +136,10 @@ describe('registerCodeModeTool (RPC to real registered tools)', () => {
       'const hits = await search("TODO", {glob: "*.ts"});',
       'await patch("a.ts", "line one", "line 1");',
       'await write("out.csv", "x");',
-      'const web = await web.search("q");',
+      'const found = await web.search("q");',
       'const w = await skills.weather("Oslo");',
       'await send("done");',
-      'JSON.stringify([src, files, hits.map(h => h.file + ":" + h.line), web.results[0].title, w.tempC])',
+      'JSON.stringify([src, files, hits.map(h => h.file + ":" + h.line), found.results[0].title, w.tempC])',
     ].join('\n'));
     expect(res.success).toBe(true);
     expect(res.output).toBe('→ ["line one\\nline two",["a.ts","b.ts"],["a.ts:1","b.ts:9"],"T",12]');

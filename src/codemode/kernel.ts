@@ -28,6 +28,12 @@ import type { Logger } from 'pino';
 import { CellSyntaxError, transformCell } from './transform.js';
 
 export const DEFAULT_CELL_TIMEOUT_MS = 300_000;
+
+/** Globals the kernel API owns; cells may not declare variables with these names. */
+export const KERNEL_API_NAMES: readonly string[] = [
+  'WORKSPACE', 'agents', 'ask', 'bash', 'glob', 'mcp', 'memory', 'patch', 'print', 'read',
+  'require', 'search', 'send', 'sendFile', 'skills', 'tools', 'web', 'write',
+];
 export const OUTPUT_CAP_CHARS = 64_000;
 
 export interface RpcContext {
@@ -405,6 +411,14 @@ export class Kernel {
         } else {
           this.finishRunning({ error: String(error) });
         }
+        return await result;
+      }
+
+      const clash = transformed.declared.filter(name => KERNEL_API_NAMES.includes(name));
+      if (clash.length > 0) {
+        this.finishRunning({
+          error: `Error: cannot declare ${clash.map(name => `"${name}"`).join(', ')}: kernel API name${clash.length > 1 ? 's' : ''} (${KERNEL_API_NAMES.join(', ')}). Pick another variable name; nothing in this cell ran.`,
+        });
         return await result;
       }
 

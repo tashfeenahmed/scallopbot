@@ -71,8 +71,10 @@ test-vision*.ts
 pdf/
 *.pdf
 
-# Evals
-evals/
+# Evals (local-only, except the committed code-mode A/B harness)
+evals/*
+!evals/codemode/
+evals/codemode/last-run.json
 
 # Web UI
 web/node_modules/

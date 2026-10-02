@@ -65,6 +65,7 @@ const ALWAYS_API = [
   'print(...values): void  // same as console.log',
   'tools(): Promise<Array<{name: string, description: string, params: string[]}>>  // every callable tool',
   'require(id) / await import(id)  // Node built-ins and workspace packages',
+  'WORKSPACE: string  // absolute workspace path; API paths and bash() are relative to it, Node\'s own fs/child_process are not',
 ];
 
 function schemaType(prop: Record<string, any> | undefined): string {

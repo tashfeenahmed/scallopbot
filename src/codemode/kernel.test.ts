@@ -3,7 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { Kernel, formatVariables, readSnapshotFile, type RpcDispatch } from './kernel.js';
+import { KERNEL_API_NAMES, Kernel, formatVariables, readSnapshotFile, type RpcDispatch } from './kernel.js';
 
 const kernels: Kernel[] = [];
 const dirs: string[] = [];
@@ -297,6 +297,32 @@ describe('Kernel RPC', () => {
     finish({ exitCode: 0, ok: true, output: 'done' });
     expect((await pending).value).toBe('0');
     expect((await k.exec('await h.kill()')).value).toBe('killed');
+  });
+});
+
+describe('Kernel globals', () => {
+  it('names bash handles synchronously and exposes WORKSPACE', async () => {
+    const started: unknown[][] = [];
+    const k = makeKernel({ dispatch: async (p, args) => { if (p === 'bash.start') started.push(args); return { id: args[2] }; } });
+    const r = await k.exec('const h1 = bash("a"); const h2 = bash("b", {cwd: "sub"}); [h1.id, h2.id, WORKSPACE === process.cwd()]');
+    expect(r.value).toBe("[ 'b1', 'b2', true ]");
+    await new Promise(res => setTimeout(res, 20));
+    expect(started).toEqual([['a', {}, 'b1'], ['b', { cwd: 'sub' }, 'b2']]);
+  });
+});
+
+describe('Kernel API name protection', () => {
+  it('refuses to declare a variable that would shadow an API function', async () => {
+    const k = makeKernel({ dispatch: async () => 'text' });
+    const r = await k.exec('globalThis.ran = 1; const glob = require("node:path")');
+    expect(r.error).toMatch(/cannot declare "glob": kernel API name/);
+    expect((await k.exec('[typeof ran, typeof glob, await read("x")]')).value).toBe("[ 'undefined', 'function', 'text' ]");
+  });
+
+  it('KERNEL_API_NAMES matches the globals the worker installs', async () => {
+    const k = makeKernel();
+    const r = await k.exec(`${JSON.stringify(KERNEL_API_NAMES)}.filter(n => globalThis[n] === undefined)`);
+    expect(r.value).toBe('[]');
   });
 });
 
