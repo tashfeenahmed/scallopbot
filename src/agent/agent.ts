@@ -11,6 +11,7 @@ import type {
   CompletionResponse,
   Message,
   SystemPrompt,
+  StreamHandlers,
 } from '../providers/types.js';
 import type { SessionManager } from './session.js';
 import type { SkillRegistry } from '../skills/registry.js';
@@ -48,6 +49,8 @@ import { selectBest, scoreResponseHeuristic } from './critic.js';
 import type { EvolutionRecorder } from '../evolution/signals.js';
 import type { OutcomeBrain } from '../brain/index.js';
 import { stripThinkTags } from '../utils/output-safety.js';
+import { ReplyStream } from './reply-stream.js';
+import { completeWithStream } from '../providers/streaming.js';
 import { resolveStateUserId } from '../utils/state-user-id.js';
 import { compactCompletedConversationHistory } from '../memory/session-message-view.js';
 import { isMemoryLiveForContext } from '../memory/state-relevance.js';
@@ -167,6 +170,8 @@ export interface AgentOptions {
    * SMS to other people). Off by default; defaults to the CONFIRM_TOOLS env.
    */
   confirmTools?: string[];
+  /** Stream reply text to onProgress as 'text_delta'. Defaults to STREAMING_ENABLED (on). */
+  streaming?: boolean;
   /** Optional integrations wired by the gateway (tools, compaction, learning). */
   hooks?: AgentHooks;
 }
@@ -241,7 +246,13 @@ export type ProgressCallback = (update: ProgressUpdate) => Promise<void>;
 export type ShouldStopCallback = () => boolean;
 
 export interface ProgressUpdate {
-  type: 'thinking' | 'planning' | 'tool_start' | 'tool_complete' | 'tool_error' | 'memory' | 'status';
+  /**
+   * 'text_delta': a piece of the reply as the model writes it (`message` is
+   * the delta). 'text_reset': the text streamed since the last reset was not
+   * the reply (it sat beside tool calls, or the call was retried); discard it.
+   * The final reply is still the processMessage() result.
+   */
+  type: 'thinking' | 'planning' | 'tool_start' | 'tool_complete' | 'tool_error' | 'memory' | 'status' | 'text_delta' | 'text_reset';
   message: string;
   toolName?: string;
   iteration?: number;
@@ -354,6 +365,7 @@ export class Agent {
   private maxToolCallsPerResponse: number;
   /** Tools that need the user's OK first (opt-in, `CONFIRM_TOOLS`). Empty by default. */
   private confirmTools: Set<string>;
+  private streamingEnabled: boolean;
   /**
    * Frozen per-session system prompts. Built once at session start and reused
    * byte-for-byte so the provider's prompt cache holds for the whole session.
@@ -420,6 +432,8 @@ export class Agent {
         .map((name) => name.trim())
         .filter(Boolean),
     );
+    this.streamingEnabled = options.streaming
+      ?? !/^(0|false|no|off)$/i.test((process.env.STREAMING_ENABLED ?? '').trim());
 
     this.logger.info({ enableThinking: this.enableThinking, bestOfN: this.bestOfN, bestOfNThreshold: this.bestOfNThreshold }, 'Agent thinking mode configured');
   }
@@ -791,6 +805,9 @@ export class Agent {
     // Loop thresholds are per turn: a failure a fresh human message
     // re-authorizes must not count against the new turn.
     this.toolLoopDetector.clearSession(sessionId);
+    const replyStream = onProgress && this.streamingEnabled && !this.subAgentMode
+      ? new ReplyStream(onProgress, (e) => this.logger.warn({ error: e.message }, 'Text delta callback failed'))
+      : undefined;
 
     // Agent loop
     while (iterations < this.maxIterations) {
@@ -984,12 +1001,14 @@ export class Agent {
         : callAbortController.signal;
       const timedRequest: CompletionRequest = { ...request, signal: callSignal };
       let callTimeout: ReturnType<typeof setTimeout> | undefined;
+      replyStream?.begin(iterations);
       try {
         const modelCall = this.executeWithRecovery(
           activeProvider,
           timedRequest,
           sessionId,
-          complexity.suggestedModelTier
+          complexity.suggestedModelTier,
+          replyStream?.handlers,
         );
         response = callTimeoutMs === undefined
           ? await modelCall
@@ -1003,6 +1022,7 @@ export class Agent {
               }),
             ]);
       } catch (error) {
+        await replyStream?.end(true);
         this.logger.error({
           iteration: iterations,
           error: (error as Error).message,
@@ -1055,6 +1075,9 @@ export class Agent {
           'Rejected malformed or anomalous tool-call batch',
         );
       }
+
+      // Text beside tool calls is planning, not the reply: the channel drops it.
+      await replyStream?.end(emittedToolUses.length > 0);
 
       // A response cannot be complete while it is still asking us to execute
       // tools. Previously `[DONE]` next to a tool call skipped the call entirely.
@@ -2278,7 +2301,8 @@ Install new skills from ClawHub with manage_skills (search, install, uninstall, 
     provider: LLMProvider,
     request: CompletionRequest,
     sessionId: string,
-    tier: 'fast' | 'standard' | 'capable'
+    tier: 'fast' | 'standard' | 'capable',
+    stream?: StreamHandlers,
   ): Promise<CompletionResponse> {
     const MAX_RETRIES = 3;
     // Provider overrides/defaults may not belong to this Router. Only feed
@@ -2297,10 +2321,15 @@ Install new skills from ClawHub with manage_skills (search, install, uninstall, 
     // Layer 0: Rate limit retry with exponential backoff
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       try {
-        const response = await provider.complete(request);
+        // Only this first layer streams; compaction and fallback retries
+        // below use complete() and the final reply arrives with the result.
+        const response = stream
+          ? await completeWithStream(provider, request, stream)
+          : await provider.complete(request);
         reportSuccess();
         return response;
       } catch (error) {
+        stream?.onTextReset?.();
         const err = error as Error & { status?: number; headers?: Record<string, string>; code?: string };
 
         // Local policy/budget failures are deterministic. Trying another

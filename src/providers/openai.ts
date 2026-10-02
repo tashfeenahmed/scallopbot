@@ -5,8 +5,15 @@ import type {
   CompletionRequest,
   CompletionResponse,
   ContentBlock,
+  StreamHandlers,
 } from './types.js';
 import { flattenSystem } from './types.js';
+import {
+  ChatCompletionStreamAssembler,
+  StreamInterruptedError,
+  trackingHandlers,
+  type ChatCompletionChunkLike,
+} from './streaming.js';
 import { DEFAULT_MAX_RETRIES, RETRY_STATUS_CODES, RETRY_DELAY_MS } from './constants.js';
 import { buildCredentialPool, type CredentialPool } from './credential-pool.js';
 
@@ -96,12 +103,13 @@ export class OpenAIProvider implements LLMProvider {
     return !!this.apiKey && this.apiKey.length > 0;
   }
 
-  async complete(request: CompletionRequest): Promise<CompletionResponse> {
+  /** The request params shared by complete() and completeStream(). */
+  private buildParams(request: CompletionRequest): OpenAI.ChatCompletionCreateParamsNonStreaming {
     const messages = this.formatMessages(request);
     // Every GPT-5.x and o-series model takes max_completion_tokens and no temperature.
     const isReasoning = REASONING_MODELS.has(this.model) || /^(?:gpt-5|o\d)/.test(this.model);
 
-    const params: OpenAI.ChatCompletionCreateParams = {
+    return {
       model: this.model,
       messages,
       // Reasoning models use max_completion_tokens instead of max_tokens
@@ -133,6 +141,10 @@ export class OpenAIProvider implements LLMProvider {
         reasoning_effort: request.enableThinking ? 'high' : 'none',
       }),
     };
+  }
+
+  async complete(request: CompletionRequest): Promise<CompletionResponse> {
+    const params = this.buildParams(request);
 
     const response = await this.executeWithRetry(() =>
       request.signal
@@ -141,6 +153,38 @@ export class OpenAIProvider implements LLMProvider {
     );
 
     return this.formatResponse(response);
+  }
+
+  /**
+   * Streamed completion via the SDK: complete()'s params plus the stream
+   * flags. Usage comes in the final chunk (include_usage). Key rotation and
+   * retries apply only until the first visible delta.
+   */
+  async completeStream(request: CompletionRequest, handlers: StreamHandlers): Promise<CompletionResponse> {
+    const params: OpenAI.ChatCompletionCreateParamsStreaming = {
+      ...this.buildParams(request),
+      stream: true,
+      stream_options: { include_usage: true },
+    };
+    const tracked = trackingHandlers(handlers);
+
+    const completion = await this.executeWithRetry(async () => {
+      const assembler = new ChatCompletionStreamAssembler(tracked.handlers);
+      try {
+        const stream = request.signal
+          ? await this.client.chat.completions.create(params, { signal: request.signal })
+          : await this.client.chat.completions.create(params);
+        for await (const chunk of stream) {
+          assembler.push(chunk as ChatCompletionChunkLike);
+        }
+      } catch (error) {
+        if (tracked.delivered()) throw new StreamInterruptedError(error);
+        throw error;
+      }
+      return assembler.result();
+    });
+
+    return this.formatResponse(completion as unknown as OpenAI.ChatCompletion);
   }
 
   private formatMessages(

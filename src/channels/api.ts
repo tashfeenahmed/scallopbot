@@ -247,7 +247,7 @@ interface WsMessage {
 }
 
 interface WsResponse {
-  type: 'response' | 'chunk' | 'error' | 'pong' | 'trigger' | 'file' | 'skill_start' | 'skill_complete' | 'skill_error' | 'thinking' | 'planning' | 'debug' | 'memory' | 'proactive';
+  type: 'response' | 'chunk' | 'chunk_reset' | 'error' | 'pong' | 'trigger' | 'file' | 'skill_start' | 'skill_complete' | 'skill_error' | 'thinking' | 'planning' | 'debug' | 'memory' | 'proactive';
   sessionId?: string;
   content?: string;
   error?: string;
@@ -884,9 +884,21 @@ export class ApiChannel implements Channel, TriggerSource {
         });
       }
 
-      // Note: For now, we send the full response as a single event
-      // In the future, this could be modified to stream tokens
-      const result = await this.config.agent.processMessage(sessionId, body.message);
+      // Reply text streams as `delta` events; `reset` means discard the
+      // text streamed so far (it was planning beside a tool call). The final
+      // reply still arrives as one `message` event.
+      const result = await this.config.agent.processMessage(
+        sessionId,
+        body.message,
+        undefined,
+        async (update) => {
+          if (update.type === 'text_delta') {
+            res.write(`event: delta\ndata: ${JSON.stringify({ sessionId, content: update.message })}\n\n`);
+          } else if (update.type === 'text_reset') {
+            res.write(`event: reset\ndata: ${JSON.stringify({ sessionId })}\n\n`);
+          }
+        },
+      );
 
       // Send response event
       res.write(`event: message\n`);
@@ -1766,10 +1778,20 @@ export class ApiChannel implements Channel, TriggerSource {
 
         this.activeProcessing.add(clientId);
         try {
+          // Reply text streams to every client ('chunk', 'chunk_reset').
           // Internal progress is opt-in. Reasoning text itself is never sent,
           // even in verbose mode; verbose clients receive a lifecycle summary.
-          const onProgress = this.verboseClients.has(clientId)
-            ? async (update: { type: string; message: string; toolName?: string; iteration?: number; count?: number; action?: string; items?: { type: string; content: string; subject?: string }[] }) => {
+          const verbose = this.verboseClients.has(clientId);
+          const onProgress = async (update: { type: string; message: string; toolName?: string; iteration?: number; count?: number; action?: string; items?: { type: string; content: string; subject?: string }[] }) => {
+                if (update.type === 'text_delta') {
+                  this.sendWsMessage(ws, { type: 'chunk', sessionId, content: update.message });
+                  return;
+                }
+                if (update.type === 'text_reset') {
+                  this.sendWsMessage(ws, { type: 'chunk_reset', sessionId });
+                  return;
+                }
+                if (!verbose) return;
                 if (update.type === 'tool_start') {
                   this.sendWsMessage(ws, {
                     type: 'skill_start',
@@ -1816,8 +1838,7 @@ export class ApiChannel implements Channel, TriggerSource {
                     message: safeDebugText(update.message)
                   });
                 }
-              }
-            : undefined;
+              };
 
           // Convert WebSocket attachments to agent Attachment format
           let attachments: Attachment[] | undefined;

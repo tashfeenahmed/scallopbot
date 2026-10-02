@@ -101,7 +101,7 @@ const ChatContainer = forwardRef<HTMLDivElement, ChatContainerProps>(
             }
             return <MessageBubble key={msg.id} message={msg} />;
           })}
-          {isWaiting && <TypingIndicator />}
+          {isWaiting && !messages[messages.length - 1]?.streaming && <TypingIndicator />}
         </div>
       </main>
     );

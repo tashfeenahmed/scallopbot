@@ -6,8 +6,10 @@ import type {
   CompletionResponse,
   ContentBlock,
   StreamEvent,
+  StreamHandlers,
   SystemPrompt,
 } from './types.js';
+import { StreamInterruptedError, trackingHandlers } from './streaming.js';
 import { DEFAULT_MAX_RETRIES, RETRY_STATUS_CODES, RETRY_DELAY_MS } from './constants.js';
 
 /**
@@ -66,8 +68,9 @@ export class AnthropicProvider implements LLMProvider {
     return !!this.apiKey && this.apiKey.length > 0;
   }
 
-  async complete(request: CompletionRequest): Promise<CompletionResponse> {
-    const params: Anthropic.MessageCreateParams = {
+  /** The request params shared by complete() and completeStream(). */
+  private buildParams(request: CompletionRequest): Anthropic.MessageCreateParamsNonStreaming {
+    return {
       model: this.model,
       messages: this.formatMessages(request.messages, request),
       max_tokens: request.maxTokens || DEFAULT_MAX_TOKENS,
@@ -85,6 +88,10 @@ export class AnthropicProvider implements LLMProvider {
         },
       }),
     };
+  }
+
+  async complete(request: CompletionRequest): Promise<CompletionResponse> {
+    const params = this.buildParams(request);
 
     const response = await this.executeWithRetry(() =>
       request.signal
@@ -93,6 +100,38 @@ export class AnthropicProvider implements LLMProvider {
     );
 
     return this.formatResponse(response);
+  }
+
+  /**
+   * Streamed completion via the SDK's message stream: complete()'s params
+   * (same system/tool/message cache breakpoints) with `stream: true`. The SDK
+   * assembles the final message, including tool input JSON and cache usage.
+   * Retries apply only until the first visible delta.
+   */
+  async completeStream(request: CompletionRequest, handlers: StreamHandlers): Promise<CompletionResponse> {
+    const params = this.buildParams(request);
+    const tracked = trackingHandlers(handlers);
+
+    const message = await this.executeWithRetry(async () => {
+      try {
+        const stream = request.signal
+          ? this.client.messages.stream(params, { signal: request.signal })
+          : this.client.messages.stream(params);
+        for await (const event of stream) {
+          if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
+            tracked.handlers.onTextDelta?.(event.delta.text);
+          } else if (event.type === 'content_block_start' && event.content_block.type === 'tool_use') {
+            tracked.handlers.onToolUseStart?.(event.content_block.name);
+          }
+        }
+        return await stream.finalMessage();
+      } catch (error) {
+        if (tracked.delivered()) throw new StreamInterruptedError(error);
+        throw error;
+      }
+    });
+
+    return this.formatResponse(message);
   }
 
   async *stream(request: CompletionRequest): AsyncIterable<StreamEvent> {

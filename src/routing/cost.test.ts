@@ -619,6 +619,41 @@ describe('CostTracker', () => {
       expect(response.usage.inputTokens).toBe(500);
     });
 
+    it('records usage on streamed calls and passes deltas through', async () => {
+      const mock: LLMProvider = {
+        ...createMockProvider('openrouter', 'qwen/qwen3.6-plus'),
+        completeStream: vi.fn().mockImplementation(async (_req, handlers) => {
+          handlers.onTextDelta?.('stre');
+          handlers.onTextDelta?.('amed');
+          return {
+            content: [{ type: 'text', text: 'streamed' }],
+            stopReason: 'end_turn',
+            usage: { inputTokens: 1000, outputTokens: 50, cachedInputTokens: 800 },
+            model: 'qwen/qwen3.6-plus',
+          } as CompletionResponse;
+        }),
+      };
+      const wrapped = tracker.wrapProvider(mock, 'stream-session');
+      const deltas: string[] = [];
+
+      const response = await wrapped.completeStream!(
+        { messages: [{ role: 'user', content: 'hello' }] },
+        { onTextDelta: (t) => deltas.push(t) },
+      );
+
+      expect(deltas).toEqual(['stre', 'amed']);
+      expect(response.content).toEqual([{ type: 'text', text: 'streamed' }]);
+      const history = tracker.getUsageHistory();
+      expect(history).toHaveLength(1);
+      expect(history[0]).toMatchObject({ sessionId: 'stream-session', inputTokens: 1000, outputTokens: 50, provider: 'openrouter' });
+      expect(mock.complete).not.toHaveBeenCalled();
+    });
+
+    it('does not invent completeStream for providers without it', () => {
+      const wrapped = tracker.wrapProvider(createMockProvider('xai', 'grok-4'), 's');
+      expect(wrapped.completeStream).toBeUndefined();
+    });
+
     it('should preserve provider name and isAvailable', () => {
       const mock = createMockProvider('xai', 'grok-4');
       const wrapped = tracker.wrapProvider(mock, 'test-session');
