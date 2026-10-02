@@ -474,6 +474,8 @@ export interface CostUsageRow {
   outputTokens: number;
   cost: number;
   timestamp: number;
+  /** Why the call was made (CompletionRequest.purpose); null for legacy rows and untagged calls. */
+  purpose?: string | null;
 }
 
 // ============ Unified Scheduled Items (Triggers + Reminders) ============
@@ -1744,6 +1746,26 @@ export class ScallopDatabase {
 
     // Migration: tag each stored vector with the embedding space it came from.
     this.migrateAddEmbeddingModelColumns();
+
+    // Migration: record why each LLM call was made (nullable, additive).
+    this.migrateAddCostUsagePurpose();
+  }
+
+  /** Add the nullable `purpose` column to cost_usage. Legacy rows stay NULL. */
+  private migrateAddCostUsagePurpose(): void {
+    try {
+      const columns = new Set(
+        (this.db.prepare('PRAGMA table_info(cost_usage)').all() as SqliteTableColumn[])
+          .map(column => column.name),
+      );
+      if (!columns.has('purpose')) {
+        this.db.exec('ALTER TABLE cost_usage ADD COLUMN purpose TEXT');
+      }
+    } catch (error) {
+      if (error instanceof Error) {
+        console.warn(`[migration] migrateAddCostUsagePurpose: ${error.message}`);
+      }
+    }
   }
 
   /**
@@ -6390,12 +6412,13 @@ export class ScallopDatabase {
 
   recordCostUsage(record: Omit<CostUsageRow, 'id'>): CostUsageRow {
     const stmt = this.db.prepare(`
-      INSERT INTO cost_usage (model, provider, session_id, input_tokens, output_tokens, cost, timestamp)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO cost_usage (model, provider, session_id, input_tokens, output_tokens, cost, timestamp, purpose)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const result = stmt.run(
       record.model, record.provider, record.sessionId,
-      record.inputTokens, record.outputTokens, record.cost, record.timestamp
+      record.inputTokens, record.outputTokens, record.cost, record.timestamp,
+      record.purpose ?? null,
     );
     return { ...record, id: Number(result.lastInsertRowid) };
   }
@@ -8959,6 +8982,7 @@ export class ScallopDatabase {
       outputTokens: row.output_tokens as number,
       cost: row.cost as number,
       timestamp: row.timestamp as number,
+      purpose: (row.purpose as string | null | undefined) ?? null,
     };
   }
 
