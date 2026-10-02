@@ -29,6 +29,9 @@ import type {
   ContentBlock,
 } from '../providers/types.js';
 import type { EmbeddingProvider } from '../memory/embeddings.js';
+import { registerShellTools } from '../tools/shell/index.js';
+import { registerTodoTool } from '../tools/todo/index.js';
+import { registerWebTools } from '../tools/web/index.js';
 import type { ActivationConfig } from '../memory/relations.js';
 
 // ---------------------------------------------------------------------------
@@ -313,6 +316,10 @@ export async function createE2EGateway(
   // 10. Create SkillRegistry (empty workspace, no skills loaded from disk)
   const skillRegistry = createSkillRegistry('/tmp', testLogger);
   await skillRegistry.initialize();
+  // Native tools the gateway registers (bash/process, todo, webfetch/web_search).
+  registerShellTools(skillRegistry);
+  registerTodoTool(skillRegistry);
+  registerWebTools(skillRegistry);
 
   // 11. Create SkillExecutor
   const skillExecutor = createSkillExecutor(testLogger);

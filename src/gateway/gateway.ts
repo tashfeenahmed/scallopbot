@@ -67,6 +67,10 @@ import { resolveStateUserId, resolveStateUserTimezone } from '../utils/state-use
 import { inspectArtifact, validateArtifactForDelivery } from '../artifacts/delivery.js';
 import { OutcomeBrain } from '../brain/index.js';
 import { registerMediaSkills, type MediaSkills } from '../skills/media-skills.js';
+import { registerShellTools, backgroundProcesses, createBashDoneRouter, type BackgroundExitEvent } from '../tools/shell/index.js';
+import { registerTodoTool } from '../tools/todo/index.js';
+import { registerWebTools } from '../tools/web/index.js';
+import { enqueueInLane, laneIsBusy } from '../agent/command-queue.js';
 
 export interface GatewayOptions {
   config: Config;
@@ -110,6 +114,7 @@ export class Gateway {
   private subAgentDeliveryTimer: NodeJS.Timeout | null = null;
   /** Opt-in email inbox trigger + calendar heads-up (src/triggers/mail-calendar.ts). */
   private mailCalendarTriggers: { stop(): void } | null = null;
+  private bashDoneListener: ((e: BackgroundExitEvent) => void) | null = null;
   /** Explicit aliases for this deployment's single canonical state owner. */
   private canonicalSingleUserIds: string[] = [];
 
@@ -458,6 +463,10 @@ export class Gateway {
 
     // Register native skills (comms + memory_get) that need runtime access
     this.registerNativeSkills(voiceStatus.tts);
+    // Native coding/web tools: bash + process, todo, webfetch + web_search
+    registerShellTools(this.skillRegistry);
+    registerTodoTool(this.skillRegistry);
+    registerWebTools(this.skillRegistry);
     // image_gen / phone_call / sms: bundled SKILL.md, in-process handlers
     const mediaVoice = voiceStatus.tts ? this.voiceManager : null;
     this.mediaSkills = registerMediaSkills({
@@ -710,6 +719,8 @@ export class Gateway {
       });
       this.logger.debug('Unified scheduler initialized');
     }
+
+    this.wireBashDoneNotices();
 
     this.isInitialized = true;
     this.logger.info('Gateway initialized successfully');
@@ -1065,6 +1076,13 @@ export class Gateway {
 
     this.mailCalendarTriggers?.stop();
     this.mailCalendarTriggers = null;
+
+    // Background bash processes die with the gateway.
+    if (this.bashDoneListener) {
+      backgroundProcesses.off('exit', this.bashDoneListener);
+      this.bashDoneListener = null;
+    }
+    await backgroundProcesses.killAll();
 
     // Clear trigger sources before stopping channels
     this.triggerSources.clear();
@@ -1749,6 +1767,51 @@ export class Gateway {
       })
       .build();
     this.skillRegistry.registerSkill(skill.skill);
+  }
+
+  /**
+   * Background bash exits become `[bash-done ...]` messages: steering into a
+   * running turn, or a new turn whose reply goes out through the outbound
+   * queue like any other proactive result.
+   */
+  private wireBashDoneNotices(): void {
+    if (this.bashDoneListener) backgroundProcesses.off('exit', this.bashDoneListener);
+    const lane = (sessionId: string) => `session:${sessionId}`;
+    const route = createBashDoneRouter({
+      isBusy: (sessionId) => laneIsBusy(lane(sessionId)),
+      enqueueSteering: (sessionId, text) => {
+        this.interruptQueue?.enqueue({ sessionId, text, timestamp: Date.now() });
+      },
+      waitForIdle: (sessionId) => enqueueInLane(lane(sessionId), async () => {}),
+      takeSteering: (sessionId, text) => {
+        if (!this.interruptQueue) return false;
+        const pending = this.interruptQueue.drain(sessionId);
+        const index = pending.findIndex(entry => entry.text === text);
+        pending.forEach((entry, i) => { if (i !== index) this.interruptQueue!.enqueue(entry); });
+        return index >= 0;
+      },
+      runTurn: async (sessionId, text) => {
+        if (!this.agent) return undefined;
+        return (await this.agent.processMessage(sessionId, text)).response;
+      },
+      deliver: async (userId, text, sessionId) => {
+        const handler = this.outboundQueue?.createHandler();
+        if (!handler) return this.handleProactiveMessage(userId, text);
+        return handler(userId, text, {
+          scheduledItemId: `bash-done:${sessionId}:${Date.now()}`,
+          ownerUserId: userId,
+          // The reply is the agent's own finished turn: deliver it as written.
+          outcome: { source: 'task_result', sessionId, explicitUserText: true, evidenceVerified: true },
+        });
+      },
+      isSubAgentSession: async (sessionId) => {
+        const session = await this.sessionManager?.getSession(sessionId);
+        return session?.metadata?.isSubAgent === true;
+      },
+      logger: this.logger,
+    });
+    this.bashDoneListener = (e) => { void route(e); };
+    backgroundProcesses.on('exit', this.bashDoneListener);
   }
 
   /**

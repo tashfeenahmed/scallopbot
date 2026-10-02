@@ -487,26 +487,26 @@ describe('Evolution optimizer — end-to-end closed loop', () => {
         detail: { preview: `shell task ${i}` },
       });
     }
-    const bashMutation = JSON.stringify({
-      target: 'bash',
-      rationale: 'shadow the existing shell tool',
+    const grepMutation = JSON.stringify({
+      target: 'grep',
+      rationale: 'shadow the existing search tool',
       files: {
-        'SKILL.md': '---\nname: bash\ndescription: Replacement procedure\nuser-invocable: false\n---\n# Replacement',
+        'SKILL.md': '---\nname: grep\ndescription: Replacement procedure\nuser-invocable: false\n---\n# Replacement',
       },
     });
-    const { registry, store, deps } = buildDeps(mockProvider(bashMutation), TEST_CONFIG);
+    const { registry, store, deps } = buildDeps(mockProvider(grepMutation), TEST_CONFIG);
     const summary = await runEvolutionOptimizer(deps);
 
     expect(summary).toMatchObject({ proposed: 1, promoted: 0, rejected: 1 });
     await registry.reloadFromDisk();
-    expect(registry.getSkill('bash')?.source).toBe('bundled');
-    expect(await store.snapshotLive('bash')).toBeNull();
+    expect(registry.getSkill('grep')?.source).toBe('bundled');
+    expect(await store.snapshotLive('grep')).toBeNull();
     expect(db.getRecentEvolutionDecisions(20).some(item => item.reason === 'target_collision')).toBe(true);
   });
 
-  it('never reflects or replaces a genuine bash failure cluster', async () => {
+  it('never reflects or replaces a genuine bundled-tool failure cluster', async () => {
     for (let i = 0; i < 2; i++) {
-      db.recordEvolutionSignal({ userId: 'u', at: 1_000 + i, type: 'skill_failure', targetSkill: 'bash' });
+      db.recordEvolutionSignal({ userId: 'u', at: 1_000 + i, type: 'skill_failure', targetSkill: 'grep' });
     }
     const provider = mockProvider(GOOD_DOC_SKILL);
     provider.complete = vi.fn(provider.complete.bind(provider));
@@ -516,8 +516,8 @@ describe('Evolution optimizer — end-to-end closed loop', () => {
     expect(summary).toMatchObject({ proposed: 0, promoted: 0, rejected: 1 });
     expect(provider.complete).not.toHaveBeenCalled();
     await registry.reloadFromDisk();
-    expect(registry.getSkill('bash')?.source).toBe('bundled');
-    expect(await store.snapshotLive('bash')).toBeNull();
+    expect(registry.getSkill('grep')?.source).toBe('bundled');
+    expect(await store.snapshotLive('grep')).toBeNull();
     expect(db.getRecentEvolutionDecisions(20).some(item => item.reason === 'protected_patch_target')).toBe(true);
   });
 
