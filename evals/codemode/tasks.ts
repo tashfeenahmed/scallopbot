@@ -246,4 +246,65 @@ export const renameAndTestTask: BenchTask = {
   },
 };
 
-export const TASKS: BenchTask[] = [todoCsvTask, largestFunctionsTask, renameAndTestTask];
+// ── 4. Unused exports across 30 modules (long-context: many files) ──────────
+
+function exportsLayout(): { modules: Array<{ file: string; exports: string[]; imports: Array<{ from: string; names: string[] }> }>; unused: string[] } {
+  const rand = rng(99);
+  const modules: Array<{ file: string; exports: string[]; imports: Array<{ from: string; names: string[] }> }> = [];
+  for (let m = 1; m <= 30; m++) {
+    const k = 3 + Math.floor(rand() * 3);
+    const exports = Array.from({ length: k }, (_, i) => `${WORDS[(m + i) % WORDS.length]}${m}x${i}`);
+    modules.push({ file: `pkg/m${String(m).padStart(2, '0')}.js`, exports, imports: [] });
+  }
+  const imported = new Set<string>();
+  for (const mod of modules) {
+    const sources = modules.filter(other => other !== mod && rand() < 0.12);
+    for (const source of sources) {
+      const names = source.exports.filter(() => rand() < 0.5);
+      if (names.length === 0) continue;
+      mod.imports.push({ from: source.file, names });
+      names.forEach(name => imported.add(name));
+    }
+  }
+  const unused = modules.flatMap(mod => mod.exports).filter(name => !imported.has(name)).sort();
+  return { modules, unused };
+}
+
+export const unusedExportsTask: BenchTask = {
+  id: 'unused-exports',
+  prompt:
+    'The pkg/ directory holds 30 ES modules. Find every exported function that no other module imports (an import means the name appears inside an ' +
+    '`import { ... } from` statement of another file; mentions in comments or strings do not count). Write the names to unused.txt in the repository ' +
+    'root, one per line, sorted alphabetically.',
+  seed(dir) {
+    const { modules } = exportsLayout();
+    for (const mod of modules) {
+      const lines: string[] = [];
+      for (const imp of mod.imports) lines.push(`import { ${imp.names.join(', ')} } from './${path.basename(imp.from)}';`);
+      lines.push('');
+      const mentioned = modules[(modules.indexOf(mod) + 7) % modules.length].exports[0];
+      lines.push(`// Note: ${mentioned} lives elsewhere; this comment is not an import.`);
+      for (const name of mod.exports) {
+        const uses = mod.imports.flatMap(imp => imp.names).slice(0, 2);
+        lines.push(`export function ${name}(value) {`);
+        for (let i = 0; i < 6; i++) lines.push(`  value = value * ${i + 2} + ${i}; // step ${i}`);
+        if (uses.length) lines.push(`  return ${uses.map(use => `${use}(value)`).join(' + ')};`);
+        else lines.push('  return value;');
+        lines.push('}', '');
+      }
+      write(dir, mod.file, lines.join('\n'));
+    }
+  },
+  verify(dir) {
+    const file = path.join(dir, 'unused.txt');
+    if (!existsSync(file)) return { pass: false, detail: 'unused.txt missing' };
+    const expected = exportsLayout().unused;
+    const actual = readFileSync(file, 'utf8').trim().split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+    const pass = actual.length === expected.length && actual.every((name, i) => name === expected[i]);
+    const missing = expected.filter(name => !actual.includes(name));
+    const extra = actual.filter(name => !expected.includes(name));
+    return { pass, detail: pass ? `${expected.length} names exact` : `missing [${missing.join(', ')}] extra [${extra.join(', ')}]${!missing.length && !extra.length ? ' (order)' : ''}` };
+  },
+};
+
+export const TASKS: BenchTask[] = [todoCsvTask, largestFunctionsTask, renameAndTestTask, unusedExportsTask];
