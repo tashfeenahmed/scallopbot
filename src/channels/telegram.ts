@@ -9,6 +9,7 @@ import type { Attachment } from './types.js';
 import { VoiceManager } from '../voice/index.js';
 import { getPendingVoiceAttachments, cleanupVoiceAttachments } from '../voice/attachments.js';
 import { BotConfigManager } from './bot-config.js';
+import { TelegramReplyDraft } from './telegram-draft.js';
 import { resolveTimezone } from '../utils/country-timezone.js';
 import type { ProviderRegistry } from '../providers/registry.js';
 import type { LLMProvider } from '../providers/types.js';
@@ -168,6 +169,8 @@ export class TelegramChannel {
   private activeProcessing: Set<string> = new Set(); // Track users with in-flight agent calls
   private userQueues: Map<string, QueuedMessage[]> = new Map(); // Per-user message queue
   private verboseUsers: Set<string> = new Set(); // Track users who want debug output
+  /** The streaming reply draft of each user's running turn. */
+  private liveDrafts = new Map<string, TelegramReplyDraft>();
   private contextWarnedTier: Map<string, number> = new Map(); // sessionId -> highest tier threshold already warned
   private voiceManager: VoiceManager | null = null;
   private voiceAvailable = false;
@@ -1014,7 +1017,8 @@ export class TelegramChannel {
       }
 
       // Thinking stays enabled in the agent but is not surfaced to Telegram users
-      const onProgress = this.buildOnProgress(userId, ctx);
+      const draft = this.createReplyDraft(userId, ctx);
+      const onProgress = this.buildOnProgress(userId, ctx, draft);
 
       const shouldStop = () => this.stopRequests.has(userId);
       const providerOverride = this.getProviderForUser(userId);
@@ -1023,7 +1027,7 @@ export class TelegramChannel {
 
       clearInterval(typingInterval);
 
-      await this.sendAgentResponse(ctx, result);
+      await this.sendAgentResponse(ctx, result, draft);
 
       await this.maybeWarnContext(sessionId, ctx, result.tokenUsage.peakInputTokens ?? result.tokenUsage.inputTokens);
 
@@ -1032,6 +1036,7 @@ export class TelegramChannel {
       // replying with voice just because the user sent a voice message.
     } catch (error) {
       clearInterval(typingInterval);
+      await this.discardReplyDraft(userId);
       this.logger.error({ userId, error: (error as Error).message }, 'Failed to process voice message');
       await ctx.reply('Sorry, I had trouble processing your voice message. Please try again or send a text message.');
     }
@@ -1111,7 +1116,8 @@ export class TelegramChannel {
       const sessionId = await this.getOrCreateSession(userId);
 
       // Thinking stays enabled in the agent but is not surfaced to Telegram users
-      const onProgress = this.buildOnProgress(userId, ctx);
+      const draft = this.createReplyDraft(userId, ctx);
+      const onProgress = this.buildOnProgress(userId, ctx, draft);
 
       const shouldStop = () => this.stopRequests.has(userId);
       const providerOverride = this.getProviderForUser(userId);
@@ -1120,13 +1126,14 @@ export class TelegramChannel {
 
       clearInterval(typingInterval);
 
-      await this.sendAgentResponse(ctx, result);
+      await this.sendAgentResponse(ctx, result, draft);
 
       await this.maybeWarnContext(sessionId, ctx, result.tokenUsage.peakInputTokens ?? result.tokenUsage.inputTokens);
 
       this.logger.info({ userId, fileName: document.file_name }, 'Processed document message');
     } catch (error) {
       clearInterval(typingInterval);
+      await this.discardReplyDraft(userId);
       this.logger.error({ userId, error: (error as Error).message }, 'Failed to process document');
       await ctx.reply('Sorry, I had trouble processing that file. Please try again.');
     }
@@ -1300,7 +1307,8 @@ export class TelegramChannel {
       // Process through agent WITH attachments
       const sessionId = await this.getOrCreateSession(userId);
 
-      const onProgress = this.buildOnProgress(userId, ctx);
+      const draft = this.createReplyDraft(userId, ctx);
+      const onProgress = this.buildOnProgress(userId, ctx, draft);
       const shouldStop = () => this.stopRequests.has(userId);
       const providerOverride = this.getProviderForUser(userId);
 
@@ -1309,13 +1317,14 @@ export class TelegramChannel {
 
       clearInterval(typingInterval);
 
-      await this.sendAgentResponse(ctx, result);
+      await this.sendAgentResponse(ctx, result, draft);
 
       await this.maybeWarnContext(sessionId, ctx, result.tokenUsage.peakInputTokens ?? result.tokenUsage.inputTokens);
 
       this.logger.info({ userId, photoCount }, 'Processed photo message with vision');
     } catch (error) {
       clearInterval(typingInterval);
+      await this.discardReplyDraft(userId);
       this.logger.error({ userId, error: (error as Error).message }, 'Failed to process photos');
       await ctx.reply('Sorry, I had trouble processing that photo. Please try again.');
     }
@@ -1430,7 +1439,8 @@ export class TelegramChannel {
 
     try {
       // Thinking stays enabled in the agent but is not surfaced to Telegram users
-      const onProgress = this.buildOnProgress(userId, ctx);
+      const draft = this.createReplyDraft(userId, ctx);
+      const onProgress = this.buildOnProgress(userId, ctx, draft);
 
       // Check if user wants to stop
       const shouldStop = () => this.stopRequests.has(userId);
@@ -1443,7 +1453,7 @@ export class TelegramChannel {
 
       clearInterval(typingInterval);
 
-      await this.sendAgentResponse(ctx, result);
+      await this.sendAgentResponse(ctx, result, draft);
 
       await this.maybeWarnContext(sessionId, ctx, result.tokenUsage.peakInputTokens ?? result.tokenUsage.inputTokens);
 
@@ -1456,6 +1466,7 @@ export class TelegramChannel {
       );
     } catch (error) {
       clearInterval(typingInterval);
+      await this.discardReplyDraft(userId);
       const err = error as Error;
       this.logger.error({ userId, error: err.message }, 'Failed to process message');
       await ctx.reply('Sorry, I encountered an error processing your message. Please try again.');
@@ -1557,7 +1568,7 @@ export class TelegramChannel {
    * blocked write waiting on the user, the approval buttons ride on the last
    * chunk so answering costs one tap.
    */
-  private async sendAgentResponse(ctx: Context, result: AgentResult): Promise<void> {
+  private async sendAgentResponse(ctx: Context, result: AgentResult, draft?: TelegramReplyDraft): Promise<void> {
     const formattedResponse = formatMarkdownToHtml(result.response);
     let chunks = splitMessage(formattedResponse).filter(c => c.trim());
     const pending = result.pendingApproval;
@@ -1565,7 +1576,20 @@ export class TelegramChannel {
       chunks = [formatMarkdownToHtml(pending.question)];
     }
 
-    for (let index = 0; index < chunks.length; index++) {
+    // A streamed draft becomes the first chunk, so the reply is not sent twice.
+    let first = 0;
+    if (draft) {
+      const ownerId = ctx.from?.id.toString();
+      if (ownerId && this.liveDrafts.get(ownerId) === draft) this.liveDrafts.delete(ownerId);
+      if (chunks.length === 0) {
+        await draft.discard();
+      } else {
+        const markup = pending && chunks.length === 1 ? approvalKeyboard(pending.id) : undefined;
+        if (await draft.finalize(chunks[0], markup)) first = 1;
+      }
+    }
+
+    for (let index = first; index < chunks.length; index++) {
       const chunk = chunks[index];
       const isLast = index === chunks.length - 1;
       const options: Parameters<Context['reply']>[1] = pending && isLast
@@ -1643,17 +1667,19 @@ export class TelegramChannel {
     const execute = async (): Promise<void> => {
       const typingInterval = this.startTypingIndicator(ctx);
       try {
-        const onProgress = this.buildOnProgress(userId, ctx);
+        const draft = this.createReplyDraft(userId, ctx);
+        const onProgress = this.buildOnProgress(userId, ctx, draft);
         const shouldStop = () => this.stopRequests.has(userId);
         const providerOverride = this.getProviderForUser(userId);
         const result = await this.agent.processMessage(sessionId, text, undefined, onProgress, shouldStop, providerOverride);
         this.stopRequests.delete(userId);
         clearInterval(typingInterval);
-        await this.sendAgentResponse(ctx, result);
+        await this.sendAgentResponse(ctx, result, draft);
         await this.maybeWarnContext(sessionId, ctx, result.tokenUsage.peakInputTokens ?? result.tokenUsage.inputTokens);
         await this.sendPendingVoiceAttachments(ctx, sessionId);
       } catch (error) {
         clearInterval(typingInterval);
+        await this.discardReplyDraft(userId);
         this.logger.error({ userId, error: (error as Error).message }, 'Failed to process approval turn');
         await ctx.reply('Sorry, I encountered an error processing your message. Please try again.').catch(() => {});
       }
@@ -1700,12 +1726,49 @@ export class TelegramChannel {
     );
   }
 
-  private buildOnProgress(userId: string, ctx: Context): ProgressCallback {
-    if (!this.verboseUsers.has(userId)) {
-      return async () => {};
-    }
+  /** A per-turn streaming draft bound to this chat (see telegram-draft.ts). */
+  private createReplyDraft(userId: string, ctx: Context): TelegramReplyDraft {
+    // Private chats share the user's id; fall back to it when ctx.chat is absent.
+    const chatId = ctx.chat?.id ?? ctx.from!.id;
+    const draft = new TelegramReplyDraft({
+      send: async (text) => (await ctx.reply(text)).message_id,
+      edit: async (messageId, text, options) => {
+        await ctx.api.editMessageText(chatId, messageId, text, {
+          ...(options?.html && { parse_mode: 'HTML' as const }),
+          ...(options?.replyMarkup !== undefined && { reply_markup: options.replyMarkup as InlineKeyboard }),
+        });
+      },
+      delete: async (messageId) => {
+        await ctx.api.deleteMessage(chatId, messageId);
+      },
+    }, { logger: this.logger });
+    this.liveDrafts.set(userId, draft);
+    return draft;
+  }
+
+  /** The turn failed: take its half-written draft off the screen. */
+  private async discardReplyDraft(userId: string): Promise<void> {
+    const draft = this.liveDrafts.get(userId);
+    if (!draft) return;
+    this.liveDrafts.delete(userId);
+    await draft.discard().catch(() => {});
+  }
+
+  private buildOnProgress(userId: string, ctx: Context, draft?: TelegramReplyDraft): ProgressCallback {
+    const verbose = this.verboseUsers.has(userId);
 
     return async (update) => {
+      // Reply streaming: deltas build the draft; a reset drops planning text.
+      if (update.type === 'text_delta') {
+        draft?.push(update.message);
+        return;
+      }
+      if (update.type === 'text_reset') {
+        draft?.reset();
+        return;
+      }
+      if (!verbose) return;
+
       let text = '';
       const truncate = (s: string, max = 500) => s.length > max ? s.slice(0, max) + '…' : s;
 

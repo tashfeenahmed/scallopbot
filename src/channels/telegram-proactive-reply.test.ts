@@ -34,6 +34,7 @@ function makeChannel(feedback: unknown) {
   channel.handleOnboardingResponse = vi.fn().mockResolvedValue(false);
   channel.activeProcessing = new Set();
   channel.userQueues = new Map();
+  channel.liveDrafts = new Map();
   channel.interruptQueue = { enqueue: vi.fn() };
   channel.mediaGroupBuffer = new Map();
   return { channel, addMessage, processMessage };

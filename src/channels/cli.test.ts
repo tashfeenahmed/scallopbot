@@ -181,7 +181,9 @@ describe('CLIChannel', () => {
 
       expect(mockAgent.processMessage).toHaveBeenCalledWith(
         expect.any(String),
-        'Hello'
+        'Hello',
+        undefined,
+        expect.any(Function),
       );
     });
 
@@ -263,7 +265,7 @@ describe('CLIChannel', () => {
 
       expect(mockSessionManager.createSession).toHaveBeenCalledTimes(1);
       expect(mockSessionManager.startNewSession).toHaveBeenCalledTimes(1);
-      expect(mockAgent.processMessage).toHaveBeenLastCalledWith('fresh-session-456', 'New conversation');
+      expect(mockAgent.processMessage).toHaveBeenLastCalledWith('fresh-session-456', 'New conversation', undefined, expect.any(Function));
     });
   });
 

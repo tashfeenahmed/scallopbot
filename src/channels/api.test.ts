@@ -905,6 +905,51 @@ describe('ApiChannel', () => {
       expect(JSON.stringify(messages)).not.toContain('INTERNAL_PLAN_SECRET');
     });
 
+    it('streams reply deltas and resets to every client, then the final response', async () => {
+      vi.mocked(mockAgent.processMessage).mockImplementation(async (
+        _sessionId,
+        _message,
+        _attachments,
+        onProgress,
+      ) => {
+        await onProgress?.({ type: 'text_delta', message: 'Let me check', iteration: 1 });
+        await onProgress?.({ type: 'text_reset', message: '', iteration: 1 });
+        await onProgress?.({ type: 'text_delta', message: 'Final ', iteration: 2 });
+        await onProgress?.({ type: 'text_delta', message: 'answer.', iteration: 2 });
+        return {
+          response: 'Final answer.',
+          tokenUsage: { inputTokens: 10, outputTokens: 20 },
+          iterationsUsed: 2,
+          completionReason: 'natural_end',
+        };
+      });
+
+      const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+      const messages = await new Promise<Record<string, unknown>[]>((resolve, reject) => {
+        const received: Record<string, unknown>[] = [];
+        const timeout = setTimeout(() => reject(new Error('Timed out waiting for WebSocket response')), 5_000);
+        ws.on('open', () => ws.send(JSON.stringify({ type: 'chat', message: 'Hello!' })));
+        ws.on('message', (data) => {
+          const parsed = JSON.parse(data.toString()) as Record<string, unknown>;
+          received.push(parsed);
+          if (parsed.type === 'response') {
+            clearTimeout(timeout);
+            ws.close();
+            resolve(received);
+          }
+        });
+        ws.on('error', reject);
+      });
+
+      expect(messages.map((m) => [m.type, m.content])).toEqual([
+        ['chunk', 'Let me check'],
+        ['chunk_reset', undefined],
+        ['chunk', 'Final '],
+        ['chunk', 'answer.'],
+        ['response', 'Final answer.'],
+      ]);
+    });
+
     it('sends redacted lifecycle summaries, never raw reasoning, to verbose clients', async () => {
       vi.mocked(mockAgent.processMessage).mockImplementation(async (
         _sessionId,

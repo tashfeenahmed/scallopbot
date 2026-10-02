@@ -310,18 +310,36 @@ export class CLIChannel {
       // Show thinking indicator
       this.print('Thinking...\r');
 
-      // Process through agent
-      const result = await this.agent.processMessage(this.sessionId, message);
+      // Stream reply text as it arrives. Text that turns out to be planning
+      // beside a tool call is marked as dropped; the final reply is printed
+      // again only if it differs from what streamed.
+      let streamed = '';
+      const onProgress = async (update: { type: string; message: string }): Promise<void> => {
+        if (update.type === 'text_delta') {
+          if (!streamed) this.print('            \r\n');
+          streamed += update.message;
+          this.print(update.message);
+        } else if (update.type === 'text_reset' && streamed) {
+          this.print('\n[…]\n');
+          streamed = '';
+        }
+      };
 
-      // Clear thinking indicator
-      this.print('            \r');
+      // Process through agent
+      const result = await this.agent.processMessage(this.sessionId, message, undefined, onProgress);
 
       // Save for /speak command
       this.lastResponse = result.response;
 
-      // Format and display response
-      const formatted = formatOutput(result.response, this.enableColors);
-      this.print('\n' + formatted + '\n\n');
+      if (streamed && streamed.trim() === result.response.trim()) {
+        this.print('\n\n');
+      } else {
+        // Clear thinking indicator
+        if (!streamed) this.print('            \r');
+        // Format and display response
+        const formatted = formatOutput(result.response, this.enableColors);
+        this.print((streamed ? '\n\n' : '\n') + formatted + '\n\n');
+      }
 
       // Show token usage if enabled
       if (this.showTokenUsage) {

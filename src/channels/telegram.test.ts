@@ -254,6 +254,7 @@ describe('TelegramChannel', () => {
       channel.sendPendingVoiceAttachments = vi.fn().mockResolvedValue(undefined);
       channel.activeProcessing = new Set();
       channel.userQueues = new Map();
+      channel.liveDrafts = new Map();
       const cleanup = () => fs.rm(dir, { recursive: true, force: true });
       return { channel, store, processMessage, cleanup };
     }

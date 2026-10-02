@@ -37,6 +37,8 @@ export interface ChatMessage {
   type: 'user' | 'assistant' | 'system' | 'error' | 'debug' | 'memory' | 'file';
   content: string;
   isMarkdown?: boolean;
+  /** Reply still streaming in ('chunk' deltas); replaced by the final 'response'. */
+  streaming?: boolean;
   // DB message ID for cursor pagination
   _dbId?: number;
   // Debug fields
@@ -196,7 +198,15 @@ export default function App() {
             setHistoryLoaded(false);
           }
           if (data.content) {
-            addMessage({ type: 'assistant', content: data.content, isMarkdown: true });
+            const finalContent = data.content;
+            // The streamed draft becomes the final reply instead of a second bubble.
+            setMessages((prev) => {
+              const last = prev[prev.length - 1];
+              if (last?.streaming) {
+                return [...prev.slice(0, -1), { ...last, content: finalContent, streaming: false }];
+              }
+              return [...prev, { id: ++messageIdCounter, type: 'assistant', content: finalContent, isMarkdown: true }];
+            });
             if (speakNextReplyRef.current && voiceRef.current.status.tts) {
               void voiceRef.current.speak(data.content);
             }
@@ -207,26 +217,28 @@ export default function App() {
           break;
 
         case 'chunk':
+          // Live reply text: grow the streaming bubble (start one if needed).
           if (data.content) {
+            const delta = data.content;
             setMessages((prev) => {
-              const last = prev[prev.length - 1];
-              if (last && last.type === 'assistant' && last.isMarkdown && !last.label) {
-                return [
-                  ...prev.slice(0, -1),
-                  { ...last, content: last.content + data.content },
-                ];
+              let index = prev.length - 1;
+              while (index >= 0 && !prev[index].streaming) index--;
+              if (index !== -1) {
+                const next = [...prev];
+                next[index] = { ...prev[index], content: prev[index].content + delta };
+                return next;
               }
               return [
                 ...prev,
-                {
-                  id: ++messageIdCounter,
-                  type: 'assistant',
-                  content: data.content!,
-                  isMarkdown: true,
-                },
+                { id: ++messageIdCounter, type: 'assistant', content: delta, isMarkdown: true, streaming: true },
               ];
             });
           }
+          break;
+
+        case 'chunk_reset':
+          // The streamed text was planning beside a tool call, not the reply.
+          setMessages((prev) => prev.filter((m) => !m.streaming));
           break;
 
         case 'system':
@@ -314,6 +326,7 @@ export default function App() {
         case 'error':
           speakNextReplyRef.current = false;
           setIsWaiting(false);
+          setMessages((prev) => prev.filter((m) => !m.streaming));
           addMessage({ type: 'error', content: data.error || 'An error occurred' });
           inputRef.current?.focus();
           break;
