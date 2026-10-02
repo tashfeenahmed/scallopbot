@@ -661,6 +661,72 @@ describe('CostTracker', () => {
     });
   });
 
+  describe('purpose column', () => {
+    function purposeProvider(): LLMProvider {
+      return {
+        name: 'moonshot',
+        model: 'kimi-k2.5',
+        isAvailable: () => true,
+        complete: vi.fn().mockResolvedValue({
+          content: [{ type: 'text', text: 'ok' }],
+          stopReason: 'end_turn',
+          usage: { inputTokens: 100, outputTokens: 10 },
+          model: 'kimi-k2.5',
+        } as CompletionResponse),
+      };
+    }
+
+    it('records request.purpose in history and cost_usage when wrapping a provider', async () => {
+      const db = new ScallopDatabase(':memory:');
+      try {
+        const t = new CostTracker({ db });
+        const wrapped = t.wrapProvider(purposeProvider(), 's1');
+        await wrapped.complete({ messages: [{ role: 'user', content: 'hi' }], purpose: 'outcome_brain' });
+        await wrapped.complete({ messages: [{ role: 'user', content: 'hi' }] });
+
+        expect(t.getUsageHistory().map(r => r.purpose)).toEqual(['outcome_brain', undefined]);
+        expect(db.getCostUsageBySession('s1').map(r => r.purpose)).toEqual(['outcome_brain', null]);
+      } finally {
+        db.close();
+      }
+    });
+
+    it('adds the nullable column to a legacy cost_usage table without losing rows', async () => {
+      const { mkdtempSync, rmSync } = await import('node:fs');
+      const { tmpdir } = await import('node:os');
+      const { join } = await import('node:path');
+      const { default: Database } = await import('better-sqlite3');
+      const dir = mkdtempSync(join(tmpdir(), 'cost-purpose-'));
+      const dbPath = join(dir, 'legacy.db');
+      try {
+        const legacy = new Database(dbPath);
+        legacy.exec(`CREATE TABLE cost_usage (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, model TEXT NOT NULL, provider TEXT NOT NULL,
+          session_id TEXT NOT NULL, input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL,
+          cost REAL NOT NULL, timestamp INTEGER NOT NULL)`);
+        legacy.prepare('INSERT INTO cost_usage (model, provider, session_id, input_tokens, output_tokens, cost, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)')
+          .run('old-model', 'openai', 'legacy', 1, 1, 0.01, Date.now());
+        legacy.close();
+
+        const db = new ScallopDatabase(dbPath);
+        try {
+          expect(db.getCostUsageBySession('legacy')).toEqual([
+            expect.objectContaining({ model: 'old-model', purpose: null }),
+          ]);
+          db.recordCostUsage({
+            model: 'm', provider: 'p', sessionId: 'legacy', inputTokens: 1, outputTokens: 1,
+            cost: 0, timestamp: Date.now(), purpose: 'tool_call',
+          });
+          expect(db.getCostUsageBySession('legacy').map(r => r.purpose)).toEqual([null, 'tool_call']);
+        } finally {
+          db.close();
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
   describe('runtime budget updates (dashboard-set)', () => {
     it('only persists the caps the caller changed', () => {
       const db = new ScallopDatabase(':memory:');

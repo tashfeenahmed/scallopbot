@@ -20,6 +20,8 @@ export interface UsageRecord {
   sessionId: string;
   cost: number;
   timestamp: Date;
+  /** CompletionRequest.purpose of the call, when the caller tagged it. */
+  purpose?: string;
 }
 
 export interface BudgetStatus {
@@ -344,6 +346,7 @@ export class CostTracker {
     outputTokens: number;
     provider: string;
     sessionId: string;
+    purpose?: string;
   }): void {
     const cost = this.calculateCost(params.model, {
       inputTokens: params.inputTokens,
@@ -369,6 +372,7 @@ export class CostTracker {
         outputTokens: params.outputTokens,
         cost,
         timestamp: record.timestamp.getTime(),
+        purpose: params.purpose ?? null,
       });
     }
   }
@@ -437,13 +441,14 @@ export class CostTracker {
    * Keeping this operation here prevents fallback call sites from accidentally
    * attributing usage to the initially selected (failed) provider.
    */
-  recordResponse(response: CompletionResponse, provider: string, sessionId: string): void {
+  recordResponse(response: CompletionResponse, provider: string, sessionId: string, purpose?: string): void {
     this.recordUsage({
       model: response.model || provider,
       inputTokens: response.usage.inputTokens,
       outputTokens: response.usage.outputTokens,
       provider,
       sessionId,
+      ...(purpose && { purpose }),
     });
   }
 
@@ -551,6 +556,7 @@ export class CostTracker {
         response.model ? response : { ...response, model: provider.model || provider.name },
         provider.name,
         sessionId ?? 'unknown',
+        request.purpose,
       );
       return response;
     };
