@@ -47,6 +47,24 @@ describe('wrapProviderWithTraceTap', () => {
     expect(rows[0].modelMaxOutputTokens).toBeGreaterThan(0);
   });
 
+  it('records streamed calls and keeps completeStream absent when the provider has none', async () => {
+    const base = makeProvider({});
+    const streaming: LLMProvider = {
+      ...base,
+      completeStream: async (request, handlers) => {
+        handlers.onTextDelta?.('{"ok"');
+        return base.complete(request);
+      },
+    };
+    const p = wrapProviderWithTraceTap(streaming);
+    const deltas: string[] = [];
+    await p.completeStream!({ messages: [{ role: 'user', content: 'hi' }], purpose: 'tool_call' }, { onTextDelta: (t) => deltas.push(t) });
+    expect(deltas).toEqual(['{"ok"']);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].purpose).toBe('tool_call');
+    expect(wrapProviderWithTraceTap(base).completeStream).toBeUndefined();
+  });
+
   it('records parsed_ok=0 when a JSON purpose returns unparseable text', async () => {
     const p = wrapProviderWithTraceTap(
       makeProvider({ content: [{ type: 'text', text: 'sorry, no json today' }] })

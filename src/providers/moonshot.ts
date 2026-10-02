@@ -20,9 +20,16 @@ import type {
   CompletionRequest,
   CompletionResponse,
   ContentBlock,
+  StreamHandlers,
   ToolResultContent,
 } from './types.js';
 import { flattenSystem } from './types.js';
+import {
+  ChatCompletionStreamAssembler,
+  StreamInterruptedError,
+  trackingHandlers,
+  type ChatCompletionChunkLike,
+} from './streaming.js';
 import { DEFAULT_MAX_RETRIES, RETRY_STATUS_CODES, RETRY_DELAY_MS } from './constants.js';
 
 /**
@@ -112,7 +119,11 @@ export class MoonshotProvider implements LLMProvider {
     return this.currentKeyIndex !== 0; // true if we haven't cycled back to start
   }
 
-  async complete(request: CompletionRequest): Promise<CompletionResponse> {
+  /** The request params shared by complete() and completeStream(). */
+  private buildParams(request: CompletionRequest): {
+    params: OpenAI.ChatCompletionCreateParamsNonStreaming & { thinking?: { type: string } };
+    messages: OpenAI.ChatCompletionMessageParam[];
+  } {
     const isKimiK2 = this.model.includes('kimi-k2');
     // Enable thinking mode if explicitly requested AND model supports it
     const enableThinking = request.enableThinking === true && isKimiK2;
@@ -138,7 +149,7 @@ export class MoonshotProvider implements LLMProvider {
     const effectiveMaxTokens = request.thinkingBudgetTokens && enableThinking
       ? Math.max(request.thinkingBudgetTokens, defaultTokens)
       : (request.maxTokens || defaultTokens);
-    const params: OpenAI.ChatCompletionCreateParams & { thinking?: { type: string } } = {
+    const params: OpenAI.ChatCompletionCreateParamsNonStreaming & { thinking?: { type: string } } = {
       model: this.model,
       messages,
       max_tokens: effectiveMaxTokens,
@@ -153,6 +164,11 @@ export class MoonshotProvider implements LLMProvider {
       // Only disable thinking if NOT enabling it (for Kimi K2 models)
       ...(isKimiK2 && !enableThinking && { thinking: { type: 'disabled' } }),
     };
+    return { params, messages };
+  }
+
+  async complete(request: CompletionRequest): Promise<CompletionResponse> {
+    const { params, messages } = this.buildParams(request);
 
     // Debug logging - log the full request
     this.logger?.debug({
@@ -195,6 +211,47 @@ export class MoonshotProvider implements LLMProvider {
       }, 'Error');
       throw error;
     }
+  }
+
+  /**
+   * Streamed completion: complete()'s params plus `stream: true`. Kimi sends
+   * reasoning as `reasoning_content` deltas (kept as a thinking block, like
+   * complete()) and usage on the final chunk's choice. Retries and key
+   * rotation apply only until the first visible delta.
+   */
+  async completeStream(request: CompletionRequest, handlers: StreamHandlers): Promise<CompletionResponse> {
+    const { params } = this.buildParams(request);
+    const streamParams = {
+      ...params,
+      stream: true,
+      stream_options: { include_usage: true },
+    } as OpenAI.ChatCompletionCreateParamsStreaming & { thinking?: { type: string } };
+    const tracked = trackingHandlers(handlers);
+
+    const completion = await this.executeWithRetry(async () => {
+      const assembler = new ChatCompletionStreamAssembler(tracked.handlers, { keepReasoning: true });
+      try {
+        const stream = request.signal
+          ? await this.client.chat.completions.create(streamParams, { signal: request.signal })
+          : await this.client.chat.completions.create(streamParams);
+        for await (const chunk of stream) {
+          assembler.push(chunk as ChatCompletionChunkLike);
+        }
+      } catch (error) {
+        if (tracked.delivered()) throw new StreamInterruptedError(error);
+        throw error;
+      }
+      return assembler.result();
+    });
+
+    this.logger?.debug({
+      model: completion.model,
+      finishReason: completion.choices[0]?.finish_reason,
+      toolCallCount: completion.choices[0]?.message.tool_calls?.length || 0,
+      usage: completion.usage,
+    }, 'Stream response');
+
+    return this.formatResponse(completion as unknown as OpenAI.ChatCompletion);
   }
 
   private formatMessages(

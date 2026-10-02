@@ -545,8 +545,7 @@ export class CostTracker {
    * Returns a proxy provider that behaves identically but tracks cost.
    */
   wrapProvider(provider: LLMProvider, sessionId?: string): LLMProvider {
-    const complete: LLMProvider['complete'] = async (request) => {
-      const response = await provider.complete(request);
+    const record = (response: CompletionResponse): CompletionResponse => {
       this.recordResponse(
         response.model ? response : { ...response, model: provider.model || provider.name },
         provider.name,
@@ -554,6 +553,12 @@ export class CostTracker {
       );
       return response;
     };
+    const complete: LLMProvider['complete'] = async (request) => record(await provider.complete(request));
+    // Streamed calls are billed the same way: the assembled response carries
+    // the final usage (incl. cached tokens) once the stream ends.
+    const completeStream: LLMProvider['completeStream'] = provider.completeStream
+      ? async (request, handlers) => record(await provider.completeStream!(request, handlers))
+      : undefined;
 
     return {
       name: provider.name,
@@ -561,6 +566,7 @@ export class CostTracker {
       isAvailable: () => provider.isAvailable(),
       stream: provider.stream?.bind(provider),
       complete,
+      ...(completeStream && { completeStream }),
     };
   }
 

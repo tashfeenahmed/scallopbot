@@ -24,7 +24,9 @@ import type {
   CompletionRequest,
   CompletionResponse,
   StreamEvent,
+  StreamHandlers,
 } from './types.js';
+import { completeWithStream } from './streaming.js';
 
 /** Minimal pino-compatible sink for fallback diagnostics (optional). */
 export interface FallbackLogger {
@@ -58,10 +60,41 @@ export class DynamicProvider implements LLMProvider {
   }
 
   async complete(request: CompletionRequest): Promise<CompletionResponse> {
+    return this.run(request, (provider) => provider.complete(request));
+  }
+
+  /**
+   * Streamed variant: each provider in the chain streams when it can and
+   * falls back to complete() when it can't. If a provider fails after it
+   * already streamed text, handlers.onTextReset tells the caller to discard
+   * it before the next provider starts over.
+   */
+  async completeStream(request: CompletionRequest, handlers: StreamHandlers): Promise<CompletionResponse> {
+    return this.run(request, async (provider) => {
+      let streamed = false;
+      try {
+        return await completeWithStream(provider, request, {
+          ...handlers,
+          onTextDelta: (text) => {
+            streamed = true;
+            handlers.onTextDelta?.(text);
+          },
+        });
+      } catch (error) {
+        if (streamed) handlers.onTextReset?.();
+        throw error;
+      }
+    });
+  }
+
+  private async run(
+    request: CompletionRequest,
+    call: (provider: LLMProvider) => Promise<CompletionResponse>,
+  ): Promise<CompletionResponse> {
     if (!this.chain) {
       const provider = await this.require();
       try {
-        const response = await provider.complete(request);
+        const response = await call(provider);
         this.outcomes?.success(provider.name);
         return response;
       } catch (error) {
@@ -79,7 +112,7 @@ export class DynamicProvider implements LLMProvider {
     for (let i = 0; i < providers.length; i++) {
       const provider = providers[i];
       try {
-        const response = await provider.complete(request);
+        const response = await call(provider);
         this.outcomes?.success(provider.name);
         return response;
       } catch (error) {

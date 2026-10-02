@@ -13,7 +13,7 @@
  * actual LLM call path.
  */
 
-import type { LLMProvider, CompletionRequest, CompletionResponse } from '../providers/types.js';
+import type { LLMProvider, CompletionRequest, CompletionResponse, StreamHandlers } from '../providers/types.js';
 import { extractJSON, extractResponseText } from '../proactive/proactive-utils.js';
 import { getModelTokenLimits } from './model-limits.js';
 import { redactSensitiveText } from '../security/redaction.js';
@@ -127,44 +127,58 @@ function serializeResponse(response: CompletionResponse): string {
  * isAvailable, provider-specific extras) passes through untouched.
  */
 export function wrapProviderWithTraceTap(provider: LLMProvider): LLMProvider {
+  const traced = async (
+    target: LLMProvider,
+    request: CompletionRequest,
+    call: () => Promise<CompletionResponse>,
+  ): Promise<CompletionResponse> => {
+    const purpose = request.purpose ?? (request.tools && request.tools.length > 0 ? 'tool_call' : undefined);
+    if (!purpose || !activeSink) {
+      return call();
+    }
+
+    const started = Date.now();
+    const response = await call();
+    try {
+      const model = response.model || (target as { model?: string }).model || target.name;
+      const limits = getModelTokenLimits({
+        name: target.name,
+        model,
+      });
+      activeSink({
+        ts: started,
+        purpose,
+        model,
+        provider: target.name,
+        prompt: prepareTraceField(serializePrompt(request)),
+        response: prepareTraceField(serializeResponse(response)),
+        parsedOk: computeParsedOk(purpose, response),
+        sessionId: request.traceSessionId ?? null,
+        latencyMs: Date.now() - started,
+        stopReason: response.stopReason,
+        requestMaxTokens: request.maxTokens ?? request.thinkingBudgetTokens ?? null,
+        modelContextWindowTokens: limits.contextWindowTokens,
+        modelMaxOutputTokens: limits.maxOutputTokens,
+      });
+    } catch {
+      // Tracing must never break the call path.
+    }
+    return response;
+  };
+
   return new Proxy(provider, {
     get(target, prop, receiver) {
-      if (prop !== 'complete') return Reflect.get(target, prop, receiver);
-
-      return async function complete(request: CompletionRequest): Promise<CompletionResponse> {
-        const purpose = request.purpose ?? (request.tools && request.tools.length > 0 ? 'tool_call' : undefined);
-        if (!purpose || !activeSink) {
-          return target.complete(request);
-        }
-
-        const started = Date.now();
-        const response = await target.complete(request);
-        try {
-          const model = response.model || (target as { model?: string }).model || target.name;
-          const limits = getModelTokenLimits({
-            name: target.name,
-            model,
-          });
-          activeSink({
-            ts: started,
-            purpose,
-            model,
-            provider: target.name,
-            prompt: prepareTraceField(serializePrompt(request)),
-            response: prepareTraceField(serializeResponse(response)),
-            parsedOk: computeParsedOk(purpose, response),
-            sessionId: request.traceSessionId ?? null,
-            latencyMs: Date.now() - started,
-            stopReason: response.stopReason,
-            requestMaxTokens: request.maxTokens ?? request.thinkingBudgetTokens ?? null,
-            modelContextWindowTokens: limits.contextWindowTokens,
-            modelMaxOutputTokens: limits.maxOutputTokens,
-          });
-        } catch {
-          // Tracing must never break the call path.
-        }
-        return response;
-      };
+      if (prop === 'complete') {
+        return function complete(request: CompletionRequest): Promise<CompletionResponse> {
+          return traced(target, request, () => target.complete(request));
+        };
+      }
+      if (prop === 'completeStream' && target.completeStream) {
+        return function completeStream(request: CompletionRequest, handlers: StreamHandlers): Promise<CompletionResponse> {
+          return traced(target, request, () => target.completeStream!(request, handlers));
+        };
+      }
+      return Reflect.get(target, prop, receiver);
     },
   });
 }

@@ -177,6 +177,26 @@ export interface StreamEvent {
   delta?: { type: string; text?: string };
 }
 
+/**
+ * Callbacks for a streamed completion. All are optional and synchronous;
+ * providers call them as chunks arrive and still resolve the assembled
+ * CompletionResponse at the end.
+ */
+export interface StreamHandlers {
+  /** Visible answer text as it is generated. Never reasoning/thinking text. */
+  onTextDelta?(text: string): void;
+  /**
+   * A tool call started streaming. Any text already delivered was planning
+   * beside a tool call, not the reply.
+   */
+  onToolUseStart?(name: string): void;
+  /**
+   * Text delivered so far is void: the call failed after streaming began and
+   * a retry or fallback provider will start over.
+   */
+  onTextReset?(): void;
+}
+
 // Provider interface
 export interface LLMProvider {
   name: string;
@@ -198,6 +218,17 @@ export interface LLMProvider {
    * Create a streaming completion
    */
   stream?(request: CompletionRequest): AsyncIterable<StreamEvent>;
+
+  /**
+   * Streamed completion: same request body as complete() plus the provider's
+   * stream flags, so prompt-cache prefixes stay byte-identical. Text deltas go
+   * to `handlers` as they arrive; the promise resolves to the same
+   * CompletionResponse complete() would return (tool calls with parsed
+   * arguments, usage incl. cached tokens, stop reason). Providers without
+   * streaming leave this undefined; callers use completeWithStream() to fall
+   * back to complete().
+   */
+  completeStream?(request: CompletionRequest, handlers: StreamHandlers): Promise<CompletionResponse>;
 
   /**
    * Check if the provider is available (has valid API key, etc.)
