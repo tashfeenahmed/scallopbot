@@ -68,6 +68,7 @@ import { stripThinkTags } from '../utils/output-safety.js';
 import { inspectArtifact, validateArtifactForDelivery } from '../artifacts/delivery.js';
 import { OutcomeBrain } from '../brain/index.js';
 import { registerMediaSkills, type MediaSkills } from '../skills/media-skills.js';
+import { setupAlwaysOn, shutdownAlwaysOn, type AlwaysOn } from './always-on.js';
 
 export interface GatewayOptions {
   config: Config;
@@ -105,6 +106,7 @@ export class Gateway {
   private subAgentExecutor: SubAgentExecutor | null = null;
   private announceQueue: AnnounceQueue | null = null;
   private interruptQueue: InterruptQueue | null = null;
+  private alwaysOn: AlwaysOn | null = null;
   private outboundQueue: OutboundQueue | null = null;
   private outcomeBrain: OutcomeBrain | null = null;
   private mediaSkills: MediaSkills | null = null;
@@ -670,6 +672,19 @@ export class Gateway {
     });
     this.logger.debug('Agent initialized');
 
+    // Goal mode, agent-created heartbeats and the wake runtime they share.
+    this.alwaysOn = setupAlwaysOn(this.skillRegistry!, {
+      agent: this.agent,
+      sessionManager: this.sessionManager,
+      db: this.scallopMemoryStore!.getDatabase(),
+      interruptQueue: this.interruptQueue,
+      costTracker: this.costTracker,
+      boardService: this.boardService,
+      deliver: (userId, text) => this.handleMessageSend(userId, text),
+      goalMaxTurns: this.config.agent.goalMaxTurns,
+      logger: this.logger,
+    });
+
     // Initialize outbound queue (rate-limits proactive messages across all subsystems)
     this.outboundQueue = new OutboundQueue({
       sendMessage: (userId: string, message: string) => this.handleProactiveMessage(userId, message),
@@ -693,6 +708,7 @@ export class Gateway {
           : this.outboundQueue.createHandler(),
         getTimezone: (userId: string) => this.getUserTimezone(userId),
         canonicalSingleUserIds: this.canonicalSingleUserIds,
+        heartbeats: this.alwaysOn?.heartbeats,
       });
       this.logger.debug('Unified scheduler initialized');
     }
@@ -872,6 +888,7 @@ export class Gateway {
         voiceManager: this.voiceManager || undefined, // Share voice manager
         providerRegistry: this.providerRegistry || undefined,
         interruptQueue: this.interruptQueue || undefined,
+        goalMode: this.alwaysOn?.goalMode,
         onUserMessage: (prefixedUserId: string, userMessage?: string, context?) => {
           return this.unifiedScheduler?.checkEngagement(prefixedUserId, userMessage, context);
         },
@@ -920,6 +937,7 @@ export class Gateway {
         memoryStore: this.scallopMemoryStore || undefined,
         db: this.scallopMemoryStore?.getDatabase(),
         interruptQueue: this.interruptQueue || undefined,
+        goalMode: this.alwaysOn?.goalMode,
         onUserMessage: (prefixedUserId: string, userMessage?: string) => {
           this.unifiedScheduler?.checkEngagement(prefixedUserId, userMessage);
         },
@@ -1037,6 +1055,7 @@ export class Gateway {
     if (this.unifiedScheduler) {
       this.unifiedScheduler.stop();
     }
+    shutdownAlwaysOn();
 
     // Stop outbound queue
     if (this.outboundQueue) {
