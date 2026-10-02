@@ -109,7 +109,12 @@ export async function copyWorkspace(src: string): Promise<string | null> {
   return dest;
 }
 
-function runProgram(copy: string, language: string, code: string): Promise<string> {
+/**
+ * Run one probe in its own process group. Resolves when the program exits
+ * (not when its pipes close: a background child it started may hold them
+ * open), on timeout, or on abort; the whole group is killed every time.
+ */
+function runProgram(copy: string, language: string, code: string, signal: AbortSignal): Promise<string> {
   const cmd = language === 'python' ? ['python3', '-'] : language === 'javascript' ? ['node', '-'] : ['bash', '-s'];
   const prepared = prepareSandboxedCommand({ argv: cmd, cwd: copy, workspace: copy, env: { ...process.env } });
   if (!prepared.ok) return Promise.resolve(`error: ${prepared.error}`);
@@ -117,7 +122,26 @@ function runProgram(copy: string, language: string, code: string): Promise<strin
   return new Promise((resolve) => {
     const chunks: string[] = [];
     let size = 0;
-    const child = spawn(wrapped.command, wrapped.args, { cwd: copy, env: wrapped.env, stdio: ['pipe', 'pipe', 'pipe'] });
+    let settled = false;
+    const child = spawn(wrapped.command, wrapped.args, { cwd: copy, env: wrapped.env, stdio: ['pipe', 'pipe', 'pipe'], detached: true });
+    const killGroup = () => {
+      try {
+        if (child.pid) process.kill(-child.pid, 'SIGKILL');
+      } catch { /* already gone */ }
+    };
+    const finish = (status: string) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort);
+      killGroup();
+      child.stdout.destroy();
+      child.stderr.destroy();
+      let out = chunks.join('');
+      if (out.length > MAX_RUN_OUTPUT) out = `${out.slice(0, MAX_RUN_OUTPUT)}\n[output truncated]`;
+      resolve(`${status}\n${out}`);
+    };
+    const onAbort = () => finish('aborted');
     const collect = (d: Buffer) => {
       if (size > MAX_RUN_OUTPUT) return;
       size += d.length;
@@ -125,20 +149,18 @@ function runProgram(copy: string, language: string, code: string): Promise<strin
     };
     child.stdout.on('data', collect);
     child.stderr.on('data', collect);
-    const timer = setTimeout(() => child.kill('SIGKILL'), RUN_TIMEOUT_MS);
-    child.on('error', (e) => { clearTimeout(timer); resolve(`error: ${e.message}`); });
-    child.on('close', (exitCode, signal) => {
-      clearTimeout(timer);
-      let out = chunks.join('');
-      if (out.length > MAX_RUN_OUTPUT) out = `${out.slice(0, MAX_RUN_OUTPUT)}\n[output truncated]`;
-      resolve(`exit ${signal === 'SIGKILL' ? `killed after ${RUN_TIMEOUT_MS / 1000}s` : exitCode}\n${out}`);
-    });
+    const timer = setTimeout(() => finish(`killed after ${RUN_TIMEOUT_MS / 1000}s`), RUN_TIMEOUT_MS);
+    if (signal.aborted) onAbort();
+    else signal.addEventListener('abort', onAbort, { once: true });
+    child.on('error', (e) => finish(`error: ${e.message}`));
+    // Give buffered output a moment to arrive, then settle on exit.
+    child.on('exit', (exitCode) => setTimeout(() => finish(`exit ${exitCode}`), 50));
     child.stdin.on('error', () => { /* exited early */ });
     child.stdin.end(code);
   });
 }
 
-async function runTool(copy: string, call: ToolUseContent): Promise<ToolResultContent> {
+async function runTool(copy: string, call: ToolUseContent, signal: AbortSignal): Promise<ToolResultContent> {
   const input = call.input as { path?: unknown; language?: unknown; code?: unknown };
   try {
     if (call.name === 'read_file') {
@@ -151,7 +173,7 @@ async function runTool(copy: string, call: ToolUseContent): Promise<ToolResultCo
     if (call.name === 'run') {
       const language = String(input.language ?? '');
       if (!['python', 'javascript', 'bash'].includes(language)) throw new Error('language must be python, javascript or bash');
-      return { type: 'tool_result', tool_use_id: call.id, content: await runProgram(copy, language, String(input.code ?? '')) };
+      return { type: 'tool_result', tool_use_id: call.id, content: await runProgram(copy, language, String(input.code ?? ''), signal) };
     }
     throw new Error(`unknown tool ${call.name}`);
   } catch (e) {
@@ -200,7 +222,7 @@ export async function checkOnStop(input: ReviewInput): Promise<string | null> {
         return findings.length > MAX_FINDINGS_CHARS ? `${findings.slice(0, MAX_FINDINGS_CHARS)}…` : findings;
       }
       messages.push({ role: 'assistant', content: response.content });
-      const results = await Promise.all(calls.map(call => runTool(copy, call)));
+      const results = await Promise.all(calls.map(call => runTool(copy, call, signal)));
       messages.push({
         role: 'user',
         content: round === MAX_ROUNDS - 1
