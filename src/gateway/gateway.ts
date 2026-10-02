@@ -16,7 +16,7 @@ import {
 } from '../providers/index.js';
 import { defineSkill } from '../skills/sdk.js';
 import { SessionManager } from '../agent/session.js';
-import { Agent } from '../agent/agent.js';
+import { Agent, type AgentHooks } from '../agent/agent.js';
 import { initSecurityLayers } from '../security/startup.js';
 import { vaultLoadResult } from '../config/config.js';
 import { EvolutionRecorder } from '../evolution/signals.js';
@@ -70,6 +70,8 @@ import { OutcomeBrain } from '../brain/index.js';
 import { registerMediaSkills, type MediaSkills } from '../skills/media-skills.js';
 import { registerShellTools, backgroundProcesses, createBashDoneRouter, type BackgroundExitEvent } from '../tools/shell/index.js';
 import { registerTodoTool } from '../tools/todo/index.js';
+import { persistLargeOutput } from '../tools/tool-output.js';
+import { verifyOnStopNudge } from '../tools/verify/ledger.js';
 import { registerWebTools } from '../tools/web/index.js';
 import { enqueueInLane, laneIsBusy } from '../agent/command-queue.js';
 
@@ -676,6 +678,7 @@ export class Gateway {
       announceQueue: this.announceQueue,
       subAgentExecutor: this.subAgentExecutor,
       interruptQueue: this.interruptQueue,
+      hooks: this.buildAgentHooks(),
     });
     this.logger.debug('Agent initialized');
 
@@ -1148,6 +1151,20 @@ export class Gateway {
 
   isGatewayRunning(): boolean {
     return this.isRunning;
+  }
+
+  /**
+   * Integrations the agent loop calls: large-output persistence on every tool
+   * result and the verify-on-stop nudge. Later phases add to this.
+   */
+  private buildAgentHooks(): AgentHooks {
+    const workspace = this.config.agent.workspace;
+    const contextWindowTokens = this.config.context.maxContextTokens;
+    return {
+      postProcessToolResult: ({ sessionId, toolName, content }) =>
+        persistLargeOutput(sessionId, toolName, content, { contextWindowTokens }),
+      verifyOnStop: (sessionId) => verifyOnStopNudge(sessionId, { workspace }),
+    };
   }
 
   /**

@@ -2477,7 +2477,7 @@ Install new skills from ClawHub with manage_skills (search, install, uninstall, 
   private static readonly PARALLEL_SAFE_TOOLS = new Set([
     'read_file', 'ls', 'glob', 'grep', 'codesearch', 'web_search',
     'memory_search', 'memory_get', 'question', 'webfetch', 'inspect_artifact',
-    'session_search', 'check_agents', 'load_procedure',
+    'session_search', 'check_agents', 'load_procedure', 'todo',
   ]);
 
   /** File writers: parallel with each other when they touch different paths. */
