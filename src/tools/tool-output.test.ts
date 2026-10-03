@@ -38,7 +38,8 @@ describe('tool output persistence', () => {
     expect(m![1].startsWith(join(root, 'tool-output', 'sess_1'))).toBe(true);
     expect(readFileSync(m![1], 'utf8')).toBe(text);
     expect(out).toContain('A'.repeat(1_000) + 'B'.repeat(500));
-    expect(out).not.toContain('C');
+    // The temp path (mkdtemp suffix) can itself contain a 'C', so look for a run.
+    expect(out).not.toContain('C'.repeat(20));
     expect(out).toMatch(/read_file with offset\/limit/);
     expect(out.length).toBeLessThan(2_200);
   });
