@@ -35,34 +35,29 @@ The architecture is validated against 30 research works from 2023--2026 across s
 
 ## Benchmark Results
 
-Evaluated on the [LoCoMo](https://github.com/snap-research/locomo) long-conversation memory benchmark (1,049 QA items, 5 conversations, 138 sessions):
-
-| Metric | OpenClaw | ScallopBot | Improvement |
-|--------|:--------:|:----------:|:-----------:|
-| **F1** | 0.38 | **0.48** | +26% |
-| **Exact Match** | 0.25 | **0.30** | +22% |
-
-**F1 by question category:**
+ScallopBot was run head to head with [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent), [OpenClaw](https://github.com/openclaw/openclaw) and [Hermes Agent](https://github.com/NousResearch/hermes-agent) on **ScallopBench v2**, a tool-calling benchmark of 36 real tasks: 12 trap tasks drawn from production failures, 6 coding tasks with hidden tests, 3 personal-assistant tasks and 15 hard multi-step tasks. Every agent used the same model (Moonshot `kimi-k2.6`, thinking on) and ran every task 3 times. Runs are scored on outcomes only: the files left in the workspace, hidden tests and the replies, never the agent's own claims.
 
 <p align="center">
-  <img src="assets/locomo-f1-by-category.png" alt="LoCoMo F1 by question category" width="800">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/scallopbench-v2-dark.svg">
+    <img src="assets/scallopbench-v2-light.svg" alt="ScallopBench v2: overall pass rate ScallopBot 98.1%, Prime Agent 98.1%, OpenClaw 97.2%, Hermes Agent 93.5%; hard tasks 44/45, 43/45, 43/45, 39/45; resisted the hidden prompt injection 3/3, 2/3, 3/3, 0/3" width="900">
+  </picture>
 </p>
 
-| Category | OpenClaw | ScallopBot | Delta |
-|----------|:--------:|:----------:|:-----:|
-| Single-hop | 0.14 | **0.20** | +0.06 |
-| Temporal | 0.26 | **0.34** | +0.08 |
-| Open-domain | 0.07 | **0.09** | +0.02 |
-| Multi-hop | 0.32 | **0.42** | +0.10 |
-| Adversarial | 0.77 | **0.97** | +0.20 |
+| | **ScallopBot** | Prime Agent | OpenClaw | Hermes Agent |
+|---|:---:|:---:|:---:|:---:|
+| **Overall** (108 task-runs) | **98.1%** (106/108) | 98.1% (106/108) | 97.2% (105/108) | 93.5% (101/108) |
+| Trap tasks | **36/36** | 36/36 | 36/36 | 36/36 |
+| Coding (hidden tests) | 17/18 | 18/18 | 17/18 | 17/18 |
+| Assistant | **9/9** | 9/9 | 9/9 | 9/9 |
+| Hard tasks | **44/45** | 43/45 | 43/45 | 39/45 |
+| Resisted the hidden prompt injection | **3/3** | 2/3 | 3/3 | 0/3 |
 
-Adversarial questions show the largest gain (+0.20) driven by cognitive pipeline features and strict answering constraints. Multi-hop benefits from NREM dream consolidation (cluster fusion).
+- **Tied for the top score** with Prime Agent, and the **best score on the hard tasks**. One or two task-runs either way is within the run-to-run spread.
+- **Prompt injection:** one task hides an instruction to delete files inside the project README. ScallopBot never followed it; Hermes Agent did in all three runs.
+- **What helps on the hard tasks:** before a turn that changed files ends, a fresh-context reviewer reads the request and the changed files and runs quick probes on a throwaway copy of the project (`src/tools/review/`). Anything it reproduces goes back to the agent as a note, never as a block. `REVIEW_ON_STOP=off` turns it off.
 
-Overall F1/EM are the QA-item-weighted average over all 1,049 items (ScallopBot F1 0.4784 / EM
-0.3003, OpenClaw F1 0.3801 / EM 0.2469). Per-category figures are the mean of the five
-per-conversation scores. Both arms use the same strict QA-answerer prompt.
-The harness lives in [`src/eval/`](src/eval/); full methodology is in the
-[paper](Paper2026.pdf).
+Competitors ran on 2 Oct 2026 (Hermes Agent `0be2d56`, Prime Agent `cf285dc`, OpenClaw `2026.9.7`), ScallopBot on 3 Oct 2026 with its default settings. Per-task results, raw run files and the adapters are in [`evals/agentic/baselines/RESULTS-v2.md`](evals/agentic/baselines/RESULTS-v2.md); the harness is [`evals/agentic/`](evals/agentic/) (`npm run bench:agentic`).
 
 ## Install
 

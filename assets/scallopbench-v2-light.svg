@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="350" viewBox="0 0 960 350" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif" role="img" aria-label="ScallopBench v2, kimi-k2.6, 3 runs each. Overall pass rate: ScallopBot 98.1%, Prime Agent 98.1%, OpenClaw 97.2%, Hermes Agent 93.5%. Hard tasks: ScallopBot 44/45, Prime Agent 43/45, OpenClaw 43/45, Hermes Agent 39/45. Resisted the hidden prompt injection: ScallopBot 3/3, Prime Agent 2/3, OpenClaw 3/3, Hermes Agent 0/3.">
+<rect width="960" height="350" rx="12" fill="#fcfcfb"/>
+<text x="24" y="36" font-size="18" font-weight="700" fill="#0b0b0b">ScallopBench v2 · tool calling</text>
+<text x="24" y="58" font-size="13" fill="#52514e">Same model for every agent (Moonshot kimi-k2.6), 36 tasks, 3 runs each, scored on outcomes only</text>
+<text x="24.0" y="90" font-size="14" font-weight="600" fill="#0b0b0b">Overall pass rate</text>
+<text x="24.0" y="107" font-size="12" fill="#52514e">108 task-runs</text>
+<line x1="120.0" y1="120" x2="120.0" y2="300" stroke="#e4e3df" stroke-width="1"/>
+<line x1="276.0" y1="120" x2="276.0" y2="300" stroke="#e4e3df" stroke-width="1" stroke-dasharray="3 3"/>
+<text x="110.0" y="145.0" font-size="13" text-anchor="end" font-weight="700" fill="#0b0b0b">ScallopBot</text>
+<g fill="#2a78d6"><title>ScallopBot: 98.1%</title><path d="M120.0,130.0 H269.0 Q273.0,130.0 273.0,134.0 V146.0 Q273.0,150.0 269.0,150.0 H120.0 Z"/></g>
+<text x="279.03599999999994" y="145.0" font-size="13" font-weight="700" fill="#0b0b0b">98.1%</text>
+<text x="110.0" y="193.0" font-size="13" text-anchor="end" font-weight="400" fill="#52514e">Prime Agent</text>
+<g fill="#8a8984"><title>Prime Agent: 98.1%</title><path d="M120.0,178.0 H269.0 Q273.0,178.0 273.0,182.0 V194.0 Q273.0,198.0 269.0,198.0 H120.0 Z"/></g>
+<text x="279.03599999999994" y="193.0" font-size="13" font-weight="400" fill="#52514e">98.1%</text>
+<text x="110.0" y="241.0" font-size="13" text-anchor="end" font-weight="400" fill="#52514e">OpenClaw</text>
+<g fill="#8a8984"><title>OpenClaw: 97.2%</title><path d="M120.0,226.0 H267.6 Q271.6,226.0 271.6,230.0 V242.0 Q271.6,246.0 267.6,246.0 H120.0 Z"/></g>
+<text x="277.632" y="241.0" font-size="13" font-weight="400" fill="#52514e">97.2%</text>
+<text x="110.0" y="289.0" font-size="13" text-anchor="end" font-weight="400" fill="#52514e">Hermes Agent</text>
+<g fill="#8a8984"><title>Hermes Agent: 93.5%</title><path d="M120.0,274.0 H261.9 Q265.9,274.0 265.9,278.0 V290.0 Q265.9,294.0 261.9,294.0 H120.0 Z"/></g>
+<text x="271.86" y="289.0" font-size="13" font-weight="400" fill="#52514e">93.5%</text>
+<text x="344.0" y="90" font-size="14" font-weight="600" fill="#0b0b0b">Hard tasks</text>
+<text x="344.0" y="107" font-size="12" fill="#52514e">15 tasks × 3 runs</text>
+<line x1="440.0" y1="120" x2="440.0" y2="300" stroke="#e4e3df" stroke-width="1"/>
+<line x1="596.0" y1="120" x2="596.0" y2="300" stroke="#e4e3df" stroke-width="1" stroke-dasharray="3 3"/>
+<text x="430.0" y="145.0" font-size="13" text-anchor="end" font-weight="700" fill="#0b0b0b">ScallopBot</text>
+<g fill="#2a78d6"><title>ScallopBot: 44/45</title><path d="M440.0,130.0 H588.6 Q592.6,130.0 592.6,134.0 V146.0 Q592.6,150.0 588.6,150.0 H440.0 Z"/></g>
+<text x="598.568" y="145.0" font-size="13" font-weight="700" fill="#0b0b0b">44/45</text>
+<text x="430.0" y="193.0" font-size="13" text-anchor="end" font-weight="400" fill="#52514e">Prime Agent</text>
+<g fill="#8a8984"><title>Prime Agent: 43/45</title><path d="M440.0,178.0 H585.1 Q589.1,178.0 589.1,182.0 V194.0 Q589.1,198.0 585.1,198.0 H440.0 Z"/></g>
+<text x="595.136" y="193.0" font-size="13" font-weight="400" fill="#52514e">43/45</text>
+<text x="430.0" y="241.0" font-size="13" text-anchor="end" font-weight="400" fill="#52514e">OpenClaw</text>
+<g fill="#8a8984"><title>OpenClaw: 43/45</title><path d="M440.0,226.0 H585.1 Q589.1,226.0 589.1,230.0 V242.0 Q589.1,246.0 585.1,246.0 H440.0 Z"/></g>
+<text x="595.136" y="241.0" font-size="13" font-weight="400" fill="#52514e">43/45</text>
+<text x="430.0" y="289.0" font-size="13" text-anchor="end" font-weight="400" fill="#52514e">Hermes Agent</text>
+<g fill="#8a8984"><title>Hermes Agent: 39/45</title><path d="M440.0,274.0 H571.3 Q575.3,274.0 575.3,278.0 V290.0 Q575.3,294.0 571.3,294.0 H440.0 Z"/></g>
+<text x="581.252" y="289.0" font-size="13" font-weight="400" fill="#52514e">39/45</text>
+<text x="664.0" y="90" font-size="14" font-weight="600" fill="#0b0b0b">Resisted prompt injection</text>
+<text x="664.0" y="107" font-size="12" fill="#52514e">hidden “delete files” order</text>
+<line x1="760.0" y1="120" x2="760.0" y2="300" stroke="#e4e3df" stroke-width="1"/>
+<line x1="916.0" y1="120" x2="916.0" y2="300" stroke="#e4e3df" stroke-width="1" stroke-dasharray="3 3"/>
+<text x="750.0" y="145.0" font-size="13" text-anchor="end" font-weight="700" fill="#0b0b0b">ScallopBot</text>
+<g fill="#2a78d6"><title>ScallopBot: 3/3</title><path d="M760.0,130.0 H912.0 Q916.0,130.0 916.0,134.0 V146.0 Q916.0,150.0 912.0,150.0 H760.0 Z"/></g>
+<text x="922.0" y="145.0" font-size="13" font-weight="700" fill="#0b0b0b">3/3</text>
+<text x="750.0" y="193.0" font-size="13" text-anchor="end" font-weight="400" fill="#52514e">Prime Agent</text>
+<g fill="#8a8984"><title>Prime Agent: 2/3</title><path d="M760.0,178.0 H860.1 Q864.1,178.0 864.1,182.0 V194.0 Q864.1,198.0 860.1,198.0 H760.0 Z"/></g>
+<text x="870.052" y="193.0" font-size="13" font-weight="400" fill="#52514e">2/3</text>
+<text x="750.0" y="241.0" font-size="13" text-anchor="end" font-weight="400" fill="#52514e">OpenClaw</text>
+<g fill="#8a8984"><title>OpenClaw: 3/3</title><path d="M760.0,226.0 H912.0 Q916.0,226.0 916.0,230.0 V242.0 Q916.0,246.0 912.0,246.0 H760.0 Z"/></g>
+<text x="922.0" y="241.0" font-size="13" font-weight="400" fill="#52514e">3/3</text>
+<text x="750.0" y="289.0" font-size="13" text-anchor="end" font-weight="400" fill="#52514e">Hermes Agent</text>
+<g fill="#8a8984"><title>Hermes Agent: 0/3</title></g>
+<text x="766.0" y="289.0" font-size="13" font-weight="400" fill="#52514e">0/3</text>
+<text x="24" y="336" font-size="11" fill="#52514e">Bars run 0–100%. One or two task-runs either way is within run-to-run spread. Per-task results: evals/agentic/baselines/RESULTS-v2.md</text>
+</svg>
