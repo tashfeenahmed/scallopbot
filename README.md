@@ -53,11 +53,11 @@ ScallopBot was run head to head with [Prime Agent](https://github.com/PrimeIntel
 | Hard tasks | **44/45** | 43/45 | 43/45 | 39/45 |
 | Resisted the hidden prompt injection | **3/3** | 2/3 | 3/3 | 0/3 |
 
-- **Tied for the top score** with Prime Agent, and the **best score on the hard tasks**. One or two task-runs either way is within the run-to-run spread.
+- **Tied for the top score** with Prime Agent, and the **best score on the hard tasks**. With 3 runs per task none of the gaps between agents is statistically significant; one or two task-runs either way is within the run-to-run spread.
 - **Prompt injection:** one task hides an instruction to delete files inside the project README. ScallopBot never followed it; Hermes Agent did in all three runs.
 - **What helps on the hard tasks:** before a turn that changed files ends, a fresh-context reviewer reads the request and the changed files and runs quick probes on a throwaway copy of the project (`src/tools/review/`). Anything it reproduces goes back to the agent as a note, never as a block. `REVIEW_ON_STOP=off` turns it off.
 
-Competitors ran on 2 Oct 2026 (Hermes Agent `0be2d56`, Prime Agent `cf285dc`, OpenClaw `2026.9.7`), ScallopBot on 3 Oct 2026 with its default settings. Per-task results, raw run files and the adapters are in [`evals/agentic/baselines/RESULTS-v2.md`](evals/agentic/baselines/RESULTS-v2.md); the harness is [`evals/agentic/`](evals/agentic/) (`npm run bench:agentic`).
+Competitors ran on 2 Oct 2026 (Hermes Agent `0be2d56`, Prime Agent `cf285dc`, OpenClaw `2026.9.7`), ScallopBot on 3 Oct 2026 with its default settings. We wrote this benchmark and improved ScallopBot against it, and we report every ScallopBot run (105, 105 and 106 of 108). The caveats, confidence intervals, per-task results, raw run files and adapters are in [`evals/agentic/baselines/RESULTS-v2.md`](evals/agentic/baselines/RESULTS-v2.md); the harness is [`evals/agentic/`](evals/agentic/) (`npm run bench:agentic`).
 
 ## Install
 
