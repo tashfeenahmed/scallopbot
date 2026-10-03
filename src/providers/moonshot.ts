@@ -111,6 +111,9 @@ export class MoonshotProvider implements LLMProvider {
       apiKey: this.apiKeys[0],
       baseURL: this.baseUrl,
       ...(this.timeout && { timeout: this.timeout }),
+      // Retries belong to executeWithRetry and the agent's recovery ladder;
+      // the SDK's own two silent retries stacked a hung request past 15 min.
+      maxRetries: 0,
     });
   }
 
@@ -132,6 +135,9 @@ export class MoonshotProvider implements LLMProvider {
       apiKey: newKey,
       baseURL: this.baseUrl,
       ...(this.timeout && { timeout: this.timeout }),
+      // Retries belong to executeWithRetry and the agent's recovery ladder;
+      // the SDK's own two silent retries stacked a hung request past 15 min.
+      maxRetries: 0,
     });
 
     this.logger?.info(`Rotated to API key ${this.currentKeyIndex + 1}/${this.apiKeys.length}`);
