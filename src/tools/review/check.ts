@@ -16,7 +16,7 @@ import { spawn } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import type { ContentBlock, LLMProvider, Message, ToolDefinition, ToolResultContent, ToolUseContent } from '../../providers/types.js';
+import type { ContentBlock, Message, ToolDefinition, ToolResultContent, ToolUseContent } from '../../providers/types.js';
 import { prepareSandboxedCommand } from '../../security/sandbox/index.js';
 import { buildReviewMessage, changedFilesSince, parseVerdict, type ReviewInput } from './review.js';
 
