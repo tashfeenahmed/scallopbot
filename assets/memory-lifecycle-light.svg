@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="330" viewBox="0 0 900 330" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif" role="img" aria-label="Memory lifecycle: capture facts after each message, store them in SQLite with model-tagged embeddings, recall with BM25 plus embeddings and re-ranking, let them decay by category half-life, consolidate nightly with NREM fusion and REM association, and forget low-utility memories with a soft archive before pruning.">
+<defs><marker id="an" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#8a8984"/></marker><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#2a78d6"/></marker></defs>
+<rect width="900" height="330" rx="14" fill="#fcfcfb"/>
+<text x="24" y="34" font-size="17" font-weight="700" fill="#0b0b0b" text-anchor="start">Memory lifecycle</text>
+<text x="24" y="54" font-size="12" font-weight="400" fill="#52514e" text-anchor="start">Memories are rewritten and pruned over time, not only stored</text>
+<rect x="24" y="74" width="262" height="96" rx="10" fill="#ffffff" stroke="#d9d8d3" stroke-width="1"/>
+<text x="38" y="96" font-size="14" font-weight="700" fill="#0b0b0b" text-anchor="start">1 · Capture</text>
+<text x="38" y="115" font-size="12" font-weight="400" fill="#52514e" text-anchor="start">facts extracted after each message</text>
+<text x="38" y="132" font-size="12" font-weight="400" fill="#52514e" text-anchor="start">user memory kept apart from</text>
+<text x="38" y="149" font-size="12" font-weight="400" fill="#52514e" text-anchor="start">the assistant’s own reflections</text>
+<rect x="319" y="74" width="262" height="96" rx="10" fill="#ffffff" stroke="#d9d8d3" stroke-width="1"/>
+<text x="333" y="96" font-size="14" font-weight="700" fill="#0b0b0b" text-anchor="start">2 · Store</text>
+<text x="333" y="115" font-size="12" font-weight="400" fill="#52514e" text-anchor="start">SQLite (ACID, WAL)</text>
+<text x="333" y="132" font-size="12" font-weight="400" fill="#52514e" text-anchor="start">embeddings tagged with their model</text>
+<text x="333" y="149" font-size="12" font-weight="400" fill="#52514e" text-anchor="start">Ollama, OpenAI or TF-IDF</text>
+<rect x="614" y="74" width="262" height="96" rx="10" fill="#eaf2fc" stroke="#2a78d6" stroke-width="1.5"/>
+<text x="628" y="96" font-size="14" font-weight="700" fill="#0b0b0b" text-anchor="start">3 · Recall</text>
+<text x="628" y="115" font-size="12" font-weight="400" fill="#52514e" text-anchor="start">BM25 + embeddings</text>
+<text x="628" y="132" font-size="12" font-weight="400" fill="#52514e" text-anchor="start">optional LLM re-rank</text>
+<text x="628" y="149" font-size="12" font-weight="400" fill="#52514e" text-anchor="start">spreading activation, 3 hops</text>
+<rect x="24" y="214" width="262" height="96" rx="10" fill="#ffffff" stroke="#d9d8d3" stroke-width="1"/>
+<text x="38" y="236" font-size="14" font-weight="700" fill="#0b0b0b" text-anchor="start">6 · Forget</text>
+<text x="38" y="255" font-size="12" font-weight="400" fill="#52514e" text-anchor="start">utility-based</text>
+<text x="38" y="272" font-size="12" font-weight="400" fill="#52514e" text-anchor="start">soft archive first</text>
+<text x="38" y="289" font-size="12" font-weight="400" fill="#52514e" text-anchor="start">then hard prune</text>
+<rect x="319" y="214" width="262" height="96" rx="10" fill="#eaf2fc" stroke="#2a78d6" stroke-width="1.5"/>
+<text x="333" y="236" font-size="14" font-weight="700" fill="#0b0b0b" text-anchor="start">5 · Consolidate</text>
+<text x="333" y="255" font-size="12" font-weight="400" fill="#52514e" text-anchor="start">nightly NREM: fuse fragments</text>
+<text x="333" y="272" font-size="12" font-weight="400" fill="#52514e" text-anchor="start">REM: find new associations,</text>
+<text x="333" y="289" font-size="12" font-weight="400" fill="#52514e" text-anchor="start">judged by an LLM</text>
+<rect x="614" y="214" width="262" height="96" rx="10" fill="#ffffff" stroke="#d9d8d3" stroke-width="1"/>
+<text x="628" y="236" font-size="14" font-weight="700" fill="#0b0b0b" text-anchor="start">4 · Decay</text>
+<text x="628" y="255" font-size="12" font-weight="400" fill="#52514e" text-anchor="start">per-category half-lives</text>
+<text x="628" y="272" font-size="12" font-weight="400" fill="#52514e" text-anchor="start">14 days (events) to</text>
+<text x="628" y="289" font-size="12" font-weight="400" fill="#52514e" text-anchor="start">346 days (relationships)</text>
+<path d="M286,122 L319,122" fill="none" stroke="#8a8984" stroke-width="1.6" marker-end="url(#an)"/>
+<path d="M581,122 L614,122" fill="none" stroke="#8a8984" stroke-width="1.6" marker-end="url(#an)"/>
+<path d="M745,170 L745,214" fill="none" stroke="#8a8984" stroke-width="1.6" marker-end="url(#an)"/>
+<path d="M614,262 L581,262" fill="none" stroke="#8a8984" stroke-width="1.6" marker-end="url(#an)"/>
+<path d="M319,262 L286,262" fill="none" stroke="#8a8984" stroke-width="1.6" marker-end="url(#an)"/>
+<path d="M450,214 L450,170" fill="none" stroke="#2a78d6" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#ah)"/>
+<text x="458" y="197" font-size="11" font-weight="400" fill="#52514e" text-anchor="start">fused summaries go back into the store</text>
+</svg>

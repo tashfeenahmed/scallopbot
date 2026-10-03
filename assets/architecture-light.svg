@@ -1,0 +1,80 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="500" viewBox="0 0 900 500" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif" role="img" aria-label="ScallopBot architecture: chat channels feed the gateway and the agent loop; the agent calls skills and the cost-aware router, which fails over between seven providers; memory and the background cognitive layer sit underneath; every reply and action goes through the outcome brain.">
+<defs><marker id="an" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#8a8984"/></marker><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#2a78d6"/></marker></defs>
+<rect width="900" height="500" rx="14" fill="#fcfcfb"/>
+<text x="24" y="34" font-size="17" font-weight="700" fill="#0b0b0b" text-anchor="start">How ScallopBot fits together</text>
+<text x="24" y="54" font-size="12" font-weight="400" fill="#52514e" text-anchor="start">One Node.js process on your own server</text>
+<text x="24" y="72" font-size="1" font-weight="400" fill="#52514e" text-anchor="start"></text>
+<rect x="24" y="80" width="190" height="48" rx="10" fill="#ffffff" stroke="#d9d8d3" stroke-width="1"/>
+<text x="38" y="102" font-size="14" font-weight="700" fill="#0b0b0b" text-anchor="start">Telegram</text>
+<text x="38" y="121" font-size="12" font-weight="400" fill="#52514e" text-anchor="start">voice, files, photos</text>
+<rect x="24" y="140" width="190" height="48" rx="10" fill="#ffffff" stroke="#d9d8d3" stroke-width="1"/>
+<text x="38" y="162" font-size="14" font-weight="700" fill="#0b0b0b" text-anchor="start">Web dashboard</text>
+<text x="38" y="181" font-size="12" font-weight="400" fill="#52514e" text-anchor="start">REST · SSE · WebSocket</text>
+<rect x="24" y="200" width="190" height="48" rx="10" fill="#ffffff" stroke="#d9d8d3" stroke-width="1"/>
+<text x="38" y="222" font-size="14" font-weight="700" fill="#0b0b0b" text-anchor="start">CLI</text>
+<text x="38" y="241" font-size="12" font-weight="400" fill="#52514e" text-anchor="start">interactive, resumable</text>
+<rect x="24" y="260" width="190" height="64" rx="10" fill="#ffffff" stroke="#d9d8d3" stroke-width="1"/>
+<text x="38" y="282" font-size="14" font-weight="700" fill="#0b0b0b" text-anchor="start">More channels</text>
+<text x="38" y="301" font-size="12" font-weight="400" fill="#52514e" text-anchor="start">Discord · Slack · WhatsApp</text>
+<text x="38" y="318" font-size="12" font-weight="400" fill="#52514e" text-anchor="start">Signal · Matrix</text>
+<path d="M214,104 L244,104" fill="none" stroke="#8a8984" stroke-width="1.6" marker-end="url(#an)"/>
+<path d="M214,164 L244,164" fill="none" stroke="#8a8984" stroke-width="1.6" marker-end="url(#an)"/>
+<path d="M214,224 L244,224" fill="none" stroke="#8a8984" stroke-width="1.6" marker-end="url(#an)"/>
+<path d="M214,292 L244,292" fill="none" stroke="#8a8984" stroke-width="1.6" marker-end="url(#an)"/>
+<line x1="244" y1="104" x2="244" y2="292" stroke="#8a8984" stroke-width="1.6"/>
+<path d="M244,110 L276,110" fill="none" stroke="#8a8984" stroke-width="1.6" marker-end="url(#an)"/>
+<rect x="276" y="80" width="212" height="60" rx="10" fill="#ffffff" stroke="#d9d8d3" stroke-width="1"/>
+<text x="290" y="102" font-size="14" font-weight="700" fill="#0b0b0b" text-anchor="start">Gateway</text>
+<text x="290" y="121" font-size="12" font-weight="400" fill="#52514e" text-anchor="start">sessions · scheduler · wake-ups</text>
+<path d="M382,140 L382,166" fill="none" stroke="#8a8984" stroke-width="1.6" marker-end="url(#an)"/>
+<rect x="276" y="166" width="212" height="96" rx="10" fill="#eaf2fc" stroke="#2a78d6" stroke-width="1.5"/>
+<text x="290" y="188" font-size="14" font-weight="700" fill="#0b0b0b" text-anchor="start">Agent loop</text>
+<text x="290" y="207" font-size="12" font-weight="400" fill="#52514e" text-anchor="start">tools in parallel waves</text>
+<text x="290" y="224" font-size="12" font-weight="400" fill="#52514e" text-anchor="start">verify-on-stop nudge</text>
+<text x="290" y="241" font-size="12" font-weight="400" fill="#52514e" text-anchor="start">check-on-stop reviewer</text>
+<path d="M382,262 L382,288" fill="none" stroke="#8a8984" stroke-width="1.6" marker-end="url(#an)"/>
+<rect x="276" y="288" width="212" height="56" rx="10" fill="#ffffff" stroke="#d9d8d3" stroke-width="1"/>
+<text x="290" y="310" font-size="14" font-weight="700" fill="#0b0b0b" text-anchor="start">Outcome brain</text>
+<text x="290" y="329" font-size="12" font-weight="400" fill="#52514e" text-anchor="start">every reply and action, one gate</text>
+<rect x="536" y="80" width="170" height="100" rx="10" fill="#ffffff" stroke="#d9d8d3" stroke-width="1"/>
+<text x="550" y="102" font-size="14" font-weight="700" fill="#0b0b0b" text-anchor="start">Router</text>
+<text x="550" y="121" font-size="12" font-weight="400" fill="#52514e" text-anchor="start">complexity → tier</text>
+<text x="550" y="138" font-size="12" font-weight="400" fill="#52514e" text-anchor="start">daily/monthly budgets</text>
+<text x="550" y="155" font-size="12" font-weight="400" fill="#52514e" text-anchor="start">priced per token</text>
+<path d="M488,196 L512,196 L512,130 L536,130" fill="none" stroke="#8a8984" stroke-width="1.6" marker-end="url(#an)"/>
+<rect x="536" y="200" width="170" height="144" rx="10" fill="#ffffff" stroke="#d9d8d3" stroke-width="1"/>
+<text x="550" y="222" font-size="14" font-weight="700" fill="#0b0b0b" text-anchor="start">Skills &amp; tools</text>
+<text x="550" y="241" font-size="12" font-weight="400" fill="#52514e" text-anchor="start">34 bundled skills</text>
+<text x="550" y="258" font-size="12" font-weight="400" fill="#52514e" text-anchor="start">bash · files · patch</text>
+<text x="550" y="275" font-size="12" font-weight="400" fill="#52514e" text-anchor="start">web · browser · pdf</text>
+<text x="550" y="292" font-size="12" font-weight="400" fill="#52514e" text-anchor="start">email · calendar</text>
+<text x="550" y="309" font-size="12" font-weight="400" fill="#52514e" text-anchor="start">ClawHub · MCP</text>
+<path d="M488,240 L536,240" fill="none" stroke="#8a8984" stroke-width="1.6" marker-end="url(#an)"/>
+<rect x="730" y="80" width="146" height="264" rx="10" fill="#ffffff" stroke="#d9d8d3" stroke-width="1"/>
+<text x="744" y="102" font-size="14" font-weight="700" fill="#0b0b0b" text-anchor="start">Providers</text>
+<text x="744" y="121" font-size="12" font-weight="400" fill="#52514e" text-anchor="start">Anthropic</text>
+<text x="744" y="138" font-size="12" font-weight="400" fill="#52514e" text-anchor="start">Moonshot</text>
+<text x="744" y="155" font-size="12" font-weight="400" fill="#52514e" text-anchor="start">OpenAI</text>
+<text x="744" y="172" font-size="12" font-weight="400" fill="#52514e" text-anchor="start">xAI</text>
+<text x="744" y="189" font-size="12" font-weight="400" fill="#52514e" text-anchor="start">Groq</text>
+<text x="744" y="206" font-size="12" font-weight="400" fill="#52514e" text-anchor="start">Ollama</text>
+<text x="744" y="223" font-size="12" font-weight="400" fill="#52514e" text-anchor="start">OpenRouter</text>
+<text x="744" y="240" font-size="12" font-weight="400" fill="#52514e" text-anchor="start">+ any OpenAI-</text>
+<text x="744" y="257" font-size="12" font-weight="400" fill="#52514e" text-anchor="start">  compatible endpoint</text>
+<text x="744" y="274" font-size="12" font-weight="400" fill="#52514e" text-anchor="start">health-aware failover</text>
+<path d="M706,130 L730,130" fill="none" stroke="#8a8984" stroke-width="1.6" marker-end="url(#an)"/>
+<rect x="24" y="376" width="420" height="96" rx="10" fill="#eaf2fc" stroke="#2a78d6" stroke-width="1.5"/>
+<text x="38" y="398" font-size="14" font-weight="700" fill="#0b0b0b" text-anchor="start">Memory · SQLite</text>
+<text x="38" y="417" font-size="12" font-weight="400" fill="#52514e" text-anchor="start">BM25 + embeddings, optional LLM re-rank</text>
+<text x="38" y="434" font-size="12" font-weight="400" fill="#52514e" text-anchor="start">spreading activation over typed relations</text>
+<text x="38" y="451" font-size="12" font-weight="400" fill="#52514e" text-anchor="start">category half-lives, fusion, utility-based forgetting</text>
+<path d="M276,214 L258,214 L258,376" fill="none" stroke="#8a8984" stroke-width="1.6" marker-end="url(#an)"/>
+<rect x="476" y="376" width="400" height="96" rx="10" fill="#eaf2fc" stroke="#2a78d6" stroke-width="1.5"/>
+<text x="490" y="398" font-size="14" font-weight="700" fill="#0b0b0b" text-anchor="start">Cognitive layer · gardener daemon</text>
+<text x="490" y="417" font-size="12" font-weight="400" fill="#52514e" text-anchor="start">light every minute · deep ~72 min · nightly sleep</text>
+<text x="490" y="434" font-size="12" font-weight="400" fill="#52514e" text-anchor="start">dream cycle (NREM + REM), self-reflection</text>
+<text x="490" y="451" font-size="12" font-weight="400" fill="#52514e" text-anchor="start">gap scanner → proactive outreach</text>
+<path d="M444,424 L476,424" fill="none" stroke="#8a8984" stroke-width="1.6" marker-end="url(#an)" marker-start="url(#an)"/>
+<path d="M676,376 L676,360 L460,360 L460,344" fill="none" stroke="#8a8984" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#an)"/>
+<text x="560" y="356" font-size="11" font-weight="400" fill="#52514e" text-anchor="start">proactive messages</text>
+</svg>

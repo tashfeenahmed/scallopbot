@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="310" viewBox="0 0 900 310" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif" role="img" aria-label="Model routing: each request is scored for complexity and sent to a fast, standard or capable tier; the budget gate checks daily and monthly limits before the call; the call goes to the first healthy provider in that tier and fails over to the next with backoff.">
+<defs><marker id="an" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#8f8e88"/></marker><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#3987e5"/></marker></defs>
+<rect width="900" height="310" rx="14" fill="#1a1a19"/>
+<text x="24" y="34" font-size="17" font-weight="700" fill="#ffffff" text-anchor="start">Cost-aware model routing</text>
+<text x="24" y="54" font-size="12" font-weight="400" fill="#c3c2b7" text-anchor="start">Each call goes to the cheapest tier that can handle it, then to the first healthy provider you have a key for</text>
+<rect x="24" y="120" width="150" height="70" rx="10" fill="#242423" stroke="#3d3d3a" stroke-width="1"/>
+<text x="99.0" y="142" font-size="14" font-weight="700" fill="#ffffff" text-anchor="middle">Request</text>
+<text x="99.0" y="161" font-size="12" font-weight="400" fill="#c3c2b7" text-anchor="middle">chat turn or</text>
+<text x="99.0" y="178" font-size="12" font-weight="400" fill="#c3c2b7" text-anchor="middle">background job</text>
+<path d="M174,155 L204,155" fill="none" stroke="#8f8e88" stroke-width="1.6" marker-end="url(#an)"/>
+<rect x="204" y="120" width="150" height="70" rx="10" fill="#242423" stroke="#3d3d3a" stroke-width="1"/>
+<text x="279.0" y="142" font-size="14" font-weight="700" fill="#ffffff" text-anchor="middle">Complexity</text>
+<text x="279.0" y="161" font-size="12" font-weight="400" fill="#c3c2b7" text-anchor="middle">analyzer scores</text>
+<text x="279.0" y="178" font-size="12" font-weight="400" fill="#c3c2b7" text-anchor="middle">the request</text>
+<path d="M354,155 L372,155 L372,102 L392,102" fill="none" stroke="#8f8e88" stroke-width="1.6" marker-end="url(#an)"/>
+<rect x="392" y="78" width="262" height="48" rx="10" fill="#242423" stroke="#3d3d3a" stroke-width="1"/>
+<text x="406" y="100" font-size="14" font-weight="700" fill="#ffffff" text-anchor="start">Fast</text>
+<text x="406" y="118" font-size="11.5" font-weight="400" fill="#c3c2b7" text-anchor="start">Groq → Moonshot → OpenRouter → …</text>
+<path d="M354,155 L372,155 L372,158 L392,158" fill="none" stroke="#8f8e88" stroke-width="1.6" marker-end="url(#an)"/>
+<rect x="392" y="134" width="262" height="48" rx="10" fill="#242423" stroke="#3d3d3a" stroke-width="1"/>
+<text x="406" y="156" font-size="14" font-weight="700" fill="#ffffff" text-anchor="start">Standard</text>
+<text x="406" y="174" font-size="11.5" font-weight="400" fill="#c3c2b7" text-anchor="start">Moonshot → OpenAI → OpenRouter → …</text>
+<path d="M354,155 L372,155 L372,214 L392,214" fill="none" stroke="#8f8e88" stroke-width="1.6" marker-end="url(#an)"/>
+<rect x="392" y="190" width="262" height="48" rx="10" fill="#242423" stroke="#3d3d3a" stroke-width="1"/>
+<text x="406" y="212" font-size="14" font-weight="700" fill="#ffffff" text-anchor="start">Capable</text>
+<text x="406" y="230" font-size="11.5" font-weight="400" fill="#c3c2b7" text-anchor="start">Anthropic → Moonshot → OpenAI → …</text>
+<path d="M654,102 L668,102 L668,155 L684,155" fill="none" stroke="#8f8e88" stroke-width="1.6" marker-end="url(#an)"/>
+<path d="M654,158 L668,158 L668,155 L684,155" fill="none" stroke="#8f8e88" stroke-width="1.6" marker-end="url(#an)"/>
+<path d="M654,214 L668,214 L668,155 L684,155" fill="none" stroke="#8f8e88" stroke-width="1.6" marker-end="url(#an)"/>
+<rect x="684" y="108" width="192" height="94" rx="10" fill="#1c2a3c" stroke="#3987e5" stroke-width="1.5"/>
+<text x="698" y="130" font-size="14" font-weight="700" fill="#ffffff" text-anchor="start">Budget gate</text>
+<text x="698" y="149" font-size="12" font-weight="400" fill="#c3c2b7" text-anchor="start">daily / monthly limits</text>
+<text x="698" y="166" font-size="12" font-weight="400" fill="#c3c2b7" text-anchor="start">checked before sending</text>
+<text x="698" y="183" font-size="12" font-weight="400" fill="#c3c2b7" text-anchor="start">then priced per token</text>
+<text x="24" y="270" font-size="12" font-weight="400" fill="#c3c2b7" text-anchor="start">A provider that keeps failing is cooled down and the next healthy one in the tier takes over (exponential backoff with jitter).</text>
+<text x="24" y="290" font-size="12" font-weight="400" fill="#c3c2b7" text-anchor="start">Any purpose can be pinned to a model instead: MODEL_RERANKER, MODEL_FACT_EXTRACTION, MODEL_COGNITION, …</text>
+</svg>

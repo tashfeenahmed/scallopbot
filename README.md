@@ -22,16 +22,32 @@
 </p>
 
 <p align="center">
-  <a href="Paper2026.pdf"><strong>Read the Paper</strong></a>
+  <a href="#install"><strong>Install</strong></a> ·
+  <a href="#benchmark-results"><strong>Benchmarks</strong></a> ·
+  <a href="#how-it-fits-together"><strong>Architecture</strong></a> ·
+  <a href="#hybrid-memory-engine"><strong>Memory</strong></a> ·
+  <a href="https://scallopbot.com"><strong>Website</strong></a> ·
+  <a href="Paper2026.pdf"><strong>Paper</strong></a>
 </p>
 
 ---
 
-Open-source personal AI agents like [OpenClaw](https://github.com/openclaw/openclaw) excel at tool orchestration, but their memory mostly stores and promotes notes rather than reshaping them, and they have no self-reflection or autonomous reasoning loop. ScallopBot addresses this cognition gap with a bio-inspired cognitive architecture that maintains full compatibility with the OpenClaw skill ecosystem. Runs at an estimated $0.05--0.10/day in model spend -- see the [cost comparison](https://scallopbot.com/cost). Comparing it with a gateway like LiteLLM? See [ScallopBot as a LiteLLM alternative](https://scallopbot.com/litellm-alternative/).
+ScallopBot is a personal AI agent that runs on your own server. Open-source agents like [OpenClaw](https://github.com/openclaw/openclaw) are good at tool orchestration, but their memory mostly stores and promotes notes rather than reshaping them, and they have no self-reflection or autonomous reasoning loop. ScallopBot adds a bio-inspired cognitive layer on top, stays compatible with the OpenClaw skill ecosystem, and runs at an estimated **$0.05–0.10 a day** in model spend ([cost comparison](https://scallopbot.com/cost)).
 
-ScallopBot runs on your own server, routes each request to the cheapest model that can handle it, tracks every cent in real time, and fails over between the LLM providers you have keys for (7 supported). You talk to it over Telegram, the web dashboard (REST + WebSocket API), or a CLI, and optionally Discord, Slack, WhatsApp, Signal or Matrix -- all from a single Node.js process. Each extra chat channel starts only when its credentials are set.
+<table>
+  <tr>
+    <td width="33%" valign="top"><h3>🧠 Memory that changes</h3>Memories are fused, linked and forgotten over time, not only stored. Recall mixes BM25, embeddings and optional LLM re-ranking.</td>
+    <td width="33%" valign="top"><h3>🌙 Works while you sleep</h3>A background gardener runs decay every minute, audits every ~72 minutes, and a nightly dream cycle, self-reflection and gap scan.</td>
+    <td width="33%" valign="top"><h3>🛡️ Checks its own work</h3>Before a turn that changed files ends, a fresh-context reviewer probes the result on a throwaway copy and hands back anything it reproduces.</td>
+  </tr>
+  <tr>
+    <td valign="top"><h3>💸 Routes by cost</h3>Each request goes to the cheapest tier that can handle it, every call is priced per token, and daily/monthly budgets stop spend before it happens.</td>
+    <td valign="top"><h3>🔌 MCP both ways</h3>Uses any MCP server, and serves its own memory over MCP so Claude Code, Codex or any MCP client shares it.</td>
+    <td valign="top"><h3>💬 Your channels</h3>Telegram, a web dashboard (installable as an app) and a CLI, plus Discord, Slack, WhatsApp, Signal and Matrix when configured. 7 LLM providers with failover.</td>
+  </tr>
+</table>
 
-The architecture is validated against 30 research works from 2023--2026 across six domains (memory retrieval, lifecycle management, associative reasoning, sleep-inspired consolidation, affect modelling, and proactive intelligence). The full cognitive pipeline operates at an estimated **$0.05--0.10 per day** in model spend.
+The architecture was checked against 30 research works from 2023–2026 across six domains: memory retrieval, lifecycle management, associative reasoning, sleep-inspired consolidation, affect modelling and proactive intelligence ([paper](Paper2026.pdf)). Comparing it with a gateway like LiteLLM? See [ScallopBot as a LiteLLM alternative](https://scallopbot.com/litellm-alternative/).
 
 ## Benchmark Results
 
@@ -59,6 +75,17 @@ ScallopBot was run head to head with [Prime Agent](https://github.com/PrimeIntel
 
 Competitors ran on 2 Oct 2026 (Hermes Agent `0be2d56`, Prime Agent `cf285dc`, OpenClaw `2026.9.7`), ScallopBot on 3 Oct 2026 with its default settings. We wrote this benchmark and improved ScallopBot against it, and we report every ScallopBot run (105, 105 and 106 of 108). The caveats, confidence intervals, per-task results, raw run files and adapters are in [`evals/agentic/baselines/RESULTS-v2.md`](evals/agentic/baselines/RESULTS-v2.md); the harness is [`evals/agentic/`](evals/agentic/) (`npm run bench:agentic`).
 
+## How it fits together
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/architecture-dark.svg">
+    <img src="assets/architecture-light.svg" alt="ScallopBot architecture: Telegram, the web dashboard, the CLI and other channels feed the gateway and the agent loop; the agent calls skills and the cost-aware router, which fails over between seven providers; SQLite memory and the background cognitive layer sit underneath; every reply and action goes through the outcome brain." width="900">
+  </picture>
+</p>
+
+Everything runs in one Node.js process. Messages from any channel go through the gateway to the agent loop, which runs tools in parallel waves and calls models through the cost-aware router. Memory lives in one SQLite file. The gardener daemon works on that memory in the background and can start conversations of its own, and every reply or action, foreground or proactive, passes through the single outcome brain before it reaches you.
+
 ## Install
 
 Every route ends with the bot running and the web dashboard on
@@ -83,7 +110,8 @@ Re-running it updates the checkout and keeps your `.env`. Flags go after
 provider key), `TELEGRAM_BOT_TOKEN`, `SCALLOPBOT_WEB_EMAIL` and
 `SCALLOPBOT_WEB_PASSWORD`; `--dry-run` shows what it would do.
 
-### Docker
+<details>
+<summary><strong>Docker</strong></summary>
 
 ```bash
 git clone https://github.com/tashfeenahmed/scallopbot.git && cd scallopbot
@@ -100,7 +128,10 @@ exposing it. An Ollama service is ready to uncomment in
 browser skill's Chrome are not in the image. `install.sh --docker` fetches just
 the compose file and a filled-in `.env` and builds straight from GitHub.
 
-### npm (global CLI)
+</details>
+
+<details>
+<summary><strong>npm (global CLI)</strong></summary>
 
 ScallopBot is not on the npm registry yet, so build and pack it from a clone:
 
@@ -117,7 +148,10 @@ scallopbot start
 `scallopbot` reads `.env` from, and keeps its data in, the directory you start
 it from (or `AGENT_WORKSPACE`).
 
-### From source
+</details>
+
+<details>
+<summary><strong>From source</strong></summary>
 
 ```bash
 git clone https://github.com/tashfeenahmed/scallopbot.git
@@ -132,6 +166,8 @@ node dist/cli.js start
 ```
 
 Requires Node.js 24+.
+
+</details>
 
 ### Install the dashboard as an app
 
@@ -200,13 +236,14 @@ silently degrading.
 
 ## Cognitive Architecture
 
-ScallopBot's cognitive layer is organised into six subsystems, orchestrated by a three-tier gardener daemon:
+ScallopBot's cognitive layer is organised into six subsystems, run by a background gardener on three clocks:
 
-| Tier | Interval | Operations |
-|------|----------|------------|
-| **Light** | 1 min | Incremental decay, expiring scheduled items, health ping |
-| **Deep** | ~72 min | Full decay, session summaries, forgetting, retrieval audit, behavioural inference, proactive evaluation |
-| **Sleep** | ≥20 h apart, only in 2--5 AM local quiet hours | Dream cycle (NREM+REM), private self-reflection, gap scanning, board review, guarded skill/prompt evolution |
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/gardener-dark.svg">
+    <img src="assets/gardener-light.svg" alt="The gardener over one day: a light tick every minute (decay, expiry, health ping), a deep tick about every 72 minutes (summaries, forgetting, audits, proactive check), and one sleep tick in the 2 to 5 AM quiet hours, at least 20 hours apart (dream cycle, reflection, gap scan, evolution)." width="900">
+  </picture>
+</p>
 
 Affect is updated per message, not on a tick. Intervals and quiet hours are configurable with
 `GARDENER_LIGHT_INTERVAL_MS`, `GARDENER_DEEP_INTERVAL_MS`, `GARDENER_SLEEP_INTERVAL_MS`,
@@ -242,9 +279,23 @@ ACT-R-inspired spreading activation over typed relation graphs (UPDATES, EXTENDS
 
 ### Hybrid Memory Engine
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/memory-lifecycle-dark.svg">
+    <img src="assets/memory-lifecycle-light.svg" alt="Memory lifecycle: capture facts after each message, store them in SQLite with model-tagged embeddings, recall with BM25 plus embeddings, optional re-ranking and spreading activation, decay by category half-life, consolidate nightly (NREM fusion and REM association, with fused summaries written back), and forget low-utility memories with a soft archive before pruning." width="900">
+  </picture>
+</p>
+
 SQLite-backed memory with ACID guarantees. Combines BM25 keyword scoring with semantic embeddings and optional LLM re-ranking. `EMBEDDING_PROVIDER` picks `ollama` (local `nomic-embed-text` or `mxbai-embed-large`), `openai`, or `tfidf`; unset, it tries Ollama and falls back to TF-IDF. Each stored vector is tagged with its model, so vectors from different models are never compared, and `reembed` moves an existing memory store to a new model. Recall uses smooth activation from temporal decay, lifecycle, genuine topic relevance, salience, and user confirmation: an old topic fades from general context but can return naturally when it becomes relevant, without magic "history" wording. Automatic retrieval is telemetry only and never reinforces freshness or utility. Assistant self-reflection and agent-subject facts remain separate from user memory. The lifecycle includes category-specific half-lives (14 days for events to 346 days for relationships), BFS-clustered fusion, and utility-based forgetting with soft-archive before hard-prune.
 
 ### Cost-Aware Model Routing
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/routing-dark.svg">
+    <img src="assets/routing-light.svg" alt="Model routing: each request is scored for complexity and sent to a fast, standard or capable tier; each tier has its own provider order; a budget gate checks daily and monthly limits before the call, and failing providers are cooled down while the next healthy one takes over." width="900">
+  </picture>
+</p>
 
 Every API call is priced at the token level using a built-in pricing database covering 50+ models. A complexity analyzer scores each request and routes it to a tier -- fast (prefers Groq, then Moonshot), standard (prefers Moonshot, then OpenAI), or capable (prefers Anthropic) -- falling through to the next healthy provider you have keys for. OpenRouter joins the failover chain when listed in `PROVIDER_ORDER`. Daily and monthly budgets gate requests before they're sent. Provider health is tracked per-call -- consecutive failures trigger automatic failover with exponential backoff and jitter.
 
@@ -288,13 +339,13 @@ The entire cognitive pipeline -- dreams, reflection, affect, gap scanning -- add
 
 | Provider | Default Model | Best For |
 |----------|--------------|----------|
-| **Anthropic** | Claude Sonnet 4 | Complex reasoning, coding |
-| **Moonshot** | Kimi K2.5 (thinking on request) | Cost-effective daily driver |
-| **OpenAI** | GPT-4o | General tasks |
+| **Anthropic** | Claude Sonnet 5.5 | Complex reasoning, coding |
+| **Moonshot** | Kimi K3 (thinking on request) | Cost-effective daily driver |
+| **OpenAI** | GPT-5.6 Luna | General tasks |
 | **xAI** | Grok 4 | Real-time information |
 | **Groq** | Llama 3.3 70B | Ultra-fast inference |
-| **Ollama** | Any local model | Privacy, offline use |
-| **OpenRouter** | 100+ models | Maximum flexibility |
+| **Ollama** | Any local model (default `llama3.2`) | Privacy, offline use |
+| **OpenRouter** | 100+ models (default Claude Sonnet 5.5) | Maximum flexibility |
 
 Configure one or more in `.env`. The router handles selection and failover automatically.
 
@@ -358,6 +409,9 @@ sent as a bearer token.
 
 34 skills ship out of the box:
 
+<details>
+<summary><strong>All 34 bundled skills</strong>: files and editing, shell and code, web, memory and planning, documents, email and calendar, MCP, dev tools, messaging, images, calls and SMS</summary>
+
 | Skill | Description |
 |-------|-------------|
 | `bash` | Execute shell commands |
@@ -395,6 +449,8 @@ sent as a bearer token.
 | `reminder` | Reminders (deprecated; use `board`) |
 | `progress` | Goal progress (deprecated; use `board`) |
 
+</details>
+
 ### Images, calls and SMS
 
 - **`image_gen`** needs `OPENAI_API_KEY`, `FAL_KEY` or `OPENROUTER_API_KEY` (or pick one with `IMAGE_GEN_PROVIDER`). Images are saved under `output/` and sent straight to the chat (Telegram photo, inline preview in the web dashboard). Each image's cost is recorded in the cost tracker, so it counts toward `DAILY_BUDGET`/`MONTHLY_BUDGET`, and generation is refused once a budget is used up. Prices are the API's reported usage where it gives one (OpenAI token usage, OpenRouter `usage.cost`), otherwise a per-image estimate.
@@ -426,6 +482,9 @@ Discord, Slack, WhatsApp, Signal and Matrix are covered by tests against mocked 
 
 **What each channel needs** (all variables are in `.env.example`):
 
+<details>
+<summary>Show credentials and allowlists per channel</summary>
+
 | Channel | Credentials | Allowlist | Notes |
 |---------|-------------|-----------|-------|
 | Discord | `DISCORD_BOT_TOKEN` (`DISCORD_APPLICATION_ID` optional) | `DISCORD_ALLOWED_USERS` (user IDs) | Enable the privileged **Message Content** intent for the bot; `discord.js` is a regular dependency |
@@ -433,6 +492,8 @@ Discord, Slack, WhatsApp, Signal and Matrix are covered by tests against mocked 
 | WhatsApp | `WHATSAPP_ENABLED=true`; link once via pairing code (`WHATSAPP_PHONE_NUMBER`) or QR | `WHATSAPP_ALLOWED_NUMBERS` (**required**) | Rides a real WhatsApp account, so it refuses to start without an allowlist; session stored in `WHATSAPP_AUTH_DIR`; optional packages `@whiskeysockets/baileys`, `@hapi/boom` (`qrcode-terminal` to render the QR) |
 | Signal | `SIGNAL_PHONE_NUMBER` (registered with `signal-cli`) | `SIGNAL_ALLOWED_NUMBERS` | Needs the `signal-cli` binary (`SIGNAL_CLI_PATH`, `SIGNAL_CONFIG_PATH`); group messages are ignored |
 | Matrix | `MATRIX_HOMESERVER_URL`, `MATRIX_ACCESS_TOKEN` (`MATRIX_USER_ID` optional) | `MATRIX_ALLOWED_USERS`, `MATRIX_ALLOWED_ROOMS` | No end-to-end encryption: use unencrypted rooms; auto-joins invites from allowed users; optional package `matrix-js-sdk` |
+
+</details>
 
 An empty allowlist means anyone who can reach the bot can use it (a warning is logged). Every channel's proactive delivery is held to the same allowlist. Set `<CHANNEL>_ENABLED=false` to keep a channel off without removing its credentials.
 
@@ -525,38 +586,6 @@ Reminders can be plain nudges or tasks; a task runs a sub-agent at the scheduled
 | Tool crash | RecoveryManager resumes from saved state |
 | Process crash | PM2 auto-restart with crash state persistence |
 
-## Architecture
-
-```
-+-----------------------------------------------------------------+
-|                          SCALLOPBOT                              |
-+-----------------------------------------------------------------+
-|                                                                  |
-|  Telegram ---+                                                   |
-|  CLI --------+-->  GATEWAY --> AGENT --> ROUTER --> PROVIDERS     |
-|  API/WS -----+       |          |                    |           |
-|                 +---------+    |         +-----------+           |
-|                 | Session |    |         | Anthropic |           |
-|                 | Manager |    |         | Moonshot  |           |
-|                 +---------+    |         | OpenAI    |           |
-|                       |         |         |           |           |
-|                       +--> OUTCOME BRAIN --> delivery/actions     |
-|                                 |         | xAI       |           |
-|                 +---------------+-+       | Groq      |           |
-|                 |  COGNITIVE LAYER |       | Ollama    |           |
-|                 |  Light |  Deep   |       | OpenRouter|           |
-|                 |  Sleep | Dreams  |       +-----------+           |
-|                 +---------+-------+                               |
-|                           |                                       |
-|                 +---------+-------+                               |
-|                 | Skills | Memory |                               |
-|                 | Voice  | Affect |                               |
-|                 | Scheduler      |                                |
-|                 +----------------+                                |
-|                                                                   |
-+-------------------------------------------------------------------+
-```
-
 ## Comparison with OpenClaw
 
 | Capability | OpenClaw | ScallopBot |
@@ -607,7 +636,8 @@ The install script is idempotent and sets up:
 | Ollama + nomic-embed-text | Local embeddings for semantic memory search |
 | ffmpeg + sox | Audio format conversion |
 
-### Alternative: systemd
+<details>
+<summary><strong>Alternative: systemd</strong></summary>
 
 ```bash
 sudo tee /etc/systemd/system/scallopbot.service << EOF
@@ -632,7 +662,12 @@ EOF
 sudo systemctl enable --now scallopbot
 ```
 
+</details>
+
 ## CLI Reference
+
+<details>
+<summary>Show all CLI commands</summary>
 
 | Command | Description |
 |---------|-------------|
@@ -657,7 +692,12 @@ sudo systemctl enable --now scallopbot
 | `google-auth` | Authorize Google Calendar and print `GOOGLE_REFRESH_TOKEN` |
 | `reembed` | Re-embed memories into the current `EMBEDDING_PROVIDER`/`EMBEDDING_MODEL` (`--dry-run`, `--limit`, `--all`; resumable) |
 
+</details>
+
 ## Project Structure
+
+<details>
+<summary>Show the source tree</summary>
 
 ```
 src/
@@ -683,6 +723,8 @@ src/
 
 web/                # React + Tailwind + Vite dashboard
 ```
+
+</details>
 
 ## Development
 
