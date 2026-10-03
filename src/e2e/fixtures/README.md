@@ -27,4 +27,4 @@ Scrubbing applied when the file was built:
 - `systemNudges` dropped.
 
 Gym data and the (anonymised, consistently remapped) Notion ids (`1801c5f6-…`, data source `7c048c39-…`)
-and the user's first name are intentionally kept: the tests assert on them.
+are intentionally kept: the tests assert on them. The user's first name, home paths and the product URLs in one conversation are replaced with placeholders (`Sam`, `/home/user`, `example.com`).

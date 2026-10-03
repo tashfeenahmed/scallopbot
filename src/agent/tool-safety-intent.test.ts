@@ -190,7 +190,7 @@ describe('B1: affirmative follow-ups bind to the proposed or failed write', () =
 describe('B1: truly unrequested writes stay blocked', () => {
   const checkoutPost: ToolUseContent = {
     type: 'tool_use', id: 'checkout', name: 'bash', input: {
-      command: `curl -X POST https://api.freellmapi.co/v1/checkout -d '{"plan":"annual"}'`,
+      command: `curl -X POST https://api.example.com/v1/checkout -d '{"plan":"annual"}'`,
     },
   };
 
@@ -200,7 +200,7 @@ describe('B1: truly unrequested writes stay blocked', () => {
     });
     expect(verdict.allowed).toBe(false);
     expect(verdict.isExternalMutation).toBe(true);
-    expect(verdict.reason).toMatch(/^BLOCKED: this write \(bash: POST https:\/\/api\.freellmapi\.co\/v1\/checkout\)/);
+    expect(verdict.reason).toMatch(/^BLOCKED: this write \(bash: POST https:\/\/api\.example\.com\/v1\/checkout\)/);
     expect(verdict.reason).toMatch(/Do not retry it with another tool/);
     expect(verdict.reason).toMatch(/ONE short question/);
   });
@@ -260,8 +260,8 @@ describe('describeToolCallForUser', () => {
       .toBe('notion create: name=Leg Press, date=2026-08-20, sets=3');
     expect(describeToolCallForUser({
       type: 'tool_use', id: 'c', name: 'bash',
-      input: { command: `curl -X POST https://api.freellmapi.co/v1/checkout -d '{"plan":"annual"}'` },
-    })).toBe('bash: POST https://api.freellmapi.co/v1/checkout');
+      input: { command: `curl -X POST https://api.example.com/v1/checkout -d '{"plan":"annual"}'` },
+    })).toBe('bash: POST https://api.example.com/v1/checkout');
     expect(describeToolCallForUser({ type: 'tool_use', id: 'e', name: 'notion', input: {} })).toBe('notion');
   });
 });

@@ -228,18 +228,18 @@ describe('B1 replay: unrequested writes stay blocked', () => {
    * Turn 35 (28 Jul 12:21): "[Replying to …] It's done. Mark it". Decision:
    * the affirmative binds to the session's Notion logging workflow (the leg
    * press the user had just sent), which the code allows. The seven blocked
-   * calls in that turn were `curl -X POST https://api.freellmapi.co/v1/checkout`
+   * calls in that turn were `curl -X POST https://api.example.com/v1/checkout`
    * invented while "checking" a payment page and must remain blocked — the
-   * user never mentioned freellmapi, and "mark" is not a "create".
+   * user never mentioned the shop, and "mark" is not a "create".
    */
-  it('turn 35 keeps the freellmapi checkout POSTs blocked while allowing the Notion log', () => {
+  it('turn 35 keeps the shop checkout POSTs blocked while allowing the Notion log', () => {
     const turn = byTurn(35);
     expect(turn.user).toMatch(/It[’']s done\. Mark it$/);
     const context = contextFor(turn);
     expect(context.continuationMutationTool).toBe('notion');
 
     const checkoutPosts = distinct(turn.toolCalls.filter(call =>
-      call.name === 'bash' && /api\.freellmapi\.co\/v1\/checkout/.test(String(call.input.command)) && /-X\s+POST/.test(String(call.input.command)),
+      call.name === 'bash' && /api\.example\.com\/v1\/checkout/.test(String(call.input.command)) && /-X\s+POST/.test(String(call.input.command)),
     ));
     expect(checkoutPosts.length).toBeGreaterThanOrEqual(5);
     for (const call of checkoutPosts) {
@@ -247,7 +247,7 @@ describe('B1 replay: unrequested writes stay blocked', () => {
       const verdict = assessToolCallForTurn(toolUse(call), context);
       expect(verdict.isExternalMutation).toBe(true);
       expect(verdict.allowed).toBe(false);
-      expect(verdict.reason).toMatch(/^BLOCKED: this write \(bash: POST https:\/\/api\.freellmapi\.co\/v1\/checkout\)/);
+      expect(verdict.reason).toMatch(/^BLOCKED: this write \(bash: POST https:\/\/api\.example\.com\/v1\/checkout\)/);
     }
 
     const notionWrite = turn.toolCalls.find(call => isNotionWrite(call) && !call.result.is_error)!;
@@ -760,7 +760,7 @@ describe('formerly known gaps in tool-safety.ts (fixed 5 Sep 2026)', () => {
     // allowed with no intent check at all (turns 24 and 59 in the fixture).
     const bypass: ToolUseContent = {
       type: 'tool_use', id: 'x', name: 'bash',
-      input: { command: `export X=1 && curl -X POST https://api.freellmapi.co/v1/checkout -d '{"plan":"annual"}'` },
+      input: { command: `export X=1 && curl -X POST https://api.example.com/v1/checkout -d '{"plan":"annual"}'` },
     };
     const verdict = assessToolCallForTurn(bypass, { userMessage: 'Check if the payment links work', timezone: TZ, now: instantOf('2026-07-28T12:21') });
     expect(verdict.isMutation).toBe(true);
