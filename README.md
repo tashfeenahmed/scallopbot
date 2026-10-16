@@ -8,8 +8,8 @@
 <h1 align="center">ScallopBot</h1>
 
 <p align="center">
-  <strong>A bio-inspired cognitive architecture for personal AI agents.</strong><br>
-  <em>Bridging the cognition gap in OpenClaw-compatible agent systems.</em>
+  <strong>Personal AI memory that actually remembers.</strong><br>
+  <em>A lightweight, self-hosted AI agent that cures your agent's amnesia.</em>
 </p>
 
 <p align="center">
