@@ -80,11 +80,11 @@ Competitors ran on 2 Oct 2026 (Hermes Agent `0be2d56`, Prime Agent `cf285dc`, Op
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/architecture-dark.svg">
-    <img src="assets/architecture-light.svg" alt="ScallopBot architecture: Telegram, the web dashboard, the CLI and other channels feed the gateway and the agent loop; the agent calls skills and the cost-aware router, which fails over between seven providers; SQLite memory and the background cognitive layer sit underneath; every reply and action goes through the outcome brain." width="900">
+    <img src="assets/architecture-light.svg" alt="ScallopBot architecture: Telegram, the web dashboard, the CLI and other channels feed the gateway and the agent loop; the agent calls skills and the cost-aware router, which fails over between seven providers; SQLite memory and the background cognitive layer sit underneath; messages the bot starts on its own go through the outcome brain." width="900">
   </picture>
 </p>
 
-Everything runs in one Node.js process. Messages from any channel go through the gateway to the agent loop, which runs tools in parallel waves and calls models through the cost-aware router. Memory lives in one SQLite file. The gardener daemon works on that memory in the background and can start conversations of its own, and every reply or action, foreground or proactive, passes through the single outcome brain before it reaches you.
+Everything runs in one Node.js process. Messages from any channel go through the gateway to the agent loop, which runs tools in parallel waves and calls models through the cost-aware router. Memory lives in one SQLite file. The gardener daemon works on that memory in the background and can start conversations of its own. Your replies come straight from the agent loop; messages the bot sends on its own (reminders, scheduled results, proactive check-ins) pass through the outcome brain first.
 
 ## Install
 
@@ -267,9 +267,9 @@ A gap scanner identifies explicit open loops, approaching deadlines, and stale/b
 
 Generated outreach is realized immediately before delivery using current context and recent message history. Social-quality gates reject internal reasoning, generic check-ins, surveillance language, faux intimacy, pressure, and multi-question interrogations; literal reminders written by the user remain unchanged.
 
-### Single Outcome Brain
+### Outcome Brain for bot-initiated messages
 
-Foreground replies, proactive candidates, scheduled results, sub-agent completions, workflow steps, progress messages, and file deliveries all converge through one shared `OutcomeBrain` before public delivery or side effects. Producers only propose outcomes; the brain combines the active request with recent conversation, current/relevant user facts and profile state, live board work, live goals, source state, time, provenance, tool observations, evidence, and recent decisions. Stateful foreground answers receive actual final model arbitration; simple no-tool conversation retains a fast deterministic boundary. It can approve, rewrite, suppress, or block, and records only hashed decision receipts—not prompts, messages, tool payloads, or private reasoning. Exact user-authored reminders remain deterministic, while inferred outreach fails closed if final arbitration is unavailable.
+Replies to your messages are not rewritten: they come straight from the agent loop. Messages the bot starts on its own (proactive check-ins, scheduled and reminder results, finished background work) go through the outbound queue to one shared `OutcomeBrain`, which weighs them against recent conversation, current user facts, live board items and goals, and recent decisions. It can send, combine, rewrite or hold back a message, drops exact duplicates, and strips internal reasoning from file captions. Exact user-authored reminders and verified task results are delivered as written; inferred outreach is held back if the model is unavailable. Only hashed decision receipts are stored, not the messages themselves.
 
 ### Spreading Activation
 
@@ -303,9 +303,9 @@ Every API call is priced at the token level using a built-in pricing database co
 
 Speech-to-text via faster-whisper (CTranslate2-optimized Whisper) and text-to-speech via Kokoro (82M param ONNX model) run entirely on-device with zero API cost. Cloud providers (Groq STT, OpenAI TTS) serve as automatic fallbacks. Telegram voice messages are transcribed inline; voice replies are synthesized when enabled.
 
-### Skills-Only Architecture
+### Native Tools and Skills
 
-All capabilities -- bash, browser, file I/O, git, Docker, PDF, web search, memory -- are implemented as self-contained skills using the [OpenClaw](https://github.com/openclaw/openclaw) SKILL.md format. Skills declare their own requirements (binaries, env vars, OS) and are gated at load time. Community skills install from [ClawHub](https://clawhub.ai) with a single CLI command.
+The core tools the agent uses on every turn -- files (`read_file`, `write_file`, `patch`, `undo`), shell (`bash`, background processes), web (`webfetch`, `web_search`) and `todo` -- are built into the agent (`src/tools/`). Everything else -- browser, git, Docker, PDF, memory search, email, calendar and more -- is a self-contained skill in the [OpenClaw](https://github.com/openclaw/openclaw) SKILL.md format. Skills declare their own requirements (binaries, env vars, OS) and are gated at load time. Community skills install from [ClawHub](https://clawhub.ai) with a single CLI command.
 
 Plain [agentskills.io](https://agentskills.io) / Anthropic skills (just `name` + `description`, optional `license`, `allowed-tools`, `metadata`) load unchanged. Only the name and description go in the prompt; the body is loaded when the model calls `load_procedure`, and bundled `references/` or `scripts/` files are listed and read on demand. A `scripts/` folder only turns a skill into a callable tool when it also has an `inputSchema` or a `scripts/run.*` entrypoint. `allowed-tools` is shown to the model but does not grant permissions.
 
@@ -543,7 +543,7 @@ Common options: [.env.example](.env.example); every variable is read in [`src/co
 
 ## Security
 
-Three opt-in layers sit on top of the existing tool-intent gates, workspace path checks and log redaction. They reduce risk; they do not make it safe to give the bot untrusted users or untrusted skills.
+Three opt-in layers sit on top of the dangerous-command blocklist, one-tap approvals (email sends, calendar writes, unlisted phone numbers and any tool in `CONFIRM_TOOLS`), workspace path checks and log redaction. They reduce risk; they do not make it safe to give the bot untrusted users or untrusted skills.
 
 **Sandboxed execution** (`bash`, `run_code`). `SANDBOX_MODE` picks the backend; the dangerous-command blocklist still runs first.
 
@@ -579,7 +579,7 @@ Reminders can be plain nudges or tasks; a task runs a sub-agent at the scheduled
 
 | Failure | Response |
 |---------|----------|
-| Context overflow | Emergency compression -- summarize old messages, keep recent context |
+| Context overflow | Lean compaction -- old tool output stubbed, older turns summarised, your messages and recent turns kept; `session_search` reaches the full history |
 | Auth errors (401/403) | Rotate API keys if multiple are configured |
 | Provider outage | Automatic failover to next healthy provider |
 | Rate limits | Exponential backoff with jitter |
@@ -702,10 +702,15 @@ sudo systemctl enable --now scallopbot
 ```
 src/
 ├── agent/          # Agent loop, session management, crash recovery
+├── brain/          # Outcome brain for bot-initiated messages
 ├── channels/       # Telegram, CLI, API, Discord, Slack, WhatsApp, Signal, Matrix adapters
+├── codemode/       # Optional code mode (AGENT_MODE=code|hybrid)
 ├── config/         # Zod-validated configuration schemas
+├── context/        # Lean compaction, history replay, session_search
 ├── dashboard/      # Systemd config generator, crash recovery
 ├── gateway/        # Server orchestration and channel initialization
+├── integrations/   # Email (IMAP/SMTP) and calendar
+├── learning/       # Core memory tool, background review and refinement
 ├── media/          # PDF, image, URL processing
 ├── mcp-server/     # Stdio MCP server exposing memory to MCP clients
 ├── memory/         # Hybrid search, fact extraction, decay engine, profiles
@@ -713,7 +718,10 @@ src/
 ├── providers/      # LLM provider implementations (7 providers)
 ├── reliability/    # Circuit breaker, graceful degradation
 ├── routing/        # Cost tracking, complexity analysis, model selection
+├── security/       # Sandbox, secret vault, prompt-injection scan, redaction
 ├── skills/         # Loader, registry, executor, ClawHub client (34 bundled)
+├── subagent/       # Durable sub-agents, delivery outbox
+├── tools/          # Native tools: files, shell, web, todo, check-on-stop review
 ├── evolution/      # Evidence-gated procedural skill learning and curation
 ├── goals/          # Persistent, budgeted, verified autonomous goals
 ├── workflow/       # Context-efficient validated tool DAG execution
