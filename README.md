@@ -30,6 +30,9 @@
   <a href="Paper2026.pdf"><strong>Paper</strong></a>
 </p>
 
+> [!NOTE]
+> **Maintenance mode (November 2026).** ScallopBot is complete and still works, but it is no longer under active development. The code, benchmarks and paper stay available under the MIT licence, and forks are welcome. Security reports are still read. New features and support requests are unlikely to be picked up.
+
 ---
 
 ScallopBot is a personal AI agent that runs on your own server. Open-source agents like [OpenClaw](https://github.com/openclaw/openclaw) are good at tool orchestration, but their memory mostly stores and promotes notes rather than reshaping them, and they have no self-reflection or autonomous reasoning loop. ScallopBot adds a bio-inspired cognitive layer on top, stays compatible with the OpenClaw skill ecosystem, and runs at an estimated **$0.05–0.10 a day** in model spend ([cost comparison](https://scallopbot.com/cost)).
